@@ -1,0 +1,53 @@
+{{/*
+  Agent / sensor outbound mTLS passthrough (issue #581).
+
+  Hand-written (NOT generated from the service registry — the registry models
+  only HTTP routes; this is a TCP/SNI passthrough route). Renders one
+  IngressRouteTCP per agentMtls backend so the device-agent / sensor client
+  cert reaches the backend's dedicated mTLS listener INTACT (the edge must not
+  terminate TLS here). The backend then fails closed via AgentAuth/SensorAuth.
+
+  Gating:
+    - Only when agentMtls.enabled.
+    - Only when the Traefik ingress controller is selected (matches the other
+      ingress templates — BYO-ingress operators wire their own passthrough).
+    - Per backend, only when its dnsName is set.
+
+  Prerequisite NOT owned by this chart: the cluster Traefik must expose a
+  TLS-passthrough entrypoint named agentMtls.entryPoint on agentMtls.port.
+*/}}
+{{- if .Values.agentMtls.enabled }}
+{{- if not .Values.serviceMtls.enabled }}
+{{- fail "agentMtls.enabled requires serviceMtls.enabled — the agent/sensor mTLS listener reuses the per-service mesh cert (Secret <svc>-mtls mounted at /app/certs). Enable serviceMtls first." }}
+{{- end }}
+{{- if eq (.Values.ingress.controller | default "traefik") "traefik" }}
+{{- $fullname := include "vistaplatform.fullname" . -}}
+{{- $port := .Values.agentMtls.port -}}
+{{- $entryPoint := .Values.agentMtls.entryPoint | default "agent-mtls" -}}
+{{- range $svc, $cfg := .Values.agentMtls.backends }}
+{{- if and $cfg $cfg.dnsName }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRouteTCP
+metadata:
+  name: {{ $fullname }}-agent-{{ $svc }}
+  labels:
+    {{- include "vistaplatform.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $svc }}
+spec:
+  entryPoints:
+    - {{ $entryPoint }}
+  routes:
+    # HostSNI disambiguates the two passthrough backends on a shared entrypoint.
+    - match: HostSNI(`{{ $cfg.dnsName }}`)
+      services:
+        - name: {{ $svc }}
+          port: {{ $port }}
+  tls:
+    # Passthrough: Traefik does NOT terminate TLS; the agent/sensor mTLS
+    # handshake completes at the backend so the client cert is preserved.
+    passthrough: true
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

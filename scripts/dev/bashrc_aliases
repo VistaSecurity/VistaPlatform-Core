@@ -1,0 +1,36 @@
+# VistaPlatform Docker Management Aliases
+# Source this file from ~/.bashrc:
+#   source /path/to/VistaPlatform/scripts/dev/bashrc_aliases
+#
+# Or use the auto-detect form (resolves the repo root at source time):
+#   source "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel 2>/dev/null)/scripts/dev/bashrc_aliases"
+
+# Resolve project root relative to this file's location
+_QV_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$_QV_SCRIPT_DIR/../.." && pwd)"
+
+# Quick docker compose commands (v2 format)
+alias dc-up="$PROJECT_ROOT/scripts/docker-manager.sh start"
+alias dc-down="$PROJECT_ROOT/scripts/docker-manager.sh stop"
+alias dc-restart="$PROJECT_ROOT/scripts/docker-manager.sh restart"
+alias dc-status="$PROJECT_ROOT/scripts/docker-manager.sh status"
+alias dc-logs="$PROJECT_ROOT/scripts/docker-manager.sh logs"
+alias dc-cleanup="$PROJECT_ROOT/scripts/docker-manager.sh cleanup"
+
+# Docker cleanup commands
+alias docker-cleanup="$PROJECT_ROOT/scripts/cleanup-docker.sh"
+alias docker-clean-all="$PROJECT_ROOT/scripts/docker-manager.sh clean-all"
+
+# Quick service logs
+alias logs-auth='docker logs -f crypto-auth-service'
+alias logs-inventory='docker logs -f crypto-inventory-service'
+alias logs-discovery='docker logs -f crypto-cluster-sensor-service'
+alias logs-sensors='docker logs -f crypto-sensor-manager'
+alias logs-api='docker logs -f crypto-api-gateway'
+
+# Quick service status
+alias ps-docker='docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
+alias ps-compose='docker-compose ps'
+
+echo "VistaPlatform aliases loaded (root: $PROJECT_ROOT)"
+echo "Use 'dc-up', 'dc-down', 'dc-status', etc."

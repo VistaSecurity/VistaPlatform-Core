@@ -1,0 +1,13 @@
+# actionlint configuration.
+#
+# Custom labels for our self-hosted runners. actionlint validates `runs-on`
+# against the labels GitHub provides, so it flags ours as typos unless they are
+# declared here. Declaring them keeps the runner-label rule useful — an actual
+# typo in a label still fails, instead of the rule being switched off wholesale.
+#
+#   build-heavy  — the runner sized for the 19-image dist build
+#   smoke        — the EC2 smoke-test runner
+self-hosted-runner:
+  labels:
+    - build-heavy
+    - smoke

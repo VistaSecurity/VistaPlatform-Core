@@ -1,0 +1,190 @@
+# Alert-type registry — single source of truth for the platform's alert catalog.
+#
+# Every stateful alert type the platform can raise is declared here
+# (NOTIFICATION_ALERTING_ARCHITECTURE.md §8.2). The registry drives:
+#   - the generated Go catalog in compliance-engine
+#     (services/compliance-engine/internal/alertcatalog/registry_gen.go —
+#      regenerate with `make generate`, checked for drift by `make audit`)
+#   - the tenant catalog UI (Settings → Alert Rules)
+#   - default-enabled semantics (absence of a tenant_alert_settings row means
+#     the registry default applies)
+#
+# Fields:
+#   id                stable alert_type identifier (matches alerts.alert_type)
+#   track             tenant | platform
+#   kind              policy (thresholds shaped by activated compliance
+#                     frameworks) | operational (detector-owned parameters)
+#   status            live (detector active) | planned (catalog entry shown
+#                     greyed; detector not yet wired)
+#   source            producing service (alert_source on the rails)
+#   subject_type      what one alert instance is about
+#   severity_model    ladder (escalates through rungs) | fixed
+#   baseline_rung     ladder types: the product-default warning rung. The
+#                     tenant preference rung REPLACES this; policy rungs are
+#                     always ADDITIVE (never reduce warning).
+#   default_severity  fixed types: severity at open
+#   auto_resolve      how the system observes the condition cleared
+#   enabled_by_default  catalog toggle default
+#   description       shown in the catalog UI
+
+version: 1
+
+alert_types:
+  # --- tenant track ---------------------------------------------------------
+  - id: certificate_expiring
+    track: tenant
+    kind: policy
+    status: live
+    source: inventory-service
+    subject_type: certificate
+    severity_model: ladder
+    baseline_rung: { days: 60, severity: medium }
+    auto_resolve: renewed certificate observed (not_after beyond every rung)
+    enabled_by_default: true
+    description: >-
+      A certificate is approaching (or past) expiry. One alert per
+      certificate, escalating as expiry nears. Activated compliance policies
+      add rungs (e.g. PCI-DSS adds a high-severity rung at its 30-day
+      boundary); your own rung replaces the 60-day product default.
+
+  - id: control_noncompliant
+    track: tenant
+    kind: policy
+    status: live
+    source: compliance-engine
+    subject_type: control
+    severity_model: fixed
+    default_severity: from-control
+    auto_resolve: finding cleared on re-evaluation
+    enabled_by_default: true
+    description: >-
+      A control in an activated framework went noncompliant. One alert per
+      control (with affected-asset count), not one per asset.
+
+  - id: compliance_score_drop
+    track: tenant
+    kind: policy
+    status: live
+    source: compliance-engine
+    subject_type: framework
+    severity_model: fixed
+    default_severity: medium
+    auto_resolve: score recovers
+    enabled_by_default: true
+    description: A framework's compliance score fell more than 10 points in 24 hours.
+
+  - id: sensor_offline
+    track: tenant
+    kind: operational
+    status: live
+    source: sensor-manager
+    subject_type: sensor
+    severity_model: fixed
+    default_severity: high
+    auto_resolve: heartbeat returns
+    enabled_by_default: true
+    description: A sensor stopped reporting (15-minute dwell before opening).
+
+  - id: discovery_agent_offline
+    track: tenant
+    kind: operational
+    status: live
+    source: device-interrogation-service
+    subject_type: agent
+    severity_model: fixed
+    default_severity: high
+    auto_resolve: heartbeat returns
+    enabled_by_default: true
+    description: A discovery agent stopped reporting (15-minute dwell before opening).
+
+  - id: discovery_job_failed
+    track: tenant
+    kind: operational
+    status: live
+    source: cluster-sensor-service
+    subject_type: job
+    severity_model: fixed
+    default_severity: medium
+    auto_resolve: next run succeeds
+    enabled_by_default: true
+    description: A discovery job failed.
+
+  - id: failed_login_burst
+    track: tenant
+    kind: operational
+    status: live
+    source: audit
+    subject_type: user
+    severity_model: fixed
+    default_severity: high
+    auto_resolve: manual
+    enabled_by_default: true
+    description: >-
+      Multiple failed login attempts in a short window (audit alert rule).
+      Detection is the audit-service rule engine; tune conditions under
+      Settings → Alert Rules.
+
+  - id: asset_limit_approaching
+    track: tenant
+    kind: operational
+    status: live
+    source: auth-service
+    subject_type: tenant
+    severity_model: ladder
+    baseline_rung: { percent: 80, severity: info }
+    auto_resolve: usage drops below the lowest rung
+    enabled_by_default: true
+    description: Asset usage is approaching the plan limit (80% info, 95% high).
+
+  # --- platform track -------------------------------------------------------
+  - id: service_down
+    track: platform
+    kind: operational
+    status: live
+    source: monitoring
+    subject_type: service
+    severity_model: fixed
+    default_severity: critical
+    auto_resolve: health check recovers
+    enabled_by_default: true
+    description: A platform service is failing health checks.
+
+  - id: metric_threshold
+    track: platform
+    kind: operational
+    status: live
+    source: monitoring
+    subject_type: service
+    severity_model: fixed
+    default_severity: from-threshold
+    auto_resolve: metric recovers
+    enabled_by_default: true
+    description: >-
+      A monitored metric crossed its configured threshold
+      (monitoring_alert_thresholds). Detection is the monitoring evaluator.
+
+  - id: tenant_health_degraded
+    track: platform
+    kind: operational
+    status: live
+    source: tenant-health-service
+    subject_type: tenant
+    severity_model: fixed
+    default_severity: medium
+    auto_resolve: health score recovers
+    enabled_by_default: true
+    description: A tenant's health score degraded below threshold.
+
+  - id: delivery_failure_rate
+    track: platform
+    kind: operational
+    status: planned
+    source: notification-service
+    subject_type: channel
+    severity_model: fixed
+    default_severity: high
+    auto_resolve: deliveries succeed again
+    enabled_by_default: true
+    description: >-
+      Notification deliveries are failing (the watcher's watcher — surfaces
+      broken SMTP credentials, dead webhooks).

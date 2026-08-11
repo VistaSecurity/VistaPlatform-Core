@@ -1,0 +1,37 @@
+{
+  "name": "@vistasecurity/api-contract",
+  "version": "0.0.0",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "private": true,
+  "description": "Spec-first OpenAPI contract for VistaPlatform and the generated, typed TypeScript client. See docsv4/developer-docs/design/frontend-v2/adr/0001-spec-first-api-contract.md.",
+  "type": "module",
+  "main": "./clients/typescript/index.ts",
+  "types": "./clients/typescript/index.ts",
+  "exports": {
+    ".": "./clients/typescript/index.ts"
+  },
+  "scripts": {
+    "generate": "npm run generate:cbom-service && npm run generate:inventory-service && npm run generate:compliance-engine && npm run generate:auth-service && npm run generate:sensor-manager && npm run generate:audit-service && npm run generate:device-interrogation-service && npm run generate:notification-service && npm run generate:admin-service && npm run generate:monitoring-service && npm run generate:resource-tracker-service && npm run generate:tenant-health-service",
+    "generate:cbom-service": "openapi-typescript openapi/cbom-service.openapi.yaml --output clients/typescript/cbom-service.d.ts",
+    "generate:inventory-service": "openapi-typescript openapi/inventory-service.openapi.yaml --output clients/typescript/inventory-service.d.ts",
+    "generate:compliance-engine": "openapi-typescript openapi/compliance-engine.openapi.yaml --output clients/typescript/compliance-engine.d.ts",
+    "generate:auth-service": "openapi-typescript openapi/auth-service.openapi.yaml --output clients/typescript/auth-service.d.ts",
+    "generate:sensor-manager": "openapi-typescript openapi/sensor-manager.openapi.yaml --output clients/typescript/sensor-manager.d.ts",
+    "generate:audit-service": "openapi-typescript openapi/audit-service.openapi.yaml --output clients/typescript/audit-service.d.ts",
+    "generate:device-interrogation-service": "openapi-typescript openapi/device-interrogation-service.openapi.yaml --output clients/typescript/device-interrogation-service.d.ts",
+    "generate:notification-service": "openapi-typescript openapi/notification-service.openapi.yaml --output clients/typescript/notification-service.d.ts",
+    "generate:admin-service": "openapi-typescript openapi/admin-service.openapi.yaml --output clients/typescript/admin-service.d.ts",
+    "generate:monitoring-service": "openapi-typescript openapi/monitoring-service.openapi.yaml --output clients/typescript/monitoring-service.d.ts",
+    "generate:resource-tracker-service": "openapi-typescript openapi/resource-tracker-service.openapi.yaml --output clients/typescript/resource-tracker-service.d.ts",
+    "generate:tenant-health-service": "openapi-typescript openapi/tenant-health-service.openapi.yaml --output clients/typescript/tenant-health-service.d.ts",
+    "generate:check": "npm run generate && git diff --exit-code -- clients/typescript",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "openapi-fetch": "^0.17.0"
+  },
+  "devDependencies": {
+    "openapi-typescript": "^7.13.0",
+    "typescript": "^6.0.3"
+  }
+}

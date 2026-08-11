@@ -1,0 +1,100 @@
+{{- if .Values.datastores.influxdb.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: influxdb
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: influxdb
+spec:
+  serviceName: influxdb
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "influxdb") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vistaplatform.labels" . | nindent 8 }}
+        app.kubernetes.io/component: influxdb
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "vistaplatform.podSecurityContext" . | nindent 8 }}
+        fsGroup: 1000
+        runAsUser: 1000
+      containers:
+        - name: influxdb
+          image: "{{ .Values.datastores.influxdb.image.repository }}:{{ .Values.datastores.influxdb.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "vistaplatform.containerSecurityContext" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8086
+          env:
+            - name: DOCKER_INFLUXDB_INIT_MODE
+              value: setup
+            - name: DOCKER_INFLUXDB_INIT_USERNAME
+              value: {{ .Values.datastores.influxdb.adminUser | quote }}
+            - name: DOCKER_INFLUXDB_INIT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vistaplatform.generatedSecretName" . }}
+                  key: influx-password
+            - name: DOCKER_INFLUXDB_INIT_ORG
+              value: {{ .Values.datastores.influxdb.org | quote }}
+            - name: DOCKER_INFLUXDB_INIT_BUCKET
+              value: {{ .Values.datastores.influxdb.bucket | quote }}
+            - name: DOCKER_INFLUXDB_INIT_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vistaplatform.generatedSecretName" . }}
+                  key: influx-token
+          resources:
+            {{- toYaml .Values.datastores.influxdb.resources | nindent 12 }}
+          volumeMounts:
+            - name: influxdb-data
+              mountPath: /var/lib/influxdb2
+            - name: influxdb-config
+              mountPath: /etc/influxdb2
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet: { path: /ping, port: 8086 }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /ping, port: 8086 }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: influxdb-config
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: influxdb-data
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: {{ coalesce .Values.datastores.influxdb.storageClassName .Values.datastores.storageClassName }}
+        resources:
+          requests:
+            storage: {{ .Values.datastores.influxdb.persistence.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: influxdb
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: influxdb
+spec:
+  selector:
+    {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "influxdb") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8086
+      targetPort: 8086
+{{- end }}

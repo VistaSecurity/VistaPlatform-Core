@@ -1,0 +1,171 @@
+/* Vista design tokens — ported from the design mock's global <style>
+   (_incoming/frontend-v2-mock/.../VISTA Console.html). The brand fonts are
+   defined by the design system's `colors_and_type.css` (not in the mock zip);
+   the :root fallbacks below are placeholders — drop the real design-system
+   stylesheet in and these can be removed.
+
+   Accent system: every brand-accent color in the app resolves through the
+   --accent* tokens below (never hardcode an accent hex or rgba tint in a
+   component — use var(--accent) / color-mix on it). Retuning the brand is an
+   edit to this block only. */
+
+:root {
+  --font-body: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-head: var(--font-body);
+  --font-display: var(--font-body);
+  --font-label: var(--font-body);
+  --accent: #3772fe;
+  --accent-deep: #2554d8;
+  --accent-light: #6f9bff;
+  --accent-fg: #ffffff;
+  --accent-gradient: linear-gradient(135deg, #6f9bff 0%, #3772fe 55%, #2554d8 100%);
+  --accent-glow: radial-gradient(circle, color-mix(in srgb, var(--accent) 45%, transparent) 0%, transparent 70%);
+}
+
+/* ---------- brand presets ----------
+   The ACTIVE brand is vista-blue: the :root values above, no attribute needed
+   (index.html carries data-brand="vista-blue" purely as documentation).
+   Set <html data-brand="gold"> to restore the original black & gold identity.
+   A brand preset carries its accent system AND the neutrals designed around
+   it — the warm off-whites belong to gold the way the cool blue-greys belong
+   to vista-blue. Everything derived via color-mix()/var() (glows, rail
+   active states, the light canvas, hero corner falls) follows automatically. */
+[data-brand='gold'] {
+  --accent: #d8a000;
+  --accent-deep: #bd8d00;
+  --accent-light: #ffd773;
+  --accent-fg: #1a1300;
+  --accent-gradient: linear-gradient(135deg, #ffe08a 0%, #d8a000 55%, #b07e00 100%);
+}
+[data-brand='gold'][data-theme='dark'] {
+  --hero-bg: linear-gradient(120deg, #0d0d0e 0%, #0b0b0c 60%, #0e0c08 100%);
+}
+[data-brand='gold'][data-theme='light'] {
+  --app-bg: #f2f1ed; --app-bg2: #f8f7f4; --app-panel2: #fafaf8;
+  --app-border: #e6e2da; --app-border2: #d7d2c8; --app-hover: rgba(10,10,10,.035);
+  --app-t1: #0e0e0f; --app-t2: #54524c; --app-t3: #8c887f; --app-track: #ece9e2;
+  --app-rail-border: #e6e2da;
+  --rail-t1: #14130f; --rail-t2: #5c5952; --rail-t3: #9b978e;
+  --rail-icon: #908b81; --rail-hover: rgba(10,10,10,.045); --rail-inset: rgba(10,10,10,.026);
+  --rail-accent: #946e00;
+  --app-shadow: 0 16px 44px rgba(40,33,10,.14); --app-scrim: rgba(20,18,12,.34);
+  --hero-border: #ded6c2;
+}
+
+/* ---------- status / severity / categorical tokens ----------
+   Semantic colors: a red must mean danger, never "this hex looked nice".
+   The shade variants are deliberate contrast steps (fill vs text-on-surface),
+   not accidents — keep them distinct. Tint a family color with
+   color-mix(in srgb, var(--danger) N%, transparent), never a literal rgba.
+   NOTE: --info happens to share the brand accent's current hue, but it is
+   pinned here on purpose — retuning --accent must not move status blues. */
+:root {
+  --danger: #ff5a5a;        /* critical severity, destructive fills */
+  --danger-text: #ff7a6a;   /* danger as text/icon on app surfaces */
+  --danger-soft: #ff8a6a;   /* softest danger text — auth error banners, hero stats */
+  --warn-strong: #f0883e;   /* high severity / needs-attention orange */
+  --warn: #e2b033;          /* medium severity / caution amber */
+  --ok: #5e9e7e;            /* healthy / passing green */
+  --ok-lime: #9dbe4e;       /* low severity lime (yellow-green step above --ok) */
+  --info: #3772fe;          /* informational status blue */
+  --neutral: #7e8794;       /* informational / inactive status grey */
+  /* categorical palette (data series & category tags) */
+  --chart-1: #c58be0;       /* purple */
+  --chart-2: #4fb6c9;       /* teal */
+  --chart-3: #7da9f0;       /* soft blue (PQC / crypto tags) */
+}
+
+/* ---------- theme tokens ---------- */
+[data-theme='dark'] {
+  --app-bg: #0a0a0a; --app-bg2: #0d0d0d; --app-panel: #101012; --app-panel2: #161618;
+  --app-border: #1f1f22; --app-border2: #2c2c30; --app-hover: rgba(255,255,255,.045);
+  --app-t1: #f1f1f2; --app-t2: #ababb2; --app-t3: #76767e; --app-track: #1d1d20;
+  --app-rail: #070707; --app-rail-border: #1a1a1c;
+  --rail-t1: rgba(255,255,255,.92); --rail-t2: rgba(255,255,255,.52); --rail-t3: rgba(255,255,255,.32);
+  --rail-icon: rgba(255,255,255,.4); --rail-hover: rgba(255,255,255,.06); --rail-inset: rgba(255,255,255,.03);
+  --rail-subactive: rgba(255,255,255,.06); --rail-active: color-mix(in srgb, var(--accent) 12%, transparent); --rail-accent: var(--accent-light); --rail-danger: rgba(255,150,140,.82);
+  --app-shadow: 0 18px 50px rgba(0,0,0,.55); --app-scrim: rgba(0,0,0,.62);
+  --accent-glow: radial-gradient(circle, color-mix(in srgb, var(--accent-deep) 34%, transparent) 0%, transparent 70%);
+  --hero-glow-blend: screen;
+  /* hero surface — the dashboard's flagship strip: same family as the page, one step apart */
+  --hero-bg: linear-gradient(120deg, #0d0d0e 0%, #0b0b0c 60%, #0e0c10 100%);
+  --hero-border: #232227;
+}
+[data-theme='light'] {
+  --app-bg: color-mix(in srgb, var(--accent) 16%, #ffffff); --app-bg2: color-mix(in srgb, var(--accent) 10%, #ffffff); --app-panel: #ffffff; --app-panel2: #f9fafc;
+  --app-border: #e3e7ee; --app-border2: #d2d8e2; --app-hover: rgba(10,14,22,.035);
+  --app-t1: #0e1015; --app-t2: #4e5563; --app-t3: #858d9c; --app-track: #e9ecf2;
+  --app-rail: #ffffff; --app-rail-border: #e3e7ee;
+  --rail-t1: #10131a; --rail-t2: #565e6c; --rail-t3: #949cab;
+  --rail-icon: #8b93a2; --rail-hover: rgba(10,14,22,.045); --rail-inset: rgba(10,14,22,.026);
+  --rail-subactive: color-mix(in srgb, var(--accent) 13%, transparent); --rail-active: color-mix(in srgb, var(--accent) 15%, transparent); --rail-accent: var(--accent-deep); --rail-danger: #b23b2e;
+  --app-shadow: 0 16px 44px rgba(15,25,50,.12); --app-scrim: rgba(12,16,26,.34);
+  --accent-glow: radial-gradient(circle, color-mix(in srgb, var(--accent) 20%, transparent) 0%, transparent 72%);
+  --hero-glow-blend: multiply;
+  /* hero surface — light mode: white base with matched blue falls at both top corners */
+  --hero-bg:
+    radial-gradient(620px 360px at 7% -12%, color-mix(in srgb, var(--accent) 24%, transparent) 0%, transparent 68%),
+    radial-gradient(620px 360px at 93% -12%, color-mix(in srgb, var(--accent) 24%, transparent) 0%, transparent 68%),
+    linear-gradient(120deg, #ffffff 0%, #f2f5fb 55%, #e9eef7 100%);
+  --hero-border: #d5dce8;
+}
+
+/* density */
+[data-density='comfortable'] { --row-h: 46px; --row-fs: 13.5px; --cell-px: 16px; --tbl-head-h: 40px; }
+[data-density='compact']     { --row-h: 33px; --row-fs: 12.5px; --cell-px: 12px; --tbl-head-h: 32px; }
+
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  background: var(--app-bg);
+  color: var(--app-t1);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+::selection { background: color-mix(in srgb, var(--accent) 32%, transparent); }
+
+/* ---------- ported base component classes ---------- */
+.eyebrow-app { font-family: var(--font-label); font-weight: 700; font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--app-t3); }
+.mono { font-family: ui-monospace, 'SF Mono', Menlo, monospace; }
+.accent-text { background: var(--accent-gradient); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.wordmark { font-family: var(--font-display); font-weight: 900; letter-spacing: .22em; }
+
+.panel { background: var(--app-panel); border: 1px solid var(--app-border); border-radius: 16px; }
+.hero-glow { mix-blend-mode: var(--hero-glow-blend); }
+
+.ui-btn { font-family: var(--font-body); font-weight: 600; font-size: 13px; letter-spacing: -.01em; border: 1px solid var(--app-border2); background: var(--app-panel2); color: var(--app-t1); height: 34px; padding: 0 14px; border-radius: 9px; display: inline-flex; align-items: center; gap: 7px; cursor: pointer; transition: all .15s ease; white-space: nowrap; }
+.ui-btn:hover { border-color: var(--app-t3); background: var(--app-hover); }
+.ui-btn.accent { background: var(--accent-gradient); color: var(--accent-fg); border: none; font-weight: 700; }
+.ui-btn.ghost { background: transparent; border-color: transparent; color: var(--app-t2); }
+
+.row-hover:hover { background: var(--app-hover); }
+.nav-item:hover:not(.active) { background: var(--rail-hover); color: var(--rail-t1); }
+.nav-sub:hover { background: var(--rail-hover); }
+
+@keyframes fadeUp { from { transform: translateY(10px); opacity: 0; } to { transform: none; opacity: 1; } }
+.fade-up { animation: fadeUp .4s cubic-bezier(.2, .8, .2, 1) both; }
+@keyframes drawerIn { from { transform: translateX(100%); } to { transform: none; } }
+@keyframes scrimIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes popIn { from { opacity: 0; transform: translateY(-6px) scale(.985); } to { opacity: 1; transform: none; } }
+
+/* ---------- ported from the mock's global <style> (Findings/Posture port) ---------- */
+.ui-btn.sm { height: 28px; padding: 0 10px; font-size: 12px; border-radius: 8px; }
+.ui-btn.icon { width: 34px; padding: 0; justify-content: center; }
+.ui-btn.icon.sm { width: 28px; }
+.chip { font-family: var(--font-body); font-size: 12px; font-weight: 500; color: var(--app-t2);
+  background: var(--app-panel2); border: 1px solid var(--app-border); border-radius: 8px;
+  padding: 5px 10px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+  transition: all .14s ease; white-space: nowrap; }
+.chip:hover { border-color: var(--app-t3); color: var(--app-t1); }
+.chip.active { border-color: var(--accent); color: var(--app-t1); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.chip svg { width: 13px; height: 13px; }
+
+/* ---------- modal primitive (Settings port of mock Modal.jsx) ---------- */
+@keyframes vmodalScrimIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes vmodalIn { from { opacity: 0; transform: translateY(10px) scale(.975); } to { opacity: 1; transform: none; } }
+.vmodal-scrim { position: fixed; inset: 0; z-index: 120; background: var(--app-scrim); backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center; padding: 24px; animation: vmodalScrimIn .18s ease both; }
+.vmodal { background: var(--app-panel); border: 1px solid var(--app-border2); border-radius: 18px;
+  box-shadow: var(--app-shadow); display: flex; flex-direction: column; width: 100%; max-height: 86vh;
+  animation: vmodalIn .24s cubic-bezier(.2,.8,.2,1) both; overflow: hidden; }
+@media (prefers-reduced-motion: reduce) { .vmodal-scrim, .vmodal { animation-duration: .01ms; } }

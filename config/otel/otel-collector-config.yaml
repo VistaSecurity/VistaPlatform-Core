@@ -1,0 +1,106 @@
+# OpenTelemetry Collector Configuration
+# For crypto-inventory platform distributed tracing and metrics
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  prometheus/traefik:
+    config:
+      scrape_configs:
+        - job_name: 'traefik'
+          scrape_interval: 15s
+          static_configs:
+            - targets: ['api-gateway:8099']
+
+processors:
+  # Batch processor for efficiency
+  batch:
+    timeout: 1s
+    send_batch_size: 512
+    send_batch_max_size: 1024
+
+  # Memory limiter to prevent OOM
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  # Resource processor to add common attributes
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: ${env:ENVIRONMENT}
+        action: upsert
+      - key: service.namespace
+        value: crypto-inventory
+        action: upsert
+
+  # Filter out health check spans to reduce noise (OTTL format)
+  filter:
+    error_mode: ignore
+    traces:
+      span:
+        - 'IsMatch(name, "GET /health") or IsMatch(name, "GET /ready")'
+
+exporters:
+  # Debug exporter for development
+  debug:
+    verbosity: detailed
+
+  # OTLP exporter to Jaeger
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # Prometheus exporter for metrics
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: crypto_inventory
+    const_labels:
+      platform: crypto-inventory
+
+  # Optional: InfluxDB exporter for metrics
+  # influxdb:
+  #   endpoint: http://influxdb:8086
+  #   token: ${INFLUXDB_TOKEN}
+  #   org: crypto-inventory
+  #   bucket: metrics
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, pprof, zpages]
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, filter, resource, batch]
+      exporters: [otlp/jaeger, debug]
+
+    metrics:
+      receivers: [otlp, prometheus/traefik]
+      processors: [memory_limiter, resource, batch]
+      exporters: [prometheus]
+
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888

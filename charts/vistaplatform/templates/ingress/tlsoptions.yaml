@@ -1,0 +1,32 @@
+{{/*
+  Traefik TLSOption pinning the minimum TLS version and cipher-suite allowlist
+  for every TLS-terminating IngressRoute the chart emits. Unlike middlewares.yaml
+  and ingressroutes.yaml this file is NOT registry-derived — it's a static edge
+  security policy — so it is a normal hand-maintained Helm template.
+
+  Gated on .Values.ingress.controller (Traefik only) and on TLS being enabled:
+  a TLSOption is meaningless when tls.mode=none (plain HTTP), so it is omitted
+  there, matching the IngressRoutes which drop their tls: block in that mode.
+
+  Knobs: .Values.tls.minVersion and .Values.tls.cipherSuites (see values.yaml).
+  Customer-neutral: no hostnames, no lab-specific references.
+*/}}
+{{- if eq (.Values.ingress.controller | default "traefik") "traefik" }}
+{{- if ne .Values.tls.mode "none" }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: TLSOption
+metadata:
+  name: {{ include "vistaplatform.fullname" . }}-tls-options
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  minVersion: {{ .Values.tls.minVersion | default "VersionTLS12" | quote }}
+  {{- with .Values.tls.cipherSuites }}
+  cipherSuites:
+    {{- range . }}
+    - {{ . | quote }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- end }}

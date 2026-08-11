@@ -1,0 +1,23 @@
+{
+  "name": "vistaplatform-monorepo",
+  "version": "0.0.0",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "private": true,
+  "description": "Vista Platform monorepo root. Declares npm workspaces for the shared TypeScript packages (api/ contract, packages/*) and the two frontends (frontend-v2, admin-ui-v2). The Go services live under services/ and use go.work for their workspace. See CLAUDE.md ('TypeScript / npm Workspaces') and docsv4/internal/developer/design/frontend-v2/adr/0005-monorepo-workspace-layout.md.",
+  "workspaces": [
+    "api",
+    "packages/*",
+    "frontend-v2",
+    "admin-ui-v2"
+  ],
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.8.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.9.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.66.0"
+  }
+}

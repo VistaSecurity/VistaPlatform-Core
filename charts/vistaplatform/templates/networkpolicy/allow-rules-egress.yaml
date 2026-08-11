@@ -1,0 +1,246 @@
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.egressEnabled }}
+{{/* ───────────────────────────────────────────────────────────────────────
+     Egress allow rules. Activated only when networkPolicy.egressEnabled
+     is true. Mirrors the consumer side of the existing ingress allow
+     rules: the registry's .Values.backends[*].needs.{postgres,redis,nats,
+     influxdb} fields decide which backends are granted outbound to each
+     datastore. Backend-to-backend HTTP on :8080 is allowed for all
+     backends (the gateway-free chart routes inter-service traffic
+     directly). The five services in .Values.networkPolicy.externalEgressBackends
+     get a broader Internet egress allow (everything EXCEPT RFC1918 +
+     link-local + the service CIDR) so they can reach customer networks
+     / vendor APIs / SMTP / webhooks.
+     ─────────────────────────────────────────────────────────────────── */}}
+
+{{/* DNS egress for every pod in the namespace. Without this the default-deny
+     egress block kills name resolution and every service fails to start. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.dnsNamespace }}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+
+{{/* Backend-to-backend HTTP on :8080. Compliance-engine → inventory-service
+     (live RuleEvaluator fallback), tenant-health-service → multiple
+     services, etc. Scoped to pods labeled part-of=vistaplatform in this
+     namespace, which matches the existing allow-ingress-to-backends rule
+     on the inbound side. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-backend-to-backend
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: vistaplatform
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: vistaplatform
+      ports:
+        - { protocol: TCP, port: 8080 }
+        # mTLS variant of the same backend-to-backend path.
+        - { protocol: TCP, port: 8443 }
+---
+
+{{/* Backends + jobs that need Postgres (consumer side of the existing
+     allow-backends-to-postgres ingress rule). Same $pgConsumers list — appends
+     rls-roles (only when serviceRls is enabled) so the role-grant Job can reach
+     Postgres under egress default-deny (#916); off-toggle render is unchanged. */}}
+{{- $pgConsumers := list "schema-migration" "seed-data" }}
+{{- if .Values.serviceRls.enabled }}
+  {{- $pgConsumers = append $pgConsumers "rls-roles" }}
+{{- end }}
+{{- range $name, $svc := .Values.backends }}
+  {{- if (default (dict) $svc.needs).postgres }}
+    {{- $pgConsumers = append $pgConsumers $name }}
+  {{- end }}
+{{- end }}
+{{- if $pgConsumers }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-to-postgres
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [{{ $pgConsumers | join "," }}] }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: postgres
+      ports:
+        - { protocol: TCP, port: 5432 }
+{{- end }}
+---
+
+{{/* Backends that need Redis. */}}
+{{- $redisConsumers := list }}
+{{- range $name, $svc := .Values.backends }}
+  {{- if (default (dict) $svc.needs).redis }}
+    {{- $redisConsumers = append $redisConsumers $name }}
+  {{- end }}
+{{- end }}
+{{- if $redisConsumers }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-to-redis
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [{{ $redisConsumers | join "," }}] }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: redis
+      ports:
+        - { protocol: TCP, port: 6379 }
+{{- end }}
+---
+
+{{/* Backends that need NATS. */}}
+{{- $natsConsumers := list }}
+{{- range $name, $svc := .Values.backends }}
+  {{- if (default (dict) $svc.needs).nats }}
+    {{- $natsConsumers = append $natsConsumers $name }}
+  {{- end }}
+{{- end }}
+{{- if $natsConsumers }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-to-nats
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [{{ $natsConsumers | join "," }}] }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: nats
+      ports:
+        - { protocol: TCP, port: 4222 }
+{{- end }}
+---
+
+{{/* monitoring-service polls the NATS HTTP monitor port (8222). */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-monitoring-to-nats-http
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: monitoring-service
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: nats
+      ports:
+        - { protocol: TCP, port: 8222 }
+---
+
+{{/* Backends that need InfluxDB. */}}
+{{- $influxConsumers := list }}
+{{- range $name, $svc := .Values.backends }}
+  {{- if (default (dict) $svc.needs).influxdb }}
+    {{- $influxConsumers = append $influxConsumers $name }}
+  {{- end }}
+{{- end }}
+{{- if and $influxConsumers .Values.datastores.influxdb.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-to-influxdb
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [{{ $influxConsumers | join "," }}] }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: influxdb
+      ports:
+        - { protocol: TCP, port: 8086 }
+{{- end }}
+---
+
+{{/* Internet egress for backends that legitimately need to call out:
+     sensor-manager / cluster-sensor-service (TLS probing arbitrary
+     endpoints), device-interrogation-service (vendor mgmt APIs on
+     customer networks), notification-service (webhook + SMTP),
+     integration-sync (third-party integrations).
+
+     Allows TCP to 0.0.0.0/0 except the standard private CIDRs and
+     link-local — this opens the public Internet without permitting
+     lateral movement to other namespaces or in-cluster Services. */}}
+{{- if .Values.networkPolicy.externalEgressBackends }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-internet
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [{{ .Values.networkPolicy.externalEgressBackends | join "," }}] }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      # Common outbound ports — HTTPS (443) for vendor APIs, HTTP (80) for
+      # health-check redirects, SMTP submission (587) + SMTPS (465) for
+      # notification-service, plus arbitrary high ports for TLS probing.
+      ports:
+        - { protocol: TCP, port: 80 }
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 465 }
+        - { protocol: TCP, port: 587 }
+        - { protocol: TCP, port: 8443 }
+{{- end }}
+{{- end }}

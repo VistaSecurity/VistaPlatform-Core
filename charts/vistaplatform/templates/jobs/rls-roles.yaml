@@ -1,0 +1,156 @@
+{{/*
+The rls-roles Job's pod template, extracted into a named template so it can be
+rendered once, hashed, and reused: the hash of the rendered pod template is
+embedded in the Job name (see below). Kubernetes Job spec.template is
+IMMUTABLE, so any change to this pod template (a new env var, the db-ca TLS
+volume, a chart-version label bump, a role-name change) must produce a NEW
+Job name — otherwise `helm upgrade` tries to patch the existing Job in place
+and fails (#421). Keep ALL pod-template content inside this define.
+*/}}
+{{- define "vistaplatform.rlsRoles.podTemplate" }}
+    metadata:
+      labels:
+        {{- include "vistaplatform.labels" . | nindent 8 }}
+        app.kubernetes.io/component: rls-roles
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "vistaplatform.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: psql
+          image: "{{ .Values.schemaMigration.image.repository }}:{{ .Values.schemaMigration.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "vistaplatform.containerSecurityContext" . | nindent 12 }}
+          env:
+            # Connect as the OWNER role — only it can ALTER the other roles.
+            - name: PGHOST
+              value: postgres
+            - name: PGPORT
+              value: "5432"
+            - name: PGUSER
+              value: {{ .Values.datastores.postgres.user | quote }}
+            - name: PGDATABASE
+              value: {{ .Values.datastores.postgres.db | quote }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vistaplatform.generatedSecretName" . }}
+                  key: postgres-password
+            # Password to assign to crypto_app / crypto_bypass. Shared with the
+            # owner's postgres-password (serviceRls reuses it). Injected as an
+            # env var from the Secret — NEVER templated into SQL/YAML — and
+            # passed to psql via -v so it stays out of rendered manifests.
+            - name: APP_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vistaplatform.generatedSecretName" . }}
+                  key: postgres-password
+            {{- if .Values.datastores.postgres.tls.enabled }}
+            # Postgres requires TLS ( Phase 3). prefer (not verify-full) so
+            # the Job connects whether postgres is mid-transition (plain) or TLS,
+            # matching the schema-migration Job.
+            - name: PGSSLMODE
+              value: prefer
+            - name: PGSSLROOTCERT
+              value: /etc/db-ca/ca.crt
+            {{- end }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              echo "Waiting for Postgres to be ready..."
+              until pg_isready -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE"; do
+                sleep 2
+              done
+              echo "Waiting for RLS roles to exist (created by schema-migration)..."
+              until [ "$(psql -tAc "SELECT count(*) FROM pg_roles WHERE rolname IN ('{{ .Values.serviceRls.roleApp }}','{{ .Values.serviceRls.roleBypass }}')")" = "2" ]; do
+                sleep 3
+              done
+              echo "Granting LOGIN + password to RLS roles..."
+              # Piped via stdin, NOT psql -c: psql only performs :'var'
+              # interpolation in script mode. With -c the literal :'pw' is sent to
+              # the server and fails ("syntax error at or near :"). printf emits
+              # the SQL (role names via %s), and the password stays in the -v pw
+              # variable (env APP_DB_PASSWORD, from the Secret) — never inlined.
+              printf "ALTER ROLE %s LOGIN PASSWORD :'pw';\nALTER ROLE %s LOGIN PASSWORD :'pw';\n" \
+                "{{ .Values.serviceRls.roleApp }}" "{{ .Values.serviceRls.roleBypass }}" \
+                | psql -v ON_ERROR_STOP=1 -v pw="$APP_DB_PASSWORD"
+              echo "RLS roles are now LOGIN-capable."
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.datastores.postgres.tls.enabled }}
+            - name: db-ca
+              mountPath: /etc/db-ca
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.datastores.postgres.tls.enabled }}
+        - name: db-ca
+          secret:
+            secretName: postgres-mtls
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
+{{- end }}
+{{- if and .Values.serviceRls.enabled .Values.datastores.postgres.enabled .Values.schemaMigration.enabled }}
+{{/*
+RLS role-login Job (ADR platform-0001, Phase 2 — issue #218).
+
+Rendered ONLY when serviceRls.enabled is true AND postgres is the in-cluster
+bundled one AND schemaMigration is enabled. When serviceRls is off (the
+default), this whole file emits nothing, so OFF-toggle output is byte-for-byte
+unchanged.
+
+What it does: schema.sql CREATEs crypto_app / crypto_bypass as NOLOGIN with no
+password. This Job is the deploy-layer step that grants them LOGIN + a password
+so backends can actually connect as them. It connects as the OWNER
+(datastores.postgres.user, default crypto_user) — only a superuser/role-admin
+can ALTER another role — and runs `ALTER ROLE <role> LOGIN PASSWORD :'pw'` for
+both roles.
+
+Password handling (no plaintext in rendered output): the password is the same
+chart-generated postgres-password the owner already uses. It is injected into
+the container as the APP_DB_PASSWORD env var via secretKeyRef (never templated
+into YAML), then handed to psql with `-v pw="$APP_DB_PASSWORD"` and quoted in
+SQL as :'pw'. The literal value never appears in this template, in any
+ConfigMap, or in the rendered manifest — only a secretKeyRef does.
+
+Ordering: like schema-migration, this is a regular release resource (NOT a
+Helm hook), so it is created alongside the Deployments. It waits for the roles
+to exist (which schema-migration creates) before altering them, so install
+converges naturally: schema-migration creates the NOLOGIN roles, this Job flips
+them to LOGIN, backend init-containers gate on the schema sentinel and start.
+ALTER ROLE is idempotent, so re-running on every upgrade is safe.
+
+Job naming (#421): a Kubernetes Job's spec.template is immutable, so the Job
+name embeds a short hash of the FULL rendered pod template (which covers the
+role names — they appear in the command — as well as env/volume changes such
+as toggling datastores.postgres.tls). Any pod-template change yields a new Job
+name, so Helm creates a fresh Job instead of attempting an in-place patch of
+the old one (which Kubernetes rejects). Previously the name was keyed only on
+a hash of the role names, so enabling postgres.tls on an existing release hit
+"spec.template: field is immutable". Superseded Jobs are removed by Helm on
+upgrade and completed ones also age out via ttlSecondsAfterFinished.
+*/}}
+{{- $podTemplate := include "vistaplatform.rlsRoles.podTemplate" . }}
+{{- $jobHash := $podTemplate | sha256sum | trunc 10 }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "vistaplatform.fullname" . }}-rls-roles-{{ $jobHash }}
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rls-roles
+spec:
+  backoffLimit: 5
+  ttlSecondsAfterFinished: 600
+  template:
+    {{- $podTemplate }}
+{{- end }}

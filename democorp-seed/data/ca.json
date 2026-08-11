@@ -1,0 +1,23 @@
+{
+  "certificates": [
+    {
+      "subject_dn": "CN=DemoCorp Internal Issuing CA,O=DemoCorp,C=US",
+      "issuer_dn": "CN=DemoCorp Internal Issuing CA,O=DemoCorp,C=US",
+      "serial_number": "4097",
+      "common_name": "DemoCorp Internal Issuing CA",
+      "not_before": "2022-08-09T19:17:58Z",
+      "not_after": "2032-08-09T19:17:58Z",
+      "fingerprint_sha256": "7a1051c8e1b5010bb41d39a9aaac668878d4a70271187390d35bd0d7431c870e",
+      "certificate_pem": "-----BEGIN CERTIFICATE-----\nMIIETDCCArSgAwIBAgICEAEwDQYJKoZIhvcNAQELBQAwRzELMAkGA1UEBhMCVVMx\nETAPBgNVBAoTCERlbW9Db3JwMSUwIwYDVQQDExxEZW1vQ29ycCBJbnRlcm5hbCBJ\nc3N1aW5nIENBMB4XDTIyMDgwOTE5MTc1OFoXDTMyMDgwOTE5MTc1OFowRzELMAkG\nA1UEBhMCVVMxETAPBgNVBAoTCERlbW9Db3JwMSUwIwYDVQQDExxEZW1vQ29ycCBJ\nbnRlcm5hbCBJc3N1aW5nIENBMIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKC\nAYEA6xnfVzBiL0Ur0vToSO21r/Bb8qe3C6GpYLWZgLGRCxasXl2lHr+NAfmEGkG0\nYWqFT1rASS2m6ZFsPxRO+3/WaW7YBwuZ/dbX3eWgjKKp2dMfAPA2ufCLQsti0opF\nDEt4fQP9qlYnZLMWpCiGjYro2sStkaA1hxniibWLikGvYGgcQCK2LapvpQNhbfqY\n+qEU1jKsg0C2TLI+khoamnDybhza85LfOJ15UACr10XypEaEdw7KiFPss/E6HMSn\nokgAsCZIbp2fJvXURa8cpxlfNW1ebEH/3k1noGeisGor1NV71ahWnlYcjp+B2Q3j\nM9uRbwMID9L26hIsf1WlG3KgZt0qMYbXLS5cry3wSAy13g+K9ZAOVmolVHGQJyxr\nQ4JLGUj5dF9SvdZgbiB0RJ/ww3IMbYurMhGT1GRl+LpNbXmtFgdbFEv/4sRfBw9F\nvoiWUgKLdG46yMTFYXuDQ8lhXWtCUfmjAiQ3X6uY2jbqEFlCICgJLt+xtka6gqB+\nhhEFAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MB0G\nA1UdDgQWBBTRAVnCN9WqO0DLbHF3SID/XXk+TDANBgkqhkiG9w0BAQsFAAOCAYEA\nNhiHvEa0VIBpp4LcQvkWtToLscz41TARygyg6ZiVzxdF39zJrTieWIgGIFuwYxIy\nrhpng7Y2n2GGYNqYyppl/EFliQSSuT5OQqOdkhzihTtlVRNL/gzbyPJFSZa/9T94\nks835yWbAnzaF6/D8WTzoYTWFeV1X7Cq7xUzsrEffaDed1ZR9YWzuslzvsK9GIxu\nuh5yOw2MuZxgBn5UcSyGKbQxM1XsFNFpwYNCcGZTLdvuzMmzef1xMjT1RuJSD3dj\nAyKPaJ2LHkZ1Fx/M9eP7bruLR2FpPmiV9bAmqwIkS9zpUp9UzvUxGahNqw+iUfia\nZVV/CEixn265j9ofwxtrGajrAd35UQYahQ0CASy53crje+JB36Dh0AJZBcwZwIOa\n1FfGaxBXgOtTTO5qO8K2z2Tnxul8rPNqcRhTTMEwI0NTs+QhoN3v+kmy5QVXH1Kr\nhbSB1Rfnr/oZ0kMK7O/lgjIMV5T9w+igy5slZJvb4Dq0KsmwyOl0Rwy4KD3Tx1ql\n-----END CERTIFICATE-----\n",
+      "public_key_algorithm": "RSA",
+      "public_key_size": 3072,
+      "signature_algorithm": "SHA256-RSA",
+      "is_self_signed": true,
+      "is_ca_certificate": true,
+      "key_usage": [
+        "keyCertSign",
+        "cRLSign"
+      ]
+    }
+  ]
+}

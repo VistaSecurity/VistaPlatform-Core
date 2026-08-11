@@ -1,0 +1,48 @@
+{{/*
+NATS server cert - mounted into the NATS pod when datastores.nats.tls.enabled.
+
+When mTLS is on for NATS, the nats.conf TLS block uses cert_file/key_file
+from this Secret + ca_file for client cert validation, and verify_and_map
+maps the cert CN to a NATS user. Backends connect with mTLS, no shared
+NATS_TOKEN.
+
+When NATS TLS is off (datastores.nats.tls.enabled: false), this Certificate
+isn't created and NATS retains the v0.1.1 shared-token model. Useful
+during the v0.1.1 → v0.1.2 transition or for customers who haven't
+migrated yet.
+*/}}
+{{- if and .Values.serviceMtls.enabled .Values.datastores.nats.tls.enabled }}
+{{- if .Values.datastores.nats.enabled }}
+{{- $cert := .Values.serviceMtls.certificate }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nats-mtls
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+spec:
+  secretName: nats-mtls
+  duration: {{ $cert.duration | quote }}
+  renewBefore: {{ $cert.renewBefore | quote }}
+  privateKey:
+    algorithm: {{ $cert.privateKey.algorithm }}
+    size: {{ $cert.privateKey.size }}
+    rotationPolicy: {{ $cert.privateKey.rotationPolicy }}
+  usages:
+    - server auth
+  commonName: nats
+  dnsNames:
+    - nats
+    - nats.{{ .Release.Namespace }}
+    - nats.{{ .Release.Namespace }}.svc
+    - nats.{{ .Release.Namespace }}.svc.cluster.local
+    - nats-0.nats
+    - nats-0.nats.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    name: {{ .Release.Name }}-platform-ca-issuer
+    kind: Issuer
+{{- end }}
+{{- end }}

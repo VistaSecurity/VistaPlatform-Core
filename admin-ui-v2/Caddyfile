@@ -1,0 +1,91 @@
+# Caddy configuration for the Vista Admin Console (admin-ui-v2).
+# Serves the React SPA with caching, security headers, and API proxying.
+# Mirrors web-ui / frontend-v2 Caddyfiles; admin console binds :3007.
+
+{
+	auto_https off
+	admin off
+}
+
+:3007 {
+	root * /srv
+
+	# Security headers
+	header {
+		X-Frame-Options "SAMEORIGIN"
+		X-Content-Type-Options "nosniff"
+		# X-XSS-Protection is deprecated and can introduce vulns in legacy
+		# browsers; "0" disables the legacy auditor. CSP below is the real defense.
+		X-XSS-Protection "0"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# CSP — same-origin everything. Tailwind requires style-src 'unsafe-inline'
+		# (utility-class arbitrary-style injection). React+Vite production output
+		# is a self-hosted bundle so script-src 'self' is sufficient. /api/* is
+		# proxied through this same Caddy so connect-src 'self' covers it.
+		Content-Security-Policy "default-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
+		# HSTS — passes through to the browser when this image sits behind Traefik
+		# HTTPS termination in the chart. No `preload`.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	}
+
+	# Gzip compression
+	encode gzip
+
+	# Health check endpoint
+	handle /health {
+		respond "healthy" 200
+	}
+
+	# Config files - no caching for runtime config
+	handle /config/* {
+		header Cache-Control "no-cache, no-store, must-revalidate"
+		header Pragma "no-cache"
+		file_server
+	}
+
+	# Proxy API calls to the Traefik API gateway
+	handle /api/* {
+		reverse_proxy crypto-api-gateway:80 {
+			header_up Host {host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 15s
+			}
+		}
+	}
+
+	# Proxy platform-branding assets (logos, favicon) to the gateway, which routes
+	# them to admin-service's /uploads/platform-branding static handler. Same
+	# upstream as /api/* — keeps white-label logos same-origin (CSP img-src 'self').
+	handle /uploads/* {
+		reverse_proxy crypto-api-gateway:80 {
+			header_up Host {host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 15s
+			}
+		}
+	}
+
+	# Static assets with long-lived cache
+	@static path *.js *.css *.png *.jpg *.jpeg *.gif *.ico *.svg
+	handle @static {
+		header Cache-Control "public, immutable, max-age=31536000"
+		file_server
+	}
+
+	# SPA fallback - serve files or fall back to index.html. index.html must NOT
+	# be cached: hashed assets above are immutable, so a stale index.html would
+	# keep pointing browsers at old (deleted) bundle hashes after a redeploy.
+	handle {
+		header Cache-Control "no-cache, must-revalidate"
+		try_files {path} /index.html
+		file_server
+	}
+}

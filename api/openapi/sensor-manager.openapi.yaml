@@ -1,0 +1,2120 @@
+openapi: 3.1.0
+info:
+  title: VistaPlatform — sensor-manager API
+  version: 0.1.0
+  description: |
+    Spec-first contract for sensor-manager (ADR-0001). The Operations-area
+    slice after the inventory / compliance / cbom / auth slices, covering the
+    **tenant sensor lifecycle** — the sensors and pending registrations a
+    Tenant Admin manages under Operations → Sensors & Agents, plus the
+    per-sensor commands and health a sensor detail view reads.
+
+    ## Scope of this spec
+
+    Covers the tenant-facing surface on the **v1** path
+    `/api/v1/sensor-manager/...` that `web-ui/src/services/sensors-api.ts`
+    consumes:
+
+      - `GET    /sensors`                          — list the tenant's sensors
+      - `GET    /sensors/stats`                     — sensor count breakdown (dashboard)
+      - `GET    /sensors/discovery-counts`          — per-sensor discovery counts
+      - `GET    /sensors/{sensor_id}`               — get one sensor
+      - `PUT    /sensors/{sensor_id}/status`        — update status (RBAC-gated)
+      - `DELETE /sensors/{sensor_id}`               — soft-delete (RBAC-gated)
+      - `POST   /sensors/{sensor_id}/commands`      — queue a command (RBAC-gated)
+      - `GET    /sensors/{sensor_id}/commands`      — list a sensor's commands
+      - `GET    /sensors/{sensor_id}/health`        — latest health metrics
+      - `GET    /sensors/pending`                   — list pending registrations
+      - `POST   /sensors/pending`                   — create a pending registration (RBAC-gated)
+      - `DELETE /sensors/pending/{key}`             — delete a pending registration (RBAC-gated)
+      - `GET    /admin/settings`                    — read sensor-admin settings
+      - `PUT    /admin/settings`                    — update sensor-admin settings (RBAC-gated)
+      - `PUT    /admin/capture-defaults`            — apply tenant-wide capture defaults (RBAC-gated)
+
+    Out of scope (this slice): the sensor-agent-facing outbound surface
+    (heartbeat, command poll/ack, discovery/health submission, config pull),
+    certificate management (CSR rotate / revoke / regenerate), health history,
+    discovery batches, per-sensor interface/config edits, pcap and
+    discovery-job routes, and the platform-stats route. Those are separate
+    concerns and ship in later slices.
+
+    ## Shape status (important)
+
+    These paths document the **current, pre-envelope shapes** the service
+    returns today, captured from the real gin handlers
+    (`services/sensor-manager/internal/handlers/{sensors,registration}.go`):
+    single resources are returned either bare (`GET /sensors/{id}` →the sensor
+    object directly) or wrapped under a key (`{ "command": {...} }`,
+    `{ "pending_sensor": {...} }`); collections are wrapped
+    (`{ "sensors": [...] }`, `{ "commands": [...] }`,
+    `{ "pending_sensors": [...] }`); errors are `{ "error": "string" }`. The Go
+    contract test
+    (`services/sensor-manager/internal/handlers/sensor_contract_test.go`)
+    asserts the live handlers match these.
+
+    The **go-forward ADR-0002 envelope** (`Error`, `Pagination`, the `data`
+    wrapper) is defined under `components.schemas` as the documented standard
+    NEW or HARDENED endpoints conform to. The current v1 sensor paths do not
+    yet use it; they are hardened to it when the frontend-v2 surface first
+    consumes them (ADR-0001 step 5), at which point this file and the contract
+    test move together.
+  contact:
+    name: VistaPlatform Platform
+servers:
+- url: /api/v1/sensor-manager
+  description: sensor-manager v1, mounted behind the API gateway.
+tags:
+- name: sensors
+  description: Tenant sensor lifecycle — list / get / stats / status / delete,
+    per-sensor commands and health.
+- name: pending-sensors
+  description: Pending sensor registrations — the pre-enrolment keys a Tenant
+    Admin creates, lists, and deletes before a sensor binary checks in.
+- name: admin-settings
+  description: Tenant sensor-admin settings and tenant-wide capture defaults the
+    Sensor Configuration page reads and writes.
+- name: pcap
+  description: Tenant PCAP/PCAPNG upload + processing-job management (upload, list,
+    get, delete). Backed by the pcap-processor pipeline.
+- name: certificates
+  description: Sensor mTLS certificate management (regenerate / get / revoke /
+    rotate). Regenerate is in-process; the others use the DB-backed CA service.
+- name: admin-fleet
+  description: Platform-admin, cross-tenant Fleet roll-up (READ-ONLY). Lists
+    sensors across all tenants for the VISTA Operations Fleet view; gated by the
+    platform-admin role check.
+
+paths:
+  /sensors:
+    get:
+      operationId: listSensors
+      tags:
+      - sensors
+      summary: List sensors for the current tenant
+      description: |
+        Returns the tenant's sensors. On any service error the handler logs and
+        returns 200 with an empty list rather than 500, so the Operations page
+        always renders.
+      responses:
+        '200':
+          description: The tenant's sensors.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SensorListResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+      x-quirks:
+      - 'Service errors return 200 with `{"sensors": []}`, not 500.'
+      - On an empty/nil result the `sensors` field can serialize as JSON null;
+        the web-ui coalesces with `?? []`.
+  /sensors/stats:
+    get:
+      operationId: getSensorStats
+      tags:
+      - sensors
+      summary: Sensor count breakdown for the current tenant
+      description: |
+        Aggregate counts used by the Operations dashboard tiles. Computed from
+        the tenant's sensors by status. Discovery/packet/error totals are
+        currently always zero (not yet wired) and `last_updated` is the server
+        time of the call.
+      responses:
+        '200':
+          description: Sensor stats.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SensorStats'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+      x-quirks:
+      - total_discoveries / total_packets / total_errors are always 0 today.
+      - Service errors return 200 with the default (all-zero) stats, not 500.
+  /sensors/discovery-counts:
+    get:
+      operationId: getSensorDiscoveryCounts
+      tags:
+      - sensors
+      summary: Per-sensor discovery counts for the current tenant
+      description: |
+        Maps each of the tenant's sensor ids to its discovery count. Returns an
+        empty map when the underlying DB is unavailable.
+      responses:
+        '200':
+          description: Map of sensor id → discovery count.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiscoveryCountsResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+      x-quirks:
+      - 'DB errors return 200 with `{"counts": {}}`, not 500.'
+  /sensors/{sensor_id}:
+    parameters:
+    - $ref: '#/components/parameters/SensorId'
+    get:
+      operationId: getSensor
+      tags:
+      - sensors
+      summary: Get a sensor by id
+      description: |
+        Returns a single sensor. The body is the sensor object **directly** (not
+        wrapped under a `sensor` key). Any retrieval failure maps to 404.
+      responses:
+        '200':
+          description: The sensor (bare object).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sensor'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+      x-quirks:
+      - 'Body is the bare sensor object, NOT `{"sensor": {...}}`. The web-ui
+        `sensorsApi.getSensor` reads `res.data` to match.'
+      - All GetSensor errors (DB error, no rows) return 404, not 500.
+    delete:
+      operationId: deleteSensor
+      tags:
+      - sensors
+      summary: Soft-delete a sensor
+      description: Soft-deletes the sensor. Gated by the `sensors.delete` permission.
+      responses:
+        '200':
+          description: Deletion acknowledged.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /sensors/{sensor_id}/status:
+    parameters:
+    - $ref: '#/components/parameters/SensorId'
+    put:
+      operationId: updateSensorStatus
+      tags:
+      - sensors
+      summary: Update a sensor's status
+      description: |
+        Sets the sensor's status. `status` is required in the body. Gated by the
+        `sensors.update` permission.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSensorStatusRequest'
+      responses:
+        '200':
+          description: Status updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /sensors/{sensor_id}/interfaces:
+    parameters:
+    - $ref: '#/components/parameters/SensorId'
+    put:
+      operationId: updateSensorInterfaces
+      tags:
+      - sensors
+      summary: Add/remove a sensor's capture network interfaces
+      description: |
+        Adds and/or removes interfaces on the sensor's capture set. The body
+        carries optional `add` / `remove` string arrays (entries already present
+        are not duplicated; entries in `remove` are dropped). Gated by the
+        `sensors.update` permission. Returns the resulting interface list.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSensorInterfacesRequest'
+      responses:
+        '200':
+          description: Interfaces updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateSensorInterfacesResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /sensors/{sensor_id}/config:
+    parameters:
+    - $ref: '#/components/parameters/SensorId'
+    put:
+      operationId: updateSensorConfig
+      tags:
+      - sensors
+      summary: Update a sensor's configuration
+      description: |
+        Updates a sensor's profile / description / tags and capture options; all
+        body fields are optional. When capture options (`active_probing`,
+        `network_discovery`, `dedup_ttl_minutes`) change, an `update_config`
+        command is queued for the sensor to apply on next checkin. Gated by the
+        `sensors.update` permission. Returns the updated config subset.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSensorConfigRequest'
+      responses:
+        '200':
+          description: Configuration updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateSensorConfigResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /sensors/{sensor_id}/commands:
+    parameters:
+    - $ref: '#/components/parameters/SensorId'
+    get:
+      operationId: listSensorCommands
+      tags:
+      - sensors
+      summary: List a sensor's pending commands
+      responses:
+        '200':
+          description: The sensor's commands.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SensorCommandListResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+    post:
+      operationId: createSensorCommand
+      tags:
+      - sensors
+      summary: Queue a command for a sensor
+      description: |
+        Creates a pending command for the sensor to pick up on its next poll.
+        `command_type` is required in the body. Gated by the `sensors.update`
+        permission. Returns 201 with the created command.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSensorCommandRequest'
+      responses:
+        '201':
+          description: The created command.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SensorCommandResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /sensors/{sensor_id}/health:
+    parameters:
+    - $ref: '#/components/parameters/SensorId'
+    get:
+      operationId: getSensorHealth
+      tags:
+      - sensors
+      summary: Latest health metrics for a sensor
+      description: |
+        Returns the most recent health-metrics row for the sensor, as a bare
+        object (not wrapped). 404 when no metrics exist yet.
+      responses:
+        '200':
+          description: Latest health metrics (bare object).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SensorHealthMetrics'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+  /sensors/pending:
+    get:
+      operationId: listPendingSensors
+      tags:
+      - pending-sensors
+      summary: List pending sensor registrations for the current tenant
+      description: |
+        Returns the tenant's pending registration keys. Expired-but-still-pending
+        rows have their `status` reflected as `expired` in the response. On any
+        service error the handler returns 200 with an empty list.
+      responses:
+        '200':
+          description: The tenant's pending registrations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PendingSensorListResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+      x-quirks:
+      - 'Service errors return 200 with `{"pending_sensors": []}`, not 500.'
+    post:
+      operationId: createPendingSensor
+      tags:
+      - pending-sensors
+      summary: Create a pending sensor registration
+      description: |
+        Mints a registration key for a new sensor. `name`, `ip_address`, and
+        `profile` are required; `ip_address` must be a valid IP. Gated by the
+        `sensors.create` permission. Returns 200 with the pending registration
+        and a ready-to-run installation command.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePendingSensorRequest'
+      responses:
+        '200':
+          description: The created pending registration plus install command.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatePendingSensorResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+      x-quirks:
+      - 'Success returns 200 (not 201) with a `pending_sensor` object plus an `installation_command` string.'
+      - Invalid IP, missing required field, and quota-exceeded all return 400.
+  /platform-ca:
+    get:
+      operationId: getPlatformCA
+      tags:
+      - pending-sensors
+      summary: Fingerprint of the CA behind this platform's edge certificate
+      description: |
+        Returns the SHA-256 fingerprint of the certificate authority that signed
+        this platform's browser-facing TLS certificate, so an operator enrolling
+        an agent can compare it against the fingerprint the agent displays before
+        approving it.
+
+        The comparison is the point. An agent facing a privately-signed platform
+        is asked to trust the CA it is shown, and anything able to intercept that
+        enrollment could present its own. Reading the fingerprint here — over an
+        authenticated browser session — gives the operator a channel the agent's
+        connection cannot forge.
+
+        The probed URL comes only from server-side configuration
+        (`WEB_UI_BASE_URL`), never from the request, so this endpoint cannot be
+        pointed at an arbitrary host.
+
+        Always 200. When the fingerprint cannot be determined (no public URL
+        configured, plain HTTP, or the platform cannot reach its own front door)
+        `available` is false and `reason` explains why. When the edge certificate
+        is publicly trusted, `trusted_by_default` is true and no fingerprint is
+        returned — agents will not prompt at all.
+      responses:
+        '200':
+          description: Platform CA fingerprint, or why it is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformCAResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+      x-quirks:
+      - 'Never errors: unavailability is reported as 200 with `available: false` and a `reason`.'
+      - Result is cached server-side for 5 minutes; the edge certificate only changes on renewal.
+  /sensors/pending/{key}:
+    parameters:
+    - $ref: '#/components/parameters/PendingKey'
+    delete:
+      operationId: deletePendingSensor
+      tags:
+      - pending-sensors
+      summary: Delete a pending sensor registration
+      description: |
+        Deletes the pending registration identified by its registration key.
+        Gated by the `sensors.delete` permission. 404 when the key is unknown or
+        belongs to another tenant.
+      responses:
+        '200':
+          description: Deletion acknowledged.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /admin/settings:
+    get:
+      operationId: getAdminSettings
+      tags:
+      - admin-settings
+      summary: Get sensor-admin settings
+      description: |
+        Returns the current sensor-registration admin settings — the
+        registration-key expiry, the maximum number of simultaneous pending
+        registrations, and the source-IP-validation toggle. Read by the Sensor
+        Configuration page.
+      x-quirks: 'in-memory: settings are held in a single package-level variable in sensor-manager, not persisted per tenant. A PUT mutates the process-wide value and a restart resets it to defaults. Documented as-is; per-tenant persistence is a later change.'
+      responses:
+        '200':
+          description: Current admin settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminSettings'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+    put:
+      operationId: updateAdminSettings
+      tags:
+      - admin-settings
+      summary: Update sensor-admin settings
+      description: |
+        Updates the sensor-registration admin settings. Gated by the
+        `settings.update` permission. `key_expiration_minutes` must be 5–1440 and
+        `max_pending_sensors` must be 1–1000; an out-of-range or unparseable body
+        returns 400.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminSettings'
+      responses:
+        '200':
+          description: Settings updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+
+  /admin/capture-defaults:
+    put:
+      operationId: updateTenantCaptureDefaults
+      tags:
+      - admin-settings
+      summary: Apply tenant-wide capture defaults
+      description: |
+        Applies a tenant-wide capture-configuration default (currently the
+        dedup-TTL observation rest period) to every active sensor by queueing an
+        `update_config` command for each. Gated by the `settings.update`
+        permission. Returns the number of sensors a command was queued for.
+        `dedup_ttl_minutes` is required and must be 1–1440. Returns 503 when the
+        sensor service is unavailable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCaptureDefaultsRequest'
+      responses:
+        '200':
+          description: Capture defaults applied; per-sensor commands queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaptureDefaultsResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '503':
+          $ref: '#/components/responses/LegacyServiceUnavailable'
+  /admin/sensors:
+    get:
+      operationId: listAdminSensors
+      tags:
+      - admin-fleet
+      summary: List sensors across ALL tenants (platform admin only)
+      description: |
+        Platform-admin, cross-tenant, READ-ONLY roll-up powering the VISTA
+        Operations Fleet view. Unlike `GET /sensors` (tenant-scoped), this lists
+        every non-deleted sensor across every tenant and carries tenant identity
+        (`tenant_id` / `tenant_name` / `tenant_slug`) on each row.
+
+        Gated by the platform-admin role check (super_admin / platform_admin /
+        support_admin), mirroring device-interrogation-service's `/admin/*`
+        gate. Non-admin callers get 403. There is no mutation surface here.
+
+        The in-cluster Platform Sensor (registered by cluster-sensor-service for
+        every tenant) appears like any other sensor; `is_platform_sensor` flags
+        it (derived from its `platform="platform"` registration signature).
+      parameters:
+      - name: tenant_id
+        in: query
+        required: false
+        description: Narrow the cross-tenant roll-up to a single tenant (operator scope).
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: All sensors across all tenants.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminSensorListResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+      x-quirks:
+      - 'When the DB pool is unavailable the handler returns 200 with `{"sensors": []}` rather than 500.'
+  /sensors/{sensor_id}/health/history:
+    parameters:
+    - $ref: '#/components/parameters/SensorId'
+    get:
+      operationId: getSensorHealthHistory
+      tags:
+      - sensors
+      summary: Health-metrics history for a sensor
+      description: |
+        Returns up to `limit` health-metrics rows (default 100, max 1000) for the
+        sensor since `since` (RFC3339; default last 24h), newest first.
+      parameters:
+      - name: since
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: Health-metrics history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SensorHealthHistoryResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /sensors/{sensor_id}/discoveries:
+    parameters:
+    - $ref: '#/components/parameters/SensorId'
+    get:
+      operationId: getSensorDiscoveries
+      tags:
+      - sensors
+      summary: Recent discoveries for a sensor
+      description: |
+        Returns the sensor's most recent discoveries (default 50), newest first.
+        Each item carries the base discovery fields plus selected metadata
+        (source_ip / version / cipher_suite / key_size) promoted to the top level
+        when present — so a discovery item is an open object.
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: Recent discoveries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SensorDiscoveriesResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /pcap/upload:
+    post:
+      operationId: uploadPcap
+      tags:
+      - pcap
+      summary: Upload a PCAP/PCAPNG file for processing
+      description: |
+        Uploads a capture file (multipart form field `file`, .pcap/.pcapng,
+        validated by extension + magic bytes + max-size). Creates a processing
+        job and publishes it for the pcap-processor. Gated by `pcap.upload`.
+        Returns 201 with the new job id; 413 when the file exceeds the platform
+        max-upload size.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+              - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201':
+          description: Upload accepted; processing job created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PcapUploadResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '413':
+          description: File exceeds the platform max-upload size.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+        '503':
+          $ref: '#/components/responses/LegacyServiceUnavailable'
+  /pcap/jobs:
+    get:
+      operationId: listPcapJobs
+      tags:
+      - pcap
+      summary: List PCAP upload/processing jobs
+      parameters:
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: A page of pcap jobs.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PcapJobListResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+        '503':
+          $ref: '#/components/responses/LegacyServiceUnavailable'
+  /pcap/jobs/{id}:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      description: PCAP job UUID.
+      schema:
+        type: string
+        format: uuid
+    get:
+      operationId: getPcapJob
+      tags:
+      - pcap
+      summary: Get a PCAP job by id
+      responses:
+        '200':
+          description: The pcap job (bare object).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PcapUploadJob'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+        '503':
+          $ref: '#/components/responses/LegacyServiceUnavailable'
+    delete:
+      operationId: deletePcapJob
+      tags:
+      - pcap
+      summary: Delete a PCAP job
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+        '503':
+          $ref: '#/components/responses/LegacyServiceUnavailable'
+  /sensors/{sensor_id}/regenerate-certificates:
+    parameters:
+    - $ref: '#/components/parameters/SensorId'
+    post:
+      operationId: regenerateSensorCertificates
+      tags:
+      - certificates
+      summary: Regenerate a sensor's mTLS certificates
+      description: |
+        Generates a fresh CA + client certificate for the sensor (in-process
+        x509/RSA) and returns the PEM bundle. Gated by `sensors.manage`.
+      responses:
+        '200':
+          description: The regenerated certificate bundle.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegenerateCertificatesResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /sensors/{sensor_id}/certificate:
+    parameters:
+    - $ref: '#/components/parameters/SensorId'
+    get:
+      operationId: getSensorCertificate
+      tags:
+      - certificates
+      summary: Get a sensor's current certificate
+      description: |
+        Returns the sensor's current certificate metadata (PEM, serial, validity,
+        revocation state). The success path reads the DB-backed CertificateService;
+        the contract test pins the request-validation (400) path.
+      responses:
+        '200':
+          description: The certificate metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SensorCertificateResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+  /sensors/{sensor_id}/certificates/revoke:
+    parameters:
+    - $ref: '#/components/parameters/SensorId'
+    post:
+      operationId: revokeSensorCertificate
+      tags:
+      - certificates
+      summary: Revoke a sensor's certificate
+      description: |
+        Revokes the sensor's certificate with a reason (compromised / expired /
+        rotated / manual). Gated by `sensors.manage`. The success path uses the
+        DB-backed CertificateService; the contract test pins the request-validation
+        (400) paths.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevokeCertificateRequest'
+      responses:
+        '200':
+          description: Certificate revoked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevokeCertificateResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /sensors/{sensor_id}/certificates/rotate:
+    parameters:
+    - $ref: '#/components/parameters/SensorId'
+    post:
+      operationId: rotateSensorCertificate
+      tags:
+      - certificates
+      summary: Rotate a sensor's certificate from a CSR
+      description: |
+        Issues a new certificate from the supplied CSR (revoking the old one).
+        Gated by `sensors.manage`. The success path uses the DB-backed
+        CertificateService + CA manager; the contract test pins the
+        request-validation + sensor-not-found (400/404) paths.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RotateCertificateRequest'
+      responses:
+        '200':
+          description: Certificate rotated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RotateCertificateResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+components:
+  parameters:
+    SensorId:
+      name: sensor_id
+      in: path
+      required: true
+      description: Sensor UUID.
+      schema:
+        type: string
+        format: uuid
+    PendingKey:
+      name: key
+      in: path
+      required: true
+      description: Pending registration key (e.g. `REG-...`).
+      schema:
+        type: string
+  responses:
+    LegacyBadRequest:
+      description: Invalid request.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+    LegacyUnauthorized:
+      description: Missing or invalid authentication.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+    LegacyForbidden:
+      description: Caller lacks the required role (platform-admin).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+    LegacyNotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+    LegacyServerError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+    LegacyServiceUnavailable:
+      description: A required dependency is unavailable.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+  schemas:
+    Sensor:
+      type: object
+      additionalProperties: true
+      description: |
+        A tenant sensor. Field presence follows models.Sensor's json tags:
+        non-`omitempty` fields are always present (nullable pointers serialize as
+        null). The handler also emits a legacy `config` object (a zero-valued
+        models.SensorConfig — `config,omitempty` does NOT omit a non-pointer
+        struct) plus optional legacy fields (type, last_seen, capabilities,
+        location, legacy_tags, metadata). Those are not read by the v2 frontend
+        and are intentionally NOT pinned here — hence `additionalProperties:
+        true`. This contract pins the stable fields the UI relies on; the legacy
+        blob is dropped when the endpoint is hardened to ADR-0002.
+      required:
+      - id
+      - tenant_id
+      - name
+      - sensor_type
+      - description
+      - platform
+      - version
+      - profile
+      - air_gapped
+      - status
+      - network_interfaces
+      - available_interfaces
+      - tags
+      - ip_address
+      - last_heartbeat
+      - created_at
+      - updated_at
+      - deleted_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        sensor_type:
+          type: string
+          description: "'network' | 'endpoint' | 'cloud' | 'api'."
+        description:
+          type:
+          - string
+          - 'null'
+        platform:
+          type: string
+        version:
+          type: string
+        profile:
+          type: string
+        air_gapped:
+          type: boolean
+          description: When true, the sensor does not check in / heartbeat / stream discoveries; the platform still shows it registered and imports findings out-of-band.
+        status:
+          type: string
+          description: "'pending' | 'active' | 'inactive' | 'error' | 'offline'."
+        network_interfaces:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+        available_interfaces:
+          description: Full host NIC inventory the sensor reports in its heartbeat; populates the UI interface picker. Distinct from network_interfaces (the monitored subset).
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+        tags:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+        ip_address:
+          type:
+          - string
+          - 'null'
+        last_heartbeat:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        reporting_interval:
+          description: Sensor's data-send cadence in seconds (null until the sensor reports it).
+          type:
+          - integer
+          - 'null'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        deleted_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+    SensorListResponse:
+      type: object
+      additionalProperties: false
+      description: |
+        CURRENT list envelope for GET /sensors: the collection is wrapped under
+        `sensors`. On an empty/nil result the field can serialize as JSON null
+        (the empty-slice-as-null quirk also seen in the scopes slice), so it is
+        typed as a nullable array.
+      required:
+      - sensors
+      properties:
+        sensors:
+          type:
+          - array
+          - 'null'
+          items:
+            $ref: '#/components/schemas/Sensor'
+    AdminSensor:
+      type: object
+      additionalProperties: false
+      description: |
+        One row of the platform-admin, cross-tenant Fleet view (GET
+        /admin/sensors). Mirrors the canonical models.Sensor telemetry but adds
+        tenant identity (tenant_name / tenant_slug from a join to tenants) and a
+        derived is_platform_sensor flag. Every field maps to a real
+        sensors/tenants column — no invented telemetry. Unlike the tenant Sensor
+        schema this is closed (additionalProperties: false): the admin handler
+        emits an explicit struct (handlers.AdminSensor), not the legacy blob.
+      required:
+      - id
+      - tenant_id
+      - tenant_name
+      - tenant_slug
+      - name
+      - description
+      - sensor_type
+      - platform
+      - version
+      - profile
+      - status
+      - air_gapped
+      - network_interfaces
+      - available_interfaces
+      - tags
+      - ip_address
+      - is_platform_sensor
+      - last_heartbeat
+      - created_at
+      - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        tenant_name:
+          type: string
+          description: Owning tenant's display name (empty string if the tenant row is missing).
+        tenant_slug:
+          type: string
+          description: Owning tenant's slug (empty string if the tenant row is missing).
+        name:
+          type: string
+        description:
+          type:
+          - string
+          - 'null'
+        sensor_type:
+          type: string
+          description: "'network' | 'endpoint' | 'cloud' | 'api'."
+        platform:
+          type: string
+          description: '"platform" for the in-cluster Platform Sensor.'
+        version:
+          type: string
+          description: '"system" for the Platform Sensor.'
+        profile:
+          type: string
+          description: '"discovery" for the Platform Sensor.'
+        status:
+          type: string
+          description: "'pending' | 'active' | 'inactive' | 'error' | 'offline'."
+        air_gapped:
+          type: boolean
+        network_interfaces:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+        available_interfaces:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+        tags:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+        ip_address:
+          type:
+          - string
+          - 'null'
+        is_platform_sensor:
+          type: boolean
+          description: True for the in-cluster Platform Sensor (derived from platform="platform").
+        last_heartbeat:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AdminSensorListResponse:
+      type: object
+      additionalProperties: false
+      description: |
+        Envelope for GET /admin/sensors: the cross-tenant collection wrapped
+        under `sensors`, with a `count`. The handler always initializes the
+        slice, so `sensors` is a (possibly empty) array, never null.
+      required:
+      - sensors
+      - count
+      properties:
+        sensors:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminSensor'
+        count:
+          type: integer
+    SensorStats:
+      type: object
+      additionalProperties: false
+      description: Sensor count breakdown for the Operations dashboard.
+      required:
+      - total_sensors
+      - active_sensors
+      - inactive_sensors
+      - error_sensors
+      - pending_sensors
+      - total_discoveries
+      - total_packets
+      - total_errors
+      - last_updated
+      properties:
+        total_sensors:
+          type: integer
+        active_sensors:
+          type: integer
+        inactive_sensors:
+          type: integer
+        error_sensors:
+          type: integer
+        pending_sensors:
+          type: integer
+        total_discoveries:
+          type: integer
+        total_packets:
+          type: integer
+        total_errors:
+          type: integer
+        last_updated:
+          type: string
+          format: date-time
+    DiscoveryCountsResponse:
+      type: object
+      additionalProperties: false
+      description: GET /sensors/discovery-counts — sensor id → discovery count.
+      required:
+      - counts
+      properties:
+        counts:
+          type: object
+          additionalProperties:
+            type: integer
+    UpdateSensorInterfacesRequest:
+      type: object
+      additionalProperties: false
+      description: 'Request body for PUT /sensors/{sensor_id}/interfaces — interfaces to add and/or remove. Both fields optional.'
+      properties:
+        add:
+          type: array
+          items:
+            type: string
+        remove:
+          type: array
+          items:
+            type: string
+    UpdateSensorInterfacesResponse:
+      type: object
+      additionalProperties: false
+      description: 'Response for PUT /sensors/{sensor_id}/interfaces — `{ message, interfaces }` with the resulting interface set.'
+      required:
+      - message
+      - interfaces
+      properties:
+        message:
+          type: string
+        interfaces:
+          type: array
+          items:
+            type: string
+    UpdateSensorConfigRequest:
+      type: object
+      additionalProperties: false
+      description: |
+        Request body for PUT /sensors/{sensor_id}/config. All fields optional;
+        only provided fields are applied. Capture options
+        (active_probing/network_discovery/dedup_ttl_minutes) additionally queue
+        an update_config command for the sensor.
+      properties:
+        air_gapped:
+          type: boolean
+        scan_interval:
+          type: integer
+        tags:
+          type: array
+          items:
+            type: string
+        description:
+          type: string
+        active_probing:
+          type: boolean
+        network_discovery:
+          type: boolean
+        dedup_ttl_minutes:
+          type: integer
+        reporting_interval:
+          description: |
+            Sensor data-send cadence in seconds. Must be one of the allowed
+            presets (30, 60, 300, 900, 1800, 3600, 7200, 14400, 28800, 43200,
+            86400); other values are rejected. Queues an update_config command.
+          type: integer
+    UpdateSensorConfigResponse:
+      type: object
+      additionalProperties: false
+      description: 'Response for PUT /sensors/{sensor_id}/config — `{ message, sensor }` with the updated config subset.'
+      required:
+      - message
+      - sensor
+      properties:
+        message:
+          type: string
+        sensor:
+          type: object
+          additionalProperties: false
+          required:
+          - id
+          - air_gapped
+          - description
+          - tags
+          - updated_at
+          properties:
+            id:
+              type: string
+              format: uuid
+            air_gapped:
+              type: boolean
+            description:
+              type:
+              - string
+              - 'null'
+            tags:
+              type:
+              - array
+              - 'null'
+              items:
+                type: string
+            updated_at:
+              type: string
+              format: date-time
+    SensorHealthHistoryResponse:
+      type: object
+      additionalProperties: false
+      description: 'GET /sensors/{sensor_id}/health/history — `{ metrics, count, since }`.'
+      required:
+      - metrics
+      - count
+      - since
+      properties:
+        metrics:
+          type: array
+          items:
+            $ref: '#/components/schemas/SensorHealthMetrics'
+        count:
+          type: integer
+        since:
+          type: string
+          format: date-time
+    SensorDiscovery:
+      type: object
+      additionalProperties: true
+      description: |
+        A single sensor discovery row. Open object: in addition to the base
+        fields below, selected metadata keys (source_ip, version, cipher_suite,
+        key_size) are promoted to the top level when present.
+      required:
+      - id
+      - sensor_id
+      - batch_id
+      - protocol
+      - dest_ip
+      - port
+      - confidence
+      - timestamp
+      - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        sensor_id:
+          type: string
+          format: uuid
+        batch_id:
+          type: string
+        protocol:
+          type: string
+        dest_ip:
+          type: string
+        port:
+          type: integer
+        confidence:
+          type: number
+        timestamp:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+    SensorDiscoveriesResponse:
+      type: object
+      additionalProperties: false
+      description: 'GET /sensors/{sensor_id}/discoveries — `{ discoveries, count }`.'
+      required:
+      - discoveries
+      - count
+      properties:
+        discoveries:
+          type: array
+          items:
+            $ref: '#/components/schemas/SensorDiscovery'
+        count:
+          type: integer
+    PcapUploadJob:
+      type: object
+      additionalProperties: false
+      description: |
+        A PCAP upload/processing job (models.PcapUploadJob). `file_path` is never
+        serialized (json:"-"). `protocols_found` / `capture_time_range` serialize
+        as JSON null when unset (nil map); the optional timestamps + error_message
+        are omitted when absent.
+      required:
+      - id
+      - tenant_id
+      - uploaded_by
+      - original_filename
+      - file_size_bytes
+      - status
+      - discovery_count
+      - packet_count
+      - protocols_found
+      - capture_time_range
+      - created_at
+      - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        uploaded_by:
+          type: string
+          format: uuid
+        original_filename:
+          type: string
+        file_size_bytes:
+          type: integer
+        status:
+          type: string
+        discovery_count:
+          type: integer
+        packet_count:
+          type: integer
+        protocols_found:
+          type:
+          - object
+          - 'null'
+          additionalProperties:
+            type: integer
+        capture_time_range:
+          type:
+          - object
+          - 'null'
+        error_message:
+          type: string
+        processing_started_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+    PcapUploadResponse:
+      type: object
+      additionalProperties: false
+      description: 'POST /pcap/upload — `{ job_id, status }` for the created job.'
+      required:
+      - job_id
+      - status
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+    PcapJobListResponse:
+      type: object
+      additionalProperties: false
+      description: 'GET /pcap/jobs — `{ jobs, total, page, limit }`. `jobs` is null on an empty page.'
+      required:
+      - jobs
+      - total
+      - page
+      - limit
+      properties:
+        jobs:
+          type:
+          - array
+          - 'null'
+          items:
+            $ref: '#/components/schemas/PcapUploadJob'
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+    RevokeCertificateRequest:
+      type: object
+      additionalProperties: false
+      description: Request body for the revoke endpoint (reason required).
+      required:
+      - reason
+      properties:
+        reason:
+          type: string
+          description: compromised / expired / rotated / manual.
+    RotateCertificateRequest:
+      type: object
+      additionalProperties: false
+      description: Request body for the rotate endpoint (PEM CSR).
+      required:
+      - csr
+      properties:
+        csr:
+          type: string
+    RegenerateCertificatesResponse:
+      type: object
+      additionalProperties: false
+      description: 'POST /sensors/{sensor_id}/regenerate-certificates — fresh CA + client cert PEM bundle.'
+      required:
+      - sensor_id
+      - client_cert
+      - client_key
+      - server_ca_cert
+      - expires_at
+      - message
+      properties:
+        sensor_id:
+          type: string
+        client_cert:
+          type: string
+        client_key:
+          type: string
+        server_ca_cert:
+          type: string
+        expires_at:
+          type: string
+        message:
+          type: string
+    RevokeCertificateResponse:
+      type: object
+      additionalProperties: false
+      description: 'POST /sensors/{sensor_id}/certificates/revoke result.'
+      required:
+      - sensor_id
+      - revoked_at
+      - reason
+      - message
+      properties:
+        sensor_id:
+          type: string
+        revoked_at:
+          type: string
+          format: date-time
+        reason:
+          type: string
+        message:
+          type: string
+    RotateCertificateResponse:
+      type: object
+      additionalProperties: false
+      description: 'POST /sensors/{sensor_id}/certificates/rotate result.'
+      required:
+      - sensor_id
+      - client_cert
+      - server_ca_cert
+      - certificate_expires_at
+      - message
+      properties:
+        sensor_id:
+          type: string
+        client_cert:
+          type: string
+        server_ca_cert:
+          type: string
+        certificate_expires_at:
+          type: string
+          format: date-time
+        message:
+          type: string
+    SensorCertificateResponse:
+      type: object
+      additionalProperties: true
+      description: |
+        GET /sensors/{sensor_id}/certificate — certificate metadata. Open object;
+        revoked_at / revocation_reason are null when the cert is active.
+      required:
+      - sensor_id
+      - certificate_pem
+      - serial_number
+      - issued_at
+      - expires_at
+      - is_revoked
+      - is_expired
+      - days_until_expiry
+      properties:
+        sensor_id:
+          type: string
+        certificate_pem:
+          type: string
+        serial_number:
+          type: string
+        issued_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        revocation_reason:
+          type:
+          - string
+          - 'null'
+        is_revoked:
+          type: boolean
+        is_expired:
+          type: boolean
+        days_until_expiry:
+          type: integer
+    MessageResponse:
+      type: object
+      additionalProperties: false
+      description: Bare acknowledgement envelope used by mutating sensor endpoints.
+      required:
+      - message
+      properties:
+        message:
+          type: string
+    AdminSettings:
+      type: object
+      additionalProperties: false
+      description: |
+        Sensor-registration admin settings (handlers.AdminSettings). Used as both
+        the GET /admin/settings response body and the PUT /admin/settings request
+        body. All three fields are present in the response; in a PUT each must be
+        in range (key expiry 5–1440, max pending 1–1000) or the update is
+        rejected with 400.
+      required:
+      - key_expiration_minutes
+      - max_pending_sensors
+      - require_ip_validation
+      properties:
+        key_expiration_minutes:
+          type: integer
+          description: Minutes a registration key stays valid (5–1440).
+        max_pending_sensors:
+          type: integer
+          description: Maximum simultaneous pending registrations (1–1000).
+        require_ip_validation:
+          type: boolean
+          description: Whether registration enforces source-IP validation.
+    UpdateCaptureDefaultsRequest:
+      type: object
+      additionalProperties: false
+      description: Request body for PUT /admin/capture-defaults.
+      required:
+      - dedup_ttl_minutes
+      properties:
+        dedup_ttl_minutes:
+          type: integer
+          description: Observation rest period in minutes applied to all active
+            sensors (1–1440).
+    CaptureDefaultsResponse:
+      type: object
+      additionalProperties: false
+      description: Result of applying tenant-wide capture defaults.
+      required:
+      - message
+      - sensors_queued
+      properties:
+        message:
+          type: string
+        sensors_queued:
+          type: integer
+          description: Number of active sensors an update_config command was
+            queued for.
+    SensorCommand:
+      type: object
+      additionalProperties: false
+      description: |
+        A command queued for a sensor (models.SensorCommand). Pointer timestamps
+        and `error_message` serialize as null until set.
+      required:
+      - id
+      - sensor_id
+      - command_type
+      - payload
+      - status
+      - created_at
+      - delivered_at
+      - acknowledged_at
+      - completed_at
+      - updated_at
+      - error_message
+      - response_data
+      properties:
+        id:
+          type: string
+          format: uuid
+        sensor_id:
+          type: string
+          format: uuid
+        command_type:
+          type: string
+        payload:
+          type:
+          - object
+          - 'null'
+          additionalProperties: true
+        status:
+          type: string
+          description: "'pending' | 'delivered' | 'acknowledged' | 'completed' | 'failed'."
+        created_at:
+          type: string
+          format: date-time
+        delivered_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        acknowledged_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        completed_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        error_message:
+          type:
+          - string
+          - 'null'
+        updated_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        response_data:
+          description: Sensor execution result/output; null until acknowledged.
+          type:
+          - object
+          - 'null'
+          additionalProperties: true
+    SensorCommandResponse:
+      type: object
+      additionalProperties: false
+      description: 'CURRENT envelope for POST /sensors/{id}/commands — `{ "command": {...} }`.'
+      required:
+      - command
+      properties:
+        command:
+          $ref: '#/components/schemas/SensorCommand'
+    SensorCommandListResponse:
+      type: object
+      additionalProperties: false
+      description: 'CURRENT envelope for GET /sensors/{id}/commands — `{ "commands": [...] }`.'
+      required:
+      - commands
+      properties:
+        commands:
+          type:
+          - array
+          - 'null'
+          items:
+            $ref: '#/components/schemas/SensorCommand'
+    CreateSensorCommandRequest:
+      type: object
+      additionalProperties: true
+      description: Request body for POST /sensors/{id}/commands.
+      required:
+      - command_type
+      properties:
+        command_type:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+    UpdateSensorStatusRequest:
+      type: object
+      additionalProperties: false
+      description: Request body for PUT /sensors/{id}/status.
+      required:
+      - status
+      properties:
+        status:
+          type: string
+    SensorHealthMetrics:
+      type: object
+      additionalProperties: false
+      description: Latest health-metrics row for a sensor (models.SensorHealthMetrics).
+      required:
+      - id
+      - sensor_id
+      - uptime_seconds
+      - memory_usage_bytes
+      - cpu_usage_percent
+      - packets_captured
+      - discoveries_made
+      - errors_count
+      - recorded_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        sensor_id:
+          type: string
+          format: uuid
+        uptime_seconds:
+          type: integer
+        memory_usage_bytes:
+          type: integer
+        cpu_usage_percent:
+          type: number
+        packets_captured:
+          type: integer
+        discoveries_made:
+          type: integer
+        errors_count:
+          type: integer
+        recorded_at:
+          type: string
+          format: date-time
+    PendingSensor:
+      type: object
+      additionalProperties: true
+      description: |
+        A pending sensor registration (models.PendingSensorRegistration). The
+        handler may emit additional legacy fields; the stable fields the UI reads
+        are pinned here.
+      required:
+      - id
+      - tenant_id
+      - registration_key
+      - name
+      - ip_address
+      - profile
+      - network_interfaces
+      - tags
+      - description
+      - metadata
+      - status
+      - expires_at
+      - used_at
+      - created_at
+      - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        registration_key:
+          type: string
+        name:
+          type: string
+        ip_address:
+          type: string
+        profile:
+          type: string
+          description: "'datacenter_host' | 'cloud_instance' | 'end_user_machine' | 'air_gapped' | 'device_interrogation'."
+        network_interfaces:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+        tags:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+        description:
+          type:
+          - string
+          - 'null'
+        metadata:
+          type:
+          - object
+          - 'null'
+          additionalProperties: true
+        status:
+          type: string
+          description: "'pending' | 'used' | 'expired' | 'cancelled'."
+        expires_at:
+          type: string
+          format: date-time
+        used_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    PendingSensorListResponse:
+      type: object
+      additionalProperties: false
+      description: 'CURRENT envelope for GET /sensors/pending — `{ "pending_sensors": [...] }`.'
+      required:
+      - pending_sensors
+      properties:
+        pending_sensors:
+          type: array
+          items:
+            $ref: '#/components/schemas/PendingSensor'
+    PlatformCAResponse:
+      type: object
+      additionalProperties: false
+      description: |
+        Identity of the CA behind this platform's edge certificate, for an
+        operator to compare against what an enrolling agent displays.
+      required:
+      - available
+      - trusted_by_default
+      properties:
+        available:
+          type: boolean
+          description: Whether the platform's certificate could be inspected at all.
+        reason:
+          type: string
+          description: |
+            Why no fingerprint is shown — either because it could not be
+            determined, or because the certificate is publicly trusted and no
+            approval step exists.
+        trusted_by_default:
+          type: boolean
+          description: |
+            The edge certificate verifies against the public trust store. Agents
+            enroll with no trust prompt, so there is nothing to compare.
+        public_url:
+          type: string
+          description: The public origin that was inspected.
+        fingerprint_sha256:
+          type: string
+          description: Lowercase unseparated hex SHA-256 of the CA certificate's DER bytes.
+        fingerprint_display:
+          type: string
+          description: The same fingerprint, colon-grouped for a human to read against a terminal.
+        subject:
+          type: string
+        issuer:
+          type: string
+        not_after:
+          type: string
+          format: date-time
+        self_signed:
+          type: boolean
+          description: |
+            False means the platform did not present its root and this is the
+            issuer-most intermediate it did present.
+    CreatePendingSensorRequest:
+      type: object
+      additionalProperties: true
+      description: Request body for POST /sensors/pending.
+      required:
+      - name
+      - ip_address
+      - profile
+      properties:
+        name:
+          type: string
+        ip_address:
+          type: string
+        profile:
+          type: string
+        network_interfaces:
+          type: array
+          items:
+            type: string
+        tags:
+          type: array
+          items:
+            type: string
+        description:
+          type: string
+    CreatePendingSensorResponse:
+      type: object
+      additionalProperties: false
+      description: CURRENT envelope for POST /sensors/pending success.
+      required:
+      - pending_sensor
+      - installation_command
+      properties:
+        pending_sensor:
+          $ref: '#/components/schemas/PendingSensor'
+        installation_command:
+          type: string
+    LegacyError:
+      type: object
+      additionalProperties: true
+      description: |
+        CURRENT error shape returned by sensor-manager endpoints today: a single
+        human-readable string under `error`. Some 400s carry extra sibling keys,
+        so additionalProperties is permitted. Unstructured — cannot be branched
+        on safely. Superseded by the ADR-0002 `Error` envelope below as
+        endpoints are hardened.
+      required:
+      - error
+      properties:
+        error:
+          type: string
+    Error:
+      type: object
+      additionalProperties: false
+      description: ADR-0002 error envelope. Clients branch on `error.code`, never on `message`.
+      required:
+      - error
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required:
+          - code
+          - message
+          properties:
+            code:
+              type: string
+              description: Stable, machine-readable enum (e.g. sensor_not_found).
+            message:
+              type: string
+              description: Human-readable, safe to surface in UI.
+            details:
+              type: array
+              items:
+                $ref: '#/components/schemas/ErrorDetail'
+            request_id:
+              type: string
+              description: For support correlation.
+    ErrorDetail:
+      type: object
+      additionalProperties: false
+      required:
+      - field
+      - issue
+      properties:
+        field:
+          type: string
+        issue:
+          type: string
+    Pagination:
+      type: object
+      additionalProperties: false
+      description: ADR-0002 pagination block for collection envelopes.
+      required:
+      - total
+      - limit
+      - offset
+      properties:
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+        next_offset:
+          type:
+          - integer
+          - 'null'
+          description: Offset of the next page, or null when there are no more.

@@ -1,0 +1,1771 @@
+openapi: 3.1.0
+info:
+  title: VistaPlatform — audit-service API
+  version: 0.1.0
+  description: |
+    Spec-first contract for audit-service (ADR-0001). Covers the tenant-facing
+    **activity-logs** read surface — the audit trail a Tenant Admin browses,
+    filters, drills into, and pivots by user / resource. UI consumer:
+    `web-ui/src/services/audit-api.ts`.
+
+    ## Scope of this spec
+
+    The activity-logs read endpoints on the **v1** path
+    `/api/v1/audit-service/...` the web-ui consumes:
+
+      - `GET  /activity-logs`                                  — list (paginated, filtered)
+      - `GET  /activity-logs/{id}`                             — get one
+      - `POST /activity-logs/query`                            — list via a filter body
+      - `GET  /activity-logs/summary`                          — aggregate summary
+      - `GET  /activity-logs/by-resource/{resource_type}/{resource_id}` — a resource's audit trail
+      - `GET  /activity-logs/by-user/{user_id}`                — a user's activity timeline
+
+    Out of scope (this slice): the internal write path (`POST /activity-logs`,
+    job-execution logging — service-to-service only), CSV/JSON export, the
+    query-param `by-user` / `by-resource` variants, and the alerts /
+    alert-rules / retention / scheduled-report / compliance-report surfaces
+    (separate concerns, later slices).
+
+    ## Shape status (important)
+
+    These paths document the **current, pre-envelope shapes** the service
+    returns today, captured from the real gin handlers
+    (`services/audit-service/internal/handlers/activity_log_handlers.go`):
+    the list wraps `{ "logs": [...], "pagination": {...} }`, a single log is
+    `{ "log": {...} }`, the summary is `{ "summary": {...} }`, and the
+    resource/user pivots carry their key plus `logs` / `total` / `page` /
+    `page_size`. Errors are `{ "error": "string" }`. The Go contract test
+    (`services/audit-service/internal/handlers/activity_log_contract_test.go`)
+    asserts the live handlers match these.
+
+    The **go-forward ADR-0002 envelope** (`Error`, `Pagination`, the `data`
+    wrapper) is defined under `components.schemas` as the documented standard
+    NEW or HARDENED endpoints conform to; the current paths are hardened to it
+    when the frontend-v2 surface first consumes them (ADR-0001 step 5).
+  contact:
+    name: VistaPlatform Platform
+servers:
+- url: /api/v1/audit-service
+  description: audit-service v1, mounted behind the API gateway.
+tags:
+- name: activity-logs
+  description: Tenant activity / audit log — list, get, summary, and user /
+    resource pivots.
+
+paths:
+  /activity-logs:
+    get:
+      operationId: listActivityLogs
+      tags:
+      - activity-logs
+      summary: List activity logs for the current tenant
+      description: |
+        Returns a filtered, paginated page of the tenant's activity logs.
+        Tenant users are automatically scoped to their own tenant. Filters
+        (event_type, event_category, user_type, success, requires_attention,
+        date range, search, etc.) are accepted as query params.
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: A page of activity logs with pagination metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivityLogListResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /activity-logs/export:
+    get:
+      operationId: exportActivityLogs
+      tags:
+      - activity-logs
+      summary: Export activity logs (JSON or CSV)
+      description: |
+        Exports the filtered activity-log result set. `format=json` (the default)
+        returns `{ "logs": [...] }` with no pagination metadata (export uses a
+        large page size); `format=csv` returns a `text/csv` file download
+        (Content-Disposition: attachment). Accepts the same filter query params
+        as `GET /activity-logs`. Tenant users are auto-scoped to their own tenant.
+      parameters:
+      - name: format
+        in: query
+        required: false
+        description: Output format. Defaults to json.
+        schema:
+          type: string
+          enum:
+          - json
+          - csv
+          default: json
+      responses:
+        '200':
+          description: The exported logs as a JSON envelope, or a CSV file download.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivityLogExportResponse'
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /activity-logs/{id}:
+    parameters:
+    - $ref: '#/components/parameters/ActivityLogId'
+    get:
+      operationId: getActivityLog
+      tags:
+      - activity-logs
+      summary: Get an activity log by id
+      responses:
+        '200':
+          description: The activity log.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivityLogResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+      x-quirks:
+      - Any retrieval failure (including no-rows) returns 404, not 500.
+  /activity-logs/query:
+    post:
+      operationId: queryActivityLogs
+      tags:
+      - activity-logs
+      summary: List activity logs via a filter body
+      description: |
+        Same result shape as `GET /activity-logs`, but the filters are supplied
+        in the request body under `filters`. Tenant users are auto-scoped to
+        their own tenant regardless of any tenant_id in the body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QueryActivityLogsRequest'
+      responses:
+        '200':
+          description: A page of activity logs with pagination metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivityLogListResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /activity-logs/summary:
+    get:
+      operationId: getActivityLogsSummary
+      tags:
+      - activity-logs
+      summary: Aggregate activity-log summary for the current tenant
+      description: |
+        Returns an aggregate summary over a date range (counts by category /
+        type, failure rate, top users, etc.). The summary object is an opaque
+        aggregate map and is intentionally not field-pinned here.
+      parameters:
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+      responses:
+        '200':
+          description: The summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivityLogSummaryResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /activity-logs/by-resource/{resource_type}/{resource_id}:
+    parameters:
+    - $ref: '#/components/parameters/ResourceType'
+    - $ref: '#/components/parameters/ResourceId'
+    get:
+      operationId: getResourceAuditTrail
+      tags:
+      - activity-logs
+      summary: Audit trail for a specific resource
+      description: Returns the activity logs touching a single resource, paginated.
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: The resource's audit trail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResourceAuditTrailResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /activity-logs/by-user/{user_id}:
+    parameters:
+    - $ref: '#/components/parameters/UserId'
+    get:
+      operationId: getUserActivityTimeline
+      tags:
+      - activity-logs
+      summary: Activity timeline for a specific user
+      description: Returns the activity logs attributed to a single user, paginated.
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: The user's activity timeline.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserActivityTimelineResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  # ===========================================================================
+  # Alert rules surface (admin-ui audit alerting). Platform admins manage rules;
+  # tenant users are scoped to their own. UI consumer: admin-ui/src/services/audit-api.ts.
+  # ===========================================================================
+  /alert-rules:
+    get:
+      operationId: getAlertRules
+      tags:
+      - alert-rules
+      summary: List alert rules
+      description: |
+        Lists alert rules (tenant users see their tenant's rules + platform
+        rules; platform users see all), with optional `is_enabled` / `severity`
+        / `rule_type` filters and `page` / `page_size` pagination. `rules` is
+        null when none match.
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - name: is_enabled
+        in: query
+        required: false
+        schema:
+          type: boolean
+      - name: severity
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: rule_type
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: The matching alert rules.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertRuleListResponse'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+    post:
+      operationId: createAlertRule
+      tags:
+      - alert-rules
+      summary: Create an alert rule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlertRuleInput'
+      responses:
+        '201':
+          description: The created rule's id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateAlertRuleResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /alert-rules/{id}:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      description: Alert rule UUID.
+      schema:
+        type: string
+        format: uuid
+    get:
+      operationId: getAlertRuleById
+      tags:
+      - alert-rules
+      summary: Get a single alert rule
+      responses:
+        '200':
+          description: The alert rule (bare object).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertRule'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+    put:
+      operationId: updateAlertRule
+      tags:
+      - alert-rules
+      summary: Update an alert rule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlertRuleInput'
+      responses:
+        '200':
+          description: Update confirmation message.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditMessageResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+    delete:
+      operationId: deleteAlertRule
+      tags:
+      - alert-rules
+      summary: Delete an alert rule
+      responses:
+        '200':
+          description: Deletion confirmation message.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditMessageResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  # ===========================================================================
+  # Retention policies (admin-ui audit retention). UI: admin-ui/src/services/audit-api.ts.
+  # ===========================================================================
+  /retention-policies:
+    get:
+      operationId: getRetentionPolicies
+      tags:
+      - retention
+      summary: List retention policies
+      description: '`policies` is null when none exist.'
+      responses:
+        '200':
+          description: The retention policies.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetentionPolicyListResponse'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+    post:
+      operationId: createRetentionPolicy
+      tags:
+      - retention
+      summary: Create a retention policy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetentionPolicyInput'
+      responses:
+        '201':
+          description: The created policy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetentionPolicyResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /retention-policies/{id}:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      description: Retention policy UUID.
+      schema:
+        type: string
+        format: uuid
+    get:
+      operationId: getRetentionPolicyById
+      tags:
+      - retention
+      summary: Get a single retention policy
+      responses:
+        '200':
+          description: The retention policy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetentionPolicyResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+    put:
+      operationId: updateRetentionPolicy
+      tags:
+      - retention
+      summary: Update a retention policy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetentionPolicyInput'
+      responses:
+        '200':
+          description: The updated policy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetentionPolicyResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  # ===========================================================================
+  # Triggered alerts (admin-ui audit alerts).
+  # ===========================================================================
+  /alerts:
+    get:
+      operationId: getAlerts
+      tags:
+      - alerts
+      summary: List triggered alerts
+      description: 'Filter by `status` (default "open"). `alerts` is null when none match.'
+      parameters:
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: The matching alerts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertListResponse'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /alerts/{id}/acknowledge:
+    post:
+      operationId: acknowledgeAlert
+      tags:
+      - alerts
+      summary: Acknowledge a triggered alert
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Acknowledgement confirmation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditMessageResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  # ===========================================================================
+  # Analytics (admin-ui audit analytics dashboards). Read-only; inner objects
+  # are loosely typed analytics blobs (only the envelope key is pinned).
+  # ===========================================================================
+  /analytics/user-activity:
+    get:
+      operationId: getUserActivityAnalytics
+      tags:
+      - analytics
+      summary: Per-user activity summary
+      parameters:
+      - name: user_id
+        in: query
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: tenant_id
+        in: query
+        required: false
+        schema:
+          type: string
+          format: uuid
+      - name: days
+        in: query
+        required: false
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: The user activity summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsSummaryResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /analytics/access-patterns:
+    get:
+      operationId: getAccessPatternsAnalytics
+      tags:
+      - analytics
+      summary: Access pattern analysis
+      parameters:
+      - name: tenant_id
+        in: query
+        required: false
+        schema:
+          type: string
+          format: uuid
+      - name: days
+        in: query
+        required: false
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: The access pattern analysis.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsAnalysisResponse'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /analytics/compliance-gaps:
+    get:
+      operationId: getComplianceGapsAnalytics
+      tags:
+      - analytics
+      summary: Compliance gap analysis
+      parameters:
+      - name: framework
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: tenant_id
+        in: query
+        required: false
+        schema:
+          type: string
+          format: uuid
+      - name: days
+        in: query
+        required: false
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: The compliance gap analysis.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsAnalysisResponse'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /analytics/dashboard:
+    get:
+      operationId: getDashboardAnalytics
+      tags:
+      - analytics
+      summary: Dashboard metrics
+      parameters:
+      - name: tenant_id
+        in: query
+        required: false
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: The dashboard metrics.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsDashboardResponse'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  # ===========================================================================
+  # SIEM integrations (admin-ui audit SIEM). The /test endpoint's network probe
+  # lives in the service, so the handler is testable behind the service interface.
+  # ===========================================================================
+  /siem/types:
+    get:
+      operationId: getSiemTypes
+      tags:
+      - siem
+      summary: List supported SIEM integration types
+      responses:
+        '200':
+          description: The supported types (static catalog).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SIEMTypesResponse'
+  /siem/integrations:
+    get:
+      operationId: getSiemIntegrations
+      tags:
+      - siem
+      summary: List SIEM integrations
+      description: '`integrations` is null when none are configured.'
+      responses:
+        '200':
+          description: The configured integrations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SIEMIntegrationListResponse'
+    post:
+      operationId: createSiemIntegration
+      tags:
+      - siem
+      summary: Create a SIEM integration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SIEMIntegrationInput'
+      responses:
+        '201':
+          description: The created integration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SIEMIntegrationResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /siem/integrations/test:
+    post:
+      operationId: testSiemIntegration
+      tags:
+      - siem
+      summary: Test a SIEM integration
+      description: Sends a test event through the integration config. Returns 400 if the test fails.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SIEMIntegrationInput'
+      responses:
+        '200':
+          description: Test succeeded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditMessageResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+  /siem/integrations/{id}:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      description: SIEM integration UUID.
+      schema:
+        type: string
+        format: uuid
+    put:
+      operationId: updateSiemIntegration
+      tags:
+      - siem
+      summary: Update a SIEM integration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SIEMIntegrationInput'
+      responses:
+        '200':
+          description: The updated integration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SIEMIntegrationResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+    delete:
+      operationId: deleteSiemIntegration
+      tags:
+      - siem
+      summary: Delete a SIEM integration
+      responses:
+        '200':
+          description: Deletion confirmation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditMessageResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  # ===========================================================================
+  # Compliance reports (admin-ui audit compliance). summary/report are loosely
+  # typed report blobs; templates is a static catalog.
+  # ===========================================================================
+  /compliance-reports/summary:
+    get:
+      operationId: getComplianceSummary
+      tags:
+      - compliance-reports
+      summary: Compliance summary
+      parameters:
+      - name: tenant_id
+        in: query
+        required: false
+        schema:
+          type: string
+          format: uuid
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+      responses:
+        '200':
+          description: The compliance summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ComplianceSummaryResponse'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /compliance-reports/validate-retention:
+    get:
+      operationId: validateRetentionPolicies
+      tags:
+      - compliance-reports
+      summary: Validate retention policy configuration
+      responses:
+        '200':
+          description: All policies valid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditMessageResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+  /compliance-reports/templates:
+    get:
+      operationId: getComplianceReportTemplates
+      tags:
+      - compliance-reports
+      summary: List compliance report templates
+      responses:
+        '200':
+          description: The report templates (static catalog).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ComplianceTemplatesResponse'
+  /compliance-reports/generate:
+    post:
+      operationId: generateComplianceReport
+      tags:
+      - compliance-reports
+      summary: Generate a compliance report
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerateComplianceReportRequest'
+      responses:
+        '200':
+          description: The generated report.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ComplianceReportResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+components:
+  parameters:
+    ActivityLogId:
+      name: id
+      in: path
+      required: true
+      description: Activity log UUID.
+      schema:
+        type: string
+        format: uuid
+    ResourceType:
+      name: resource_type
+      in: path
+      required: true
+      description: Resource type (e.g. asset, certificate).
+      schema:
+        type: string
+    ResourceId:
+      name: resource_id
+      in: path
+      required: true
+      description: Resource UUID.
+      schema:
+        type: string
+        format: uuid
+    UserId:
+      name: user_id
+      in: path
+      required: true
+      description: User UUID.
+      schema:
+        type: string
+        format: uuid
+    Page:
+      name: page
+      in: query
+      required: false
+      description: 1-based page number.
+      schema:
+        type: integer
+        minimum: 1
+    PageSize:
+      name: page_size
+      in: query
+      required: false
+      description: Page size.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+    StartDate:
+      name: start_date
+      in: query
+      required: false
+      description: Inclusive lower bound (RFC3339).
+      schema:
+        type: string
+        format: date-time
+    EndDate:
+      name: end_date
+      in: query
+      required: false
+      description: Inclusive upper bound (RFC3339).
+      schema:
+        type: string
+        format: date-time
+  responses:
+    LegacyBadRequest:
+      description: Invalid request.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+    LegacyUnauthorized:
+      description: Missing or invalid authentication.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+    LegacyForbidden:
+      description: Tenant context required / not permitted.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+    LegacyNotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+    LegacyServerError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+  schemas:
+    ActivityLog:
+      type: object
+      additionalProperties: false
+      description: |
+        A single audit/activity log entry (models.ActivityLog). Field presence
+        follows the json tags: the listed required fields are always present;
+        every other field is `omitempty` and appears only when set (so optional
+        fields are absent — never JSON null — when empty).
+      required:
+      - id
+      - user_type
+      - event_type
+      - event_category
+      - action
+      - success
+      - requires_attention
+      - occurred_at
+      - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        user_type:
+          type: string
+        user_email:
+          type: string
+        event_type:
+          type: string
+        event_category:
+          type: string
+        action:
+          type: string
+        resource_type:
+          type: string
+        resource_id:
+          type: string
+          format: uuid
+        old_values:
+          type: object
+          additionalProperties: true
+        new_values:
+          type: object
+          additionalProperties: true
+        changed_fields:
+          type: array
+          items:
+            type: string
+        ip_address:
+          type: string
+        user_agent:
+          type: string
+        request_id:
+          type: string
+        session_id:
+          type: string
+        success:
+          type: boolean
+        error_message:
+          type: string
+        error_code:
+          type: string
+        compliance_tags:
+          type: array
+          items:
+            type: string
+        requires_attention:
+          type: boolean
+        metadata:
+          type: object
+          additionalProperties: true
+        tags:
+          type: array
+          items:
+            type: string
+        occurred_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+    ActivityLogPagination:
+      type: object
+      additionalProperties: false
+      description: CURRENT pagination block embedded under the `pagination` key by the list/query endpoints.
+      required:
+      - page
+      - page_size
+      - total
+      - total_pages
+      - has_next
+      - has_prev
+      properties:
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total:
+          type: integer
+        total_pages:
+          type: integer
+        has_next:
+          type: boolean
+        has_prev:
+          type: boolean
+    ActivityLogListResponse:
+      type: object
+      additionalProperties: false
+      description: |
+        CURRENT list envelope for GET /activity-logs and POST /activity-logs/query.
+        On an empty/nil result the `logs` field can serialize as JSON null, so it
+        is typed as a nullable array.
+      required:
+      - logs
+      - pagination
+      properties:
+        logs:
+          type:
+          - array
+          - 'null'
+          items:
+            $ref: '#/components/schemas/ActivityLog'
+        pagination:
+          $ref: '#/components/schemas/ActivityLogPagination'
+    ActivityLogExportResponse:
+      type: object
+      additionalProperties: false
+      description: |
+        JSON export envelope for GET /activity-logs/export?format=json — the full
+        filtered result set under `logs`, with no pagination metadata (export uses
+        a large page size). `format=csv` returns text/csv instead. On an
+        empty/nil result `logs` can serialize as JSON null, so it is a nullable array.
+      required:
+      - logs
+      properties:
+        logs:
+          type:
+          - array
+          - 'null'
+          items:
+            $ref: '#/components/schemas/ActivityLog'
+    ActivityLogResponse:
+      type: object
+      additionalProperties: false
+      description: 'CURRENT envelope for GET /activity-logs/{id} — `{ "log": {...} }`.'
+      required:
+      - log
+      properties:
+        log:
+          $ref: '#/components/schemas/ActivityLog'
+    ActivityLogSummaryResponse:
+      type: object
+      additionalProperties: false
+      description: |
+        CURRENT envelope for GET /activity-logs/summary. The summary is an opaque
+        aggregate map (counts, rates, top-N) and is not field-pinned in this
+        slice.
+      required:
+      - summary
+      properties:
+        summary:
+          type: object
+          additionalProperties: true
+    ResourceAuditTrailResponse:
+      type: object
+      additionalProperties: false
+      description: CURRENT envelope for GET /activity-logs/by-resource/{resource_type}/{resource_id}.
+      required:
+      - resource_type
+      - resource_id
+      - logs
+      - total
+      - page
+      - page_size
+      properties:
+        resource_type:
+          type: string
+        resource_id:
+          type: string
+          format: uuid
+        logs:
+          type:
+          - array
+          - 'null'
+          items:
+            $ref: '#/components/schemas/ActivityLog'
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+    UserActivityTimelineResponse:
+      type: object
+      additionalProperties: false
+      description: CURRENT envelope for GET /activity-logs/by-user/{user_id}.
+      required:
+      - user_id
+      - logs
+      - total
+      - page
+      - page_size
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        logs:
+          type:
+          - array
+          - 'null'
+          items:
+            $ref: '#/components/schemas/ActivityLog'
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+    QueryActivityLogsRequest:
+      type: object
+      additionalProperties: false
+      description: |
+        Request body for POST /activity-logs/query. `filters` mirrors the query
+        params of the GET list endpoint; all fields optional. Tenant scoping is
+        applied server-side regardless of body content.
+      properties:
+        filters:
+          type: object
+          additionalProperties: false
+          description: |
+            Filter set for the query. All fields optional; mirrors the GET list
+            endpoint's query params (snake_case). Tenant scoping is still
+            enforced server-side regardless of body content.
+          properties:
+            tenant_id:
+              type: string
+              format: uuid
+            user_id:
+              type: string
+              format: uuid
+            user_type:
+              type: string
+            event_type:
+              type: array
+              items: { type: string }
+            event_category:
+              type: array
+              items: { type: string }
+            action:
+              type: array
+              items: { type: string }
+            resource_type:
+              type: string
+            resource_id:
+              type: string
+              format: uuid
+            compliance_tags:
+              type: array
+              items: { type: string }
+            tags:
+              type: array
+              items: { type: string }
+            impersonation:
+              type: boolean
+            success:
+              type: boolean
+            requires_attention:
+              type: boolean
+            start_date:
+              type: string
+              format: date-time
+            end_date:
+              type: string
+              format: date-time
+            search:
+              type: string
+            page:
+              type: integer
+            page_size:
+              type: integer
+            sort_by:
+              type: string
+            sort_order:
+              type: string
+    AlertRule:
+      type: object
+      additionalProperties: false
+      description: |
+        A custom alert rule (models.AlertRule). `tenant_id` is omitempty — null
+        for platform rules, present for tenant-scoped rules. `conditions` and
+        `actions` are config blobs left loosely typed here (always present).
+      required:
+        - id
+        - name
+        - description
+        - rule_type
+        - is_enabled
+        - severity
+        - conditions
+        - actions
+        - created_by
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        rule_type:
+          type: string
+          description: "threshold / pattern / anomaly."
+        is_enabled:
+          type: boolean
+        severity:
+          type: string
+          description: "critical / high / medium / low."
+        conditions:
+          type: object
+          additionalProperties: true
+          description: Trigger conditions (models.AlertConditions).
+        actions:
+          type: object
+          additionalProperties: true
+          description: Actions on trigger (models.AlertActions).
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AlertRuleListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /alert-rules — `{ "rules": [...], "total": N, "page": P, "page_size": S }`. `rules` is null when none match.'
+      required:
+        - rules
+        - total
+        - page
+        - page_size
+      properties:
+        rules:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/AlertRule'
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+    CreateAlertRuleResponse:
+      type: object
+      additionalProperties: false
+      description: 'Response for POST /alert-rules — the new rule id plus a message.'
+      required:
+        - id
+        - message
+      properties:
+        id:
+          type: string
+          format: uuid
+        message:
+          type: string
+    AuditMessageResponse:
+      type: object
+      additionalProperties: false
+      description: 'A bare confirmation message (used by alert-rule update/delete).'
+      required:
+        - message
+      properties:
+        message:
+          type: string
+    AlertRuleInput:
+      type: object
+      additionalProperties: true
+      description: |
+        Body for POST/PUT /alert-rules (models.AlertRule). No fields are required
+        by the binding; server-side scoping sets tenant_id/created_by. Read-only
+        fields present in the body (id, created_at, …) are ignored.
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        rule_type:
+          type: string
+        is_enabled:
+          type: boolean
+        severity:
+          type: string
+        tenant_id:
+          type: [string, 'null']
+          format: uuid
+        conditions:
+          type: object
+          additionalProperties: true
+        actions:
+          type: object
+          additionalProperties: true
+    RetentionPolicy:
+      type: object
+      additionalProperties: false
+      description: |
+        An audit-log retention policy (services.RetentionPolicy). `tenant_id`,
+        `event_type`, `compliance_framework`, `cold_storage_days` are omitempty.
+      required:
+        - id
+        - policy_name
+        - hot_storage_days
+        - total_retention_days
+        - is_active
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        policy_name:
+          type: string
+        event_type:
+          type: string
+        compliance_framework:
+          type: string
+        hot_storage_days:
+          type: integer
+        cold_storage_days:
+          type: integer
+        total_retention_days:
+          type: integer
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    RetentionPolicyResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope `{ "policy": ... }` for single-policy endpoints.'
+      required:
+        - policy
+      properties:
+        policy:
+          $ref: '#/components/schemas/RetentionPolicy'
+    RetentionPolicyListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope `{ "policies": [...] }`. `policies` is null when none exist.'
+      required:
+        - policies
+      properties:
+        policies:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/RetentionPolicy'
+    RetentionPolicyInput:
+      type: object
+      additionalProperties: true
+      description: 'Body for POST/PUT /retention-policies (services.RetentionPolicy). Read-only fields are ignored.'
+      properties:
+        policy_name:
+          type: string
+        event_type:
+          type: [string, 'null']
+        compliance_framework:
+          type: [string, 'null']
+        hot_storage_days:
+          type: integer
+        cold_storage_days:
+          type: [integer, 'null']
+        total_retention_days:
+          type: integer
+        is_active:
+          type: boolean
+    Alert:
+      type: object
+      additionalProperties: false
+      description: |
+        A triggered alert (services.Alert). `sample_events`, `acknowledged_at`,
+        `acknowledged_by`, `resolved_at` are omitempty.
+      required:
+        - id
+        - rule_id
+        - rule_name
+        - severity
+        - message
+        - event_count
+        - triggered_at
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        rule_id:
+          type: string
+          format: uuid
+        rule_name:
+          type: string
+        severity:
+          type: string
+        message:
+          type: string
+        event_count:
+          type: integer
+        sample_events:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        triggered_at:
+          type: string
+          format: date-time
+        acknowledged_at:
+          type: string
+          format: date-time
+        acknowledged_by:
+          type: string
+          format: uuid
+        resolved_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          description: "open / acknowledged / resolved."
+    AlertListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope `{ "alerts": [...] }`. `alerts` is null when none match.'
+      required:
+        - alerts
+      properties:
+        alerts:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/Alert'
+    AnalyticsSummaryResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope `{ "summary": {...} }` for /analytics/user-activity. `summary` is a loosely-typed analytics blob.'
+      required:
+        - summary
+      properties:
+        summary:
+          type: object
+          additionalProperties: true
+    AnalyticsAnalysisResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope `{ "analysis": {...} }` for /analytics/access-patterns + /analytics/compliance-gaps. `analysis` is a loosely-typed blob.'
+      required:
+        - analysis
+      properties:
+        analysis:
+          type: object
+          additionalProperties: true
+    AnalyticsDashboardResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope `{ "metrics": {...} }` for /analytics/dashboard. `metrics` is a loosely-typed blob.'
+      required:
+        - metrics
+      properties:
+        metrics:
+          type: object
+          additionalProperties: true
+    SIEMIntegration:
+      type: object
+      additionalProperties: false
+      description: |
+        A SIEM integration (services.SIEMIntegration). `config` and `filters` are
+        config blobs left loosely typed here.
+      required:
+        - id
+        - name
+        - type
+        - enabled
+        - config
+        - filters
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        type:
+          type: string
+          description: "splunk / datadog / elastic / generic_webhook."
+        enabled:
+          type: boolean
+        config:
+          type: object
+          additionalProperties: true
+        filters:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    SIEMIntegrationResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope `{ "integration": ... }`.'
+      required:
+        - integration
+      properties:
+        integration:
+          $ref: '#/components/schemas/SIEMIntegration'
+    SIEMIntegrationListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope `{ "integrations": [...] }`. `integrations` is null when none are configured.'
+      required:
+        - integrations
+      properties:
+        integrations:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/SIEMIntegration'
+    SIEMTypesResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope `{ "types": [...] }` — static catalog of supported integration types with their config fields.'
+      required:
+        - types
+      properties:
+        types:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    SIEMIntegrationInput:
+      type: object
+      additionalProperties: true
+      description: 'Body for POST/PUT/test SIEM integration (services.SIEMIntegration). Read-only fields are ignored.'
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+        enabled:
+          type: boolean
+        config:
+          type: object
+          additionalProperties: true
+        filters:
+          type: object
+          additionalProperties: true
+    ComplianceSummaryResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope `{ "summary": {...} }` for /compliance-reports/summary. `summary` is a loosely-typed blob.'
+      required:
+        - summary
+      properties:
+        summary:
+          type: object
+          additionalProperties: true
+    ComplianceTemplatesResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope `{ "templates": [...] }` — static catalog of compliance report templates.'
+      required:
+        - templates
+      properties:
+        templates:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    ComplianceReportResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope `{ "report": {...} }` for /compliance-reports/generate. `report` is a loosely-typed report blob (services.ComplianceReport).'
+      required:
+        - report
+      properties:
+        report:
+          type: object
+          additionalProperties: true
+    GenerateComplianceReportRequest:
+      type: object
+      additionalProperties: true
+      description: 'Body for POST /compliance-reports/generate.'
+      required:
+        - framework
+        - start_date
+        - end_date
+      properties:
+        framework:
+          type: string
+          description: "soc2 / iso27001 / gdpr / hipaa / pci_dss."
+        start_date:
+          type: string
+          format: date-time
+        end_date:
+          type: string
+          format: date-time
+        tenant_id:
+          type: [string, 'null']
+          format: uuid
+        format:
+          type: string
+          description: "json / pdf / excel (defaults to json)."
+    LegacyError:
+      type: object
+      additionalProperties: true
+      description: |
+        CURRENT error shape returned by audit-service endpoints today: a single
+        human-readable string under `error`. Unstructured — cannot be branched
+        on safely. Superseded by the ADR-0002 `Error` envelope below as
+        endpoints are hardened.
+      required:
+      - error
+      properties:
+        error:
+          type: string
+    Error:
+      type: object
+      additionalProperties: false
+      description: ADR-0002 error envelope. Clients branch on `error.code`, never on `message`.
+      required:
+      - error
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required:
+          - code
+          - message
+          properties:
+            code:
+              type: string
+              description: Stable, machine-readable enum (e.g. activity_log_not_found).
+            message:
+              type: string
+              description: Human-readable, safe to surface in UI.
+            details:
+              type: array
+              items:
+                $ref: '#/components/schemas/ErrorDetail'
+            request_id:
+              type: string
+              description: For support correlation.
+    ErrorDetail:
+      type: object
+      additionalProperties: false
+      required:
+      - field
+      - issue
+      properties:
+        field:
+          type: string
+        issue:
+          type: string
+    Pagination:
+      type: object
+      additionalProperties: false
+      description: ADR-0002 pagination block for collection envelopes.
+      required:
+      - total
+      - limit
+      - offset
+      properties:
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+        next_offset:
+          type:
+          - integer
+          - 'null'
+          description: Offset of the next page, or null when there are no more.

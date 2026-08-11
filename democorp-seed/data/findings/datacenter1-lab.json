@@ -1,0 +1,572 @@
+{
+  "findings": [
+    {
+      "hostname": "dc1l-web01.democorp.example",
+      "ip_address": "172.20.30.10",
+      "port": 443,
+      "asset_type": "server",
+      "protocol": "TLS",
+      "protocol_version": "SSLv3",
+      "cipher_suite": "TLS_RSA_WITH_RC4_128_SHA",
+      "key_exchange_algorithm": "STATIC-RSA",
+      "key_size": 1024,
+      "hash_algorithm": "MD5",
+      "operating_system": "Ubuntu 24.04",
+      "raw_data": {
+        "certificates": [
+          {
+            "subject_dn": "CN=dc1l-web01.democorp.example,O=DemoCorp,C=US",
+            "issuer_dn": "CN=DemoCorp Internal Issuing CA,O=DemoCorp,C=US",
+            "serial_number": "4132",
+            "common_name": "dc1l-web01.democorp.example",
+            "subject_alternative_names": [
+              "dc1l-web01.democorp.example"
+            ],
+            "not_before": "2025-08-09T19:17:59Z",
+            "not_after": "2027-02-25T20:17:59Z",
+            "fingerprint_sha256": "07fa38a60f8d47b8f135b89d154f55576d780d73156f3ea99f508810eee14026",
+            "certificate_pem": "-----BEGIN CERTIFICATE-----\nMIIDgzCCAeugAwIBAgICECQwDQYJKoZIhvcNAQEFBQAwRzELMAkGA1UEBhMCVVMx\nETAPBgNVBAoTCERlbW9Db3JwMSUwIwYDVQQDExxEZW1vQ29ycCBJbnRlcm5hbCBJ\nc3N1aW5nIENBMB4XDTI1MDgwOTE5MTc1OVoXDTI3MDIyNTIwMTc1OVowRjELMAkG\nA1UEBhMCVVMxETAPBgNVBAoTCERlbW9Db3JwMSQwIgYDVQQDExtkYzFsLXdlYjAx\nLmRlbW9jb3JwLmV4YW1wbGUwgZ8wDQYJKoZIhvcNAQEBBQADgY0AMIGJAoGBAK0o\n8ERmyBVHThTXwxgUDeQScWiGttoUMWPtzaKXtgWkBYKkY1UfBxmf50hZhIXyYH0z\nKqjSEA+aNCq7va22da7TE9O/JagpUVAXymGcYuZSTJXhilWZlPrHJonBUav+Lp/d\nXWP00bNFcomj4W+OwGXyXO6MAqC7yHzZsKRqdtJzAgMBAAGjfjB8MA4GA1UdDwEB\n/wQEAwIFoDATBgNVHSUEDDAKBggrBgEFBQcDATAMBgNVHRMBAf8EAjAAMB8GA1Ud\nIwQYMBaAFNEBWcI31ao7QMtscXdIgP9deT5MMCYGA1UdEQQfMB2CG2RjMWwtd2Vi\nMDEuZGVtb2NvcnAuZXhhbXBsZTANBgkqhkiG9w0BAQUFAAOCAYEAiNC/lNF/7Mji\nUn4XH7prVjKqJVct4RC1XFtibGUZ6lwgOwrOsdkTFH6P8ZmV7xpL7Xo9pXJJTnX4\n3xAn+hiqtc3sWBH+ujuXoROLiun2NlHWO+SVE7Te/Qt+9XYYF4+Xt2DK8b/02apC\nzHQphfJ9L1BnHBPAk59/vhnCPdtiuF+iogXgK8wTaniq4meI7YZLNHTaSvYEaRIW\n3WB+epehKqqOwiTY/HIcBD7VMJ9PzHHzLoq62EFYKsd7tCM6GBn4dZ8nOFCRa3v2\n5ke9emFVrMS5fo6UsWCN/SNcZ9V72a7rv6COd/cTjpCCXVSP4lYgc9au1+AILuqx\nYRhZGtnKgW8o7zd9+S2F01jM/xdHidg4NFGvm0OmRIg4OIulURFFBtXEA1pj6YbL\nzwnIRntJGDuVtyNQopJXCZWTg1UAT4+mSQw9nYHDBNeVVKc4+pzPYCT0MrxmEWXP\nMcR3TRaIIW2MJCod+iqQE5XfwxjXqDQHM59T/7g1ozJwY2JDIlid\n-----END CERTIFICATE-----\n",
+            "public_key_algorithm": "RSA",
+            "public_key_size": 1024,
+            "signature_algorithm": "SHA1-RSA",
+            "is_self_signed": false,
+            "is_ca_certificate": false,
+            "key_usage": [
+              "digitalSignature",
+              "keyEncipherment"
+            ],
+            "extended_key_usage": [
+              "serverAuth"
+            ]
+          }
+        ],
+        "environment": "lab",
+        "last_seen_at": "2026-06-25T15:17:59-04:00",
+        "source": "democorp-seed"
+      }
+    },
+    {
+      "hostname": "dc1l-api02.democorp.example",
+      "ip_address": "172.20.30.11",
+      "port": 443,
+      "asset_type": "server",
+      "protocol": "TLS",
+      "protocol_version": "TLS1.0",
+      "cipher_suite": "TLS_RSA_WITH_3DES_EDE_CBC_SHA",
+      "key_exchange_algorithm": "RSA-1024",
+      "key_size": 1024,
+      "hash_algorithm": "SHA1",
+      "operating_system": "RHEL 9",
+      "raw_data": {
+        "certificates": [
+          {
+            "subject_dn": "CN=dc1l-api02.democorp.example,O=DemoCorp,C=US",
+            "issuer_dn": "CN=dc1l-api02.democorp.example,O=DemoCorp,C=US",
+            "serial_number": "4133",
+            "common_name": "dc1l-api02.democorp.example",
+            "subject_alternative_names": [
+              "dc1l-api02.democorp.example"
+            ],
+            "not_before": "2025-08-09T19:17:59Z",
+            "not_after": "2026-12-07T20:17:59Z",
+            "fingerprint_sha256": "d01764226fe0561d79bc20e5cb37de5c5bf419afdc65c59726a2a54adf1c8bb7",
+            "certificate_pem": "-----BEGIN CERTIFICATE-----\nMIICYDCCAcmgAwIBAgICECUwDQYJKoZIhvcNAQEFBQAwRjELMAkGA1UEBhMCVVMx\nETAPBgNVBAoTCERlbW9Db3JwMSQwIgYDVQQDExtkYzFsLWFwaTAyLmRlbW9jb3Jw\nLmV4YW1wbGUwHhcNMjUwODA5MTkxNzU5WhcNMjYxMjA3MjAxNzU5WjBGMQswCQYD\nVQQGEwJVUzERMA8GA1UEChMIRGVtb0NvcnAxJDAiBgNVBAMTG2RjMWwtYXBpMDIu\nZGVtb2NvcnAuZXhhbXBsZTCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEApPpV\nahwuz/a9NU8gCa09o1M0sfqxMc6mfpI2NhtiufqnAgQWTzfaXhn6C6Mi7cO2/U36\nBEFIpXvYdCneGWP2v6RQYOJmxTUtKTu0p23RnAHoVhxZUF158bTcPmWxdSXexeoT\niYlLNOqKRMemvZAHAM2vyMtSzZxNIBFeqPs7akMCAwEAAaNdMFswDgYDVR0PAQH/\nBAQDAgWgMBMGA1UdJQQMMAoGCCsGAQUFBwMBMAwGA1UdEwEB/wQCMAAwJgYDVR0R\nBB8wHYIbZGMxbC1hcGkwMi5kZW1vY29ycC5leGFtcGxlMA0GCSqGSIb3DQEBBQUA\nA4GBAC4W6N+gq2cQGDYaCWb0XGZt4kgvOhctcoDIDY1j/zFo6utqFRNxK/7THh+x\nj9yuIqhpj/AI4AaSrH12OemCX9lTX7OZ6Ia/c7MYXJ2qfm76bps+dqgZKLl/E2vm\njp9CiM1lx2YntIZDjffksuwUf1yfGFwxcX2ZRew4lEDhKZnN\n-----END CERTIFICATE-----\n",
+            "public_key_algorithm": "RSA",
+            "public_key_size": 1024,
+            "signature_algorithm": "SHA1-RSA",
+            "is_self_signed": true,
+            "is_ca_certificate": false,
+            "key_usage": [
+              "digitalSignature",
+              "keyEncipherment"
+            ],
+            "extended_key_usage": [
+              "serverAuth"
+            ]
+          }
+        ],
+        "environment": "lab",
+        "last_seen_at": "2026-06-21T15:17:59-04:00",
+        "source": "democorp-seed"
+      }
+    },
+    {
+      "hostname": "dc1l-app03.democorp.example",
+      "ip_address": "172.20.30.12",
+      "port": 443,
+      "asset_type": "server",
+      "protocol": "TLS",
+      "protocol_version": "TLS1.1",
+      "cipher_suite": "TLS_RSA_WITH_3DES_EDE_CBC_SHA",
+      "key_exchange_algorithm": "DH-1024",
+      "key_size": 1024,
+      "hash_algorithm": "SHA1",
+      "operating_system": "Debian 12",
+      "raw_data": {
+        "certificates": [
+          {
+            "subject_dn": "CN=dc1l-app03.democorp.example,O=DemoCorp,C=US",
+            "issuer_dn": "CN=DemoCorp Internal Issuing CA,O=DemoCorp,C=US",
+            "serial_number": "4134",
+            "common_name": "dc1l-app03.democorp.example",
+            "subject_alternative_names": [
+              "dc1l-app03.democorp.example"
+            ],
+            "not_before": "2025-08-09T19:17:59Z",
+            "not_after": "2027-09-13T19:17:59Z",
+            "fingerprint_sha256": "b0d75926e12da363e62ecf367d3431d395b337c36d3ca6fec28217dc823efc93",
+            "certificate_pem": "-----BEGIN CERTIFICATE-----\nMIIDgzCCAeugAwIBAgICECYwDQYJKoZIhvcNAQEFBQAwRzELMAkGA1UEBhMCVVMx\nETAPBgNVBAoTCERlbW9Db3JwMSUwIwYDVQQDExxEZW1vQ29ycCBJbnRlcm5hbCBJ\nc3N1aW5nIENBMB4XDTI1MDgwOTE5MTc1OVoXDTI3MDkxMzE5MTc1OVowRjELMAkG\nA1UEBhMCVVMxETAPBgNVBAoTCERlbW9Db3JwMSQwIgYDVQQDExtkYzFsLWFwcDAz\nLmRlbW9jb3JwLmV4YW1wbGUwgZ8wDQYJKoZIhvcNAQEBBQADgY0AMIGJAoGBAN/e\n4Z14yVkGb3hHKSC9sbEHFgUjJ3Mbnh73vSudUUD8H4yAm2d2e7h0d7qu8sJ2oMEL\nDZ/BGethq7CeBqXwl2MG+ujfBx/7f9yo+9jr6Eu6+gVrFF6feYBMQ7rpCY6IZD8l\nTlpanzTLuliZ9T3yX31zHICVVVpV6SAHmHnseqGVAgMBAAGjfjB8MA4GA1UdDwEB\n/wQEAwIFoDATBgNVHSUEDDAKBggrBgEFBQcDATAMBgNVHRMBAf8EAjAAMB8GA1Ud\nIwQYMBaAFNEBWcI31ao7QMtscXdIgP9deT5MMCYGA1UdEQQfMB2CG2RjMWwtYXBw\nMDMuZGVtb2NvcnAuZXhhbXBsZTANBgkqhkiG9w0BAQUFAAOCAYEAKHCq6T+dkOTY\nf5fLVCqv13Et1wATcu8C0CExGGQC0GFrUwPcs2nYhxB7k20AajgbHMYBKt0v4qP0\nWSKVYIA//snieVTegFuE2OFU1jEtq6cclWjk3ey3/G4yg0noQaVhcIwJXtUKLgAx\ntcg4lVtOVijt8VdnrrEhi5DxkoNI/O/KoleQIxnhBuKOA3L2IrTKxkjKbPyMmDfd\nih4Kug8Uh8PvSxoRjcsgO3g6nPfKzigjkZje0OVu2pw1XkmrtjAaLJvot+0uVLUc\nMMX46PrSjfIEPuMsLOG4YEPyxrLyfdeWKH2KcWwksT+H+36m2SXU3R5xpxAzEWGh\n2aSH92MsakrorHXNX9kuqtq47HCum581XZ6vsEDt8Yez3McphsI9ZalMmvXyLCmc\nOWuyIjwwehMjxjYv0v02XN8bB4YO3xdoHjbGUb2lCHuKVRue75XpClgm98Oqv0Kg\nLbajIX0AZfeiiacFeChMMbQmjsgiHX5VjNvroqk/+iqSWE41/kMC\n-----END CERTIFICATE-----\n",
+            "public_key_algorithm": "RSA",
+            "public_key_size": 1024,
+            "signature_algorithm": "SHA1-RSA",
+            "is_self_signed": false,
+            "is_ca_certificate": false,
+            "key_usage": [
+              "digitalSignature",
+              "keyEncipherment"
+            ],
+            "extended_key_usage": [
+              "serverAuth"
+            ]
+          }
+        ],
+        "environment": "lab",
+        "last_seen_at": "2026-06-17T15:17:59-04:00",
+        "source": "democorp-seed"
+      }
+    },
+    {
+      "hostname": "dc1l-db04.democorp.example",
+      "ip_address": "172.20.30.13",
+      "port": 443,
+      "asset_type": "server",
+      "protocol": "TLS",
+      "protocol_version": "TLS1.2",
+      "cipher_suite": "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+      "key_exchange_algorithm": "ECDHE",
+      "key_size": 2048,
+      "hash_algorithm": "SHA256",
+      "operating_system": "Windows Server 2022",
+      "raw_data": {
+        "certificates": [
+          {
+            "subject_dn": "CN=dc1l-db04.democorp.example,O=DemoCorp,C=US",
+            "issuer_dn": "CN=DemoCorp Internal Issuing CA,O=DemoCorp,C=US",
+            "serial_number": "4135",
+            "common_name": "dc1l-db04.democorp.example",
+            "subject_alternative_names": [
+              "dc1l-db04.democorp.example"
+            ],
+            "not_before": "2025-08-09T19:17:59Z",
+            "not_after": "2026-07-10T19:17:59Z",
+            "fingerprint_sha256": "1f3bf79d15b4ca2d3132c771e9ed05ffafdacb216426da4f96804aff22249754",
+            "certificate_pem": "-----BEGIN CERTIFICATE-----\nMIIEBTCCAm2gAwIBAgICECcwDQYJKoZIhvcNAQELBQAwRzELMAkGA1UEBhMCVVMx\nETAPBgNVBAoTCERlbW9Db3JwMSUwIwYDVQQDExxEZW1vQ29ycCBJbnRlcm5hbCBJ\nc3N1aW5nIENBMB4XDTI1MDgwOTE5MTc1OVoXDTI2MDcxMDE5MTc1OVowRTELMAkG\nA1UEBhMCVVMxETAPBgNVBAoTCERlbW9Db3JwMSMwIQYDVQQDExpkYzFsLWRiMDQu\nZGVtb2NvcnAuZXhhbXBsZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEB\nAJUQkrB+SLD4Ib5U24ewZCIEn6nyM3Th4okCLO7UXjfWeBnZPwjZXnVyw8yApG/I\nesBNLAd4OCWkoiQnHn9wEukFnmdF/0DNwMxlbN5mrO/RHhJgGGo8aQ703DdW0Sir\nrAbrvSyjCRP7+4gdFmiJk1Zz5mwyKS1TiTppSl8Atmhm++i5CBGas64ZWkobsQBj\nj6cllKPBUjDwrwNBMcpzu3btcbWgjWvoBFtHcsMU3SfMcnEXAlOP84DDFZ+9fIYd\nHzvcDv5TaplDAMKWx5Tg6aKRtui2mkgIR0I870KiIzjEED7TOjHRhqUvbrz0pXu2\nP1pW8FJSzmppQ8mUeJgWTdcCAwEAAaN9MHswDgYDVR0PAQH/BAQDAgWgMBMGA1Ud\nJQQMMAoGCCsGAQUFBwMBMAwGA1UdEwEB/wQCMAAwHwYDVR0jBBgwFoAU0QFZwjfV\nqjtAy2xxd0iA/115PkwwJQYDVR0RBB4wHIIaZGMxbC1kYjA0LmRlbW9jb3JwLmV4\nYW1wbGUwDQYJKoZIhvcNAQELBQADggGBAB4t+emp4KdAzFpqdGX4jKPpGSjGiyvv\n9fXK0exI65Y85LFJtz0hn7PjPaEY4KghDcU5NRAhjKNVZC1/RtIPB9yuJEGw41I6\nxhPBAzooDaBMRdzjlOKiY4QLVrMK5iwm+vIX0UWkjicsNdA8AbiKtlCw11QE0bEV\nrN5/t3BpETu3jOPiKreAZcyTYFgbjGkzRMhwe0lZfQmQtruaNjljaM5aJbaeyCda\nEBacHYAJBN8e+NGpKAE5H9iHQonKCUiQhjUeuvPue7l2kfGJPdgDZNZSBzruE1Ji\n04ypeADLEHxE5wMDtDiTusiQb5SgOIMSu+kdOhxI5U8Wl03s8yQNO0h7mZ4l0ye8\nWRZnqf2kuP2IzGyGn6vzYjwBADOmEy2wm8sFtvXzglkUXxqpF/xXXoDxmDnQo9pQ\n7hpow4nkyePpTA7wmh0cT3L1UN9G/1rgkS74rTt3OB0lM23+sV9U7MthWZWBBEzg\nO9HQK7p/HhZqiQoybF+ylYgy/n39BumNGg==\n-----END CERTIFICATE-----\n",
+            "public_key_algorithm": "RSA",
+            "public_key_size": 2048,
+            "signature_algorithm": "SHA256-RSA",
+            "is_self_signed": false,
+            "is_ca_certificate": false,
+            "key_usage": [
+              "digitalSignature",
+              "keyEncipherment"
+            ],
+            "extended_key_usage": [
+              "serverAuth"
+            ]
+          }
+        ],
+        "environment": "lab",
+        "last_seen_at": "2026-06-13T15:17:59-04:00",
+        "source": "democorp-seed"
+      }
+    },
+    {
+      "hostname": "dc1l-cache05.democorp.example",
+      "ip_address": "172.20.30.14",
+      "port": 443,
+      "asset_type": "server",
+      "protocol": "TLS",
+      "protocol_version": "TLS1.2",
+      "cipher_suite": "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+      "key_exchange_algorithm": "ECDHE",
+      "key_size": 2048,
+      "hash_algorithm": "SHA384",
+      "operating_system": "Ubuntu 24.04",
+      "raw_data": {
+        "certificates": [
+          {
+            "subject_dn": "CN=dc1l-cache05.democorp.example,O=DemoCorp,C=US",
+            "issuer_dn": "CN=DemoCorp Internal Issuing CA,O=DemoCorp,C=US",
+            "serial_number": "4136",
+            "common_name": "dc1l-cache05.democorp.example",
+            "subject_alternative_names": [
+              "dc1l-cache05.democorp.example"
+            ],
+            "not_before": "2025-08-09T19:17:59Z",
+            "not_after": "2027-12-22T20:17:59Z",
+            "fingerprint_sha256": "6aaf1f4b778695f1ffd76e46764764951fe8b98e58c81c2b6191e602fd373dcf",
+            "certificate_pem": "-----BEGIN CERTIFICATE-----\nMIIEDDCCAnSgAwIBAgICECgwDQYJKoZIhvcNAQELBQAwRzELMAkGA1UEBhMCVVMx\nETAPBgNVBAoTCERlbW9Db3JwMSUwIwYDVQQDExxEZW1vQ29ycCBJbnRlcm5hbCBJ\nc3N1aW5nIENBMB4XDTI1MDgwOTE5MTc1OVoXDTI3MTIyMjIwMTc1OVowSDELMAkG\nA1UEBhMCVVMxETAPBgNVBAoTCERlbW9Db3JwMSYwJAYDVQQDEx1kYzFsLWNhY2hl\nMDUuZGVtb2NvcnAuZXhhbXBsZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoC\nggEBAKUme3dvApgHJVLMsIg0O/QCqX7kbT3kXsSqBAvaVd3edMr/3v5b85tQCn1A\n+aqUnvRUM903Ml+Nm6PmQf5qr84lUWm9/9Xzh8XhbgWSE1/iFTyHJ7N5iDIJuXY9\nI/4HAtKmkkw8+MWVotnEBvn7d5BXY33m1X53/6QyqLktbqDClYgzcVbAHe1myBWE\n28kFbLUjR0pdhm/vo6FvusyM3cXTArl4E5r5gto87MW9QKaP7SX+6ncF6z/aTApk\ny9CqQZVQWtq8iZRT64Ad9h8qLXV1Hx3joFi0U0Nq6LyBfsZcNRfOEq2Ju0jufXLb\nmPLKVdaheivCcxaC8/DuU/3iKzMCAwEAAaOBgDB+MA4GA1UdDwEB/wQEAwIFoDAT\nBgNVHSUEDDAKBggrBgEFBQcDATAMBgNVHRMBAf8EAjAAMB8GA1UdIwQYMBaAFNEB\nWcI31ao7QMtscXdIgP9deT5MMCgGA1UdEQQhMB+CHWRjMWwtY2FjaGUwNS5kZW1v\nY29ycC5leGFtcGxlMA0GCSqGSIb3DQEBCwUAA4IBgQCDdAQ31zsSmfFshlS5aclr\nECYu6/Vu+5lCIS5PloXXSeNJix6P7LyghGeVyAIUFsPmRDeZZNBf8AttE7Fl74AA\nc0oqTwyB9GKkgAr1c7Qn6AfpO6NBibV3egibVshylWJLzP4sDqBiM3C/kgTf8vaT\nKpP9yHjou6WgFA4R/zySlfxbPOpinh4zTffnAJczZGuuZRRyn8aewodoq1q1vrHu\njTh/9OJkEPWMg1GUdh21FMwyLmUxjDFvYarVhgUyR0qafE0gAJH6NxQoU3MNaZws\nATLz7D/XUF5vXCKDk0neMvBXdK5cRLchWFESHBWIIFa5x/qY5diTWSBVHXzpRSAK\na141YHs0Wa+3BccG5RC0nvDBmSHg0AYY7shJXQYeZmSBMHbN+p8gaeFG/cav3P3N\n3zCG9nS4c/nLSkFf1qze6MKG6Eksh/XycC4TV9u28bal/EiQYCHI+sWEfFP/T+oe\nqoLAJBhTi9fS2sKSyDmmopVaW21rmWL9OH9DdSON0G4=\n-----END CERTIFICATE-----\n",
+            "public_key_algorithm": "RSA",
+            "public_key_size": 2048,
+            "signature_algorithm": "SHA256-RSA",
+            "is_self_signed": false,
+            "is_ca_certificate": false,
+            "key_usage": [
+              "digitalSignature",
+              "keyEncipherment"
+            ],
+            "extended_key_usage": [
+              "serverAuth"
+            ]
+          }
+        ],
+        "environment": "lab",
+        "last_seen_at": "2026-06-09T15:17:59-04:00",
+        "source": "democorp-seed"
+      }
+    },
+    {
+      "hostname": "dc1l-queue06.democorp.example",
+      "ip_address": "172.20.30.15",
+      "port": 443,
+      "asset_type": "server",
+      "protocol": "TLS",
+      "protocol_version": "SSLv3",
+      "cipher_suite": "TLS_RSA_WITH_RC4_128_SHA",
+      "key_exchange_algorithm": "STATIC-RSA",
+      "key_size": 1024,
+      "hash_algorithm": "MD5",
+      "operating_system": "RHEL 9",
+      "raw_data": {
+        "certificates": [
+          {
+            "subject_dn": "CN=dc1l-queue06.democorp.example,O=DemoCorp,C=US",
+            "issuer_dn": "CN=DemoCorp Internal Issuing CA,O=DemoCorp,C=US",
+            "serial_number": "4137",
+            "common_name": "dc1l-queue06.democorp.example",
+            "subject_alternative_names": [
+              "dc1l-queue06.democorp.example"
+            ],
+            "not_before": "2025-08-09T19:17:59Z",
+            "not_after": "2027-02-25T20:17:59Z",
+            "fingerprint_sha256": "def958e9aa59316df49fef927272db97dc72435a326d240c39dc10df2f4c544e",
+            "certificate_pem": "-----BEGIN CERTIFICATE-----\nMIIDiDCCAfCgAwIBAgICECkwDQYJKoZIhvcNAQEFBQAwRzELMAkGA1UEBhMCVVMx\nETAPBgNVBAoTCERlbW9Db3JwMSUwIwYDVQQDExxEZW1vQ29ycCBJbnRlcm5hbCBJ\nc3N1aW5nIENBMB4XDTI1MDgwOTE5MTc1OVoXDTI3MDIyNTIwMTc1OVowSDELMAkG\nA1UEBhMCVVMxETAPBgNVBAoTCERlbW9Db3JwMSYwJAYDVQQDEx1kYzFsLXF1ZXVl\nMDYuZGVtb2NvcnAuZXhhbXBsZTCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEA\nvsV8ipPDZ6owT2vbUQ5ToPl+O1p4qky4qBJI9CTnZzfSLPmtxhnMqwSS8ahplKXv\n/7PInGGLGikK2ZTqZD0crxc5auLLjQtZtLZyNqYVWVmX2EuQSX6VJT7Z3204Dy1D\nVm9ei9G5Gmbm8aoWVfa3i30m5gzIb6khXP08tjmUCOECAwEAAaOBgDB+MA4GA1Ud\nDwEB/wQEAwIFoDATBgNVHSUEDDAKBggrBgEFBQcDATAMBgNVHRMBAf8EAjAAMB8G\nA1UdIwQYMBaAFNEBWcI31ao7QMtscXdIgP9deT5MMCgGA1UdEQQhMB+CHWRjMWwt\ncXVldWUwNi5kZW1vY29ycC5leGFtcGxlMA0GCSqGSIb3DQEBBQUAA4IBgQDGfMeB\nXIfX9WRFy46jdimF+HgtwKfWEW4SkuqYm7zzbOD4Ifzt20nPtSo4SVoH608LAIi8\ngTW08pR2IvAGVh9VyMjDvH73wYcHhTp63g5BahC9Ykl41T9SWIbfFm7pWbq0i54M\n3xZoBnnWrasg5IYgSwWnou6lwUIVAjvUNGrx6XSnIA0HM9+NtzPGg0bgJzU3FGW6\nXOohcsEyUie4Pf+XCNRVJEfL8PkzvMAbqtnhEEAhlhRydTj/3WGgQFtEJo3pV/qW\nsfgu0Dyi5NdVu4IqD/2aOABSJcnyoFUZm97nGoS4Rs9bdXBMwypU/5oYD7N7SPsK\nNBFi9wbC+aWSJMRrT2qtmUbahAtosHtrZTQX9EY6JV6pWw3jKMrYnGSS/Eirii6o\nL5QEsasDtHsHAnIqJGxnlrHYJ6C0E83iENNhr8g+HHaFqH726yzVBS2gozlaC58W\nFeVfm2RZrFSDfILG+gvdGR/dq14wi55cMfxmJd5S8PFTFrEZG5XIY7atpz8=\n-----END CERTIFICATE-----\n",
+            "public_key_algorithm": "RSA",
+            "public_key_size": 1024,
+            "signature_algorithm": "SHA1-RSA",
+            "is_self_signed": false,
+            "is_ca_certificate": false,
+            "key_usage": [
+              "digitalSignature",
+              "keyEncipherment"
+            ],
+            "extended_key_usage": [
+              "serverAuth"
+            ]
+          }
+        ],
+        "environment": "lab",
+        "last_seen_at": "2026-06-05T15:17:59-04:00",
+        "source": "democorp-seed"
+      }
+    },
+    {
+      "hostname": "dc1l-proxy07.democorp.example",
+      "ip_address": "172.20.30.16",
+      "port": 443,
+      "asset_type": "server",
+      "protocol": "TLS",
+      "protocol_version": "TLS1.0",
+      "cipher_suite": "TLS_RSA_WITH_3DES_EDE_CBC_SHA",
+      "key_exchange_algorithm": "RSA-1024",
+      "key_size": 1024,
+      "hash_algorithm": "SHA1",
+      "operating_system": "Debian 12",
+      "raw_data": {
+        "certificates": [
+          {
+            "subject_dn": "CN=dc1l-proxy07.democorp.example,O=DemoCorp,C=US",
+            "issuer_dn": "CN=DemoCorp Internal Issuing CA,O=DemoCorp,C=US",
+            "serial_number": "4138",
+            "common_name": "dc1l-proxy07.democorp.example",
+            "subject_alternative_names": [
+              "dc1l-proxy07.democorp.example"
+            ],
+            "not_before": "2025-08-09T19:17:59Z",
+            "not_after": "2026-12-07T20:17:59Z",
+            "fingerprint_sha256": "0141b0da8b80f5ad7d3a926106709b9fc486a7b37306ee6c5e6382a289c101f8",
+            "certificate_pem": "-----BEGIN CERTIFICATE-----\nMIIDiDCCAfCgAwIBAgICECowDQYJKoZIhvcNAQEFBQAwRzELMAkGA1UEBhMCVVMx\nETAPBgNVBAoTCERlbW9Db3JwMSUwIwYDVQQDExxEZW1vQ29ycCBJbnRlcm5hbCBJ\nc3N1aW5nIENBMB4XDTI1MDgwOTE5MTc1OVoXDTI2MTIwNzIwMTc1OVowSDELMAkG\nA1UEBhMCVVMxETAPBgNVBAoTCERlbW9Db3JwMSYwJAYDVQQDEx1kYzFsLXByb3h5\nMDcuZGVtb2NvcnAuZXhhbXBsZTCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEA\nuM0KPLXr8cwWtrICqRNZBFlVq061sK1hZsNVjgDwixvClWbLWc8fs/dU5eJyrw8t\nU/2G7DLSKCBGGkGzPxcTy+MKb39FXTkK/6xfPwbMqwO12YYYK/qa9P9pvQLVY1BL\n0hn7G+pKkvmqhQ0FF31LpN3c0vXdMADy38hPyx/zzPcCAwEAAaOBgDB+MA4GA1Ud\nDwEB/wQEAwIFoDATBgNVHSUEDDAKBggrBgEFBQcDATAMBgNVHRMBAf8EAjAAMB8G\nA1UdIwQYMBaAFNEBWcI31ao7QMtscXdIgP9deT5MMCgGA1UdEQQhMB+CHWRjMWwt\ncHJveHkwNy5kZW1vY29ycC5leGFtcGxlMA0GCSqGSIb3DQEBBQUAA4IBgQBsKICJ\nSeHwZnIbyDdYjONtePjoLsIs61SzqfrS08geS74F0BkGK+golk6vZPm5rPCxI0pe\njV5ODhqzJM1Z2GDI7Wwri9r78cW1EXyY+Q3AxiWrEDpeDsQ7848AIIziGhTIKx9C\nU3FRcIeqN2n2ZCDuwdBuyk3O8RWcjHtl15PVREfPjkYDwqjnfNG3XyVxnfVRvKI5\nF/XSqfP3LWrrqyVImC4ea+aJOOC205Rb4Aye4l1Bh+v8PeljW3lTUOjYSazgJ1Lm\nAGtJm/V4XwuUYBgqEYBYW9vWcE1GfL27VnIZc+osWeCDxdtgE4GY4V69aQHC1g5G\ne7DpH3MkVD2qhXlDTPrCEZL3/BAjazrheZEzWtxn9ZMoeTbafGQFP/6y9Z0UA0SH\nbexHGfUVtEihNSTBdaGqzeiypGAtYTnFzA3DyjhXDP9/l0tLv44YQqEBSuiuZ8c0\nPlXg5q9NTXauwQxskXWSXCa7IGi3tbKg5d9QPIn2PsReW72mUETdo9XPWqI=\n-----END CERTIFICATE-----\n",
+            "public_key_algorithm": "RSA",
+            "public_key_size": 1024,
+            "signature_algorithm": "SHA1-RSA",
+            "is_self_signed": false,
+            "is_ca_certificate": false,
+            "key_usage": [
+              "digitalSignature",
+              "keyEncipherment"
+            ],
+            "extended_key_usage": [
+              "serverAuth"
+            ]
+          }
+        ],
+        "environment": "lab",
+        "last_seen_at": "2026-06-01T15:17:59-04:00",
+        "source": "democorp-seed"
+      }
+    },
+    {
+      "hostname": "dc1l-gw08.democorp.example",
+      "ip_address": "172.20.30.17",
+      "port": 443,
+      "asset_type": "server",
+      "protocol": "TLS",
+      "protocol_version": "TLS1.1",
+      "cipher_suite": "TLS_RSA_WITH_3DES_EDE_CBC_SHA",
+      "key_exchange_algorithm": "DH-1024",
+      "key_size": 1024,
+      "hash_algorithm": "SHA1",
+      "operating_system": "Windows Server 2022",
+      "raw_data": {
+        "certificates": [
+          {
+            "subject_dn": "CN=dc1l-gw08.democorp.example,O=DemoCorp,C=US",
+            "issuer_dn": "CN=DemoCorp Internal Issuing CA,O=DemoCorp,C=US",
+            "serial_number": "4139",
+            "common_name": "dc1l-gw08.democorp.example",
+            "subject_alternative_names": [
+              "dc1l-gw08.democorp.example"
+            ],
+            "not_before": "2025-08-09T19:17:59Z",
+            "not_after": "2027-09-13T19:17:59Z",
+            "fingerprint_sha256": "96dcb96cafe1ca56eeb71060a7881fd2a863bc183ac9ec78ae1b92f52fb06d6a",
+            "certificate_pem": "-----BEGIN CERTIFICATE-----\nMIIDgTCCAemgAwIBAgICECswDQYJKoZIhvcNAQEFBQAwRzELMAkGA1UEBhMCVVMx\nETAPBgNVBAoTCERlbW9Db3JwMSUwIwYDVQQDExxEZW1vQ29ycCBJbnRlcm5hbCBJ\nc3N1aW5nIENBMB4XDTI1MDgwOTE5MTc1OVoXDTI3MDkxMzE5MTc1OVowRTELMAkG\nA1UEBhMCVVMxETAPBgNVBAoTCERlbW9Db3JwMSMwIQYDVQQDExpkYzFsLWd3MDgu\nZGVtb2NvcnAuZXhhbXBsZTCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEAsy2T\nnnknJa3aqrz3WuJO24cvS6cWsB3Zh7EDtKlp71UDbfjKAOU5rP7mCIvexxuw+67N\nJoipg2OuzZVobhnbKfjPYLGG2i3A4cdFImd7G2bY0uNAP1Tpi7LyCvW4nkSc5+Vr\nKfSEfw8YzqyZyvQB9GlkijPcxSW8aHrzEG0O4CcCAwEAAaN9MHswDgYDVR0PAQH/\nBAQDAgWgMBMGA1UdJQQMMAoGCCsGAQUFBwMBMAwGA1UdEwEB/wQCMAAwHwYDVR0j\nBBgwFoAU0QFZwjfVqjtAy2xxd0iA/115PkwwJQYDVR0RBB4wHIIaZGMxbC1ndzA4\nLmRlbW9jb3JwLmV4YW1wbGUwDQYJKoZIhvcNAQEFBQADggGBAM4LCv6Qk4vOQt6S\nyq1vT2M0nl1Ta51yNZXYtyfHh0cqTN8ffLbejqZubBOgS5fgX08mb87z3sqBKpjT\nEig6LTZ1aG3smnngxQoh15VBojt25Rgd1brsYGTXB0FP9RxSD06WwdmzGoyTvq8Z\nOBs/jEjY7w6WOikOQZ+FwPZPIHnAeniXju32l6JIrFX3Y2b+ZPlmgRF7GIIuq/PZ\n79QvMRbBrT12kffYsmW+ocj4uXsEHTYMKWF4m4rRGH3zt7TE8iocSRE+NUVOws9E\nogTPOycnVx+8HzCebh81hO51GlMXkmvldqV4ckbA101xXFYerEY4PYzjG4Oqmjh3\n8wk4Vvd7Qzi88flYU+39LMpUYe7CIOJGCTybK7IVUmB+FbvDYe0ZvSttsmxNmdJS\nkHtD94vDuVy3jSuIpAmlQaZRYvmChuqjBVr3uXMRa3nnStiiQER9JicZQl+HIvjO\ntaQRDXdE/3F1UUZZk09w9oqTH+FmluXuvgdrI6lLtPLzVIrx/A==\n-----END CERTIFICATE-----\n",
+            "public_key_algorithm": "RSA",
+            "public_key_size": 1024,
+            "signature_algorithm": "SHA1-RSA",
+            "is_self_signed": false,
+            "is_ca_certificate": false,
+            "key_usage": [
+              "digitalSignature",
+              "keyEncipherment"
+            ],
+            "extended_key_usage": [
+              "serverAuth"
+            ]
+          }
+        ],
+        "environment": "lab",
+        "last_seen_at": "2026-05-28T15:17:59-04:00",
+        "source": "democorp-seed"
+      }
+    },
+    {
+      "hostname": "dc1l-svc09.democorp.example",
+      "ip_address": "172.20.30.18",
+      "port": 443,
+      "asset_type": "server",
+      "protocol": "TLS",
+      "protocol_version": "TLS1.2",
+      "cipher_suite": "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+      "key_exchange_algorithm": "ECDHE",
+      "key_size": 2048,
+      "hash_algorithm": "SHA256",
+      "operating_system": "Ubuntu 24.04",
+      "raw_data": {
+        "certificates": [
+          {
+            "subject_dn": "CN=dc1l-svc09.democorp.example,O=DemoCorp,C=US",
+            "issuer_dn": "CN=DemoCorp Internal Issuing CA,O=DemoCorp,C=US",
+            "serial_number": "4140",
+            "common_name": "dc1l-svc09.democorp.example",
+            "subject_alternative_names": [
+              "dc1l-svc09.democorp.example"
+            ],
+            "not_before": "2025-08-09T19:17:59Z",
+            "not_after": "2026-07-10T19:17:59Z",
+            "fingerprint_sha256": "c48d91aa51ecb5f1bb680c2db5be9902211046260f98da9ea02561ce5e2c5422",
+            "certificate_pem": "-----BEGIN CERTIFICATE-----\nMIIEBzCCAm+gAwIBAgICECwwDQYJKoZIhvcNAQELBQAwRzELMAkGA1UEBhMCVVMx\nETAPBgNVBAoTCERlbW9Db3JwMSUwIwYDVQQDExxEZW1vQ29ycCBJbnRlcm5hbCBJ\nc3N1aW5nIENBMB4XDTI1MDgwOTE5MTc1OVoXDTI2MDcxMDE5MTc1OVowRjELMAkG\nA1UEBhMCVVMxETAPBgNVBAoTCERlbW9Db3JwMSQwIgYDVQQDExtkYzFsLXN2YzA5\nLmRlbW9jb3JwLmV4YW1wbGUwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIB\nAQDDUhfpyn3GIJJ7b7gtXDguTii1ueaiU9tsfre1NEmS2RrLbHPq6Jd7WzmIAYWx\ne0vw9281ZYCqXXzSpCoSqNQBqjBMae6T1Tcf1j/6q/MbWlbLH/3gKCtihH4iwmMZ\njriQYIOR9crfrQ3b5uP99tqQjXKv1ZjR0Wt6h1RER9N+0KauxQmCL3e9BP4D+M3o\n1kmhimnsrNKGt4yGqijIc+73Lh0dN3BqFAaymm9jFC0POc1Pjo4WayHxohXzQ1/c\n0A92mK74fL5ZRQKHS+2U6omj3MUxmWZgXIHRST3ezXwz//fmw0Lr2J7nMyl4yRJz\nnKKQlnVrdpo4spd0I5JAQ4Y/AgMBAAGjfjB8MA4GA1UdDwEB/wQEAwIFoDATBgNV\nHSUEDDAKBggrBgEFBQcDATAMBgNVHRMBAf8EAjAAMB8GA1UdIwQYMBaAFNEBWcI3\n1ao7QMtscXdIgP9deT5MMCYGA1UdEQQfMB2CG2RjMWwtc3ZjMDkuZGVtb2NvcnAu\nZXhhbXBsZTANBgkqhkiG9w0BAQsFAAOCAYEATYkzIl2FWevqqh/vIi6+1olk/3MF\n0pi1P+GBjEocBOdORuKBC8gstIz8uuB/ORuzs3P6aGykqgTN0Hf78lw04Wz1R0Ly\nf6YIu7PkTKxpZJIWWbRD93NTd1Bd7SDlnAcXOMcQkQoyxGoUCGDBsetU+tEs0HkF\npo4zlXFZveHB0a4TgruYxxkwC5xXTeE6YT6MLrZfehtgrUFUemJEaTM9HcpLubQI\nQketmkfTBNQlTDoqz2jF0ZEQ5djiF5SDX8KFxf//H4axfN5auAVR61LWlgvkdue+\nnveZ1NXOr2Tt++P82gXmqvOTW5kBBYwlx+etj+S8gPxrKIqAfGrGhIVxYX5ygoTd\nRXIlDaUwiwzPQ9t9IW/GtfDoiUdsUlI1dulWnhZGj1Y801sEs27duYNYyidWxxRT\ncKfs4V7OJCV+roWGiVbotVtroV3lK1A5ptMOUos+TloNYj+LMGukArpUrabE/8tj\n4/LWqXKeSHrRE4qxxOOx5NmfvuQ4ZaIAQ1m5\n-----END CERTIFICATE-----\n",
+            "public_key_algorithm": "RSA",
+            "public_key_size": 2048,
+            "signature_algorithm": "SHA256-RSA",
+            "is_self_signed": false,
+            "is_ca_certificate": false,
+            "key_usage": [
+              "digitalSignature",
+              "keyEncipherment"
+            ],
+            "extended_key_usage": [
+              "serverAuth"
+            ]
+          }
+        ],
+        "environment": "lab",
+        "last_seen_at": "2026-05-24T15:17:59-04:00",
+        "source": "democorp-seed"
+      }
+    },
+    {
+      "hostname": "dc1l-node10.democorp.example",
+      "ip_address": "172.20.30.19",
+      "port": 443,
+      "asset_type": "server",
+      "protocol": "TLS",
+      "protocol_version": "TLS1.2",
+      "cipher_suite": "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+      "key_exchange_algorithm": "ECDHE",
+      "key_size": 2048,
+      "hash_algorithm": "SHA384",
+      "operating_system": "RHEL 9",
+      "raw_data": {
+        "certificates": [
+          {
+            "subject_dn": "CN=dc1l-node10.democorp.example,O=DemoCorp,C=US",
+            "issuer_dn": "CN=DemoCorp Internal Issuing CA,O=DemoCorp,C=US",
+            "serial_number": "4141",
+            "common_name": "dc1l-node10.democorp.example",
+            "subject_alternative_names": [
+              "dc1l-node10.democorp.example"
+            ],
+            "not_before": "2025-08-09T19:17:59Z",
+            "not_after": "2027-12-22T20:17:59Z",
+            "fingerprint_sha256": "1f5c16efeaa44e0611f254af95cecbfc7c355ab3f18a04847d03e9756b43740b",
+            "certificate_pem": "-----BEGIN CERTIFICATE-----\nMIIECTCCAnGgAwIBAgICEC0wDQYJKoZIhvcNAQELBQAwRzELMAkGA1UEBhMCVVMx\nETAPBgNVBAoTCERlbW9Db3JwMSUwIwYDVQQDExxEZW1vQ29ycCBJbnRlcm5hbCBJ\nc3N1aW5nIENBMB4XDTI1MDgwOTE5MTc1OVoXDTI3MTIyMjIwMTc1OVowRzELMAkG\nA1UEBhMCVVMxETAPBgNVBAoTCERlbW9Db3JwMSUwIwYDVQQDExxkYzFsLW5vZGUx\nMC5kZW1vY29ycC5leGFtcGxlMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKC\nAQEAunKD1ZoG6vqKvxQkoiQPYVsqANG9I6nBZaNS9gJ4XVkCDeH7/IFhLp+whqwh\ngDIkgANv49x1L6GL1Y6Eq6Ze6XJr8gTxkGWrDXxFeYX3xjSx4ud8cikBno2irgLZ\nEYWC1W6HS77j08UfTyfg8Yn8/5F/pqIV2nbLm4ukyD4pi1BwKzKd8yTu8u1P6Uss\n75t/OuIpcbI9FkBpcZtAq/R17KrIhtoK9ZovtFa1gw98MdBKbIfGgsZL/bLMHLFV\nMm0dsyJu8OVaBW0idXibBRJ0Uon37KEdvF8+f/jLXpXMzCBaCGFYrMG+he6d52tB\nH09vYsHUSMgUBb6JWzI6z+xBOwIDAQABo38wfTAOBgNVHQ8BAf8EBAMCBaAwEwYD\nVR0lBAwwCgYIKwYBBQUHAwEwDAYDVR0TAQH/BAIwADAfBgNVHSMEGDAWgBTRAVnC\nN9WqO0DLbHF3SID/XXk+TDAnBgNVHREEIDAeghxkYzFsLW5vZGUxMC5kZW1vY29y\ncC5leGFtcGxlMA0GCSqGSIb3DQEBCwUAA4IBgQDOlP4520at/3SBLWDE7+aDJYCI\nA7kb6riLpUP5mFFH5Kjwmm6JfGke5gBO7aWB4th9DnD08ksrp6idAg4szFjrY/MA\nIx9TzlL9sp75L/DkrPIj3Nd9YM7P7sTJdhJmJ3cz7DymMppdpckwjhDoqMlaeUgx\nZscK+sfrHKHeWmMwiawOL9L9xu/ZVR+NYmcJbmY1F5TJ7+bfY8QSHx/fmU+caQ2e\nl85yx+x0Rw6QTd8Quhm7bCdI9kCfMZNbhoE3xF/IbbKaQNf/AeUX2K7g+3dV+xAN\nYJI0KsrQeBiEOyBLrpY5KxwLBTpwtZlcv+iCnpiyN/Pe9W/qzAzCA9G4UozdPGs6\nbKhyPSet2HZ3+3ZJbQbr9mYyt1opMm0Z0LQOhxwXx0VsN0UuhZp9lzpi0oAYOTxm\nweS2KBMyxWlU+raawVbYPNLVVLFTP0CTqLr5j9+V3/zVwfRPHv3oulxxTvp8C99E\n3ihURUyBRZTyOLZqpWM/wQUYO1CMGDxQrKSnsec=\n-----END CERTIFICATE-----\n",
+            "public_key_algorithm": "RSA",
+            "public_key_size": 2048,
+            "signature_algorithm": "SHA256-RSA",
+            "is_self_signed": false,
+            "is_ca_certificate": false,
+            "key_usage": [
+              "digitalSignature",
+              "keyEncipherment"
+            ],
+            "extended_key_usage": [
+              "serverAuth"
+            ]
+          }
+        ],
+        "environment": "lab",
+        "last_seen_at": "2026-05-20T15:17:59-04:00",
+        "source": "democorp-seed"
+      }
+    },
+    {
+      "hostname": "dc1l-web11.democorp.example",
+      "ip_address": "172.20.30.20",
+      "port": 443,
+      "asset_type": "server",
+      "protocol": "TLS",
+      "protocol_version": "SSLv3",
+      "cipher_suite": "TLS_RSA_WITH_RC4_128_SHA",
+      "key_exchange_algorithm": "STATIC-RSA",
+      "key_size": 1024,
+      "hash_algorithm": "MD5",
+      "operating_system": "Debian 12",
+      "raw_data": {
+        "certificates": [
+          {
+            "subject_dn": "CN=dc1l-web11.democorp.example,O=DemoCorp,C=US",
+            "issuer_dn": "CN=DemoCorp Internal Issuing CA,O=DemoCorp,C=US",
+            "serial_number": "4142",
+            "common_name": "dc1l-web11.democorp.example",
+            "subject_alternative_names": [
+              "dc1l-web11.democorp.example"
+            ],
+            "not_before": "2025-08-09T19:17:59Z",
+            "not_after": "2027-02-25T20:17:59Z",
+            "fingerprint_sha256": "6344eaa307afe979c640ceb66b1fa8f1f40753c86a796ae5aa8c65088febceec",
+            "certificate_pem": "-----BEGIN CERTIFICATE-----\nMIIDgzCCAeugAwIBAgICEC4wDQYJKoZIhvcNAQEFBQAwRzELMAkGA1UEBhMCVVMx\nETAPBgNVBAoTCERlbW9Db3JwMSUwIwYDVQQDExxEZW1vQ29ycCBJbnRlcm5hbCBJ\nc3N1aW5nIENBMB4XDTI1MDgwOTE5MTc1OVoXDTI3MDIyNTIwMTc1OVowRjELMAkG\nA1UEBhMCVVMxETAPBgNVBAoTCERlbW9Db3JwMSQwIgYDVQQDExtkYzFsLXdlYjEx\nLmRlbW9jb3JwLmV4YW1wbGUwgZ8wDQYJKoZIhvcNAQEBBQADgY0AMIGJAoGBAL5I\nqWRwiYQwwtTljUbkb8AzXcUQudzoNDDfsGbC/nxZHe5AG8yDFRFNLh/Gb+I/BDUx\nKTL+oOSO8rnIAhTWTEnZ/CIF5LTvaisfR9AASpFEQknzqVC93qwPFT54yKvmBFRS\nYO7gRT22/o/msyU/41Jso+A6o5DL7Yi/BOyYHA3/AgMBAAGjfjB8MA4GA1UdDwEB\n/wQEAwIFoDATBgNVHSUEDDAKBggrBgEFBQcDATAMBgNVHRMBAf8EAjAAMB8GA1Ud\nIwQYMBaAFNEBWcI31ao7QMtscXdIgP9deT5MMCYGA1UdEQQfMB2CG2RjMWwtd2Vi\nMTEuZGVtb2NvcnAuZXhhbXBsZTANBgkqhkiG9w0BAQUFAAOCAYEAw5K2WsNRv5OW\nSqGjl+sCyJd0rymb7xBXVqzFOXZKi0109prpd2/QUEa2Lc0CuuSVPCLKJE1PcfzJ\nr07y36qipAmCaG32+vhStaEka/JhTg6Xns9JZe+z2iQ21hBF8oN1kPm/Ok4SM8O7\nYaTD2K8/r3fg8TN8nsHY1ImJyhpMAKNqfSRKUmzNCAgSHp0seBqOKZRDPTVaqT5R\nplmRyTh1xNqTlANqu8ggpxiYhWI8EpVNgwT2pPzhKNVTMTzfOcam68n30mw4xFWP\nP/kHN0d+R3DfqYvm/KWTNSw2mLrOxJvNpHnpjV3PpjP2F0HJSYgSwSjDe8rz2+dt\nxe7CY66L09RtuzOjdQ/xZ6N9szpJqRCNIjXP5QJxAj6SGlcMXqZSV/xftZ9kEEDW\nEiozpDJSouf0D+HYFFuBZewZ6y8k+PKv9URlFbY9iakyCGNbZglhGntZZprYjFZ5\nyGWBecPujzLU2REvkVSy42b181dDE2lBnrktf5pOlcHJDVOnItSM\n-----END CERTIFICATE-----\n",
+            "public_key_algorithm": "RSA",
+            "public_key_size": 1024,
+            "signature_algorithm": "SHA1-RSA",
+            "is_self_signed": false,
+            "is_ca_certificate": false,
+            "key_usage": [
+              "digitalSignature",
+              "keyEncipherment"
+            ],
+            "extended_key_usage": [
+              "serverAuth"
+            ]
+          }
+        ],
+        "environment": "lab",
+        "last_seen_at": "2026-05-16T15:17:59-04:00",
+        "source": "democorp-seed"
+      }
+    },
+    {
+      "hostname": "dc1l-api12.democorp.example",
+      "ip_address": "172.20.30.21",
+      "port": 443,
+      "asset_type": "server",
+      "protocol": "TLS",
+      "protocol_version": "TLS1.0",
+      "cipher_suite": "TLS_RSA_WITH_3DES_EDE_CBC_SHA",
+      "key_exchange_algorithm": "RSA-1024",
+      "key_size": 1024,
+      "hash_algorithm": "SHA1",
+      "operating_system": "Windows Server 2022",
+      "raw_data": {
+        "certificates": [
+          {
+            "subject_dn": "CN=dc1l-api12.democorp.example,O=DemoCorp,C=US",
+            "issuer_dn": "CN=DemoCorp Internal Issuing CA,O=DemoCorp,C=US",
+            "serial_number": "4143",
+            "common_name": "dc1l-api12.democorp.example",
+            "subject_alternative_names": [
+              "dc1l-api12.democorp.example"
+            ],
+            "not_before": "2025-08-09T19:17:59Z",
+            "not_after": "2026-12-07T20:17:59Z",
+            "fingerprint_sha256": "e55c1a123bbc4c0a61ef35c85d9776c6bb4ea0e64e6c38d3ee035f1f609b8b04",
+            "certificate_pem": "-----BEGIN CERTIFICATE-----\nMIIDgzCCAeugAwIBAgICEC8wDQYJKoZIhvcNAQEFBQAwRzELMAkGA1UEBhMCVVMx\nETAPBgNVBAoTCERlbW9Db3JwMSUwIwYDVQQDExxEZW1vQ29ycCBJbnRlcm5hbCBJ\nc3N1aW5nIENBMB4XDTI1MDgwOTE5MTc1OVoXDTI2MTIwNzIwMTc1OVowRjELMAkG\nA1UEBhMCVVMxETAPBgNVBAoTCERlbW9Db3JwMSQwIgYDVQQDExtkYzFsLWFwaTEy\nLmRlbW9jb3JwLmV4YW1wbGUwgZ8wDQYJKoZIhvcNAQEBBQADgY0AMIGJAoGBAOae\nm3HxubyBEmyrJxw2XAgzNtaatSaKOpA+vvfzIZ/1cJ/9tfBdtgGZwAA5k9bMYQM9\nZRgwlYJGDW+epaXJHRSFiN+U2LmdkczAmr+7juCkblf89LjYDJFrrqsmcUP0W8GY\nJQte1N1zpokVDwya31khlEb+zuvKrTsgy68+yMpLAgMBAAGjfjB8MA4GA1UdDwEB\n/wQEAwIFoDATBgNVHSUEDDAKBggrBgEFBQcDATAMBgNVHRMBAf8EAjAAMB8GA1Ud\nIwQYMBaAFNEBWcI31ao7QMtscXdIgP9deT5MMCYGA1UdEQQfMB2CG2RjMWwtYXBp\nMTIuZGVtb2NvcnAuZXhhbXBsZTANBgkqhkiG9w0BAQUFAAOCAYEAAshVRpdzAuaO\n0wv0Plu/RCv0j8uB9wocBwPWOGiBTYdFfGj3rV/JYs5jJdNRblGHOsmD9L8dIByB\nISxehzF0Ynkp+MS9eq5i+7cAz2yeGb9M1F5MT6sKkA16H86r3G+1ptOjF6MG04jb\npUuLQTpM2Qze4+9GSVf5Oeod2aPFf6b4eZBpTDTmImmAo1r60qIv1xyYOyQ4j6zJ\n5YtC+kHW/clv6uK2QP4zigqb4+VteulcDLxQIuWUz/8yY/57xT6FAjnqBmm0cKmO\nYDnJp+bFd0RIE33nvsnhnKNvsL81wXy/unoU7h/t8tD7N9MutGkm7ljJzOsgkDAp\nFbPFFGBMJkTVcdeXaPsKapben4fcRPOYXxn1Ki3oFDRC+cCd6hqxkDWIOealPjRn\nqMJyAGulLNxsWWbqWnvyADBaV4JJv4Xwr7v3fEMjxoL6h+7cOi9EIuFPvA99RHXz\nP+xHok4qwX6qQWRThftn29xfjUlG2p+sjHp9TXDMXSBhCv+X3IkF\n-----END CERTIFICATE-----\n",
+            "public_key_algorithm": "RSA",
+            "public_key_size": 1024,
+            "signature_algorithm": "SHA1-RSA",
+            "is_self_signed": false,
+            "is_ca_certificate": false,
+            "key_usage": [
+              "digitalSignature",
+              "keyEncipherment"
+            ],
+            "extended_key_usage": [
+              "serverAuth"
+            ]
+          }
+        ],
+        "environment": "lab",
+        "last_seen_at": "2026-05-12T15:17:59-04:00",
+        "source": "democorp-seed"
+      }
+    },
+    {
+      "hostname": "dc1l-ssh01.democorp.example",
+      "ip_address": "172.20.30.100",
+      "port": 22,
+      "asset_type": "server",
+      "protocol": "SSH",
+      "protocol_version": "2.0",
+      "key_exchange_algorithm": "ECDHE",
+      "hash_algorithm": "SHA256",
+      "raw_data": {
+        "environment": "lab",
+        "source": "democorp-seed"
+      }
+    },
+    {
+      "hostname": "dc1l-ssh02.democorp.example",
+      "ip_address": "172.20.30.101",
+      "port": 22,
+      "asset_type": "server",
+      "protocol": "SSH",
+      "protocol_version": "2.0",
+      "key_exchange_algorithm": "X25519",
+      "hash_algorithm": "SHA512",
+      "raw_data": {
+        "environment": "lab",
+        "source": "democorp-seed"
+      }
+    }
+  ]
+}

@@ -1,0 +1,824 @@
+openapi: 3.1.0
+info:
+  title: VistaPlatform — resource-tracker-service API
+  version: 0.1.0
+  description: |
+    Spec-first contract for resource-tracker-service (ADR-0001). First slice for
+    this service, covering the **platform resource-usage / cost surface** the
+    admin-ui consumes plus the sibling internal endpoints that share the same
+    `/api/v1/resource-tracker-service` namespace.
+
+    UI consumer: `admin-ui/src/services/resource-tracker-api.ts`
+    (`getTenantResourceUsage`, `getTenantResourceTrend`, `getTenantCostTrend`,
+    `generateCostAnalysis`, `getAllTenantsResourceUsage`, `getResourceUsageStats`,
+    `recordResourceMetrics`, `healthCheck`).
+
+    Note: `admin-ui/src/services/costs-api.ts` is NOT a consumer of this service
+    — it calls `/api/v1/admin-service/admin/costs/*` (admin-service), so those
+    shapes are out of scope here.
+
+    ## Scope of this spec
+
+    The `/api/v1/resource-tracker-service/...` routes registered in
+    `services/resource-tracker-service/cmd/main.go`:
+
+      - `POST /metrics`                         — internal metrics ingestion (HMAC)
+      - `GET  /tenants/{tenantId}/usage`        — aggregated usage for a tenant
+      - `GET  /tenants/{tenantId}/trend`        — usage trend for a tenant
+      - `GET  /tenants/{tenantId}/cost-trend`   — cost trend for a tenant
+      - `GET  /tenants/{tenantId}/cost-analysis`— cost analysis for a tenant
+      - `GET  /tenants/usage`                   — all-tenants usage (platform admin)
+      - `GET  /stats`                           — platform-wide stats (platform admin)
+      - `GET  /tenant/{id}/resource-summary`    — resource health summary (internal/tenant-health)
+
+    Out of scope: the legacy `/api/v1/resource-tracker/...` namespace (a
+    duplicate route group kept for backward compatibility — the admin-ui calls
+    the `-service` namespace exclusively) and the `POST /metrics` HTTP fallback
+    on that legacy group.
+
+    ## Shape status
+
+    These document the CURRENT shapes captured from the real handlers (typed Go
+    structs for usage/cost-analysis/health-summary, ad-hoc `gin.H{}` envelopes
+    for trend/cost-trend/stats/all-tenants, errors as `{ "error": "..." }`).
+    They predate the ADR-0002 envelope and are pinned here as-is so drift is
+    caught.
+servers:
+  - url: /api/v1/resource-tracker-service
+    description: Via the API gateway (JWT auth; some endpoints also accept HMAC service auth).
+paths:
+  /metrics:
+    post:
+      operationId: recordResourceMetrics
+      tags:
+        - resource-usage
+      summary: Record resource usage metrics (internal)
+      description: |
+        Internal, HMAC-authenticated metrics ingestion. The tenant ID is taken
+        from the HMAC-signed `X-Tenant-ID` header, NOT the request body — a
+        `tenant_id` in the body must either be omitted or match the signed
+        header, otherwise the request is rejected (400). Primarily called
+        service-to-service; the admin-ui exposes a thin `recordResourceMetrics`
+        wrapper.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResourceMetricsRequest'
+      responses:
+        '200':
+          description: Metrics recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          description: Missing/invalid X-Tenant-ID header, bad body, or body tenant_id contradicts the signed header.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Metrics could not be recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenants/{tenantId}/usage:
+    parameters:
+      - $ref: '#/components/parameters/TenantIdPath'
+    get:
+      operationId: getTenantResourceUsage
+      tags:
+        - resource-usage
+      summary: Aggregated resource usage for a tenant
+      description: |
+        Returns aggregated usage for the tenant over `period`. For tenant-scoped
+        JWTs the URL `tenantId` is ignored and the JWT's tenant is used; platform
+        admins and internal calls use the URL param.
+      parameters:
+        - $ref: '#/components/parameters/PeriodQuery'
+      responses:
+        '200':
+          description: The aggregated usage.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResourceUsageResponse'
+        '400':
+          description: Invalid tenant ID or period.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenants/{tenantId}/trend:
+    parameters:
+      - $ref: '#/components/parameters/TenantIdPath'
+    get:
+      operationId: getTenantResourceTrend
+      tags:
+        - resource-usage
+      summary: Resource usage trend for a tenant
+      description: 'Returns the usage trend wrapped as `{ "trend": [...] }`. The admin-ui reads `response.data.trend`.'
+      parameters:
+        - $ref: '#/components/parameters/PeriodQuery'
+      responses:
+        '200':
+          description: The usage trend.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResourceTrendResponse'
+        '400':
+          description: Invalid tenant ID or period.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenants/{tenantId}/cost-trend:
+    parameters:
+      - $ref: '#/components/parameters/TenantIdPath'
+    get:
+      operationId: getTenantCostTrend
+      tags:
+        - cost
+      summary: Cost trend for a tenant
+      description: 'Returns the cost trend wrapped as `{ "cost_trend": [...] }`. The admin-ui reads `response.data.cost_trend`.'
+      parameters:
+        - $ref: '#/components/parameters/PeriodQuery'
+      responses:
+        '200':
+          description: The cost trend.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CostTrendResponse'
+        '400':
+          description: Invalid tenant ID or period.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenants/{tenantId}/cost-analysis:
+    parameters:
+      - $ref: '#/components/parameters/TenantIdPath'
+    get:
+      operationId: generateCostAnalysis
+      tags:
+        - cost
+      summary: Generate cost analysis for a tenant
+      parameters:
+        - $ref: '#/components/parameters/PeriodQuery'
+      responses:
+        '200':
+          description: The cost analysis (bare object).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CostAnalysis'
+        '400':
+          description: Invalid tenant ID or period.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenants/usage:
+    get:
+      operationId: getAllTenantsResourceUsage
+      tags:
+        - platform
+      summary: All-tenants resource usage (platform admin)
+      description: |
+        Platform-admin / internal-only. Returns a paginated list of per-tenant
+        usage summaries. `page` defaults to 1, `limit` to 20 (clamped to 1–100).
+
+        Discrepancy note: the handler sets `pagination.total` to the length of
+        the CURRENT page slice (not the full match count), because the slice is
+        re-bound before the count is read. Documented here as the server's
+        actual behaviour; the field name implies a full total.
+      parameters:
+        - $ref: '#/components/parameters/PeriodQuery'
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: The paginated all-tenants usage.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AllTenantsUsageResponse'
+        '400':
+          description: Invalid period.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '403':
+          description: Platform admin access required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /stats:
+    get:
+      operationId: getResourceUsageStats
+      tags:
+        - platform
+      summary: Platform-wide resource usage statistics (platform admin)
+      description: |
+        Platform-admin / internal-only. Aggregates all-tenant usage into
+        platform totals plus the top 5 tenants by cost. `aws_costs` is always
+        present: real AWS Cost Explorer data when integration is configured and
+        returns costs, otherwise an estimated-source stub.
+      parameters:
+        - $ref: '#/components/parameters/PeriodQuery'
+      responses:
+        '200':
+          description: The platform stats.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformStats'
+        '400':
+          description: Invalid period.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '403':
+          description: Platform admin access required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenant/{id}/resource-summary:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Tenant ID.
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getTenantResourceHealthSummary
+      tags:
+        - resource-usage
+      summary: Resource health summary for a tenant (internal / tenant-health)
+      description: |
+        Primarily called by tenant-health-service (JWT or HMAC). Tenant-scoped
+        JWTs may only read their own tenant (403 on mismatch).
+      responses:
+        '200':
+          description: The resource health summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantResourceHealthSummary'
+        '400':
+          description: Invalid tenant ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Tenant mismatch.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+components:
+  parameters:
+    TenantIdPath:
+      name: tenantId
+      in: path
+      required: true
+      description: 'Tenant ID. Ignored for tenant-scoped JWTs (the JWT''s tenant is used); honoured for platform-admin / internal calls.'
+      schema:
+        type: string
+        format: uuid
+    PeriodQuery:
+      name: period
+      in: query
+      required: false
+      description: Aggregation window.
+      schema:
+        type: string
+        enum: [1h, 24h, 7d, 30d]
+        default: 24h
+  responses:
+    LegacyUnauthorized:
+      description: Missing or invalid tenant/auth context.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+  schemas:
+    ResourceMetricsRequest:
+      type: object
+      additionalProperties: false
+      description: |
+        Body for POST /metrics (models.ResourceMetricsRequest). `tenant_id` is
+        bound from the signed X-Tenant-ID header — if present in the body it must
+        match. All metric fields are omitempty.
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        api_calls:
+          type: integer
+        database_queries:
+          type: integer
+        memory_usage_mb:
+          type: integer
+        cpu_usage_percent:
+          type: number
+        storage_used_mb:
+          type: integer
+        network_bytes:
+          type: integer
+          format: int64
+    ResourceBreakdown:
+      type: object
+      additionalProperties: false
+      description: Detailed cost breakdown (models.ResourceBreakdown).
+      required:
+        - api_cost
+        - database_cost
+        - storage_cost
+        - compute_cost
+        - network_cost
+        - total_cost
+      properties:
+        api_cost:
+          type: number
+        database_cost:
+          type: number
+        storage_cost:
+          type: number
+        compute_cost:
+          type: number
+        network_cost:
+          type: number
+        total_cost:
+          type: number
+    ResourceAlert:
+      type: object
+      additionalProperties: false
+      description: 'Resource usage alert (models.ResourceAlert). `resolved_at` is null when the alert is unresolved.'
+      required:
+        - id
+        - tenant_id
+        - alert_type
+        - metric
+        - threshold
+        - current_value
+        - message
+        - severity
+        - is_active
+        - created_at
+        - resolved_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        alert_type:
+          type: string
+          description: "cost / usage / performance."
+        metric:
+          type: string
+          description: "api_calls / memory_usage / etc."
+        threshold:
+          type: number
+        current_value:
+          type: number
+        message:
+          type: string
+        severity:
+          type: string
+          description: "critical / warning / info."
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        resolved_at:
+          type: [string, 'null']
+          format: date-time
+    ResourceUsageResponse:
+      type: object
+      additionalProperties: false
+      description: 'Aggregated usage for a tenant (models.ResourceUsageResponse). `alerts` is null when none.'
+      required:
+        - tenant_id
+        - period
+        - total_api_calls
+        - total_db_queries
+        - avg_memory_mb
+        - avg_cpu_percent
+        - total_storage_mb
+        - total_network_mb
+        - total_cost_usd
+        - cost_breakdown
+        - alerts
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        period:
+          type: string
+          description: "1h / 24h / 7d / 30d."
+        total_api_calls:
+          type: integer
+        total_db_queries:
+          type: integer
+        avg_memory_mb:
+          type: number
+        avg_cpu_percent:
+          type: number
+        total_storage_mb:
+          type: integer
+        total_network_mb:
+          type: number
+        total_cost_usd:
+          type: number
+        cost_breakdown:
+          $ref: '#/components/schemas/ResourceBreakdown'
+        alerts:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/ResourceAlert'
+    CostDataPoint:
+      type: object
+      additionalProperties: false
+      description: A single cost data point (models.CostDataPoint).
+      required:
+        - timestamp
+        - cost_usd
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        cost_usd:
+          type: number
+    ResourceDataPoint:
+      type: object
+      additionalProperties: false
+      description: A single resource usage data point (models.ResourceDataPoint).
+      required:
+        - timestamp
+        - api_calls
+        - database_queries
+        - memory_usage_mb
+        - cpu_usage_percent
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        api_calls:
+          type: integer
+        database_queries:
+          type: integer
+        memory_usage_mb:
+          type: integer
+        cpu_usage_percent:
+          type: number
+    ResourceTrendResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /tenants/{tenantId}/trend — `{ "trend": [...] }`. `trend` is null when there are no points.'
+      required:
+        - trend
+      properties:
+        trend:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/ResourceDataPoint'
+    CostTrendResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /tenants/{tenantId}/cost-trend — `{ "cost_trend": [...] }`. `cost_trend` is null when there are no points.'
+      required:
+        - cost_trend
+      properties:
+        cost_trend:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/CostDataPoint'
+    OptimizationSuggestion:
+      type: object
+      additionalProperties: false
+      description: A cost optimization recommendation (models.OptimizationSuggestion).
+      required:
+        - type
+        - description
+        - potential_savings
+        - priority
+      properties:
+        type:
+          type: string
+          description: "api / database / storage / compute."
+        description:
+          type: string
+        potential_savings:
+          type: number
+        priority:
+          type: string
+          description: "high / medium / low."
+    CostAnalysis:
+      type: object
+      additionalProperties: false
+      description: 'Cost analysis for a tenant over a period (models.CostAnalysis). `optimization_suggestions` is null when none.'
+      required:
+        - id
+        - tenant_id
+        - period_start
+        - period_end
+        - total_cost_usd
+        - resource_breakdown
+        - optimization_suggestions
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        period_start:
+          type: string
+          format: date-time
+        period_end:
+          type: string
+          format: date-time
+        total_cost_usd:
+          type: number
+        resource_breakdown:
+          $ref: '#/components/schemas/ResourceBreakdown'
+        optimization_suggestions:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/OptimizationSuggestion'
+        created_at:
+          type: string
+          format: date-time
+    TenantResourceSummary:
+      type: object
+      additionalProperties: false
+      description: 'Per-tenant resource summary (models.TenantResourceSummary). `cost_trend` / `resource_trend` are null when empty.'
+      required:
+        - tenant_id
+        - tenant_name
+        - current_usage
+        - cost_trend
+        - resource_trend
+        - optimization_score
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        tenant_name:
+          type: string
+        current_usage:
+          $ref: '#/components/schemas/ResourceUsageResponse'
+        cost_trend:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/CostDataPoint'
+        resource_trend:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/ResourceDataPoint'
+        optimization_score:
+          type: number
+          description: '0–100, higher is better.'
+    Pagination:
+      type: object
+      additionalProperties: false
+      description: |
+        Pagination block for GET /tenants/usage. Discrepancy: `total` reflects
+        the CURRENT page length, not the full match count (the handler re-binds
+        the slice before reading its length). `total_pages` is derived from that
+        same value.
+      required:
+        - page
+        - limit
+        - total
+        - total_pages
+      properties:
+        page:
+          type: integer
+        limit:
+          type: integer
+        total:
+          type: integer
+        total_pages:
+          type: integer
+    AllTenantsUsageResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /tenants/usage — `{ "tenants": [...], "pagination": {...} }`. `tenants` is an array (empty when the page is past the end).'
+      required:
+        - tenants
+        - pagination
+      properties:
+        tenants:
+          type: array
+          items:
+            $ref: '#/components/schemas/TenantResourceSummary'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+    PlatformStatsBlock:
+      type: object
+      additionalProperties: false
+      description: Platform-wide aggregate totals (the `platform_stats` block of GET /stats).
+      required:
+        - total_tenants
+        - total_api_calls
+        - total_db_queries
+        - total_storage_mb
+        - total_network_mb
+        - total_cost_usd
+        - avg_memory_mb
+        - avg_cpu_percent
+      properties:
+        total_tenants:
+          type: integer
+        total_api_calls:
+          type: integer
+        total_db_queries:
+          type: integer
+        total_storage_mb:
+          type: integer
+        total_network_mb:
+          type: number
+        total_cost_usd:
+          type: number
+        avg_memory_mb:
+          type: number
+        avg_cpu_percent:
+          type: number
+    AWSCosts:
+      type: object
+      additionalProperties: false
+      description: |
+        AWS cost breakdown (the `aws_costs` block of GET /stats). `cost_source`
+        is "aws" when real AWS Cost Explorer data was returned, otherwise
+        "estimated". `service_breakdown` maps AWS service name → cost USD.
+      required:
+        - total_cost_usd
+        - service_breakdown
+        - cost_source
+      properties:
+        total_cost_usd:
+          type: number
+        service_breakdown:
+          type: object
+          additionalProperties:
+            type: number
+        cost_source:
+          type: string
+          enum: [aws, estimated]
+    PlatformStats:
+      type: object
+      additionalProperties: false
+      description: 'Response for GET /stats. `top_tenants_by_cost` holds up to 5 tenants. `aws_costs` is always present (real or estimated stub).'
+      required:
+        - period
+        - platform_stats
+        - top_tenants_by_cost
+        - aws_costs
+      properties:
+        period:
+          type: string
+          description: "1h / 24h / 7d / 30d."
+        platform_stats:
+          $ref: '#/components/schemas/PlatformStatsBlock'
+        top_tenants_by_cost:
+          type: array
+          items:
+            $ref: '#/components/schemas/TenantResourceSummary'
+        aws_costs:
+          $ref: '#/components/schemas/AWSCosts'
+    TenantResourceHealthSummary:
+      type: object
+      additionalProperties: false
+      description: Resource health metrics for a tenant (models.TenantResourceHealthSummary), consumed by tenant-health-service.
+      required:
+        - tenant_id
+        - total_api_calls
+        - total_db_queries
+        - avg_cpu_percent
+        - avg_memory_mb
+        - total_cost_usd
+        - resource_efficiency_score
+        - last_updated
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        total_api_calls:
+          type: integer
+          description: Total API calls in the last 24h.
+        total_db_queries:
+          type: integer
+          description: Total database queries in the last 24h.
+        avg_cpu_percent:
+          type: number
+        avg_memory_mb:
+          type: number
+        total_cost_usd:
+          type: number
+          description: Total cost in USD for the last 24h.
+        resource_efficiency_score:
+          type: number
+          description: '0–100.'
+        last_updated:
+          type: string
+          format: date-time
+    MessageResponse:
+      type: object
+      additionalProperties: false
+      description: 'Generic confirmation envelope — `{ "message": "..." }`.'
+      required:
+        - message
+      properties:
+        message:
+          type: string
+    LegacyError:
+      type: object
+      additionalProperties: true
+      description: CURRENT error shape — a single human-readable string under `error`. Superseded by the ADR-0002 Error envelope as endpoints are hardened.
+      required:
+        - error
+      properties:
+        error:
+          type: string

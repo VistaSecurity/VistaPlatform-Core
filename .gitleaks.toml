@@ -1,0 +1,50 @@
+# gitleaks configuration for the public Vista Platform tree.
+#
+# This is NOT the internal repo's config. That one allowlists paths which do not
+# exist here (lab sensor captures, dev key material) and names our secret store,
+# so the export deletes it. Shipping nothing in its place left the public
+# repository with no scanner configuration at all — anyone running gitleaks
+# against a clone got the stock ruleset and a wall of false positives from the
+# test fixtures and algorithm names below, which is a good way to teach people
+# to ignore the scanner.
+#
+#   gitleaks detect --no-banner --redact
+#
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures and cryptographic vocabulary — not credentials."
+
+paths = [
+  # Deterministic test vectors. These exist so the crypto has known-answer
+  # tests; they are not credentials to anything and are meant to be readable.
+  '''shared/security/encryption/encryption_test\.go''',
+  '''shared/security/jwtkeys/verifier_test\.go''',
+  '''shared/agentcreds/.*''',
+  '''.*_test\.go''',
+  '''.*\.test\.ts''',
+  # Seed and demo data: algorithm catalogue rows and synthetic findings whose
+  # field names ("key_exchange", "key_exchange_algorithm") trip the generic
+  # API-key rule. The seeded platform-admin password hash IS published on
+  # purpose — see scripts/database/seed.sql, where every seeded admin carries
+  # force_password_change so it grants only a change-password-only session.
+  '''scripts/database/seed\.sql''',
+  '''democorp-seed/.*''',
+  # Documentation showing the SHAPE of a credential, with placeholder values.
+  '''docsv4/.*\.md''',
+  '''.*/CERTIFICATE_MANAGEMENT\.md''',
+  # The code scanner's own rule table. It contains the literal string
+  # "-----BEGIN RSA PRIVATE KEY-----" because that is the PATTERN it hunts for
+  # in customer source. A secret scanner flagging another secret scanner's
+  # signatures is the canonical false positive.
+  '''services/device-interrogation-service/internal/services/codescan/rules\.go''',
+]
+
+regexes = [
+  # Cryptographic algorithm identifiers, not secrets.
+  '''key_exchange(_algorithm)?''',
+  # Documentation placeholders, including the literal token stand-ins used in
+  # example curl commands ("Authorization: Bearer YOUR_TOKEN").
+  '''REPLACE_ME|CHANGE_ME|YOUR_TOKEN|your-[a-z-]+-here|xxxxx+|T00000000''',
+]

@@ -1,0 +1,84 @@
+# Production image for admin-ui-v2 — the Vista Admin Console.
+#
+# BUILD CONTEXT = REPO ROOT (not admin-ui-v2/). admin-ui-v2 is an npm workspace
+# member that imports @vistasecurity/api-contract (api/) and
+# @vistasecurity/primitives (packages/primitives/) as TypeScript SOURCE, so the
+# build needs the root package.json/lock plus those workspaces. Build with:
+#
+#   docker build -f admin-ui-v2/Dockerfile.prod -t <image> .          # from repo root
+#
+# Like frontend-v2, this image bakes in NO API URL: the typed clients use
+# relative /api/* paths (see api/clients/typescript/client.ts), so the UI is
+# same-origin with the API behind Traefik in every environment — zero API config.
+ARG NODE_BUILDER=node:24-alpine
+ARG GO_BUILDER_IMAGE=golang:1.26-alpine
+FROM ${NODE_BUILDER} AS builder
+WORKDIR /repo
+
+# Version metadata (parity with the About surface). Stamped at release time;
+# defaults keep local builds meaningful.
+ARG VITE_APP_VERSION=dev
+ARG VITE_GIT_SHA=unknown
+ARG VITE_BUILD_DATE=unknown
+ENV VITE_APP_VERSION=$VITE_APP_VERSION \
+    VITE_GIT_SHA=$VITE_GIT_SHA \
+    VITE_BUILD_DATE=$VITE_BUILD_DATE
+
+# Workspace sources first (all package.json must be present for `npm ci` to
+# resolve the workspace tree against the root lockfile). node_modules is excluded
+# by the root .dockerignore, so this is a clean install.
+COPY package.json package-lock.json ./
+COPY api/ ./api/
+COPY packages/ ./packages/
+COPY admin-ui-v2/ ./admin-ui-v2/
+RUN npm ci
+RUN npm run build -w admin-ui-v2
+
+# ---- caddy build: compile Caddy on Go 1.26.5 ----
+# The stock caddy:2-alpine binary (even at 2.11.4) is compiled with Go stdlib
+# 1.26.3, which Trivy still flags (CVE-2026-27145/-42504/-42507). Rebuild the
+# Caddy binary ourselves on the repo's Go 1.26.5 toolchain so the runtime carries
+# stdlib 1.26.5 (also clears GO-2026-5856/CVE-2026-42505). Pinned to Caddy v2.11.4
+# (its own CVE fix, and its go.mod already pulls patched x/crypto/x/net/go-jose);
+# GOTOOLCHAIN=local honors the repo's Go-1.26-only rule (no auto-download of a
+# newer toolchain).
+FROM ${GO_BUILDER_IMAGE} AS caddybuild
+ENV GOTOOLCHAIN=local CGO_ENABLED=0
+RUN go install github.com/caddyserver/caddy/v2/cmd/caddy@v2.11.4
+
+# ---- runtime: Caddy static server (mirrors frontend-v2/Dockerfile.prod) ----
+# Pinned by digest to defeat tag-mover attacks on docker.io/library/caddy.
+# caddy:2-alpine → Caddy v2.11.4 on Alpine 3.23.5. Bumped from the 2.11.3 pin to
+# clear the Trivy scan findings this base carried: Caddy CVE-2026-52844/52845
+# (fix 2.11.4), the bundled Go x/crypto/x/net/go-jose + stdlib CVEs, and the Alpine
+# OpenSSL CVE-2026-45447 (libssl3/libcrypto3 3.5.7-r0) + curl 8.19.0-r0. The
+# runtime Caddy binary is then replaced with the Go-1.26.5 build above to clear
+# the residual stdlib CVEs. See
+# docsv4/internal/developer/security/2026-07-frontend-caddy-cve-remediation.md.
+FROM caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+
+# Swap in the Go-1.26.5-compiled Caddy binary (stdlib 1.26.5, patched deps).
+# Unlike the stock caddy:2-alpine binary, this one carries NO file capabilities,
+# so there is no cap_net_bind_service to strip (we bind 3007, never a privileged
+# port, and the chart's strict containerSecurityContext drops ALL caps anyway).
+# The prior `setcap -r` step is therefore gone — it would error on the cap-free
+# binary ("no such attribute").
+COPY --from=caddybuild /go/bin/caddy /usr/bin/caddy
+
+RUN addgroup -g 1001 -S appgroup && adduser -u 1001 -S appuser -G appgroup
+
+COPY --from=builder --chown=appuser:appgroup /repo/admin-ui-v2/dist /srv
+COPY --chown=appuser:appgroup admin-ui-v2/Caddyfile /etc/caddy/Caddyfile
+
+# Writable dirs for Caddy runtime state (image declares VOLUME /config /data)
+RUN mkdir -p /config/caddy /data/caddy \
+    && chown -R appuser:appgroup /config /data
+
+USER appuser
+
+EXPOSE 3007
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD wget -qO- http://localhost:3007/health || exit 1
+
+CMD ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]

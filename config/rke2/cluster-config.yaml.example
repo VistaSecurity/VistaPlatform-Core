@@ -1,0 +1,64 @@
+# Example RKE2 server configuration.
+# Copy to /etc/rancher/rke2/config.yaml on the RKE2 server node before starting rke2-server.
+#
+# Used by scripts/install-rke2-server.sh, which copies this file into place if no
+# /etc/rancher/rke2/config.yaml exists. Edit values below to match your environment.
+#
+# RKE2 docs: https://docs.rke2.io/install/configuration
+
+# CIS hardening profile. Required for VistaPlatform deployments.
+# Before enabling, create the required system users:
+#   sudo useradd -r -c "kube-apiserver user" -s /sbin/nologin -M kube-apiserver
+#   sudo useradd -r -c "etcd user" -s /sbin/nologin -M etcd
+profile: cis
+
+# CIS requires the kubeconfig to be readable only by root (not world-readable).
+write-kubeconfig-mode: "0600"
+
+# Hostnames or IPs that should appear in the API server certificate SANs.
+# Add any IP, FQDN, or load balancer hostname through which kubectl will connect.
+tls-san:
+  - "vistaplatform.local"
+  - "rke2.local"
+
+# Network plugin. RKE2 default is canal; change to cilium or calico if needed.
+cni:
+  - canal
+
+# Audit logging — required by CIS benchmark and VistaPlatform deployment guide.
+# Create /etc/rancher/rke2/audit-policy.yaml before starting rke2-server.
+kube-apiserver-arg:
+  - audit-log-path=/var/lib/rancher/rke2/server/logs/audit.log
+  - audit-log-maxage=30
+  - audit-log-maxbackup=10
+  - audit-log-maxsize=100
+  - audit-policy-file=/etc/rancher/rke2/audit-policy.yaml
+
+# Kubernetes feature gates. Leave empty for defaults.
+# kube-apiserver-arg:
+#   - "feature-gates=ReadWriteOncePod=true"
+
+# Disable bundled components.
+#
+# IMPORTANT: RKE2 v1.30+ ships rke2-ingress-nginx (NOT Traefik) as the bundled
+# ingress controller. The VistaPlatform chart emits Traefik-only IngressRoute and
+# Middleware CRDs, so nginx cannot serve them. We disable nginx here and
+# install Traefik explicitly per deployment-guide §3.5.
+disable:
+  - rke2-ingress-nginx
+
+# Other optional components you may want to disable:
+# disable:
+#   - rke2-ingress-nginx
+#   - rke2-metrics-server
+#   - rke2-snapshot-controller
+
+# Node label and taint examples (uncomment to apply).
+# node-label:
+#   - "node-role.kubernetes.io/vistaplatform=true"
+# node-taint:
+#   - "vistaplatform-only=true:NoSchedule"
+
+# Etcd snapshot retention.
+etcd-snapshot-retention: 10
+etcd-snapshot-schedule-cron: "0 */6 * * *"

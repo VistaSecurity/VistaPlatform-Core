@@ -1,0 +1,59 @@
+{{- include "vistaplatform.validateTLS" . -}}
+{{- include "vistaplatform.validateMtls" . -}}
+{{- include "vistaplatform.validateRls" . -}}
+{{- $derivedScheme := ternary "http" "https" (eq .Values.tls.mode "none") -}}
+{{- $tlsScheme := default $derivedScheme .Values.tls.externalScheme -}}
+{{- $publicHost := include "vistaplatform.publicHost" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vistaplatform.fullname" . }}-config
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+data:
+  ENV: {{ .Values.appConfig.env | quote }}
+  LOG_LEVEL: {{ .Values.appConfig.logLevel | quote }}
+  PORT: {{ .Values.appConfig.port | quote }}
+  {{- if .Values.serviceMtls.enabled }}
+  # App-level mTLS active (serviceMtls.enabled): backends serve their real API on
+  # the mTLS listener (TLS_PORT) and reduce :8080 to the kubelet /health probe.
+  # Cert files come from the per-service <svc>-mtls Secret mounted at /app/certs
+  # (cert-manager default filenames). Peer URLs are derived from USE_MTLS in
+  # shared/config (https://<svc>:8443) — see CHART-V0.1.2-MTLS-PLAN.md §4.
+  USE_MTLS: "true"
+  TLS_PORT: "8443"
+  SERVICE_CERT_PATH: /app/certs/tls.crt
+  SERVICE_KEY_PATH: /app/certs/tls.key
+  CLIENT_CERT_PATH: /app/certs/tls.crt
+  CLIENT_KEY_PATH: /app/certs/tls.key
+  PLATFORM_CA_CERT_PATH: /app/certs/ca.crt
+  {{- else }}
+  USE_MTLS: "false"
+  {{- end }}
+  NATS_URL: "nats://nats:4222"
+  COOKIE_DOMAIN: {{ printf ".%s" $publicHost | quote }}
+  COOKIE_SECURE: {{ include "vistaplatform.cookieSecure" . | quote }}
+  WEB_UI_BASE_URL: {{ printf "%s://%s" $tlsScheme $publicHost | quote }}
+  # Public base URL for the OAuth/OIDC SSO redirect_uri the auth-service hands to
+  # the identity provider (Google, etc.). The callback route lives under the
+  # tenant app host, so default it to the same origin as WEB_UI_BASE_URL; an
+  # operator can override via appConfig.oauthCallbackBaseURL. When unset the
+  # service falls back to a localhost default and the provider rejects the
+  # redirect_uri —.
+  OAUTH_CALLBACK_BASE_URL: {{ .Values.appConfig.oauthCallbackBaseURL | default (printf "%s://%s" $tlsScheme $publicHost) | quote }}
+  {{- $adminHost := .Values.tls.adminDnsName | default $publicHost }}
+  ADMIN_UI_BASE_URL: {{ printf "%s://%s" $tlsScheme $adminHost | quote }}
+  DB_MAX_OPEN_CONNS: {{ .Values.appConfig.dbMaxOpenConns | quote }}
+  DB_MAX_IDLE_CONNS: {{ .Values.appConfig.dbMaxIdleConns | quote }}
+  NATS_STREAM_REPLICAS: {{ .Values.appConfig.natsStreamReplicas | quote }}
+  REDIS_POOL_SIZE: {{ .Values.appConfig.redisPoolSize | quote }}
+  REDIS_MIN_IDLE_CONNS: {{ .Values.appConfig.redisMinIdleConns | quote }}
+  LICENSE_TOKEN_FILE: {{ printf "%s/%s" .Values.license.mountPath .Values.license.secretKey | quote }}
+  # Chart version surfaced on every backend pod so the About page can show
+  # platform-side version info alongside per-service image tags. Sourced
+  # from Chart.yaml — never hand-edit. SERVICE_VERSION is set per pod in
+  # the backend deployment template, because each service can carry its
+  # own image-tag override and that's the variable an operator most needs
+  # to see when diagnosing "did the upgrade take?".
+  CHART_VERSION: {{ .Chart.Version | quote }}
+  CHART_APP_VERSION: {{ .Chart.AppVersion | quote }}

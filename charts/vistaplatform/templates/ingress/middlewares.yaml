@@ -1,0 +1,761 @@
+{{/*
+  GENERATED FILE. DO NOT EDIT.
+  Source: standards/service-registry.yaml
+  Generator: scripts/generate-k8s-ingress.mjs
+  Regenerate with: make generate-k8s-ingress
+*/}}
+{{/*
+  Gated on .Values.ingress.controller: this entire file emits nothing
+  when the operator selected an ingress controller other than Traefik
+  (e.g. "none" — bring-your-own-ingress, nginx-ingress, Istio, Gateway
+  API). See values.yaml `ingress:` block for the supported values.
+*/}}
+{{- if eq (.Values.ingress.controller | default "traefik") "traefik" }}
+{{- include "vistaplatform.validateTLS" . -}}
+{{- $tlsMode := .Values.tls.mode -}}
+{{- $fullname := include "vistaplatform.fullname" . -}}
+{{- $namespace := .Release.Namespace -}}
+{{- $dnsName := include "vistaplatform.publicHost" . -}}
+{{- $adminDnsName := .Values.tls.adminDnsName | default "" -}}
+{{- $apiHost := printf "Host(`%s`)" $dnsName -}}
+{{- if $adminDnsName }}{{- $apiHost = printf "(Host(`%s`) || Host(`%s`))" $dnsName $adminDnsName -}}{{- end -}}
+{{- $entryPoints := list "websecure" -}}
+{{- $tlsSecret := "" -}}
+{{- if or (eq $tlsMode "certManager") (eq $tlsMode "selfSigned") -}}{{- $tlsSecret = printf "%s-tls" $fullname -}}{{- end -}}
+{{- if eq $tlsMode "existingSecret" -}}{{- $tlsSecret = .Values.tls.existingSecretName -}}{{- end -}}
+{{- if eq $tlsMode "none" -}}{{- $entryPoints = list "web" -}}{{- end -}}
+{{- $adminPlaneSplit := and $adminDnsName .Values.adminPlane.restrictToAdminHost -}}
+{{- $adminAllowList := "" -}}
+{{- if and $adminPlaneSplit .Values.adminPlane.ipAllowList.enabled -}}
+{{- if not .Values.adminPlane.ipAllowList.sourceRange -}}
+{{- fail "adminPlane.ipAllowList.enabled is true but adminPlane.ipAllowList.sourceRange is empty — an allow-list with no entries would lock every operator out of the admin console" -}}
+{{- end -}}
+{{- $adminAllowList = .Values.adminPlane.ipAllowList -}}
+{{- end -}}
+
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: cors-headers
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  headers:
+    accessControlAllowOriginList:
+      - "https://{{ $dnsName }}"
+      {{- if .Values.tls.adminDnsName }}
+      - "https://{{ .Values.tls.adminDnsName }}"
+      {{- end }}
+      {{- range .Values.gateway.extraCorsOrigins | default list }}
+      - {{ . | quote }}
+      {{- end }}
+    accessControlAllowMethods:
+      - GET
+      - POST
+      - PUT
+      - PATCH
+      - DELETE
+      - OPTIONS
+    accessControlAllowHeaders:
+      - Authorization
+      - Content-Type
+      - X-Requested-With
+      - X-Impersonate-Tenant
+      - X-Tenant-ID
+      - X-User-ID
+      - X-CSRF-Token
+    accessControlAllowCredentials: true
+    accessControlMaxAge: 86400
+    addVaryHeader: true
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: security-headers
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  headers:
+    frameDeny: true
+    contentTypeNosniff: true
+    browserXssFilter: true
+    referrerPolicy: strict-origin-when-cross-origin
+    contentSecurityPolicy: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'
+      https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: https:;
+      connect-src 'self' https:; frame-ancestors 'none';"
+    customResponseHeaders:
+      Permissions-Policy: camera=(), microphone=(), geolocation=()
+    {{- if ne .Values.tls.mode "none" }}
+    stsSeconds: 31536000
+    stsIncludeSubdomains: true
+    stsPreload: true
+    {{- end }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-backend-cors
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  headers:
+    customResponseHeaders:
+      Access-Control-Allow-Origin: ""
+      Access-Control-Allow-Methods: ""
+      Access-Control-Allow-Headers: ""
+      Access-Control-Allow-Credentials: ""
+      Access-Control-Max-Age: ""
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rate-limit-api
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  rateLimit:
+    average: 1000
+    burst: 2000
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rate-limit-auth
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  rateLimit:
+    average: 200
+    burst: 400
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: compress
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  compress:
+    minResponseBodyBytes: 1024
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: body-size-limit
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  buffering:
+    maxRequestBodyBytes: 104857600
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: retry
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  retry:
+    attempts: 3
+    initialInterval: 100ms
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: deny-admin-plane
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  ipAllowList:
+    sourceRange:
+      - 192.0.2.0/24
+    rejectStatusCode: 404
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: deny-internal-plane
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  ipAllowList:
+    sourceRange:
+      - 192.0.2.0/24
+    rejectStatusCode: 404
+{{- if $adminAllowList }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: admin-plane-allowlist
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  ipAllowList:
+    sourceRange:
+      {{- range $adminAllowList.sourceRange }}
+      - {{ . | quote }}
+      {{- end }}
+    {{- with $adminAllowList.ipStrategy }}
+    {{- if or .depth .excludedIPs }}
+    ipStrategy:
+      {{- if .depth }}
+      depth: {{ .depth }}
+      {{- end }}
+      {{- with .excludedIPs }}
+      excludedIPs:
+        {{- range . }}
+        - {{ . | quote }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- end }}
+{{- end }}
+{{- if ne $tlsMode "none" }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+{{- end }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: circuit-breaker-auth-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  circuitBreaker:
+    expression: ResponseCodeRatio(500, 600, 0, 600) > 0.30
+    checkPeriod: 10s
+    fallbackDuration: 30s
+    recoveryDuration: 60s
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: circuit-breaker-inventory-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  circuitBreaker:
+    expression: ResponseCodeRatio(500, 600, 0, 600) > 0.30
+    checkPeriod: 10s
+    fallbackDuration: 30s
+    recoveryDuration: 60s
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: circuit-breaker-compliance-engine
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  circuitBreaker:
+    expression: ResponseCodeRatio(500, 600, 0, 600) > 0.30
+    checkPeriod: 10s
+    fallbackDuration: 30s
+    recoveryDuration: 60s
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: circuit-breaker-cbom-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  circuitBreaker:
+    expression: ResponseCodeRatio(500, 600, 0, 600) > 0.30
+    checkPeriod: 10s
+    fallbackDuration: 30s
+    recoveryDuration: 60s
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: circuit-breaker-sensor-manager
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  circuitBreaker:
+    expression: ResponseCodeRatio(500, 600, 0, 600) > 0.30
+    checkPeriod: 10s
+    fallbackDuration: 30s
+    recoveryDuration: 60s
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: circuit-breaker-cluster-sensor-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  circuitBreaker:
+    expression: ResponseCodeRatio(500, 600, 0, 600) > 0.30
+    checkPeriod: 10s
+    fallbackDuration: 30s
+    recoveryDuration: 60s
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: circuit-breaker-admin-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  circuitBreaker:
+    expression: ResponseCodeRatio(500, 600, 0, 600) > 0.30
+    checkPeriod: 10s
+    fallbackDuration: 30s
+    recoveryDuration: 60s
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: circuit-breaker-monitoring-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  circuitBreaker:
+    expression: ResponseCodeRatio(500, 600, 0, 600) > 0.30
+    checkPeriod: 10s
+    fallbackDuration: 30s
+    recoveryDuration: 60s
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: circuit-breaker-resource-tracker-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  circuitBreaker:
+    expression: ResponseCodeRatio(500, 600, 0, 600) > 0.30
+    checkPeriod: 10s
+    fallbackDuration: 30s
+    recoveryDuration: 60s
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: circuit-breaker-tenant-health-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  circuitBreaker:
+    expression: ResponseCodeRatio(500, 600, 0, 600) > 0.30
+    checkPeriod: 10s
+    fallbackDuration: 30s
+    recoveryDuration: 60s
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: circuit-breaker-device-interrogation-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  circuitBreaker:
+    expression: ResponseCodeRatio(500, 600, 0, 600) > 0.30
+    checkPeriod: 10s
+    fallbackDuration: 30s
+    recoveryDuration: 60s
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: circuit-breaker-audit-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  circuitBreaker:
+    expression: ResponseCodeRatio(500, 600, 0, 600) > 0.30
+    checkPeriod: 10s
+    fallbackDuration: 30s
+    recoveryDuration: 60s
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: circuit-breaker-notification-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  circuitBreaker:
+    expression: ResponseCodeRatio(500, 600, 0, 600) > 0.30
+    checkPeriod: 10s
+    fallbackDuration: 30s
+    recoveryDuration: 60s
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: circuit-breaker-discovery-processor-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  circuitBreaker:
+    expression: ResponseCodeRatio(500, 600, 0, 600) > 0.30
+    checkPeriod: 10s
+    fallbackDuration: 30s
+    recoveryDuration: 60s
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: circuit-breaker-mcp-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  circuitBreaker:
+    expression: ResponseCodeRatio(500, 600, 0, 600) > 0.30
+    checkPeriod: 10s
+    fallbackDuration: 30s
+    recoveryDuration: 60s
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: circuit-breaker-pcap-processor
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  circuitBreaker:
+    expression: ResponseCodeRatio(500, 600, 0, 600) > 0.30
+    checkPeriod: 10s
+    fallbackDuration: 30s
+    recoveryDuration: 60s
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rewrite-auth-service-health
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePath:
+    path: /health
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rewrite-inventory-service-health
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePath:
+    path: /health
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rewrite-compliance-engine-health
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePath:
+    path: /health
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rewrite-cbom-service-health
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePath:
+    path: /health
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rewrite-sensor-manager-health
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePath:
+    path: /health
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rewrite-cluster-sensor-service-health
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePath:
+    path: /health
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rewrite-admin-service-health
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePath:
+    path: /health
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rewrite-monitoring-service-health
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePath:
+    path: /health
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rewrite-resource-tracker-service-health
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePath:
+    path: /health
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rewrite-tenant-health-service-health
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePath:
+    path: /health
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rewrite-device-interrogation-service-health
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePath:
+    path: /health
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rewrite-audit-service-health
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePath:
+    path: /health
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rewrite-notification-service-health
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePath:
+    path: /health
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rewrite-discovery-processor-service-health
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePath:
+    path: /health
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rewrite-mcp-service-health
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePath:
+    path: /health
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rewrite-pcap-processor-health
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePath:
+    path: /health
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: v2-to-v1-auth-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePathRegex:
+    regex: ^/api/v2/auth-service/(.*)
+    replacement: /api/v1/auth-service/$1
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: v2-to-v1-compliance-engine
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePathRegex:
+    regex: ^/api/v2/compliance-engine/(.*)
+    replacement: /api/v1/compliance-engine/$1
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: v2-to-v1-cbom-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePathRegex:
+    regex: ^/api/v2/cbom-service/(.*)
+    replacement: /api/v1/cbom-service/$1
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: v2-to-v1-sensor-manager
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePathRegex:
+    regex: ^/api/v2/sensor-manager/(.*)
+    replacement: /api/v1/sensor-manager/$1
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: v2-to-v1-cluster-sensor-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePathRegex:
+    regex: ^/api/v2/cluster-sensor-service/(.*)
+    replacement: /api/v1/cluster-sensor-service/$1
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: v2-to-v1-admin-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePathRegex:
+    regex: ^/api/v2/admin-service/(.*)
+    replacement: /api/v1/admin-service/$1
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: v2-to-v1-monitoring-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePathRegex:
+    regex: ^/api/v2/monitoring-service/(.*)
+    replacement: /api/v1/monitoring-service/$1
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: v2-to-v1-resource-tracker-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePathRegex:
+    regex: ^/api/v2/resource-tracker-service/(.*)
+    replacement: /api/v1/resource-tracker-service/$1
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: v2-to-v1-tenant-health-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePathRegex:
+    regex: ^/api/v2/tenant-health-service/(.*)
+    replacement: /api/v1/tenant-health-service/$1
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: v2-to-v1-device-interrogation-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePathRegex:
+    regex: ^/api/v2/device-interrogation-service/(.*)
+    replacement: /api/v1/device-interrogation-service/$1
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: v2-to-v1-audit-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePathRegex:
+    regex: ^/api/v2/audit-service/(.*)
+    replacement: /api/v1/audit-service/$1
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: v2-to-v1-notification-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePathRegex:
+    regex: ^/api/v2/notification-service/(.*)
+    replacement: /api/v1/notification-service/$1
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: v2-to-v1-discovery-processor-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePathRegex:
+    regex: ^/api/v2/discovery-processor-service/(.*)
+    replacement: /api/v1/discovery-processor-service/$1
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: v2-to-v1-mcp-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePathRegex:
+    regex: ^/api/v2/mcp-service/(.*)
+    replacement: /api/v1/mcp-service/$1
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: v2-to-v1-pcap-processor
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePathRegex:
+    regex: ^/api/v2/pcap-processor/(.*)
+    replacement: /api/v1/pcap-processor/$1
+{{- end }}

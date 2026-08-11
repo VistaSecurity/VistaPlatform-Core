@@ -1,0 +1,32 @@
+# Development Dockerfile for discovery-processor-service
+ARG GO_BUILDER_IMAGE=golang:1.26-alpine
+ARG RUNTIME_IMAGE=alpine:3.24.1
+FROM ${GO_BUILDER_IMAGE} AS builder
+
+WORKDIR /workspace
+RUN apk add --no-cache ca-certificates tzdata git
+
+# Explicitly enable workspace mode
+ENV GOWORK=/workspace/go.work
+ENV GOTOOLCHAIN=local
+
+# Copy workspace files in correct order
+COPY go.work ./
+COPY shared ./shared
+COPY shared/rbac ./shared/rbac
+COPY services ./services
+COPY sensor ./sensor
+COPY device-agent ./device-agent
+# Build from workspace root
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/main ./services/discovery-processor-service/cmd
+
+FROM ${RUNTIME_IMAGE}
+RUN apk --no-cache add ca-certificates tzdata
+WORKDIR /app
+RUN addgroup -g 1001 -S appgroup && adduser -u 1001 -S appuser -G appgroup
+COPY --from=builder /out/main ./main
+RUN chown appuser:appgroup ./main && chmod +x ./main
+USER appuser
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+CMD ["./main"]

@@ -1,0 +1,73 @@
+{{/*
+Self-signed edge certificate, for tls.mode=selfSigned.
+
+This mode exists so that `helm install` works with no arguments and still
+serves HTTPS. The alternatives were both bad: defaulting to certManager meant
+the first command failed unless you already had an issuer, and defaulting to
+`none` meant shipping a security product that serves its login page over plain
+HTTP by default.
+
+A self-signed cert produces a browser warning, which is honest — it says "this
+is not a trusted certificate", and for an evaluation on a laptop or a single VM
+that is exactly the truth. Anyone running this for real sets tls.mode to
+certManager or existingSecret and gets a proper chain.
+
+Generated once and then reused: the lookup below reads back the existing Secret
+on upgrade, so the cert does not churn on every `helm upgrade` (which would
+break every open session and re-trigger the browser warning).
+
+Reuse is conditional on the HOSTS being unchanged, and that condition is the
+whole reason this file is more than four lines. Reusing unconditionally meant
+that setting tls.dnsName on an existing release — the exact upgrade someone
+performs when they move from a laptop lookaround to a real hostname — kept the
+old certificate, whose SAN no longer matched anything being requested. Traefik
+then found no SNI match and quietly served its own default certificate, so the
+browser reported a certificate for `*.traefik.default` and `helm upgrade`
+reported success. Nothing anywhere said the chart's certificate had gone stale.
+
+The generated-for hosts are therefore recorded on the Secret and compared here.
+An annotation rather than parsing the certificate because Helm's template
+functions cannot read an x509 SAN — and a value we wrote ourselves is a more
+honest record of intent than one re-derived from the artifact anyway. A Secret
+written by an older chart has no annotation, so it compares unequal and is
+reissued once on the next upgrade; that is the correct outcome for it too.
+*/}}
+{{- if eq .Values.tls.mode "selfSigned" }}
+{{- $name := printf "%s-tls" (include "vistaplatform.fullname" .) }}
+{{- $dns := include "vistaplatform.publicHost" . }}
+{{- $alt := list $dns }}
+{{- if .Values.tls.adminDnsName }}{{- $alt = append $alt .Values.tls.adminDnsName }}{{- end }}
+{{- $wantHosts := join "," $alt }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $name }}
+{{- $haveHosts := "" }}
+{{- if and $existing $existing.metadata.annotations }}
+{{- $haveHosts = index $existing.metadata.annotations "vistaplatform.io/tls-hosts" | default "" }}
+{{- end }}
+{{- $crt := "" }}
+{{- $key := "" }}
+{{- if and $existing (eq $haveHosts $wantHosts) }}
+{{- $crt = index $existing.data "tls.crt" | b64dec }}
+{{- $key = index $existing.data "tls.key" | b64dec }}
+{{- else }}
+{{- $cert := genSelfSignedCert $dns nil $alt 3650 }}
+{{- $crt = $cert.Cert }}
+{{- $key = $cert.Key }}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+    # The hosts this certificate was issued for. Compared on every upgrade;
+    # a mismatch reissues. Do not edit by hand — editing it to match a
+    # certificate that does not cover these hosts restores the silent failure
+    # described at the top of this file.
+    vistaplatform.io/tls-hosts: {{ $wantHosts | quote }}
+type: kubernetes.io/tls
+data:
+  tls.crt: {{ $crt | b64enc }}
+  tls.key: {{ $key | b64enc }}
+{{- end }}

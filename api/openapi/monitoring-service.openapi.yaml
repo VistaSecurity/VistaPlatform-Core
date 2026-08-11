@@ -1,0 +1,1116 @@
+openapi: 3.1.0
+info:
+  title: VistaPlatform — monitoring-service API
+  version: 0.1.0
+  description: |
+    Spec-first contract for monitoring-service (ADR-0001). First slice for this
+    service, covering the **tenant system-status** surface (`/status/*`) — the
+    Dashboard health widget and Operations system-status reads a tenant sees.
+    UI consumer: `web-ui/src/services/status-api.ts` (`getSystemHealthOverview`).
+
+    ## Testability note
+
+    Four of the five handlers depend only on the in-memory HealthService; the
+    fifth (`/status/health/overview`) additionally made two direct `*sql.DB`
+    calls (a sensor-stats query + a ping). This slice landed a behaviour-
+    preserving refactor first: the `healthService` field is now the
+    `healthStatusProvider` interface and the two DB calls moved verbatim into a
+    `healthStore` interface + `healthRepository`
+    (`services/monitoring-service/internal/api/health_status_repository.go`), so
+    the real gin handlers run over httptest with in-memory stubs — no database.
+    See the Go contract test
+    (`services/monitoring-service/internal/api/status_contract_test.go`).
+
+    ## Scope of this spec
+
+    The tenant `/status` endpoints on `/api/v1/monitoring-service/status/...`:
+
+      - `GET /status/system`            — full system status
+      - `GET /status/metrics`           — the metrics block only
+      - `GET /status/health/overview`   — the Dashboard health widget shape
+      - `GET /status/services/{name}`   — one service's status (404 if unknown)
+      - `GET /status/incidents`         — incident history (empty array stub today)
+
+    Out of scope: the platform/admin status surface (`/admin-service/status/*`)
+    and the metrics/logs/alerting/SIEM/trends endpoints on this service.
+
+    ## Shape status
+
+    These document the current shapes captured from the real handlers (typed Go
+    structs for system status + health overview, a bare empty array for
+    incidents, errors as `{ "error": "..." }`). They predate the ADR-0002
+    envelope and are pinned here as-is so drift is caught.
+servers:
+  - url: /api/v1/monitoring-service
+    description: Via the API gateway (JWT auth, tenant-scoped).
+paths:
+  /status/system:
+    get:
+      operationId: getSystemStatus
+      tags:
+      - status
+      summary: Full system status
+      responses:
+        '200':
+          description: The aggregated system status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemStatusResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+  /status/metrics:
+    get:
+      operationId: getSystemMetrics
+      tags:
+      - status
+      summary: System metrics block
+      responses:
+        '200':
+          description: The metrics block of the system status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemMetrics'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+  /status/health/overview:
+    get:
+      operationId: getHealthOverview
+      tags:
+      - status
+      summary: Dashboard system-health overview
+      responses:
+        '200':
+          description: The tenant-facing health overview (sensors, services, database).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemHealthOverview'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+  /status/services/{name}:
+    parameters:
+    - name: name
+      in: path
+      required: true
+      description: Service name to look up within the system status.
+      schema:
+        type: string
+    get:
+      operationId: getServiceStatus
+      tags:
+      - status
+      summary: One service's status
+      responses:
+        '200':
+          description: The matching service status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceStatus'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+  /status/incidents:
+    get:
+      operationId: getIncidentHistory
+      tags:
+      - status
+      summary: Incident history
+      description: 'Returns a bare JSON array. Today this is always empty (`[]`) — the incidents table is not yet wired; the shape is pinned so a future implementation is caught by the contract test.'
+      responses:
+        '200':
+          description: The incident history (empty array stub today).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncidentList'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+  /version:
+    get:
+      operationId: getVersionAggregate
+      tags:
+      - status
+      summary: Aggregated version / release-skew across services (About page)
+      description: 'Fans out to each peer service''s /health and returns this service''s own version (`self`), a per-service breakdown (`services`), a four-state `status` (aligned/skew/degraded/unknown) with reachability `summary` counts, the legacy `aligned` boolean (status == aligned), and the mismatched fields (`skew`) when status is "skew". UI consumer: web-ui About page.'
+      responses:
+        '200':
+          description: The aggregated version report.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+
+  # ===========================================================================
+  # Platform alerting surface (admin-ui) — behind RequirePlatformAuth +
+  # platform.health permission. UI consumer: admin-ui/src/services/status-api.ts.
+  # ===========================================================================
+  /alerting/thresholds:
+    get:
+      operationId: getAlertThresholds
+      tags:
+      - alerting
+      summary: List alert thresholds
+      description: |
+        Lists configured alert thresholds, with optional `service_name` and
+        `enabled` (bool) query filters. `thresholds` is null when none match
+        (the service returns a nil slice); `count` is its length.
+      parameters:
+        - name: service_name
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: enabled
+          in: query
+          required: false
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: The matching thresholds.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertThresholdListResponse'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+    post:
+      operationId: createAlertThreshold
+      tags:
+      - alerting
+      summary: Create an alert threshold
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAlertThresholdRequest'
+      responses:
+        '201':
+          description: The created threshold (bare object).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertThreshold'
+        '400':
+          description: Invalid request body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: The threshold could not be created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /alerting/thresholds/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getAlertThreshold
+      tags:
+      - alerting
+      summary: Get a single alert threshold
+      responses:
+        '200':
+          description: The threshold (bare object).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertThreshold'
+        '400':
+          description: Invalid threshold ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '404':
+          description: Threshold not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+    put:
+      operationId: updateAlertThreshold
+      tags:
+      - alerting
+      summary: Update an alert threshold
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAlertThresholdRequest'
+      responses:
+        '200':
+          description: The updated threshold (bare object).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertThreshold'
+        '400':
+          description: Invalid threshold ID or body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: The threshold could not be updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+    delete:
+      operationId: deleteAlertThreshold
+      tags:
+      - alerting
+      summary: Delete an alert threshold
+      responses:
+        '200':
+          description: Deletion confirmation message.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertThresholdDeletedResponse'
+        '400':
+          description: Invalid threshold ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: The threshold could not be deleted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /alerting/history:
+    get:
+      operationId: getAlertHistory
+      tags:
+      - alerting
+      summary: List triggered alerts (history)
+      description: |
+        Returns triggered alerts with optional `service_name` and `status`
+        filters. `limit` defaults to 50 (max 500) and `offset` to 0; both are
+        echoed back. `count` is the total matching count (not the page size).
+        `alerts` is null when none match.
+      parameters:
+        - name: service_name
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: The matching alert history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertHistoryResponse'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+
+  # ===========================================================================
+  # Historical trends, admin status, gateway proxy (admin-ui status/gateway).
+  # UI consumers: admin-ui/src/services/status-api.ts + gateway-api.ts.
+  # The gateway/* endpoints transparently proxy Traefik's dashboard API server-
+  # side; their 200 bodies are whatever Traefik returns (passthrough).
+  # ===========================================================================
+  /trends:
+    get:
+      operationId: getHistoricalTrends
+      tags:
+      - trends
+      summary: Historical metric trends
+      description: |
+        Returns time-bucketed trend points for a metric. `window` must be
+        `1m`/`1h`/`1d`; `metric_type` one of latency_p50/p95/p99/error_rate/
+        throughput. `trends` is null when there are no points.
+      parameters:
+      - name: service_name
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: metric_type
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: window
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: start
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+      - name: end
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+      responses:
+        '200':
+          description: The trend series.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrendsResponse'
+        '400':
+          description: Invalid window or metric_type.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /admin/status:
+    get:
+      operationId: getAdminSystemStatus
+      tags:
+      - status
+      summary: Platform admin system status (health + platform metrics overlay)
+      responses:
+        '200':
+          description: The system status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemStatusResponse'
+  /gateway/overview:
+    get:
+      operationId: getGatewayOverview
+      tags:
+      - gateway
+      summary: Traefik dashboard overview (server-side proxy)
+      responses:
+        '200':
+          description: Traefik's /api/overview response (passthrough).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayPassthrough'
+        '502':
+          description: Invalid response from the gateway.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '503':
+          description: Gateway dashboard not configured or unreachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /gateway/routers:
+    get:
+      operationId: getGatewayRouters
+      tags:
+      - gateway
+      summary: Traefik HTTP routers (server-side proxy)
+      responses:
+        '200':
+          description: Traefik's /api/http/routers response (passthrough).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayPassthrough'
+        '502':
+          description: Invalid response from the gateway.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '503':
+          description: Gateway dashboard not configured or unreachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /gateway/services:
+    get:
+      operationId: getGatewayServices
+      tags:
+      - gateway
+      summary: Traefik HTTP services (server-side proxy)
+      responses:
+        '200':
+          description: Traefik's /api/http/services response (passthrough).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayPassthrough'
+        '502':
+          description: Invalid response from the gateway.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '503':
+          description: Gateway dashboard not configured or unreachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /gateway/middlewares:
+    get:
+      operationId: getGatewayMiddlewares
+      tags:
+      - gateway
+      summary: Traefik HTTP middlewares (server-side proxy)
+      responses:
+        '200':
+          description: Traefik's /api/http/middlewares response (passthrough).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayPassthrough'
+        '502':
+          description: Invalid response from the gateway.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '503':
+          description: Gateway dashboard not configured or unreachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+components:
+  responses:
+    LegacyUnauthorized:
+      description: Missing or invalid tenant/auth context.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+    LegacyNotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+  schemas:
+    ServiceStatus:
+      type: object
+      additionalProperties: false
+      description: 'Per-service health (models.ServiceStatus). `error` is omitempty — present only when the service reported one.'
+      required:
+      - name
+      - status
+      - message
+      - response_time_ms
+      - last_check
+      - last_checked
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          description: "healthy / degraded / down / unknown."
+        message:
+          type: string
+        response_time_ms:
+          type: integer
+        last_check:
+          type: string
+          format: date-time
+        last_checked:
+          type: string
+          format: date-time
+        error:
+          type: string
+    SystemMetrics:
+      type: object
+      additionalProperties: false
+      description: Aggregate platform metrics (models.SystemMetrics).
+      required:
+      - cpu_usage
+      - memory_usage
+      - disk_usage
+      - network_io
+      - uptime_seconds
+      - total_services
+      - healthy_services
+      - degraded_services
+      - down_services
+      - average_response_time
+      - total_tenants
+      - active_tenants
+      - total_users
+      - total_assets
+      - last_updated
+      properties:
+        cpu_usage:
+          type: number
+        memory_usage:
+          type: number
+        disk_usage:
+          type: number
+        network_io:
+          type: integer
+        uptime_seconds:
+          type: integer
+        total_services:
+          type: integer
+        healthy_services:
+          type: integer
+        degraded_services:
+          type: integer
+        down_services:
+          type: integer
+        average_response_time:
+          type: number
+        total_tenants:
+          type: integer
+        active_tenants:
+          type: integer
+        total_users:
+          type: integer
+        total_assets:
+          type: integer
+        last_updated:
+          type: string
+          format: date-time
+    SystemStatusResponse:
+      type: object
+      additionalProperties: false
+      description: Full system status (models.SystemStatusResponse).
+      required:
+      - status
+      - overall_status
+      - services
+      - metrics
+      - timestamp
+      properties:
+        status:
+          type: string
+        overall_status:
+          type: string
+        services:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/ServiceStatus'
+        metrics:
+          $ref: '#/components/schemas/SystemMetrics'
+        timestamp:
+          type: string
+          format: date-time
+    SystemHealthOverviewSensors:
+      type: object
+      additionalProperties: false
+      required:
+      - active
+      - total
+      properties:
+        active:
+          type: integer
+        total:
+          type: integer
+    SystemHealthOverviewService:
+      type: object
+      additionalProperties: false
+      required:
+      - name
+      - status
+      - response_time_ms
+      - last_checked
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          description: "healthy / degraded / down / unknown."
+        response_time_ms:
+          type: integer
+        last_checked:
+          type: string
+    SystemHealthOverviewDatabase:
+      type: object
+      additionalProperties: false
+      description: '`message` is omitempty — present only on failure.'
+      required:
+      - status
+      properties:
+        status:
+          type: string
+          description: "healthy / down."
+        message:
+          type: string
+    SystemHealthOverview:
+      type: object
+      additionalProperties: false
+      description: 'Tenant-facing health overview (models.SystemHealthOverview). `services` is always a non-null array (the handler sizes a slice to the service count — empty [] when none).'
+      required:
+      - overall_status
+      - sensors
+      - services
+      - database
+      - last_updated
+      properties:
+        overall_status:
+          type: string
+          description: "healthy / degraded / down."
+        sensors:
+          $ref: '#/components/schemas/SystemHealthOverviewSensors'
+        services:
+          type: array
+          items:
+            $ref: '#/components/schemas/SystemHealthOverviewService'
+        database:
+          $ref: '#/components/schemas/SystemHealthOverviewDatabase'
+        last_updated:
+          type: string
+    IncidentList:
+      type: array
+      description: 'CURRENT shape for GET /status/incidents — a bare array, always empty today.'
+      items: {}
+    VersionInfo:
+      type: object
+      additionalProperties: true
+      description: 'A service''s version block (shared/version.Info): release tag, helm chart + appVersion, and (when digest-pinned) the per-pod image digest.'
+      required:
+      - service
+      - chart
+      - app_version
+      properties:
+        service:
+          type: string
+        chart:
+          type: string
+        app_version:
+          type: string
+        image_digest:
+          type: string
+    ServiceVersionRow:
+      type: object
+      additionalProperties: false
+      description: 'Per-service row in the aggregate. `image_digest` / `error` are omitempty.'
+      required:
+      - service
+      - tag
+      - chart
+      - app_version
+      - status
+      properties:
+        service:
+          type: string
+        tag:
+          type: string
+        chart:
+          type: string
+        app_version:
+          type: string
+        image_digest:
+          type: string
+        status:
+          type: string
+          description: "healthy / unreachable."
+        error:
+          type: string
+    SkewEntry:
+      type: object
+      additionalProperties: false
+      required:
+      - field
+      - values
+      properties:
+        field:
+          type: string
+          description: "tag / chart / app_version."
+        values:
+          type: array
+          items:
+            type: string
+    VersionSummary:
+      type: object
+      additionalProperties: false
+      description: 'Reachability/reporting counts behind VersionResponse.status.'
+      required:
+      - total
+      - reachable
+      - unreachable
+      - reporting
+      properties:
+        total:
+          type: integer
+          description: 'Peers probed (excludes self).'
+        reachable:
+          type: integer
+          description: 'Peers whose /health answered 2xx.'
+        unreachable:
+          type: integer
+          description: 'total - reachable.'
+        reporting:
+          type: integer
+          description: 'Peers that returned a real (non-"unknown") version.'
+    VersionResponse:
+      type: object
+      additionalProperties: false
+      description: 'CURRENT shape for GET /version. `services` is a (possibly null/empty) per-service breakdown; `skew` is omitted unless `status` is "skew". `status` is the four-state deployment health the About-page badge renders; `aligned` is retained as the green-state boolean (`status == "aligned"`).'
+      required:
+      - self
+      - services
+      - status
+      - summary
+      - aligned
+      properties:
+        self:
+          $ref: '#/components/schemas/VersionInfo'
+        services:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/ServiceVersionRow'
+        status:
+          type: string
+          enum: [aligned, skew, degraded, unknown]
+          description: 'aligned = all reachable peers report one agreed version; skew = ≥2 distinct real versions; degraded = reporters agree but a peer is unreachable; unknown = no real version reported anywhere (normal in local dev).'
+        summary:
+          $ref: '#/components/schemas/VersionSummary'
+        aligned:
+          type: boolean
+          description: 'True iff status == "aligned". Retained for backward compatibility; new consumers should read `status`.'
+        skew:
+          type: array
+          items:
+            $ref: '#/components/schemas/SkewEntry'
+    AlertThreshold:
+      type: object
+      additionalProperties: false
+      description: |
+        A configurable alerting threshold (models.AlertThreshold). `service_name`,
+        `warning_threshold`, `critical_threshold`, `description`, `created_by` and
+        `updated_by` are omitempty — present only when set.
+      required:
+        - id
+        - threshold_name
+        - metric_type
+        - severity
+        - enabled
+        - notify_email
+        - notify_slack
+        - notify_webhook
+        - notify_in_app
+        - comparison_operator
+        - duration_minutes
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        threshold_name:
+          type: string
+        metric_type:
+          type: string
+        service_name:
+          type: string
+        warning_threshold:
+          type: number
+        critical_threshold:
+          type: number
+        severity:
+          type: string
+        enabled:
+          type: boolean
+        notify_email:
+          type: boolean
+        notify_slack:
+          type: boolean
+        notify_webhook:
+          type: boolean
+        notify_in_app:
+          type: boolean
+        comparison_operator:
+          type: string
+        duration_minutes:
+          type: integer
+        description:
+          type: string
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        updated_by:
+          type: string
+          format: uuid
+    AlertHistory:
+      type: object
+      additionalProperties: false
+      description: |
+        A triggered alert (models.AlertHistory). `threshold_id`, `service_name`,
+        `acknowledged_by`, `acknowledged_at`, `resolved_at` and `message` are
+        omitempty — present only when set. `notifications_sent` and `metadata` are
+        always present but null when unset.
+      required:
+        - id
+        - threshold_name
+        - metric_type
+        - threshold_value
+        - actual_value
+        - severity
+        - status
+        - notifications_sent
+        - metadata
+        - triggered_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        threshold_id:
+          type: string
+          format: uuid
+        threshold_name:
+          type: string
+        metric_type:
+          type: string
+        service_name:
+          type: string
+        threshold_value:
+          type: number
+        actual_value:
+          type: number
+        severity:
+          type: string
+        status:
+          type: string
+        acknowledged_by:
+          type: string
+          format: uuid
+        acknowledged_at:
+          type: string
+          format: date-time
+        resolved_at:
+          type: string
+          format: date-time
+        notifications_sent:
+          type: [array, 'null']
+          items:
+            type: object
+            additionalProperties: true
+        message:
+          type: string
+        metadata:
+          type: [object, 'null']
+          additionalProperties: true
+        triggered_at:
+          type: string
+          format: date-time
+    AlertThresholdListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /alerting/thresholds — `{ "thresholds": [...], "count": N }`. `thresholds` is null when none match.'
+      required:
+        - thresholds
+        - count
+      properties:
+        thresholds:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/AlertThreshold'
+        count:
+          type: integer
+    AlertHistoryResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /alerting/history — `{ "alerts": [...], "count": N, "limit": L, "offset": O }`. `alerts` is null when none match; `count` is the total match count.'
+      required:
+        - alerts
+        - count
+        - limit
+        - offset
+      properties:
+        alerts:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/AlertHistory'
+        count:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+    AlertThresholdDeletedResponse:
+      type: object
+      additionalProperties: false
+      description: 'Confirmation envelope for DELETE /alerting/thresholds/{id}.'
+      required:
+        - message
+      properties:
+        message:
+          type: string
+    CreateAlertThresholdRequest:
+      type: object
+      additionalProperties: true
+      description: 'Body for POST /alerting/thresholds (models.CreateAlertThresholdRequest).'
+      required:
+        - threshold_name
+        - metric_type
+      properties:
+        threshold_name:
+          type: string
+        metric_type:
+          type: string
+        service_name:
+          type: string
+        warning_threshold:
+          type: number
+        critical_threshold:
+          type: number
+        severity:
+          type: string
+        enabled:
+          type: boolean
+        notify_email:
+          type: boolean
+        notify_slack:
+          type: boolean
+        notify_webhook:
+          type: boolean
+        notify_in_app:
+          type: boolean
+        comparison_operator:
+          type: string
+        duration_minutes:
+          type: integer
+        description:
+          type: string
+    UpdateAlertThresholdRequest:
+      type: object
+      additionalProperties: true
+      description: 'Body for PUT /alerting/thresholds/{id} (models.UpdateAlertThresholdRequest). All fields optional.'
+      properties:
+        warning_threshold:
+          type: number
+        critical_threshold:
+          type: number
+        severity:
+          type: string
+        enabled:
+          type: boolean
+        notify_email:
+          type: boolean
+        notify_slack:
+          type: boolean
+        notify_webhook:
+          type: boolean
+        notify_in_app:
+          type: boolean
+        comparison_operator:
+          type: string
+        duration_minutes:
+          type: integer
+        description:
+          type: string
+    TrendPoint:
+      type: object
+      additionalProperties: false
+      description: One bucketed trend point (services.TrendPoint). `value` is null for empty buckets.
+      required:
+        - timestamp
+        - value
+        - status
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        value:
+          type: [number, 'null']
+        status:
+          type: string
+    TrendsResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /trends. `trends` is null when there are no points.'
+      required:
+        - service_name
+        - metric_type
+        - window
+        - start_time
+        - end_time
+        - trends
+        - count
+      properties:
+        service_name:
+          type: string
+        metric_type:
+          type: string
+        window:
+          type: string
+        start_time:
+          type: string
+          format: date-time
+        end_time:
+          type: string
+          format: date-time
+        trends:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/TrendPoint'
+        count:
+          type: integer
+    GatewayPassthrough:
+      description: |
+        Transparent passthrough of Traefik's dashboard API response (an object for
+        /api/overview, an array for routers/services/middlewares). Unconstrained —
+        the shape is owned by Traefik, not this service.
+    LegacyError:
+      type: object
+      additionalProperties: true
+      description: CURRENT error shape — a single human-readable string under `error`. Superseded by the ADR-0002 Error envelope as endpoints are hardened.
+      required:
+      - error
+      properties:
+        error:
+          type: string

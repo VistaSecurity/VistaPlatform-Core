@@ -1,0 +1,170 @@
+{{/*
+The schema-migration Job's pod template, extracted into a named template so it
+can be rendered once, hashed, and reused: the hash of the rendered pod template
+is embedded in the Job name (see below). Kubernetes Job spec.template is
+IMMUTABLE, so any change to this pod template (a new env var, a TLS volume, a
+chart-version label bump) must produce a NEW Job name — otherwise `helm
+upgrade` tries to patch the existing Job in place and fails (#421).
+Keep ALL pod-template content inside this define.
+*/}}
+{{- define "vistaplatform.schemaMigration.podTemplate" }}
+{{- $schemaHash := .Files.Get "files/schema/schema.sql" | sha256sum | trunc 10 }}
+    metadata:
+      labels:
+        {{- include "vistaplatform.labels" . | nindent 8 }}
+        app.kubernetes.io/component: schema-migration
+        vistasecurity.io/schema-hash: "{{ $schemaHash }}"
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "vistaplatform.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: psql
+          image: "{{ .Values.schemaMigration.image.repository }}:{{ .Values.schemaMigration.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "vistaplatform.containerSecurityContext" . | nindent 12 }}
+          env:
+            {{- if .Values.datastores.postgres.enabled }}
+            - name: PGHOST
+              value: postgres
+            - name: PGPORT
+              value: "5432"
+            - name: PGUSER
+              value: {{ .Values.datastores.postgres.user | quote }}
+            - name: PGDATABASE
+              value: {{ .Values.datastores.postgres.db | quote }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vistaplatform.generatedSecretName" . }}
+                  key: postgres-password
+            {{- if .Values.datastores.postgres.tls.enabled }}
+            # Postgres requires TLS ( Phase 3); psql/pg_isready (libpq) honor these. prefer (not verify-full) so the pre/post-upgrade hook connects whether postgres is mid-transition (plain) or TLS.
+            - name: PGSSLMODE
+              value: prefer
+            - name: PGSSLROOTCERT
+              value: /etc/db-ca/ca.crt
+            {{- end }}
+            {{- else }}
+            # External database (e.g. RDS): connect via the full DATABASE_URL from
+            # the platform secret. It carries the correct host, user, password and
+            # sslmode=require. The discrete PGHOST/PGPASSWORD path hardcodes an
+            # in-cluster "postgres" host with no TLS and reads a postgres-password
+            # key that needn't match the external credential — an SSL-required
+            # external DB rejects it ("no pg_hba.conf entry ... no encryption").
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vistaplatform.platformSecretName" . }}
+                  key: database-url
+            {{- end }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              echo "Waiting for Postgres to be ready..."
+              {{- if .Values.datastores.postgres.enabled }}
+              until pg_isready -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE"; do
+                sleep 2
+              done
+              echo "Applying schema (hash: {{ $schemaHash }})..."
+              psql -v ON_ERROR_STOP=1 -f /schema/schema.sql
+              echo "Recording schema-migration completion marker..."
+              psql -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS public.schema_migration_status (schema_hash text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now()); INSERT INTO public.schema_migration_status (schema_hash) VALUES ('{{ $schemaHash }}') ON CONFLICT (schema_hash) DO UPDATE SET applied_at = now();"
+              {{- else }}
+              until pg_isready -d "$DATABASE_URL"; do
+                sleep 2
+              done
+              echo "Applying schema (hash: {{ $schemaHash }})..."
+              psql -v ON_ERROR_STOP=1 -d "$DATABASE_URL" -f /schema/schema.sql
+              echo "Recording schema-migration completion marker..."
+              psql -v ON_ERROR_STOP=1 -d "$DATABASE_URL" -c "CREATE TABLE IF NOT EXISTS public.schema_migration_status (schema_hash text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now()); INSERT INTO public.schema_migration_status (schema_hash) VALUES ('{{ $schemaHash }}') ON CONFLICT (schema_hash) DO UPDATE SET applied_at = now();"
+              {{- end }}
+              echo "Schema applied successfully."
+          volumeMounts:
+            - name: schema
+              mountPath: /schema
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            {{- if and .Values.datastores.postgres.enabled .Values.datastores.postgres.tls.enabled }}
+            - name: db-ca
+              mountPath: /etc/db-ca
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: schema
+          configMap:
+            name: {{ include "vistaplatform.fullname" . }}-schema
+        {{- if and .Values.datastores.postgres.enabled .Values.datastores.postgres.tls.enabled }}
+        - name: db-ca
+          secret:
+            secretName: postgres-mtls
+            items:
+              - { key: ca.crt, path: ca.crt }
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+{{- end }}
+{{- if .Values.schemaMigration.enabled }}
+{{/*
+Applies scripts/database/schema.sql against Postgres on every install and
+upgrade. The schema is idempotent (CREATE TABLE IF NOT EXISTS / DO blocks for
+types) so re-running is safe whether the database is fresh or already populated.
+
+v0.2.0 redesign — was previously a post-install Helm hook, which deadlocked
+fresh installs under `helm install --wait`: helm waits for all Deployments to
+be Ready BEFORE running post-install hooks, but backends can't be Ready without
+the schema, so the install fails before the hook ever runs.
+
+The new design makes the Job (and its ConfigMap) regular release resources.
+Backend deployments have an init container that polls Postgres for a sentinel
+table (public.tenants) — they self-gate on schema readiness, so the install
+converges naturally: Job and Deployments are created together, Job runs as
+soon as Postgres is Ready, backend init containers detect schema availability
+and exit, backend main containers start. helm --wait observes Deployments
+becoming Ready (without needing --wait-for-jobs).
+
+Job naming (#421): a Kubernetes Job's spec.template is immutable, so the Job
+name embeds a short hash of the FULL rendered pod template (which itself
+covers the schema-content hash via labels + command). Any change that alters
+the pod template — a new schema version, toggling datastores.postgres.tls
+(db-ca volume + PGSSL* env), a chart-version label bump — yields a new Job
+name, so Helm creates a fresh Job instead of attempting an in-place patch of
+the old one (which Kubernetes rejects). Previously the name was keyed only on
+the schema-content hash, so enabling postgres.tls on an existing release
+failed with "spec.template: field is immutable". Superseded Jobs are removed
+by Helm on upgrade (name no longer in the release manifest) and completed
+ones also age out via ttlSecondsAfterFinished.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vistaplatform.fullname" . }}-schema
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: schema-migration
+data:
+  schema.sql: |
+{{ .Files.Get "files/schema/schema.sql" | indent 4 }}
+---
+{{- $schemaHash := .Files.Get "files/schema/schema.sql" | sha256sum | trunc 10 }}
+{{- $podTemplate := include "vistaplatform.schemaMigration.podTemplate" . }}
+{{- $jobHash := $podTemplate | sha256sum | trunc 10 }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "vistaplatform.fullname" . }}-schema-migration-{{ $jobHash }}
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: schema-migration
+    vistasecurity.io/schema-hash: "{{ $schemaHash }}"
+spec:
+  backoffLimit: 5
+  ttlSecondsAfterFinished: 600
+  template:
+    {{- $podTemplate }}
+{{- end }}

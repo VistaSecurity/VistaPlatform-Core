@@ -1,0 +1,35 @@
+# Development image for frontend-v2 — the Vista tenant UI (Vite dev server + HMR).
+#
+# BUILD CONTEXT = REPO ROOT (not frontend-v2/), same as Dockerfile.prod:
+# frontend-v2 is an npm workspace member that imports @vistasecurity/api-contract
+# (api/) and @vistasecurity/primitives (packages/primitives/) as TS source, so the
+# install needs the root package.json/lock plus those workspaces. Build with:
+#
+#   docker build -f frontend-v2/Dockerfile.dev -t <image> .          # from repo root
+#
+# docker-compose mounts ./frontend-v2, ./api, ./packages over the copied sources
+# for live edits; node_modules stays in the image (anonymous volume in compose).
+# The Vite dev proxy forwards /api -> $VITE_DEV_PROXY_TARGET (api-gateway:8080 in
+# compose); the UI uses relative /api/* paths so there is no VITE_API_URL.
+ARG NODE_IMAGE=node:24-alpine
+FROM ${NODE_IMAGE}
+WORKDIR /repo
+
+# Workspace sources first — all package.json must be present for `npm ci` to
+# resolve the workspace tree against the root lockfile. node_modules is excluded
+# by the root .dockerignore, so this is a clean install.
+COPY package.json package-lock.json ./
+COPY api/ ./api/
+COPY packages/ ./packages/
+COPY frontend-v2/ ./frontend-v2/
+RUN npm ci
+
+# Use the official image's unprivileged node user (uid 1000).
+RUN chown -R node:node /repo
+USER node
+
+EXPOSE 3001
+
+# Vite dev server with HMR. --host 0.0.0.0 for container reachability; port 3001
+# matches the exposed port and the chart/compose convention.
+CMD ["npm", "run", "dev", "-w", "frontend-v2", "--", "--host", "0.0.0.0", "--port", "3001"]

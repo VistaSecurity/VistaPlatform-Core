@@ -1,0 +1,1052 @@
+services:
+  # =================================================================
+  # Database Services
+  # =================================================================
+  postgres:
+    image: postgres:17-alpine
+    container_name: crypto-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-crypto_inventory}
+      POSTGRES_USER: ${POSTGRES_USER:-crypto_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - ./scripts/database/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U crypto_user -d crypto_inventory" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  influxdb:
+    image: influxdb:2.8-alpine
+    container_name: crypto-influxdb
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUXDB_USERNAME:-admin}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUXDB_PASSWORD:?Set INFLUXDB_PASSWORD in .env}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUXDB_ORG:-crypto-inventory}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUXDB_BUCKET:-metrics}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_TOKEN:?Set INFLUXDB_TOKEN in .env}
+    volumes:
+      - influx_data:/var/lib/influxdb2
+      - influx_config:/etc/influxdb2
+    ports:
+      - "${INFLUXDB_HOST_PORT:-8086}:8086"
+    healthcheck:
+      test: [ "CMD", "influx", "ping" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    container_name: crypto-redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  # =================================================================
+  # Message Queue
+  # =================================================================
+  nats:
+    image: nats:2.14-alpine
+    container_name: crypto-nats
+    command: [ "-js", "-m", "8222", "--user", "${NATS_USER:-nats_user}", "--pass", "${NATS_PASSWORD:?Set NATS_PASSWORD in .env}" ]
+    ports:
+      - "${NATS_CLIENT_HOST_PORT:-4222}:4222"
+      - "${NATS_HTTP_HOST_PORT:-8222}:8222"
+    healthcheck:
+      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8222/healthz" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  # =================================================================
+  # Backend Services
+  # =================================================================
+  auth-service:
+    build:
+      context: .
+      dockerfile: ./services/auth-service/Dockerfile.dev
+      args:
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+    container_name: crypto-auth-service
+    environment:
+      - PORT=8080
+      - ENV=development
+      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:?Set ENCRYPTION_MASTER_KEY in .env}
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      - LICENSE_TOKEN=${LICENSE_TOKEN:-}
+      - JWT_EXPIRY=24h
+      - LOG_LEVEL=debug
+      - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
+      # Empty SMTP_HOST is meaningful: auth-service reads it to decide whether
+      # this deployment can deliver mail at all, and only requires new users to
+      # verify their address when it can. The old literal "localhost" made every
+      # deployment claim it could send, so signup succeeded, the mail silently
+      # failed, and login then refused the account that had just been created.
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USERNAME=${SMTP_USERNAME:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - FROM_EMAIL=${FROM_EMAIL:-noreply@example.com}
+      - FROM_NAME=${FROM_NAME:-Vista}
+      # mTLS Configuration
+      - USE_MTLS=true
+      - TLS_PORT=8443
+      - SERVICE_CERT_PATH=/app/certs/server-cert.pem
+      - SERVICE_KEY_PATH=/app/certs/server-key.pem
+      - CLIENT_CERT_PATH=/app/certs/client-cert.pem
+      - CLIENT_KEY_PATH=/app/certs/client-key.pem
+      - PLATFORM_CA_CERT_PATH=/app/certs/platform-ca-cert.pem
+    ports:
+      - "${AUTH_SERVICE_HOST_PORT:-8081}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - uploads_data:/app/uploads
+      - ./service-certs/auth-service:/app/certs:ro
+      # - ./services/auth-service:/app
+      # - /app/vendor
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  inventory-service:
+    build:
+      context: .
+      dockerfile: ./services/inventory-service/Dockerfile.dev
+      args:
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+    container_name: crypto-inventory-service
+    environment:
+      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:?Set ENCRYPTION_MASTER_KEY in .env}
+      - LICENSE_TOKEN=${LICENSE_TOKEN:-}
+      - SERVER_HOST=0.0.0.0
+      - PORT=8080
+      - GIN_MODE=release
+      - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
+      - ENV=development
+      - DEV_TENANT_ID=c092c348-9d22-4259-b6e3-8fccbce66c7b
+      - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
+      # mTLS Configuration
+      - USE_MTLS=true
+      - TLS_PORT=8443
+      - SERVICE_CERT_PATH=/app/certs/server-cert.pem
+      - SERVICE_KEY_PATH=/app/certs/server-key.pem
+      - CLIENT_CERT_PATH=/app/certs/client-cert.pem
+      - CLIENT_KEY_PATH=/app/certs/client-key.pem
+      - PLATFORM_CA_CERT_PATH=/app/certs/platform-ca-cert.pem
+    ports:
+      - "${INVENTORY_SERVICE_HOST_PORT:-8082}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    volumes:
+      - ./service-certs/inventory-service:/app/certs:ro
+      # - ./services/inventory-service:/app
+      # - /app/vendor
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  compliance-engine:
+    build:
+      context: .
+      dockerfile: ./services/compliance-engine/Dockerfile.dev
+      args:
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+    container_name: crypto-compliance-engine
+    environment:
+      - PORT=8080
+      - ENV=development
+      - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
+      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
+      - DEV_TENANT_ID=c092c348-9d22-4259-b6e3-8fccbce66c7b
+      - LOG_LEVEL=debug
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - JWT_EXPIRY=24h
+      # HMAC secret for signing outbound service-to-service calls (resource
+      # tracking metrics, audit logs). Required — see service-registry.yaml.
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      # mTLS Configuration
+      - USE_MTLS=true
+      - TLS_PORT=8443
+      - SERVICE_CERT_PATH=/app/certs/server-cert.pem
+      - SERVICE_KEY_PATH=/app/certs/server-key.pem
+      - CLIENT_CERT_PATH=/app/certs/client-cert.pem
+      - CLIENT_KEY_PATH=/app/certs/client-key.pem
+      - PLATFORM_CA_CERT_PATH=/app/certs/platform-ca-cert.pem
+    ports:
+      - "${COMPLIANCE_ENGINE_HOST_PORT:-8083}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    volumes:
+      - ./service-certs/compliance-engine:/app/certs:ro
+      # - ./services/compliance-engine:/app
+      # - /app/vendor
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  sensor-manager:
+    build:
+      context: .
+      dockerfile: ./services/sensor-manager/Dockerfile.dev
+      args:
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+    container_name: crypto-sensor-manager
+    environment:
+      - PORT=8080
+      - ENV=development
+      - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
+      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
+      - INFLUXDB_ORG=crypto-inventory
+      - INFLUXDB_BUCKET=metrics
+      - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      - LICENSE_TOKEN=${LICENSE_TOKEN:-}
+      - LOG_LEVEL=debug
+      # Encryption master key for CA certificate private key encryption
+      - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:-dev-master-key-change-in-production}
+      # mTLS Configuration
+      - USE_MTLS=true
+      - TLS_PORT=8443
+      - SERVICE_CERT_PATH=/app/certs/server-cert.pem
+      - SERVICE_KEY_PATH=/app/certs/server-key.pem
+      - CLIENT_CERT_PATH=/app/certs/client-cert.pem
+      - CLIENT_KEY_PATH=/app/certs/client-key.pem
+      - PLATFORM_CA_CERT_PATH=/app/certs/platform-ca-cert.pem
+    ports:
+      - "${SENSOR_MANAGER_HOST_PORT:-8085}:8080"
+      - "${SENSOR_MANAGER_TLS_PORT:-8443}:8443"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    volumes:
+      - ./service-certs/sensor-manager:/app/certs:ro
+      # Shared with pcap-processor so uploaded captures are readable for NATS-driven jobs
+      - pcap_uploads:/tmp/pcap-uploads
+      # - ./services/sensor-manager:/app
+      # - /app/vendor
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  cbom-service:
+    build:
+      context: .
+      dockerfile: ./services/cbom-service/Dockerfile.dev
+      args:
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+    container_name: crypto-cbom-service
+    environment:
+      - PORT=8080
+      - ENV=development
+      - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
+      - FEATURE_REPORTS_DEV_ENABLE=true
+      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
+      - INFLUXDB_ORG=crypto-inventory
+      - INFLUXDB_BUCKET=metrics
+      - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      - LICENSE_TOKEN=${LICENSE_TOKEN:-}
+      - LOG_LEVEL=debug
+      # mTLS Configuration
+      - USE_MTLS=true
+      - TLS_PORT=8443
+      - SERVICE_CERT_PATH=/app/certs/server-cert.pem
+      - SERVICE_KEY_PATH=/app/certs/server-key.pem
+      - CLIENT_CERT_PATH=/app/certs/client-cert.pem
+      - CLIENT_KEY_PATH=/app/certs/client-key.pem
+      - PLATFORM_CA_CERT_PATH=/app/certs/platform-ca-cert.pem
+    ports:
+      - "${CBOM_SERVICE_HOST_PORT:-8084}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    volumes:
+      # - ./services/cbom-service:/app
+      # - /app/vendor
+      - report_storage:/app/reports
+      - ./service-certs/cbom-service:/app/certs:ro
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  resource-tracker-service:
+    build:
+      context: .
+      dockerfile: ./services/resource-tracker-service/Dockerfile.dev
+      args:
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+    container_name: crypto-resource-tracker-service
+    environment:
+      - PORT=8080
+      - ENV=development
+      - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
+      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:?Set ENCRYPTION_MASTER_KEY in .env}
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      - LICENSE_TOKEN=${LICENSE_TOKEN:-}
+      - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
+      - LOG_LEVEL=debug
+      # mTLS Configuration
+      - USE_MTLS=true
+      - TLS_PORT=8443
+      - SERVICE_CERT_PATH=/app/certs/server-cert.pem
+      - SERVICE_KEY_PATH=/app/certs/server-key.pem
+      - CLIENT_CERT_PATH=/app/certs/client-cert.pem
+      - CLIENT_KEY_PATH=/app/certs/client-key.pem
+      - PLATFORM_CA_CERT_PATH=/app/certs/platform-ca-cert.pem
+    ports:
+      - "${RESOURCE_TRACKER_HOST_PORT:-8092}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: true
+      nats:
+        condition: service_healthy
+        required: true
+    volumes:
+      - ./service-certs/resource-tracker-service:/app/certs:ro
+      # - ./services/resource-tracker-service:/app
+      # - /app/vendor
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  mcp-service:
+    build:
+      context: .
+      dockerfile: ./services/mcp-service/Dockerfile.dev
+      args:
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+    container_name: crypto-mcp-service
+    environment:
+      - PORT=8080
+      - ENV=development
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      - LICENSE_TOKEN=${LICENSE_TOKEN:-}
+      - LOG_LEVEL=debug
+      # mTLS Configuration
+      - USE_MTLS=true
+      - TLS_PORT=8443
+      - SERVICE_CERT_PATH=/app/certs/server-cert.pem
+      - SERVICE_KEY_PATH=/app/certs/server-key.pem
+      - CLIENT_CERT_PATH=/app/certs/client-cert.pem
+      - CLIENT_KEY_PATH=/app/certs/client-key.pem
+      - PLATFORM_CA_CERT_PATH=/app/certs/platform-ca-cert.pem
+    ports:
+      - "${MCP_SERVICE_HOST_PORT:-8100}:8080"
+    depends_on:
+      auth-service:
+        condition: service_healthy
+    volumes:
+      - ./service-certs/mcp-service:/app/certs:ro
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  tenant-health-service:
+    build:
+      context: .
+      dockerfile: ./services/tenant-health-service/Dockerfile.dev
+      args:
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+    container_name: crypto-tenant-health-service
+    environment:
+      - PORT=8080
+      - ENV=development
+      - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
+      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      - LICENSE_TOKEN=${LICENSE_TOKEN:-}
+      - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
+      - LOG_LEVEL=debug
+      # mTLS Configuration
+      - USE_MTLS=true
+      - TLS_PORT=8443
+      - SERVICE_CERT_PATH=/app/certs/server-cert.pem
+      - SERVICE_KEY_PATH=/app/certs/server-key.pem
+      - CLIENT_CERT_PATH=/app/certs/client-cert.pem
+      - CLIENT_KEY_PATH=/app/certs/client-key.pem
+      - PLATFORM_CA_CERT_PATH=/app/certs/platform-ca-cert.pem
+    ports:
+      - "${TENANT_HEALTH_HOST_PORT:-8093}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: true
+      nats:
+        condition: service_healthy
+    volumes:
+      - ./service-certs/tenant-health-service:/app/certs:ro
+      # - ./services/tenant-health-service:/app
+      # - /app/vendor
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  device-interrogation-service:
+    build:
+      context: .
+      dockerfile: ./services/device-interrogation-service/Dockerfile.dev
+      args:
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+    container_name: crypto-device-interrogation-service
+    environment:
+      - PORT=8080
+      - ENV=development
+      - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
+      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      - LICENSE_TOKEN=${LICENSE_TOKEN:-}
+      - LOG_LEVEL=debug
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
+      - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:?Set ENCRYPTION_MASTER_KEY in .env}
+      # Bootstrap certificate paths for mTLS authentication
+      - BOOTSTRAP_CERT_PATH=/app/bootstrap-certs/device-interrogation-service-cert.pem
+      - BOOTSTRAP_KEY_PATH=/app/bootstrap-certs/device-interrogation-service-key.pem
+      - BOOTSTRAP_CA_CERT_PATH=/app/bootstrap-certs/bootstrap-ca-cert.pem
+      - DEVICE_INTERROGATION_SERVICE_URL=http://device-interrogation-service:8080
+      - PLATFORM_DEVICE_INTERROGATION_AGENT_ID=550e8400-e29b-41d4-a716-446655440002
+      # mTLS Configuration
+      - USE_MTLS=true
+      - TLS_PORT=8443
+      - SERVICE_CERT_PATH=/app/certs/server-cert.pem
+      - SERVICE_KEY_PATH=/app/certs/server-key.pem
+      - CLIENT_CERT_PATH=/app/certs/client-cert.pem
+      - CLIENT_KEY_PATH=/app/certs/client-key.pem
+      - PLATFORM_CA_CERT_PATH=/app/certs/platform-ca-cert.pem
+    ports:
+      - "${DEVICE_INTERROGATION_SERVICE_HOST_PORT:-8095}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: true
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    volumes:
+      - ./bootstrap-certs:/app/bootstrap-certs:ro
+      - ./service-certs/device-interrogation-service:/app/certs:ro
+    # volumes:
+      # - ./services/device-interrogation-service:/app
+      # - /app/vendor
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  # =================================================================
+  # Audit Service
+  # =================================================================
+  audit-service:
+    build:
+      context: .
+      dockerfile: ./services/audit-service/Dockerfile.dev
+      args:
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+    container_name: crypto-audit-service
+    environment:
+      - PORT=8080
+      - ENV=development
+      - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
+      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:?Set ENCRYPTION_MASTER_KEY in .env}
+      - LICENSE_TOKEN=${LICENSE_TOKEN:-}
+      - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
+      - LOG_LEVEL=debug
+      # mTLS Configuration
+      - USE_MTLS=true
+      - TLS_PORT=8443
+      - SERVICE_CERT_PATH=/app/certs/server-cert.pem
+      - SERVICE_KEY_PATH=/app/certs/server-key.pem
+      - CLIENT_CERT_PATH=/app/certs/client-cert.pem
+      - CLIENT_KEY_PATH=/app/certs/client-key.pem
+      - PLATFORM_CA_CERT_PATH=/app/certs/platform-ca-cert.pem
+    ports:
+      - "${AUDIT_SERVICE_HOST_PORT:-8096}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    volumes:
+      - ./service-certs/audit-service:/app/certs:ro
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  # =================================================================
+  # API Gateway (Traefik v3)
+  # =================================================================
+  api-gateway:
+    image: traefik:v3.6.12
+    container_name: crypto-api-gateway
+    ports:
+      - "${API_GATEWAY_HOST_PORT:-8080}:80"
+      - "8099:8099"  # Traefik Prometheus metrics
+    volumes:
+      - ./config/traefik/traefik-development.yaml:/etc/traefik/traefik.yaml:ro
+      - ./config/traefik/dynamic-development.yaml:/etc/traefik/dynamic.yaml:ro
+      - ./service-certs/api-gateway:/etc/traefik/certs:ro
+    depends_on:
+      - auth-service
+      - inventory-service
+      - compliance-engine
+      - cbom-service
+      - sensor-manager
+      - admin-service
+      - cluster-sensor-service
+      - monitoring-service
+      - device-interrogation-service
+      - audit-service
+      - resource-tracker-service
+      - tenant-health-service
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  # =================================================================
+  # Frontend
+  # =================================================================
+  web-ui:
+    # Tenant UI is now built from frontend-v2/ (build-and-swap, ADR-0013). The
+    # service keeps its web-ui identity (name + :3000 host port); only the build
+    # source changed. Repo-root context because frontend-v2 is an npm workspace
+    # member that needs api/ + packages/ (see frontend-v2/Dockerfile.dev).
+    build:
+      context: .
+      dockerfile: frontend-v2/Dockerfile.dev
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:24-alpine}
+    container_name: crypto-web-ui
+    environment:
+      # frontend-v2 uses relative /api/* paths; the Vite dev proxy forwards them
+      # to the gateway inside the compose network (not localhost). Target the
+      # Traefik *web* entrypoint on :80 (host 8080 maps to container 80) — NOT
+      # :8080, which is Traefik's dashboard/API and 404s app routes.
+      - VITE_DEV_PROXY_TARGET=http://api-gateway
+      - CHOKIDAR_USEPOLLING=true
+    ports:
+      - "${WEB_UI_HOST_PORT:-3000}:3001"
+    volumes:
+      # Live-edit the workspace sources; keep the image's installed node_modules.
+      # The root anonymous volume protects root node_modules (hoisted deps).
+      # The frontend-v2 anonymous volume protects workspace-local node_modules
+      # (vite and other devDeps are installed there per the lockfile, not hoisted).
+      - ./frontend-v2:/repo/frontend-v2
+      - ./api:/repo/api
+      - ./packages:/repo/packages
+      - /repo/node_modules
+      - /repo/frontend-v2/node_modules
+    depends_on:
+      - api-gateway
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  # admin-ui ("VISTA Operations") — the platform admin UI. Built from the
+  # admin-ui-v2/ source (build-and-swap, ADR-0013: the directory keeps its dev
+  # name, the image/service is admin-ui — mirrors web-ui building from frontend-v2/).
+  # Prod image (Caddy :3007) from the repo root because the source is an
+  # npm-workspace member (imports api/ + packages/). For live hot-reload during
+  # development, run `npm run dev -w admin-ui-v2` directly (also :3007). Same-origin
+  # /api/* via the gateway; no API config baked in.
+  admin-ui:
+    build:
+      context: .
+      dockerfile: admin-ui-v2/Dockerfile.prod
+    container_name: crypto-admin-ui
+    ports:
+      - "${ADMIN_UI_HOST_PORT:-3006}:3007"
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  # =================================================================
+  # Development Tools
+  # =================================================================
+  adminer:
+    image: adminer:latest
+    container_name: crypto-adminer
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+      ADMINER_DEFAULT_USERNAME: crypto_user
+      ADMINER_DEFAULT_DATABASE: crypto_inventory
+    ports:
+      # 18003, not 8090: discovery-processor-service owns 8090 (its documented
+      # service port), and two services defaulting to the same host port makes
+      # `docker compose up` fail with "port is already allocated" for anyone who
+      # does not set ADMINER_HOST_PORT. env.example sets it, which is why this
+      # never surfaced in dev. 18003 is what the registry's dev_port_generation
+      # block already allocates to adminer.
+      - "${ADMINER_HOST_PORT:-18003}:8080"
+    depends_on:
+      - postgres
+    networks:
+      - crypto-network
+
+  # =================================================================
+  # Cluster Sensor Service
+  # =================================================================
+  cluster-sensor-service:
+    build:
+      context: .
+      dockerfile: ./services/cluster-sensor-service/Dockerfile.dev
+      args:
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+    container_name: crypto-cluster-sensor-service
+    environment:
+      - PORT=8080
+      - ENV=development
+      - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
+      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:?Set ENCRYPTION_MASTER_KEY in .env}
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      - LICENSE_TOKEN=${LICENSE_TOKEN:-}
+      - LOG_LEVEL=debug
+      # Bootstrap certificate paths for mTLS authentication
+      - BOOTSTRAP_CERT_PATH=/app/bootstrap-certs/cluster-sensor-service-cert.pem
+      - BOOTSTRAP_KEY_PATH=/app/bootstrap-certs/cluster-sensor-service-key.pem
+      - BOOTSTRAP_CA_CERT_PATH=/app/bootstrap-certs/bootstrap-ca-cert.pem
+      - SENSOR_MANAGER_URL=http://sensor-manager:8080
+      - PLATFORM_DISCOVERY_SENSOR_ID=550e8400-e29b-41d4-a716-446655440001
+      # mTLS Configuration
+      - USE_MTLS=true
+      - TLS_PORT=8443
+      - SERVICE_CERT_PATH=/app/certs/server-cert.pem
+      - SERVICE_KEY_PATH=/app/certs/server-key.pem
+      - CLIENT_CERT_PATH=/app/certs/client-cert.pem
+      - CLIENT_KEY_PATH=/app/certs/client-key.pem
+      - PLATFORM_CA_CERT_PATH=/app/certs/platform-ca-cert.pem
+    ports:
+      - "${CLUSTER_SENSOR_HOST_PORT:-8088}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./bootstrap-certs:/app/bootstrap-certs:ro
+      - ./service-certs/cluster-sensor-service:/app/certs:ro
+    # volumes:
+      # - ./services/cluster-sensor-service:/app
+      # - /app/vendor
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  # =================================================================
+  # Monitoring Service
+  # =================================================================
+  monitoring-service:
+    build:
+      context: .
+      dockerfile: ./services/monitoring-service/Dockerfile.dev
+      args:
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+    container_name: crypto-monitoring-service
+    environment:
+      - PORT=8080
+      - ENV=development
+      - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
+      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - INFLUXDB_URL=http://influxdb:8086
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:?Set ENCRYPTION_MASTER_KEY in .env}
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      - LICENSE_TOKEN=${LICENSE_TOKEN:-}
+      - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
+      # Optional: attribute host/system metrics to a real tenant UUID (must exist in tenants table)
+      - RESOURCE_METRICS_TENANT_ID=${RESOURCE_METRICS_TENANT_ID:-}
+      - LOG_LEVEL=debug
+      - SERVICE_TIMEOUT=5
+      - HEALTH_CHECK_INTERVAL=30
+      # Traefik dashboard API for gateway metrics proxy (internal port, NOT the routing port 80)
+      - TRAEFIK_DASHBOARD_URL=http://api-gateway:8080
+      # mTLS Configuration
+      - USE_MTLS=true
+      - TLS_PORT=8443
+      - SERVICE_CERT_PATH=/app/certs/server-cert.pem
+      - SERVICE_KEY_PATH=/app/certs/server-key.pem
+      - CLIENT_CERT_PATH=/app/certs/client-cert.pem
+      - CLIENT_KEY_PATH=/app/certs/client-key.pem
+      - PLATFORM_CA_CERT_PATH=/app/certs/platform-ca-cert.pem
+    ports:
+      - "${MONITORING_SERVICE_HOST_PORT:-8091}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      # volumes:
+      # - ./services/monitoring-service:/app
+      # - /app/vendor
+    volumes:
+      - ./service-certs/monitoring-service:/app/certs:ro
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  # =================================================================
+  # Admin Service
+  # =================================================================
+  admin-service:
+    build:
+      context: .
+      dockerfile: ./services/admin-service/Dockerfile.dev
+      args:
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+    container_name: crypto-admin-service
+    environment:
+      - PORT=8080
+      - ENV=development
+      - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
+      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      - LICENSE_TOKEN=${LICENSE_TOKEN:-}
+      - LOG_LEVEL=debug
+      - DEV_TENANT_ID=c092c348-9d22-4259-b6e3-8fccbce66c7b
+      # Platform Integrations Management - Encryption master key for credential storage
+      # In production, use AWS KMS or similar key management service
+      # For development, session-init.sh generates this automatically
+      - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:-dev-master-key-change-in-production}
+      # Stripe configuration for billing
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
+      - STRIPE_PUBLISHABLE_KEY=${STRIPE_PUBLISHABLE_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      # mTLS Configuration
+      - USE_MTLS=true
+      - TLS_PORT=8443
+      - SERVICE_CERT_PATH=/app/certs/server-cert.pem
+      - SERVICE_KEY_PATH=/app/certs/server-key.pem
+      - CLIENT_CERT_PATH=/app/certs/client-cert.pem
+      - CLIENT_KEY_PATH=/app/certs/client-key.pem
+      - PLATFORM_CA_CERT_PATH=/app/certs/platform-ca-cert.pem
+    ports:
+      - "${ADMIN_SERVICE_HOST_PORT:-8089}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    volumes:
+      - uploads_data:/app/uploads
+      - ./service-certs/admin-service:/app/certs:ro
+      # - ./services/admin-service:/app  # Temporarily disabled for debugging
+      # - /app/vendor
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: ./services/notification-service/Dockerfile.dev
+      args:
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+    container_name: crypto-notification-service
+    environment:
+      - PORT=8080
+      - ENV=development
+      - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
+      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      - LICENSE_TOKEN=${LICENSE_TOKEN:-}
+      - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
+      - LOG_LEVEL=debug
+      - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:?Set ENCRYPTION_MASTER_KEY in .env}
+      # mTLS Configuration
+      - USE_MTLS=true
+      - TLS_PORT=8443
+      - SERVICE_CERT_PATH=/app/certs/server-cert.pem
+      - SERVICE_KEY_PATH=/app/certs/server-key.pem
+      - CLIENT_CERT_PATH=/app/certs/client-cert.pem
+      - CLIENT_KEY_PATH=/app/certs/client-key.pem
+      - PLATFORM_CA_CERT_PATH=/app/certs/platform-ca-cert.pem
+    ports:
+      - "${NOTIFICATION_SERVICE_HOST_PORT:-8097}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    volumes:
+      - ./service-certs/notification-service:/app/certs:ro
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  discovery-processor-service:
+    build:
+      context: .
+      dockerfile: ./services/discovery-processor-service/Dockerfile.dev
+      args:
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+    container_name: crypto-discovery-processor-service
+    environment:
+      - PORT=8080
+      - ENV=development
+      - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
+      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      - LICENSE_TOKEN=${LICENSE_TOKEN:-}
+      - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
+      - LOG_LEVEL=debug
+      # mTLS Configuration
+      - USE_MTLS=true
+      - TLS_PORT=8443
+      - SERVICE_CERT_PATH=/app/certs/server-cert.pem
+      - SERVICE_KEY_PATH=/app/certs/server-key.pem
+      - CLIENT_CERT_PATH=/app/certs/client-cert.pem
+      - CLIENT_KEY_PATH=/app/certs/client-key.pem
+      - PLATFORM_CA_CERT_PATH=/app/certs/platform-ca-cert.pem
+    ports:
+      - "${DISCOVERY_PROCESSOR_SERVICE_HOST_PORT:-8090}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    volumes:
+      - ./service-certs/discovery-processor-service:/app/certs:ro
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  pcap-processor:
+    build:
+      context: .
+      dockerfile: ./services/pcap-processor/Dockerfile.dev
+      args:
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+    container_name: crypto-pcap-processor
+    environment:
+      - PORT=8080
+      - ENV=development
+      - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
+      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      - LICENSE_TOKEN=${LICENSE_TOKEN:-}
+      - SENSOR_MANAGER_URL=http://sensor-manager:8080
+      - LOG_LEVEL=debug
+    ports:
+      - "${PCAP_PROCESSOR_HOST_PORT:-8098}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    volumes:
+      # Must match sensor-manager mount path — event carries host path string
+      - pcap_uploads:/tmp/pcap-uploads
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+# =================================================================
+# Observability Services
+# =================================================================
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.151.0
+    container_name: crypto-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./config/otel/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "${OTEL_GRPC_HOST_PORT:-4317}:4317"   # OTLP gRPC
+      - "${OTEL_HTTP_HOST_PORT:-4318}:4318"   # OTLP HTTP
+      - "8889:8889"   # Prometheus metrics
+      - "13133:13133" # Health check
+    environment:
+      - ENVIRONMENT=${ENV:-development}
+    depends_on:
+      - jaeger
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/jaeger:2.17.0
+    container_name: crypto-jaeger
+    ports:
+      - "${JAEGER_UI_HOST_PORT:-16686}:16686" # Jaeger UI
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.11.3
+    container_name: crypto-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_HOST_PORT:-9091}:9090"
+    depends_on:
+      - otel-collector
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.1.0-25351545110
+    container_name: crypto-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_HTTP_PORT=3000
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/etc/grafana/dashboards:ro
+    ports:
+      - "${GRAFANA_HOST_PORT:-18002}:3000" # Grafana UI
+    depends_on:
+      - prometheus
+      - otel-collector
+      - influxdb
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+# =================================================================
+# Volumes
+# =================================================================
+volumes:
+  postgres_data:
+    driver: local
+  influx_data:
+    driver: local
+  influx_config:
+    driver: local
+  redis_data:
+    driver: local
+  grafana_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  report_storage:
+    driver: local
+  uploads_data:
+    driver: local
+  pcap_uploads:
+    driver: local
+
+# =================================================================
+# Networks
+# =================================================================
+networks:
+  crypto-network:
+    driver: bridge

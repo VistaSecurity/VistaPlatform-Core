@@ -1,0 +1,376 @@
+package registration
+
+import (
+	"bytes"
+	"crypto/tls"
+	"crypto/x509"
+	"database/sql"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/config"
+	"github.com/vistasecurity/vistaplatform/shared/certificates"
+)
+
+// Certificate represents a stored certificate for a tenant
+type Certificate struct {
+	ClientCert   string
+	ServerCACert string
+	PrivateKey   string
+	ExpiresAt    time.Time
+	TenantID     uuid.UUID
+}
+
+// AutoRegisterService handles auto-registration of platform agents
+type AutoRegisterService struct {
+	config       *config.Config
+	db           *sql.DB
+	certificates map[uuid.UUID]*Certificate // tenant ID -> certificate
+	certMutex    sync.RWMutex
+	certDir      string
+	agentID      uuid.UUID
+}
+
+// NewAutoRegisterService creates a new auto-registration service
+func NewAutoRegisterService(cfg *config.Config, db *sql.DB) (*AutoRegisterService, error) {
+	// Parse fixed agent ID
+	agentID, err := uuid.Parse(cfg.PlatformDeviceInterrogationAgentID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid platform device interrogation agent ID: %w", err)
+	}
+
+	// Create certificate directory
+	certDir := "/app/certs"
+	if err := os.MkdirAll(certDir, 0700); err != nil {
+		// Fallback to /tmp if /app/certs doesn't exist (e.g., in dev)
+		certDir = "/tmp/device-interrogation-certs"
+		_ = os.MkdirAll(certDir, 0700)
+	}
+
+	service := &AutoRegisterService{
+		config:       cfg,
+		db:           db,
+		certificates: make(map[uuid.UUID]*Certificate),
+		certDir:      certDir,
+		agentID:      agentID,
+	}
+
+	// Load existing certificates from file system
+	service.loadCertificatesFromDisk()
+
+	return service, nil
+}
+
+// RegisterForAllTenants registers the platform agent for all active tenants
+func (s *AutoRegisterService) RegisterForAllTenants() error {
+	// Query all active tenants
+	query := `
+		SELECT id
+		FROM tenants
+		WHERE deleted_at IS NULL
+		ORDER BY created_at ASC
+	`
+
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return fmt.Errorf("failed to query tenants: %w", err)
+	}
+	defer rows.Close()
+
+	var tenantIDs []uuid.UUID
+	for rows.Next() {
+		var tenantID uuid.UUID
+		if err := rows.Scan(&tenantID); err != nil {
+			continue
+		}
+		tenantIDs = append(tenantIDs, tenantID)
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("failed to scan tenants: %w", err)
+	}
+
+	// Register for each tenant
+	var errors []error
+	for _, tenantID := range tenantIDs {
+		if err := s.RegisterForTenant(tenantID); err != nil {
+			errors = append(errors, fmt.Errorf("failed to register for tenant %s: %w", tenantID, err))
+			// Continue with other tenants even if one fails
+		}
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("registration completed with %d errors: %v", len(errors), errors)
+	}
+
+	return nil
+}
+
+// RegisterForTenant registers the platform agent for a specific tenant
+func (s *AutoRegisterService) RegisterForTenant(tenantID uuid.UUID) error {
+	// Check if we already have a valid certificate for this tenant
+	s.certMutex.RLock()
+	cert, exists := s.certificates[tenantID]
+	s.certMutex.RUnlock()
+
+	if exists && cert != nil && time.Now().Before(cert.ExpiresAt.Add(-30*24*time.Hour)) {
+		// Certificate exists and is valid (not expiring within 30 days)
+		return nil
+	}
+
+	// Generate keypair and CSR
+	csrGen := certificates.NewCSRGenerator()
+	privateKey, err := csrGen.GenerateKeyPair()
+	if err != nil {
+		return fmt.Errorf("failed to generate keypair: %w", err)
+	}
+
+	csrPEM, err := csrGen.GenerateCSR(s.agentID, privateKey)
+	if err != nil {
+		return fmt.Errorf("failed to generate CSR: %w", err)
+	}
+
+	// Encode private key
+	privateKeyPEM, err := csrGen.EncodePrivateKey(privateKey)
+	if err != nil {
+		return fmt.Errorf("failed to encode private key: %w", err)
+	}
+
+	// Call auto-registration endpoint
+	reqBody := map[string]interface{}{
+		"agent_id":  s.agentID.String(),
+		"tenant_id": tenantID.String(),
+		"csr":       csrPEM,
+		"platform":  "platform",
+		"version":   "system",
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/device-interrogation-service/agents/auto-register", s.config.DeviceInterrogationServiceURL)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	// Create HTTP client with mTLS using bootstrap certificates
+	client, err := s.createMTLSClient()
+	if err != nil {
+		return fmt.Errorf("failed to create mTLS client: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("auto-registration failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Parse response
+	var response struct {
+		AgentID              string `json:"agent_id"`
+		TenantID             string `json:"tenant_id"`
+		ClientCert           string `json:"client_cert"`
+		ServerCACert         string `json:"server_ca_cert"`
+		CertificateExpiresAt string `json:"certificate_expires_at"`
+		Message              string `json:"message"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	// Parse expiration
+	expiresAt, err := time.Parse(time.RFC3339, response.CertificateExpiresAt)
+	if err != nil {
+		// Default to 1 year from now if parsing fails
+		expiresAt = time.Now().AddDate(1, 0, 0)
+	}
+
+	// Store certificate
+	cert = &Certificate{
+		ClientCert:   response.ClientCert,
+		ServerCACert: response.ServerCACert,
+		PrivateKey:   privateKeyPEM,
+		ExpiresAt:    expiresAt,
+		TenantID:     tenantID,
+	}
+
+	s.certMutex.Lock()
+	s.certificates[tenantID] = cert
+	s.certMutex.Unlock()
+
+	// Save to disk
+	if err := s.saveCertificateToDisk(tenantID, cert); err != nil {
+		// Log error but don't fail registration
+		fmt.Printf("Warning: Failed to save certificate to disk: %v\n", err)
+	}
+
+	return nil
+}
+
+// GetCertificate retrieves a certificate for a tenant
+func (s *AutoRegisterService) GetCertificate(tenantID uuid.UUID) (*Certificate, error) {
+	s.certMutex.RLock()
+	defer s.certMutex.RUnlock()
+
+	cert, exists := s.certificates[tenantID]
+	if !exists || cert == nil {
+		return nil, fmt.Errorf("certificate not found for tenant %s", tenantID)
+	}
+
+	return cert, nil
+}
+
+// loadCertificatesFromDisk loads certificates from the file system
+func (s *AutoRegisterService) loadCertificatesFromDisk() {
+	// Try to load certificates from disk
+	// File naming: {agent-id}-{tenant-id}-cert.pem, {agent-id}-{tenant-id}-key.pem, {agent-id}-{tenant-id}-ca.pem
+	pattern := filepath.Join(s.certDir, fmt.Sprintf("%s-*-cert.pem", s.agentID.String()))
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return // No certificates found or error
+	}
+
+	for _, certFile := range matches {
+		// Extract tenant ID from filename
+		// Format: {agent-id}-{tenant-id}-cert.pem
+		base := filepath.Base(certFile)
+		// Remove {agent-id}- and -cert.pem
+		tenantIDStr := base[len(s.agentID.String())+1 : len(base)-9] // Remove agent ID prefix and "-cert.pem" suffix
+		tenantID, err := uuid.Parse(tenantIDStr)
+		if err != nil {
+			continue
+		}
+
+		// Load certificate files
+		certPEM, err := os.ReadFile(certFile) //nolint:gosec // intentional — certFile from filepath.Glob over s.certDir, filename validated as {agentID}-{tenantUUID}-cert.pem
+		if err != nil {
+			continue
+		}
+
+		keyFile := filepath.Join(s.certDir, fmt.Sprintf("%s-%s-key.pem", s.agentID.String(), tenantID.String()))
+		keyPEM, err := os.ReadFile(keyFile) //nolint:gosec // intentional — keyFile path built from server-validated certDir + agentID UUID + tenantID UUID
+		if err != nil {
+			continue
+		}
+
+		caFile := filepath.Join(s.certDir, fmt.Sprintf("%s-%s-ca.pem", s.agentID.String(), tenantID.String()))
+		caPEM, err := os.ReadFile(caFile) //nolint:gosec // intentional — caFile path built from server-validated certDir + agentID UUID + tenantID UUID
+		if err != nil {
+			continue
+		}
+
+		// Parse certificate to get expiration
+		block, _ := pem.Decode(certPEM)
+		if block == nil {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			continue
+		}
+
+		s.certMutex.Lock()
+		s.certificates[tenantID] = &Certificate{
+			ClientCert:   string(certPEM),
+			ServerCACert: string(caPEM),
+			PrivateKey:   string(keyPEM),
+			ExpiresAt:    cert.NotAfter,
+			TenantID:     tenantID,
+		}
+		s.certMutex.Unlock()
+	}
+}
+
+// saveCertificateToDisk saves a certificate to the file system
+func (s *AutoRegisterService) saveCertificateToDisk(tenantID uuid.UUID, cert *Certificate) error {
+	baseName := fmt.Sprintf("%s-%s", s.agentID.String(), tenantID.String())
+
+	// Save certificate
+	certFile := filepath.Join(s.certDir, fmt.Sprintf("%s-cert.pem", baseName))
+	if err := os.WriteFile(certFile, []byte(cert.ClientCert), 0600); err != nil {
+		return fmt.Errorf("failed to save certificate: %w", err)
+	}
+
+	// Save private key
+	keyFile := filepath.Join(s.certDir, fmt.Sprintf("%s-key.pem", baseName))
+	if err := os.WriteFile(keyFile, []byte(cert.PrivateKey), 0600); err != nil {
+		return fmt.Errorf("failed to save private key: %w", err)
+	}
+
+	// Save CA certificate
+	caFile := filepath.Join(s.certDir, fmt.Sprintf("%s-ca.pem", baseName))
+	if err := os.WriteFile(caFile, []byte(cert.ServerCACert), 0600); err != nil {
+		return fmt.Errorf("failed to save CA certificate: %w", err)
+	}
+
+	return nil
+}
+
+// createMTLSClient creates an HTTP client configured with bootstrap mTLS certificates
+func (s *AutoRegisterService) createMTLSClient() (*http.Client, error) {
+	// Load bootstrap client certificate and key
+	certPEM, err := os.ReadFile(s.config.BootstrapCertPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read bootstrap certificate: %w", err)
+	}
+
+	keyPEM, err := os.ReadFile(s.config.BootstrapKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read bootstrap private key: %w", err)
+	}
+
+	// Load certificate and key
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load certificate and key: %w", err)
+	}
+
+	// Load CA certificate for server verification
+	caCertPEM, err := os.ReadFile(s.config.BootstrapCACertPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read bootstrap CA certificate: %w", err)
+	}
+
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCertPEM) {
+		return nil, fmt.Errorf("failed to parse bootstrap CA certificate")
+	}
+
+	// Configure TLS
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      caCertPool,
+		MinVersion:   tls.VersionTLS12,
+	}
+
+	// Create HTTP client with mTLS
+	transport := &http.Transport{
+		TLSClientConfig: tlsConfig,
+	}
+
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   30 * time.Second,
+	}
+
+	return client, nil
+}

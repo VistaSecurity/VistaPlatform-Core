@@ -1,0 +1,69 @@
+name: Install libpcap-dev
+description: >
+  Install libpcap-dev for the CGO builds (sensor, pcap-processor), safely when
+  several jobs run concurrently on the same self-hosted runner.
+
+runs:
+  using: composite
+  steps:
+    - name: Install libpcap-dev
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # Why this is not just `apt-get install`:
+        #
+        # Our self-hosted runners execute several jobs at once on ONE machine,
+        # and apt takes a machine-wide lock. sensor, pcap-processor and
+        # govulncheck all need libpcap-dev, so whenever two of them start
+        # together the second dies immediately with
+        #
+        #   E: Could not get lock /var/lib/apt/lists/lock. It is held by ...
+        #   E: Could not get lock /var/lib/dpkg/lock-frontend
+        #
+        # That is not a flaky test, it is a guaranteed collision, and it cost a
+        # rerun on most pushes. GitHub-hosted runners never see it because each
+        # job gets its own VM.
+        #
+        # Two defences, cheapest first.
+
+        # 1. Do not touch apt at all if the package is already there. On a
+        #    long-lived self-hosted runner this is the usual case, so most jobs
+        #    now take no lock whatsoever and cannot collide.
+        if dpkg -s libpcap-dev >/dev/null 2>&1; then
+          echo "libpcap-dev already installed — skipping apt"
+          exit 0
+        fi
+
+        # Containers (nightly's test-backend runs in golang:1.26.5-bookworm) are
+        # root and have their own filesystem, so no sudo and no host contention.
+        SUDO=""
+        if [ "$(id -u)" -ne 0 ]; then SUDO="sudo"; fi
+
+        install_pkg() {
+          # DPkg::Lock::Timeout makes apt wait for the lock rather than exit 100.
+          # It covers apt's own locks; flock below covers the whole critical
+          # section, including the window between update and install.
+          apt-get -o DPkg::Lock::Timeout=600 update -qq
+          apt-get -o DPkg::Lock::Timeout=600 install -y libpcap-dev
+        }
+        export -f install_pkg
+
+        # 2. Serialise the update+install pair across every job on this runner.
+        #    flock is deterministic where retry loops are hopeful: the second
+        #    job blocks until the first finishes, then finds the package present
+        #    and returns immediately. -w 600 so a wedged apt fails the job
+        #    instead of hanging the runner forever.
+        if command -v flock >/dev/null 2>&1; then
+          $SUDO flock -w 600 /var/lock/vista-apt.lock bash -c install_pkg
+        else
+          # No flock (minimal container image). The apt-level timeout still
+          # applies, and a container has no host contention to begin with.
+          $SUDO bash -c install_pkg
+        fi
+
+        dpkg -s libpcap-dev >/dev/null 2>&1 || {
+          echo "::error::libpcap-dev still not installed after apt reported success"
+          exit 1
+        }
+        echo "libpcap-dev installed"

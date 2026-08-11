@@ -1,0 +1,138 @@
+# Documentation metadata for the published edition matrix.
+#
+# THIS FILE DOES NOT GATE ANYTHING. It is read only by
+# scripts/generate-edition-matrix.mjs to build the customer-facing matrix.
+# Adding a key here grants nothing and paywalls nothing.
+#
+# The matrix is a join over three inputs, each of which already had an owner
+# before this file existed. That is deliberate — a fourth copy of "which
+# capabilities are paid" is exactly the drift the generator exists to prevent:
+#
+#   shared/entitlements/editions.go   WHICH capabilities are gated, and to which
+#                                     edition. Sole authority. The generator
+#                                     fails if this file disagrees with it.
+#   scripts/database/seed.sql         Each capability's display name and
+#                                     description (billable_items rows).
+#   standards/editions.yaml (here)    Only what has no other home: the reader's
+#                                     documentation link, and the MSP surface.
+#
+# Why the MSP surface is declared by hand: MSP is carved by splitting
+# admin-service into admin-core / admin-msp (OPEN_SOURCE_CARVE_TRACKER §5.4),
+# not by billable-item gating. editionByItem therefore contains zero MSP
+# entries, and a matrix generated from it alone would show MSP as empty.
+
+editions:
+  core:
+    label: Core
+    tagline: Free and open source. One team securing its own estate.
+    summary: >-
+      Everything not listed as Enterprise or MSP below. Full discovery, the
+      complete crypto inventory and CMDB, compliance evaluation against the six
+      free frameworks, CBOM generation and CycloneDX export, RBAC, local users
+      and invitations, audit logging, RLS tenant isolation, the mTLS service
+      mesh, and the sensor and agent source.
+
+  enterprise:
+    label: Enterprise
+    tagline: A company with auditors and an identity provider.
+    summary: >-
+      Core, plus compliance authoring, federated identity, audit-grade CBOM
+      evidence, external system integration, and the regulated framework
+      catalog.
+
+  msp:
+    label: MSP
+    tagline: Selling this as a service to others.
+    summary: >-
+      Enterprise, plus the multi-tenant management plane. Note that tenant
+      isolation itself is Core — MSP sells the plane that manages tenants, not
+      the model that isolates them.
+
+# Reader documentation for each edition-gated capability.
+#
+# The key set MUST equal editionByItem in shared/entitlements/editions.go. The
+# generator fails on drift in either direction, so adding a capability to the
+# gate forces a decision about documenting it here.
+#
+# Paths are layer-qualified (core/, enterprise/, msp/) and relative to docsv4/.
+#
+# `doc: null` means the capability is gated but has no dedicated customer
+# documentation. That is a reported gap, not an accepted state — the generator
+# lists them so they cannot quietly persist.
+docs:
+  custom_policies:     enterprise/features/custom-policies.md
+  threshold_overrides: null   # see no_self_service below
+  cbom_signing:        enterprise/cbom/cbom-compliance-attestation.md
+  sso_saml:            enterprise/features/sso-and-federated-identity.md
+  billing_portal:      enterprise/features/billing-and-subscriptions.md
+  custom_branding:     enterprise/features/custom-branding.md
+  cmdb_sync:           core/features/cmdb-integrations.md
+  siem_export:         enterprise/features/siem-export.md
+  ot_active_probing:   null   # see no_self_service below
+  ot_primary_lens:     null   # see no_self_service below
+
+# Capabilities that are GATED but have no user-facing surface yet.
+#
+# These are deliberately undocumented rather than accidentally undocumented.
+# CLAUDE.md's rule is that a backend endpoint with no UI control is not a tenant
+# capability, it is a gap — so writing a feature guide for one would describe a
+# button that does not exist. They stay listed here, and the matrix says so
+# plainly, until the UI lands.
+#
+#   threshold_overrides  the self-service threshold-override UI is explicitly
+#                        deferred by ADR-0014 ("do not rebuild unprompted").
+#   ot_active_probing    no OT surface in the frontend: the inventory lens
+#   ot_primary_lens      registry has no OT lens and nothing references the OT
+#                        protocols. Backend/sensor only today.
+#
+# Every key here must also be `null` in docs: above — the generator enforces
+# that, so a capability cannot claim both a guide and no surface.
+no_self_service:
+  - threshold_overrides
+  - ot_active_probing
+  - ot_primary_lens
+
+# The MSP management plane.
+#
+# Sourced from OPEN_SOURCE_CARVE_TRACKER §5.4's admin-msp inventory. These are
+# capability AREAS, not billable-item keys: they are carved by which service
+# ships them, so there is no key to gate and nothing to cross-check against
+# editionByItem. The generator asserts they do NOT collide with a gated item
+# key, which would mean a capability was carved twice by two different
+# mechanisms.
+msp_surface:
+  - name: Tenant lifecycle
+    summary: >-
+      Creating, suspending, migrating and deleting tenants; the tenant switcher
+      and cross-tenant views.
+    doc: null
+  - name: Tier and entitlement authoring
+    summary: >-
+      Defining subscription tiers and the entitlements each includes. Tier
+      ASSIGNMENT and enforcement stay Core, so entitlements still resolve on a
+      Core deployment.
+    doc: null
+  - name: Billing and subscriptions
+    summary: >-
+      Payment provider wiring, invoicing, plans and pricing, trials, and the
+      subscription lifecycle.
+    doc: null
+  - name: Announcements and maintenance windows
+    summary: Platform-wide notices and scheduled maintenance windows across tenants.
+    doc: null
+  - name: Support tickets
+    summary: Operator-side support queue spanning tenants.
+    doc: null
+  - name: Cost monitoring
+    summary: Per-tenant cost attribution and platform cost dashboards.
+    doc: null
+  - name: Cross-tenant security and SIEM
+    summary: >-
+      Fleet-wide security posture and audit forwarding across every tenant, as
+      distinct from a single tenant's own SIEM export.
+    doc: null
+  - name: Legal acceptance ledger
+    summary: >-
+      The record of which tenant accepted which version of the terms. Authoring
+      and serving the documents themselves is Core.
+    doc: null

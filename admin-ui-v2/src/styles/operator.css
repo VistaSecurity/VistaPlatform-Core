@@ -1,0 +1,128 @@
+/* VISTA Operations — operator theme tokens + component classes.
+   Ported from the design kit's ops-base.css (theme) + the --rail-* tokens from
+   "VISTA Operations.html". Set per data-* attribute on <html>; fixed product
+   defaults are dark / compact / blue / square (the prototype's tweak panel is
+   not part of the product). Source of truth:
+   _incoming/admin-ui-v2-kit/design_handoff_vista_operations/prototype/ops-base.css */
+
+/* ============ OPERATOR THEME — cooler graphite, instrument-grade ============ */
+[data-theme="dark"] {
+  --op-bg: #0B0D11; --op-bg2: #0E1117; --op-panel: #11141A; --op-panel2: #161A22;
+  --op-border: #1E232C; --op-border2: #2A303B; --op-hover: rgba(255,255,255,.04);
+  --op-t1: #E9ECF1; --op-t2: #98A1AE; --op-t3: #626B79; --op-track: #1A1F28;
+  --op-rail: #08090C; --op-rail-border: #171B22; --op-avatar: linear-gradient(135deg,#222831,#363f4d);
+  --op-shadow: 0 18px 50px rgba(0,0,0,.6); --op-scrim: rgba(0,0,0,.66);
+  --op-hero: linear-gradient(135deg,#13161d 0%,#0c0e13 60%);
+  --rail-t1: rgba(255,255,255,.92); --rail-t2: rgba(255,255,255,.55); --rail-t3: rgba(255,255,255,.34);
+  --rail-icon: rgba(255,255,255,.45); --rail-hover: rgba(255,255,255,.06); --rail-inset: rgba(255,255,255,.04);
+}
+[data-theme="light"] {
+  --op-bg: #ECEEF2; --op-bg2: #F4F5F8; --op-panel: #FFFFFF; --op-panel2: #F6F7FA;
+  --op-border: #E1E4EA; --op-border2: #D0D5DD; --op-hover: rgba(15,20,30,.035);
+  --op-t1: #111620; --op-t2: #4D5663; --op-t3: #828B97; --op-track: #E7EAEF;
+  --op-rail: #0E1117; --op-rail-border: #1B2029; --op-avatar: linear-gradient(135deg,#2a313c,#444d5b);
+  --op-shadow: 0 16px 44px rgba(20,28,45,.16); --op-scrim: rgba(18,24,38,.4);
+  --op-hero: linear-gradient(135deg,#13161d 0%,#0c0e13 60%);
+  /* sidebar stays dark in both themes */
+  --rail-t1: rgba(255,255,255,.92); --rail-t2: rgba(255,255,255,.55); --rail-t3: rgba(255,255,255,.32);
+  --rail-icon: rgba(255,255,255,.42); --rail-hover: rgba(255,255,255,.05); --rail-inset: rgba(255,255,255,.028);
+}
+[data-accent="blue"] { --op-blue: var(--vista-blue); --op-accent: var(--accent); --op-accent-soft: color-mix(in srgb, var(--accent) 15%, transparent); --op-accent-text: #4d83ff; --op-on-accent: var(--accent-fg); }
+[data-theme="dark"][data-accent="blue"] { --op-accent-text: var(--accent-light); }
+:root { --op-blue: var(--vista-blue); }
+[data-brand="gold"] { --op-accent-text: #b8880a; }
+[data-theme="dark"][data-brand="gold"] { --op-accent-text: var(--accent-light); }
+
+[data-density="comfortable"] { --row-h: 46px; --row-fs: 13px; --cell-px: 15px; --tbl-head-h: 38px; }
+[data-density="compact"]     { --row-h: 34px; --row-fs: 12.5px; --cell-px: 12px; --tbl-head-h: 30px; }
+[data-geo="square"]  { --r-sm: 6px; --r-md: 8px; --r-lg: 11px; --r-btn: 7px; }
+[data-geo="rounded"] { --r-sm: 9px; --r-md: 13px; --r-lg: 18px; --r-btn: 10px; }
+
+body { font-family: var(--font-body); background: var(--op-bg); color: var(--op-t1);
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+
+*::-webkit-scrollbar { width: 9px; height: 9px; }
+*::-webkit-scrollbar-thumb { background: var(--op-border2); border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
+*::-webkit-scrollbar-thumb:hover { background: var(--op-t3); background-clip: padding-box; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+.op-eyebrow { font-family: var(--font-label); font-weight: 700; font-size: 10px; letter-spacing: .13em; text-transform: uppercase; color: var(--op-t3); }
+.mono, .op-num { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace; font-variant-numeric: tabular-nums; }
+.wordmark { font-family: var(--font-display); font-weight: 900; letter-spacing: .26em; }
+.accent-text { background: var(--accent-gradient); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+
+.op-panel { background: var(--op-panel); border: 1px solid var(--op-border); border-radius: var(--r-lg); }
+
+.op-btn { font-family: var(--font-body); font-weight: 600; font-size: 12.5px; letter-spacing: -.01em;
+  border: 1px solid var(--op-border2); background: var(--op-panel2); color: var(--op-t1);
+  height: 32px; padding: 0 13px; border-radius: var(--r-btn); display: inline-flex; align-items: center; gap: 7px;
+  cursor: pointer; transition: all .14s ease; white-space: nowrap; text-decoration: none; }
+.op-btn:hover { border-color: var(--op-t3); background: var(--op-hover); }
+.op-btn svg { width: 14px; height: 14px; }
+.op-btn.primary { background: var(--op-accent); color: var(--op-on-accent); border: none; }
+.op-btn.primary:hover { filter: brightness(1.08); }
+.op-btn.accent { background: var(--accent-gradient); color: var(--accent-fg); border: none; font-weight: 700; }
+.op-btn.accent:hover { filter: brightness(1.06); }
+.op-btn.ghost { background: transparent; border-color: transparent; color: var(--op-t2); }
+.op-btn.ghost:hover { background: var(--op-hover); color: var(--op-t1); }
+.op-btn.danger { color: var(--danger-text); border-color: color-mix(in srgb, var(--danger) 30%, transparent); background: color-mix(in srgb, var(--danger) 8%, transparent); }
+.op-btn.danger:hover { background: color-mix(in srgb, var(--danger) 16%, transparent); }
+.op-btn.sm { height: 27px; padding: 0 10px; font-size: 11.5px; }
+.op-btn.icon { width: 32px; padding: 0; justify-content: center; }
+.op-btn.icon.sm { width: 27px; }
+.op-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+.op-chip { font-family: var(--font-body); font-size: 12px; font-weight: 500; color: var(--op-t2);
+  background: var(--op-panel2); border: 1px solid var(--op-border); border-radius: var(--r-btn);
+  padding: 5px 11px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; transition: all .14s; white-space: nowrap; }
+.op-chip:hover { border-color: var(--op-t3); color: var(--op-t1); }
+.op-chip.active { border-color: var(--op-accent); color: var(--op-t1); background: var(--op-accent-soft); }
+.op-chip svg { width: 13px; height: 13px; }
+
+.op-table { width: 100%; border-collapse: collapse; font-size: var(--row-fs); }
+.op-table thead th { height: var(--tbl-head-h); text-align: left; padding: 0 var(--cell-px); font-family: var(--font-label);
+  font-weight: 700; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--op-t3);
+  border-bottom: 1px solid var(--op-border); white-space: nowrap; }
+.op-table tbody td { height: var(--row-h); padding: 0 var(--cell-px); border-bottom: 1px solid var(--op-border); color: var(--op-t1); white-space: nowrap; }
+.op-table tbody tr:hover { background: var(--op-hover); }
+.op-table .num { text-align: right; font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; }
+.op-table .t-muted { color: var(--op-t2); }
+
+.row-hover:hover { background: var(--op-hover); }
+input, button, select, textarea { font-family: inherit; }
+
+@keyframes opFade { from { transform: translateY(8px); } to { transform: none; } }
+@keyframes opPop { from { opacity: 0; transform: translateY(-6px) scale(.985); } to { opacity: 1; transform: none; } }
+@keyframes opScrim { from { opacity: 0; } to { opacity: 1; } }
+@keyframes opModalIn { from { opacity: 0; transform: translateY(10px) scale(.975); } to { opacity: 1; transform: none; } }
+@keyframes opToastIn { from { opacity: 0; transform: translateY(10px) scale(.98); } to { opacity: 1; transform: none; } }
+@keyframes opDrawer { from { transform: translateX(100%); } to { transform: none; } }
+@keyframes opSheen { from { background-position: -200% 0; } to { background-position: 200% 0; } }
+.op-fade { animation: opFade .35s cubic-bezier(.2,.8,.2,1); }
+@media (prefers-reduced-motion: reduce) { * { animation-duration: .01ms !important; } }
+
+/* ── Operator sign-in (two-pane), ported from the design kit's
+   "VISTA Operations Login.html" (SSO-first + credentials). The structural
+   classes live here so the responsive collapse below works; the rest is
+   inline-styled in pages/login-page.tsx. ── */
+.login-wrap { display: flex; min-height: 100vh; }
+.login-stage { position: relative; flex: 1.1; overflow: hidden;
+  background: radial-gradient(130% 100% at 22% 18%, #14171f 0%, #0a0c10 58%);
+  display: flex; flex-direction: column; justify-content: space-between; padding: 52px 56px; }
+.login-form { flex: .92; min-width: 0; display: flex; align-items: center; justify-content: center;
+  padding: 0 56px; background: var(--op-bg2); border-left: 1px solid var(--op-border); }
+.glow { position: absolute; border-radius: 50%; pointer-events: none; mix-blend-mode: screen; }
+.lf-input { display: flex; align-items: center; gap: 10px; height: 46px; padding: 0 14px; border-radius: var(--r-md);
+  background: var(--op-panel2); border: 1px solid var(--op-border2); transition: border-color .15s; }
+.lf-input:focus-within { border-color: var(--op-accent); }
+.lf-input input { flex: 1; min-width: 0; border: none; background: transparent; outline: none;
+  font-family: var(--font-body); font-size: 14px; color: var(--op-t1); }
+.sso-btn { width: 100%; height: 48px; border-radius: var(--r-md); cursor: pointer; display: inline-flex;
+  align-items: center; justify-content: center; gap: 10px; font-family: var(--font-body); font-weight: 600;
+  font-size: 14px; border: 1px solid var(--op-border2); background: var(--op-panel2); color: var(--op-t1); transition: all .15s; }
+.sso-btn:hover { border-color: var(--op-t3); }
+.sso-btn:disabled { cursor: not-allowed; }
+.sso-btn.primary { background: var(--op-accent); color: var(--op-on-accent); border: none; box-shadow: 0 6px 22px color-mix(in srgb, var(--accent) 26%, transparent); }
+.sso-btn.primary:hover { filter: brightness(1.08); }
+@media (max-width: 880px) { .login-stage { display: none; } .login-form { border-left: none; } }

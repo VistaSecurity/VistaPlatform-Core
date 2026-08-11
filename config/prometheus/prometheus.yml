@@ -1,0 +1,14 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    platform: crypto-inventory
+
+scrape_configs:
+  # Scrape otel-collector's prometheus exporter.
+  # The otel-collector scrapes Traefik and prefixes all metrics with crypto_inventory_,
+  # so Grafana dashboard queries use the crypto_inventory_traefik_* naming.
+  - job_name: crypto-inventory/otel-collector
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['otel-collector:8889']

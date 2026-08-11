@@ -1,0 +1,1511 @@
+openapi: 3.1.0
+info:
+  title: VistaPlatform — notification-service API
+  version: 0.1.0
+  description: |
+    Spec-first contract for notification-service (ADR-0001). First slice for this
+    service, covering the **tenant notification settings** surface — the two
+    Settings → Organization pages a Tenant Admin uses to manage delivery
+    channels and the rules that route alerts to them. UI consumers:
+    `web-ui/src/pages/notification-channels-page.tsx` and
+    `web-ui/src/pages/notification-rules-page.tsx`.
+
+    ## Testability note
+
+    The HTTP handlers are methods on `*Server` that delegate to two concrete
+    service objects (`*services.ChannelManager`, `*services.RuleEngine`). This
+    slice landed a behaviour-preserving field→interface refactor first: those
+    two `Server` fields are now narrow interfaces (`channelManagerIface` /
+    `ruleEngineIface`) the concrete services still satisfy
+    (`services/notification-service/internal/api/server.go`), which makes the
+    real gin handlers contract-testable against in-memory stubs — no database.
+    See the Go contract test
+    (`services/notification-service/internal/api/notifications_contract_test.go`).
+
+    ## Scope of this spec
+
+    The Tenant Admin endpoints on `/api/v1/notification-service/tenant/...`:
+
+      - `GET/POST           /tenant/channels`           — list / create a channel
+      - `GET/PUT/DELETE     /tenant/channels/{id}`      — get / update / delete
+      - `POST               /tenant/channels/{id}/test` — send a test notification
+      - `GET/POST           /tenant/rules`              — list / create a rule
+      - `GET/PUT/DELETE     /tenant/rules/{id}`         — get / update / delete
+
+    Out of scope (this slice): the platform channels/rules (`/platform/*`,
+    admin-ui), the `/tenant/history` + `/tenant/notifications` read endpoints
+    (those query `*sqlx.DB` inline — a separate repo extraction), and the
+    internal service-to-service `/internal/send` endpoint.
+
+    ## Shape status
+
+    These document the current pre-envelope shapes — lists are returned as bare
+    JSON arrays, single objects bare, delete/test as `{ "status": "..." }`,
+    errors as a single string under `error`. They predate the ADR-0002 response
+    envelope and are pinned here as-is so drift is caught.
+servers:
+  - url: /api/v1/notification-service
+    description: Via the API gateway (cookie auth + CSRF), tenant-admin scoped.
+paths:
+  /tenant/channels:
+    get:
+      operationId: listTenantChannels
+      summary: List the tenant's notification channels
+      responses:
+        '200':
+          description: The tenant's channels (bare array; null when none exist).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantChannelListResponse'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+    post:
+      operationId: createTenantChannel
+      summary: Create a notification channel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateChannelRequest'
+      responses:
+        '201':
+          description: The created channel.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantNotificationChannel'
+        '400':
+          description: Invalid request body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenant/channels/{id}:
+    get:
+      operationId: getTenantChannel
+      summary: Get one channel
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The channel.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantNotificationChannel'
+        '400':
+          description: Invalid channel ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '404':
+          description: Channel not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+    put:
+      operationId: updateTenantChannel
+      summary: Update a channel
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateChannelRequest'
+      responses:
+        '200':
+          description: The updated channel.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantNotificationChannel'
+        '400':
+          description: Invalid channel ID or request body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+    delete:
+      operationId: deleteTenantChannel
+      summary: Delete a channel
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 'Deleted — `{ "status": "deleted" }`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          description: Invalid channel ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenant/channels/{id}/test:
+    post:
+      operationId: testTenantChannel
+      summary: Send a test notification through a channel
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 'Test dispatched — `{ "status": "test_sent" }`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          description: Invalid channel ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenant/rules:
+    get:
+      operationId: listTenantRules
+      summary: List the tenant's notification rules
+      responses:
+        '200':
+          description: The tenant's rules (bare array; null when none exist).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantRuleListResponse'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+    post:
+      operationId: createTenantRule
+      summary: Create a notification rule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRuleRequest'
+      responses:
+        '201':
+          description: The created rule.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantNotificationRule'
+        '400':
+          description: Invalid request body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenant/rules/{id}:
+    get:
+      operationId: getTenantRule
+      summary: Get one rule
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The rule.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantNotificationRule'
+        '400':
+          description: Invalid rule ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '404':
+          description: Rule not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+    put:
+      operationId: updateTenantRule
+      summary: Update a rule
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRuleRequest'
+      responses:
+        '200':
+          description: The updated rule.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantNotificationRule'
+        '400':
+          description: Invalid rule ID or request body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+    delete:
+      operationId: deleteTenantRule
+      summary: Delete a rule
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 'Deleted — `{ "status": "deleted" }`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          description: Invalid rule ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenant/history:
+    get:
+      operationId: getTenantHistory
+      summary: List the tenant's sent-notification history
+      description: 'Returns the tenant''s notification history (most recent first). Always a non-null array — empty when there is none.'
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Max rows to return (1–100, default 50).
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: The notification history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantHistoryListResponse'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenant/notifications:
+    get:
+      operationId: getTenantInAppNotifications
+      summary: List the tenant's in-app notifications
+      description: 'Returns up to 100 in-app notifications (most recent first), wrapped under `notifications` (always a non-null array).'
+      responses:
+        '200':
+          description: The tenant's in-app notifications.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InAppNotificationListResponse'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenant/notifications/{id}/read:
+    put:
+      operationId: markTenantNotificationRead
+      summary: Mark one in-app notification read
+      description: 'Stamps read_at on a single tenant in-app notification. Idempotent — already-read rows keep their original read_at. Not behind the settings.update write gate: any member manages their own bell.'
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Marked read.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadStatusResponse'
+        '400':
+          description: Invalid notification ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenant/notifications/read-all:
+    put:
+      operationId: markAllTenantNotificationsRead
+      summary: Mark all in-app notifications read
+      description: 'Stamps read_at on every unread tenant in-app notification.'
+      responses:
+        '200':
+          description: Marked read.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadStatusResponse'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /platform/notifications:
+    get:
+      operationId: getPlatformInAppNotifications
+      summary: List the platform operator in-app inbox
+      description: 'The admin-ui bell feed (platform_in_app_notifications — platform-scoped alerts, no tenant). Up to 100 rows, most recent first, wrapped under `notifications`. Gated by ANY platform permission (the bell is for every platform staffer), not platform.notifications.manage.'
+      responses:
+        '200':
+          description: The platform in-app notifications.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformInAppNotificationListResponse'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /platform/notifications/{id}/read:
+    put:
+      operationId: markPlatformNotificationRead
+      summary: Mark one platform in-app notification read
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Marked read.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadStatusResponse'
+        '400':
+          description: Invalid notification ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /platform/notifications/read-all:
+    put:
+      operationId: markAllPlatformNotificationsRead
+      summary: Mark all platform in-app notifications read
+      responses:
+        '200':
+          description: Marked read.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadStatusResponse'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /platform/history:
+    get:
+      operationId: getPlatformHistory
+      summary: List the platform-wide sent-notification history
+      description: 'Platform/admin (admin-ui) twin of GET /tenant/history — the platform-wide notification history (rows with tenant_id IS NULL), most recent first. Always a non-null array; empty when there is none. (Previously this handler queried then discarded the rows and always returned empty — fixed in #299.)'
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Max rows to return (1–100, default 50).
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: The platform notification history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformHistoryListResponse'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+
+  # ===========================================================================
+  # Platform notification channels + rules (admin-ui). Behind platform-admin auth.
+  # UI consumers: admin-ui platform-notification-channels-page / -rules-page (inline
+  # api() calls, not a service-layer client).
+  # ===========================================================================
+  /platform/channels:
+    get:
+      operationId: listPlatformChannels
+      tags: [platform-notifications]
+      summary: List platform notification channels
+      description: 'Returns a bare array; null when none exist.'
+      responses:
+        '200':
+          description: The platform channels.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformChannelList'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+    post:
+      operationId: createPlatformChannel
+      tags: [platform-notifications]
+      summary: Create a platform notification channel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateChannelRequest'
+      responses:
+        '201':
+          description: The created channel.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformNotificationChannel'
+        '400':
+          description: Invalid request body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /platform/channels/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getPlatformChannel
+      tags: [platform-notifications]
+      summary: Get a platform notification channel
+      responses:
+        '200':
+          description: The channel.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformNotificationChannel'
+        '400':
+          description: Invalid channel ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '404':
+          description: Channel not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+    put:
+      operationId: updatePlatformChannel
+      tags: [platform-notifications]
+      summary: Update a platform notification channel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateChannelRequest'
+      responses:
+        '200':
+          description: The updated channel.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformNotificationChannel'
+        '400':
+          description: Invalid channel ID or body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+    delete:
+      operationId: deletePlatformChannel
+      tags: [platform-notifications]
+      summary: Delete a platform notification channel
+      responses:
+        '200':
+          description: Deletion confirmation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          description: Invalid channel ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /platform/channels/{id}/test:
+    post:
+      operationId: testPlatformChannel
+      tags: [platform-notifications]
+      summary: Send a test notification through a platform channel
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Test dispatched.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          description: Invalid channel ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /platform/rules:
+    get:
+      operationId: listPlatformRules
+      tags: [platform-notifications]
+      summary: List platform notification rules
+      description: 'Returns a bare array; null when none exist.'
+      responses:
+        '200':
+          description: The platform rules.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformRuleList'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+    post:
+      operationId: createPlatformRule
+      tags: [platform-notifications]
+      summary: Create a platform notification rule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRuleRequest'
+      responses:
+        '201':
+          description: The created rule.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformNotificationRule'
+        '400':
+          description: Invalid request body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /platform/rules/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getPlatformRule
+      tags: [platform-notifications]
+      summary: Get a platform notification rule
+      responses:
+        '200':
+          description: The rule.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformNotificationRule'
+        '400':
+          description: Invalid rule ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '404':
+          description: Rule not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+    put:
+      operationId: updatePlatformRule
+      tags: [platform-notifications]
+      summary: Update a platform notification rule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRuleRequest'
+      responses:
+        '200':
+          description: The updated rule.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformNotificationRule'
+        '400':
+          description: Invalid rule ID or body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+    delete:
+      operationId: deletePlatformRule
+      tags: [platform-notifications]
+      summary: Delete a platform notification rule
+      responses:
+        '200':
+          description: Deletion confirmation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          description: Invalid rule ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+
+  /platform/maintenance-windows:
+    get:
+      operationId: listMaintenanceWindows
+      tags: [platform-notifications]
+      summary: List maintenance windows
+      description: >
+        Returns recent and upcoming maintenance windows (from 7 days ago
+        onward), newest first. While a window is active, notification-service
+        suppresses delivery of all notifications (storm control §10.3).
+      responses:
+        '200':
+          description: The maintenance windows.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceWindowListResponse'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+    post:
+      operationId: createMaintenanceWindow
+      tags: [platform-notifications]
+      summary: Create a maintenance window
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateMaintenanceWindowRequest'
+      responses:
+        '201':
+          description: The created maintenance window.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceWindow'
+        '400':
+          description: Invalid body, or `ends_at` is not after `starts_at`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /platform/maintenance-windows/{id}:
+    delete:
+      operationId: deleteMaintenanceWindow
+      tags: [platform-notifications]
+      summary: Delete a maintenance window
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Deletion confirmation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          description: Invalid window ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '404':
+          description: Maintenance window not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+components:
+  schemas:
+    TenantNotificationChannel:
+      type: object
+      additionalProperties: false
+      description: |
+        A tenant delivery channel (models.TenantNotificationChannel). `config` is
+        always present but null when unset; `test_status`, `last_test_at`,
+        `last_used_at`, `description` and `created_by` are omitempty — present
+        only when set.
+      required:
+        - id
+        - tenant_id
+        - channel_name
+        - channel_type
+        - config
+        - enabled
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        channel_name:
+          type: string
+        channel_type:
+          type: string
+          description: "email / slack / webhook / pagerduty / teams (delivery transport)."
+        config:
+          type: [object, 'null']
+          additionalProperties: true
+        enabled:
+          type: boolean
+        test_status:
+          type: string
+        last_test_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+        description:
+          type: string
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    TenantNotificationRule:
+      type: object
+      additionalProperties: false
+      description: |
+        A tenant alert-routing rule (models.TenantNotificationRule). `channel_ids`
+        is always present but null when unset; `alert_type`, `severity_filter`,
+        `category_filter` and `digest_window` are omitempty.
+      required:
+        - id
+        - tenant_id
+        - rule_name
+        - alert_source
+        - channel_ids
+        - frequency
+        - enabled
+        - priority
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        rule_name:
+          type: string
+        alert_source:
+          type: string
+        alert_type:
+          type: string
+        channel_ids:
+          type: [array, 'null']
+          items:
+            type: string
+            format: uuid
+        severity_filter:
+          type: array
+          items:
+            type: string
+        category_filter:
+          type: array
+          items:
+            type: string
+        frequency:
+          type: string
+          description: "immediate / digest (delivery cadence)."
+        digest_window:
+          type: integer
+          description: Digest window in minutes.
+        enabled:
+          type: boolean
+        priority:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    TenantChannelListResponse:
+      type: [array, 'null']
+      description: 'CURRENT shape for GET /tenant/channels — a bare array, null when none exist.'
+      items:
+        $ref: '#/components/schemas/TenantNotificationChannel'
+    TenantRuleListResponse:
+      type: [array, 'null']
+      description: 'CURRENT shape for GET /tenant/rules — a bare array, null when none exist.'
+      items:
+        $ref: '#/components/schemas/TenantNotificationRule'
+    CreateChannelRequest:
+      type: object
+      additionalProperties: false
+      description: Body for POST /tenant/channels.
+      required:
+        - channel_name
+        - channel_type
+        - config
+      properties:
+        channel_name:
+          type: string
+        channel_type:
+          type: string
+        config:
+          type: object
+          additionalProperties: true
+        enabled:
+          type: boolean
+        description:
+          type: string
+    UpdateChannelRequest:
+      type: object
+      additionalProperties: false
+      description: Body for PUT /tenant/channels/{id}. All fields optional.
+      properties:
+        channel_name:
+          type: string
+        config:
+          type: object
+          additionalProperties: true
+        enabled:
+          type: boolean
+        description:
+          type: string
+    CreateRuleRequest:
+      type: object
+      additionalProperties: false
+      description: Body for POST /tenant/rules.
+      required:
+        - rule_name
+        - alert_source
+        - channel_ids
+      properties:
+        rule_name:
+          type: string
+        alert_source:
+          type: string
+        alert_type:
+          type: string
+        channel_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        severity_filter:
+          type: array
+          items:
+            type: string
+        category_filter:
+          type: array
+          items:
+            type: string
+        frequency:
+          type: string
+        digest_window:
+          type: integer
+        enabled:
+          type: boolean
+        priority:
+          type: integer
+    UpdateRuleRequest:
+      type: object
+      additionalProperties: false
+      description: Body for PUT /tenant/rules/{id}. All fields optional.
+      properties:
+        rule_name:
+          type: string
+        alert_type:
+          type: string
+        channel_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        severity_filter:
+          type: array
+          items:
+            type: string
+        category_filter:
+          type: array
+          items:
+            type: string
+        frequency:
+          type: string
+        digest_window:
+          type: integer
+        enabled:
+          type: boolean
+        priority:
+          type: integer
+    StatusResponse:
+      type: object
+      additionalProperties: false
+      description: 'Bare status envelope for delete / test — e.g. `{ "status": "deleted" }`.'
+      required:
+        - status
+      properties:
+        status:
+          type: string
+    MaintenanceWindow:
+      type: object
+      additionalProperties: false
+      description: >
+        A platform-scoped delivery-suppression window (models.MaintenanceWindow;
+        storm control §10.3). While one is active, notification-service
+        suppresses delivery of all notifications. `created_by` is omitted when
+        unset (the Go model tags it `omitempty`).
+      required:
+        - id
+        - starts_at
+        - ends_at
+        - reason
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        starts_at:
+          type: string
+          format: date-time
+        ends_at:
+          type: string
+          format: date-time
+        reason:
+          type: string
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+    MaintenanceWindowListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /platform/maintenance-windows — `{ "windows": [...] }`.'
+      required:
+        - windows
+      properties:
+        windows:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaintenanceWindow'
+    CreateMaintenanceWindowRequest:
+      type: object
+      additionalProperties: false
+      description: Body for POST /platform/maintenance-windows. `ends_at` must be after `starts_at`.
+      required:
+        - starts_at
+        - ends_at
+      properties:
+        starts_at:
+          type: string
+          format: date-time
+        ends_at:
+          type: string
+          format: date-time
+        reason:
+          type: string
+    PlatformNotificationChannel:
+      type: object
+      additionalProperties: false
+      description: |
+        A platform-scoped notification channel (models.PlatformNotificationChannel).
+        Mirrors TenantNotificationChannel without tenant_id. `config` is always
+        present (null when unset); `test_status`/`last_test_at`/`last_used_at`/
+        `description`/`created_by`/`updated_by` are omitempty.
+      required:
+        - id
+        - channel_name
+        - channel_type
+        - config
+        - enabled
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        channel_name:
+          type: string
+        channel_type:
+          type: string
+        config:
+          type: [object, 'null']
+          additionalProperties: true
+        enabled:
+          type: boolean
+        test_status:
+          type: string
+        last_test_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+        description:
+          type: string
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        updated_by:
+          type: string
+          format: uuid
+    PlatformNotificationRule:
+      type: object
+      additionalProperties: false
+      description: |
+        A platform-scoped notification rule (models.PlatformNotificationRule).
+        Mirrors TenantNotificationRule without tenant_id. `channel_ids` is always
+        present (null when unset); `alert_type`/`severity_filter`/`category_filter`/
+        `digest_window` are omitempty.
+      required:
+        - id
+        - rule_name
+        - alert_source
+        - channel_ids
+        - frequency
+        - enabled
+        - priority
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        rule_name:
+          type: string
+        alert_source:
+          type: string
+        alert_type:
+          type: string
+        channel_ids:
+          type: [array, 'null']
+          items:
+            type: string
+            format: uuid
+        severity_filter:
+          type: array
+          items:
+            type: string
+        category_filter:
+          type: array
+          items:
+            type: string
+        frequency:
+          type: string
+        digest_window:
+          type: integer
+        enabled:
+          type: boolean
+        priority:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    PlatformChannelList:
+      type: [array, 'null']
+      description: 'Bare array of platform channels (null when none exist).'
+      items:
+        $ref: '#/components/schemas/PlatformNotificationChannel'
+    PlatformRuleList:
+      type: [array, 'null']
+      description: 'Bare array of platform rules (null when none exist).'
+      items:
+        $ref: '#/components/schemas/PlatformNotificationRule'
+    LegacyError:
+      type: object
+      additionalProperties: true
+      description: CURRENT error shape — a single human-readable string under `error`. Superseded by the ADR-0002 Error envelope as endpoints are hardened.
+      required:
+        - error
+      properties:
+        error:
+          type: string
+    NotificationHistory:
+      type: object
+      additionalProperties: false
+      description: |
+        A sent-notification history row (models.NotificationHistory). `tenant_id`
+        is omitempty; `metadata` is always present but null when unset.
+      required:
+        - id
+        - notification_type
+        - alert_source
+        - alert_type
+        - severity
+        - message
+        - channels_used
+        - status
+        - metadata
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        notification_type:
+          type: string
+        alert_source:
+          type: string
+        alert_type:
+          type: string
+        severity:
+          type: string
+          description: "critical / high / medium / low / info."
+        message:
+          type: string
+        channels_used:
+          type: [array, 'null']
+          items:
+            type: string
+        status:
+          type: string
+          description: "sent / failed / pending / partial."
+        metadata:
+          type: [object, 'null']
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+    InAppNotification:
+      type: object
+      additionalProperties: false
+      description: |
+        A tenant in-app notification (models.InAppNotification). `job_id`,
+        `finding_id` and `read_at` are omitempty — present only when set.
+      required:
+        - id
+        - tenant_id
+        - type
+        - title
+        - message
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          description: "alert / discovery / compliance / system / billing / security / other."
+        title:
+          type: string
+        message:
+          type: string
+        job_id:
+          type: string
+          format: uuid
+        finding_id:
+          type: string
+          format: uuid
+        read_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+    TenantHistoryListResponse:
+      type: array
+      description: 'CURRENT shape for GET /tenant/history — a bare array (non-null; empty when none).'
+      items:
+        $ref: '#/components/schemas/NotificationHistory'
+    PlatformHistoryListResponse:
+      type: array
+      description: 'CURRENT shape for GET /platform/history — a bare array of platform-wide history rows (non-null; empty when none). Same NotificationHistory shape as the tenant history.'
+      items:
+        $ref: '#/components/schemas/NotificationHistory'
+    InAppNotificationListResponse:
+      type: object
+      additionalProperties: false
+      description: 'CURRENT envelope for GET /tenant/notifications — `{ "notifications": [...] }` (non-null array).'
+      required:
+        - notifications
+      properties:
+        notifications:
+          type: array
+          items:
+            $ref: '#/components/schemas/InAppNotification'
+    PlatformInAppNotification:
+      type: object
+      description: 'A platform-scoped in-app notification (operator inbox row). No tenant column.'
+      required:
+        - id
+        - type
+        - title
+        - message
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          type: string
+        title:
+          type: string
+        message:
+          type: string
+        read_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+    PlatformInAppNotificationListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /platform/notifications — `{ "notifications": [...] }` (non-null array).'
+      required:
+        - notifications
+      properties:
+        notifications:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlatformInAppNotification'
+    ReadStatusResponse:
+      type: object
+      additionalProperties: false
+      description: 'Ack envelope for the mark-read endpoints — `{ "status": "read" }`.'
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum: [read]

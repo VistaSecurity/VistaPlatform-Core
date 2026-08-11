@@ -1,0 +1,62 @@
+Vista Platform
+Copyright 2026 Robert Ray Woodward
+
+This product is licensed under the Functional Source License, Version 1.1, with
+an Apache License 2.0 future licence (FSL-1.1-ALv2). See LICENSE.md.
+
+Each release additionally becomes available under the Apache License, Version
+2.0 on the second anniversary of the date that release was made available.
+
+
+THIRD-PARTY COMPONENTS
+----------------------
+
+This product includes third-party software. Each component remains under its
+own licence; the terms in LICENSE.md apply to this product, not to them.
+
+The authoritative, complete inventory is the dependency manifests in this
+repository: go.mod / go.sum for the Go modules, and package.json /
+package-lock.json for the npm packages. Those are generated and stay current;
+this file records only the points that need a stated position.
+
+The Go and npm dependency trees were audited before publication and contain no
+copyleft-licensed components: no GPL, AGPL, LGPL, SSPL, CDDL, EPL, BUSL or
+Elastic-licensed code is present. The Go dependencies are MIT, Apache-2.0 and
+BSD; the npm dependencies are predominantly MIT and ISC.
+
+
+Dual-licensed components — our election
+---------------------------------------
+
+jszip is offered by its authors under either the MIT licence or GPL-3.0-or-later.
+We take it under the MIT licence.
+
+Recording this matters: silence about which arm of a dual licence was taken is
+what creates an argument years later.
+
+
+Mozilla Public License 2.0 components
+-------------------------------------
+
+lightningcss (and its platform-specific binaries) are licensed under MPL-2.0.
+MPL-2.0 is a file-level copyleft: it obliges publication of modifications to
+MPL-licensed files. We do not modify them, and they are build-time tooling that
+is not distributed in the product. Their notices are retained.
+
+
+Cryptographic notice
+--------------------
+
+This product uses cryptography. It does not implement its own primitives; it
+uses the Go standard library and the golang.org/x/crypto packages. Distribution
+and use may be subject to export control or import restrictions in some
+jurisdictions.
+
+
+TRADEMARKS
+----------
+
+"Vista", "Vista Platform" and "VistaSecurity" are trademarks of
+Robert Ray Woodward, used as the name of this project. The licence in LICENSE.md
+grants no right to use them, other than to identify the origin of the software
+as that licence describes.

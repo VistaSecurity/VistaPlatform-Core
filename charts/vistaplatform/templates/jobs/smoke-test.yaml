@@ -1,0 +1,42 @@
+{{/*
+helm test target. Verifies that auth-service and admin-service answer /health
+directly (cluster Traefik handles external routing — there's no in-cluster
+gateway pod to ping). Run via: helm test <release> -n <namespace>.
+*/}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "vistaplatform.fullname" . }}-smoke-test
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: smoke-test
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    {{- include "vistaplatform.podSecurityContext" . | nindent 4 }}
+  containers:
+    - name: smoke
+      image: curlimages/curl:8.10.1
+      securityContext:
+        {{- include "vistaplatform.containerSecurityContext" . | nindent 8 }}
+      command:
+        - sh
+        - -c
+        - |
+          set -e
+          echo "Checking auth-service..."
+          curl -fsS http://auth-service:8080/health
+          echo
+          echo "Checking admin-service..."
+          curl -fsS http://admin-service:8080/health
+          echo
+          echo "Smoke test passed."
+      volumeMounts:
+        - { name: tmp, mountPath: /tmp }
+  volumes:
+    - name: tmp
+      emptyDir: {}

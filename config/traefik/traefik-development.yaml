@@ -1,0 +1,42 @@
+# GENERATED: DO NOT EDIT. Source: standards/service-registry.yaml
+# Generated for development environment (mTLS: false, TLS: false)
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+entryPoints:
+  web:
+    address: :80
+  metrics:
+    address: :8099
+ping:
+  entryPoint: web
+metrics:
+  prometheus:
+    entryPoint: metrics
+    addEntryPointsLabels: true
+    addRoutersLabels: true
+    addServicesLabels: true
+tracing:
+  otlp:
+    grpc:
+      endpoint: otel-collector:4317
+      insecure: true
+accessLog:
+  format: common
+  fields:
+    headers:
+      defaultMode: drop
+      names:
+        X-Forwarded-For: keep
+        X-Real-Ip: keep
+        User-Agent: keep
+        Origin: keep
+log:
+  level: DEBUG
+providers:
+  file:
+    filename: /etc/traefik/dynamic.yaml
+    watch: true
+api:
+  dashboard: true
+  insecure: true

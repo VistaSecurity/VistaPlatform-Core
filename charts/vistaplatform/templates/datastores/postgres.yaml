@@ -1,0 +1,152 @@
+{{- if .Values.datastores.postgres.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "postgres") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vistaplatform.labels" . | nindent 8 }}
+        app.kubernetes.io/component: postgres
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "vistaplatform.podSecurityContext" . | nindent 8 }}
+        fsGroup: 70
+        runAsUser: 70
+      containers:
+        - name: postgres
+          image: "{{ .Values.datastores.postgres.image.repository }}:{{ .Values.datastores.postgres.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.datastores.postgres.tls.enabled }}
+          # Serve TLS (postgres-mtls server cert) and require it for remote
+          # connections via the custom pg_hba (hostssl + scram). Local socket
+          # stays trusted so pg_isready probes + initdb keep working. Phase 3.
+          args:
+            - -c
+            - ssl=on
+            - -c
+            - ssl_cert_file=/etc/postgres-tls/tls.crt
+            - -c
+            - ssl_key_file=/etc/postgres-tls/tls.key
+            - -c
+            - ssl_ca_file=/etc/postgres-tls/ca.crt
+            - -c
+            - hba_file=/etc/postgres-hba/pg_hba.conf
+          {{- end }}
+          securityContext:
+            {{- include "vistaplatform.containerSecurityContext" . | nindent 12 }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.datastores.postgres.db | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.datastores.postgres.user | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vistaplatform.generatedSecretName" . }}
+                  key: postgres-password
+            - name: POSTGRES_INITDB_ARGS
+              value: "--encoding=UTF8 --locale=C"
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          resources:
+            {{- toYaml .Values.datastores.postgres.resources | nindent 12 }}
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+            - name: tmp
+              mountPath: /tmp
+            - name: run
+              mountPath: /var/run/postgresql
+            {{- if .Values.datastores.postgres.tls.enabled }}
+            - name: postgres-tls
+              mountPath: /etc/postgres-tls
+              readOnly: true
+            - name: postgres-hba
+              mountPath: /etc/postgres-hba
+              readOnly: true
+            {{- end }}
+          livenessProbe:
+            exec:
+              command: [pg_isready, -U, {{ .Values.datastores.postgres.user }}, -d, {{ .Values.datastores.postgres.db }}]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, {{ .Values.datastores.postgres.user }}, -d, {{ .Values.datastores.postgres.db }}]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
+        {{- if .Values.datastores.postgres.tls.enabled }}
+        - name: postgres-tls
+          secret:
+            secretName: postgres-mtls
+            # Postgres refuses to start if the TLS key is group/world-readable.
+            # 0640 + fsGroup 70 (above) → root:postgres 0640, readable by the
+            # postgres user (70) only.
+            defaultMode: 0640
+        - name: postgres-hba
+          configMap:
+            name: {{ include "vistaplatform.fullname" . }}-postgres-hba
+        {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: {{ coalesce .Values.datastores.postgres.storageClassName .Values.datastores.storageClassName }}
+        resources:
+          requests:
+            storage: {{ .Values.datastores.postgres.persistence.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  selector:
+    {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "postgres") | nindent 4 }}
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+{{- if .Values.datastores.postgres.tls.enabled }}
+---
+# Custom pg_hba.conf ( Phase 3): local socket trusted (pg_isready probes +
+# initdb); all remote connections must use TLS (hostssl) + scram password. This
+# enforces encryption + server verification for every backend/Job connection.
+# (Mutual client-cert auth — clientcert=verify-ca — is a planned follow-up.)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vistaplatform.fullname" . }}-postgres-hba
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+data:
+  pg_hba.conf: |
+    local   all all                trust
+    hostssl all all 0.0.0.0/0      scram-sha-256
+    hostssl all all ::/0           scram-sha-256
+{{- end }}
+{{- end }}

@@ -1,0 +1,78 @@
+{{/*
+  ALB Ingress — rendered only when ingress.alb.enabled is true.
+
+  Provisions an internet-facing AWS Application Load Balancer via the
+  AWS Load Balancer Controller. TLS is terminated at the ALB using the
+  ACM certificate specified in ingress.alb.certificateArn. Plain HTTP
+  is then forwarded to Traefik pod IPs (target-type: ip) which handles
+  the IngressRoute rules, middlewares, and per-service routing.
+
+  Prerequisites:
+    - AWS Load Balancer Controller installed in the cluster
+    - ingress.alb.certificateArn set to a valid ACM certificate ARN
+    - tls.mode: none (ALB terminates TLS; Traefik receives HTTP)
+    - Traefik installed and running (any namespace — target-type: ip
+      bypasses Service namespace boundaries)
+
+  After apply, retrieve the ALB hostname:
+    kubectl get ingress -n <release-ns> {{ include "vistaplatform.fullname" . }}-alb \
+      -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+  Then create Route 53 alias records for tls.dnsName and tls.adminDnsName
+  pointing at that hostname.
+*/}}
+{{- if .Values.ingress.alb.enabled }}
+{{- $fullname := include "vistaplatform.fullname" . -}}
+{{- $dnsName := .Values.tls.dnsName | required "tls.dnsName is required when ingress.alb.enabled is true" -}}
+{{- $adminDnsName := .Values.tls.adminDnsName | default "" -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}-alb
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: {{ .Values.ingress.alb.scheme | default "internet-facing" | quote }}
+    alb.ingress.kubernetes.io/target-type: {{ .Values.ingress.alb.targetType | default "ip" | quote }}
+    alb.ingress.kubernetes.io/ip-address-type: "ipv4"
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    {{- if .Values.ingress.alb.certificateArn }}
+    alb.ingress.kubernetes.io/certificate-arn: {{ .Values.ingress.alb.certificateArn | quote }}
+    {{- end }}
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/tags: "Project=vistaplatform,ManagedBy=helm"
+    alb.ingress.kubernetes.io/healthcheck-path: /api/v1/auth-service/health
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "5"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "3"
+    {{- with .Values.ingress.alb.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: alb
+  rules:
+    - host: {{ $dnsName | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: traefik
+                port:
+                  number: 80
+    {{- if $adminDnsName }}
+    - host: {{ $adminDnsName | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: traefik
+                port:
+                  number: 80
+    {{- end }}
+{{- end }}

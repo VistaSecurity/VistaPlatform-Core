@@ -1,0 +1,89 @@
+{{- $derivedScheme := ternary "http" "https" (eq .Values.tls.mode "none") -}}
+{{- $tlsScheme := default $derivedScheme .Values.tls.externalScheme -}}
+{{- $apiUrl := printf "%s://%s" $tlsScheme (include "vistaplatform.publicHost" .) -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-ui-runtime-config
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web-ui
+data:
+  config.json: |
+    {
+      "apiGatewayUrl": "{{ $apiUrl }}",
+      "reportsApiUrl": "{{ $apiUrl }}",
+      "inventoryUrl": "{{ $apiUrl }}",
+      "ssoAllowedIdpHosts": {{ dig "sso" "allowedIdpHosts" (list) .Values.frontend | toJson }},
+      "ssoAllowedIdpSuffixes": {{ dig "sso" "allowedIdpSuffixes" (list) .Values.frontend | toJson }}
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-ui
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web-ui
+spec:
+  replicas: {{ default .Values.defaultReplicas .Values.frontend.webUi.replicas }}
+  selector:
+    matchLabels:
+      {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "web-ui") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vistaplatform.labels" . | nindent 8 }}
+        app.kubernetes.io/component: web-ui
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "vistaplatform.podSecurityContext" . | nindent 8 }}
+      {{- $antiAffinity := include "vistaplatform.podAntiAffinity" (dict "ctx" . "component" "web-ui") }}
+      {{- if $antiAffinity }}
+      affinity:
+        {{- $antiAffinity | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: web-ui
+          image: {{ include "vistaplatform.image" (dict "ctx" . "repo" "web-ui" "tag" .Values.frontend.webUi.image.tag) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "vistaplatform.containerSecurityContext" . | nindent 12 }}
+          ports:
+            - { name: http, containerPort: 3001 }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - name: runtime-config
+              mountPath: /srv/config/config.json
+              subPath: config.json
+              readOnly: true
+          resources:
+            {{- toYaml .Values.frontend.webUi.resources | nindent 12 }}
+          livenessProbe:
+            httpGet: { path: /, port: 3001 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /, port: 3001 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: runtime-config
+          configMap:
+            name: web-ui-runtime-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-ui
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web-ui
+spec:
+  selector:
+    {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "web-ui") | nindent 4 }}
+  ports:
+    - { name: http, port: 80, targetPort: 3001 }

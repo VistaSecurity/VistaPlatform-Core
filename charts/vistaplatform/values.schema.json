@@ -1,0 +1,673 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "VistaPlatform Helm chart values",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "image",
+    "tls",
+    "license",
+    "platform",
+    "datastores",
+    "backends"
+  ],
+  "properties": {
+    "createNamespace": {
+      "type": "boolean"
+    },
+    "nameOverride": {
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "type": "string"
+    },
+    "enableSpreadAcrossNodes": {
+      "type": "boolean"
+    },
+    "defaultReplicas": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "registry",
+        "repoPrefix"
+      ],
+      "properties": {
+        "registry": {
+          "type": "string",
+          "description": "Registry hostname hosting the product images. Defaults to docker.io (the public release destination). Set to a private mirror or air-gapped registry hostname to pull from there instead. Must not be empty \u2014 the image reference is built as <registry>/<repoPrefix>/<image>."
+        },
+        "repoPrefix": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        },
+        "pullSecrets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "tls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "certManager",
+            "existingSecret",
+            "selfSigned",
+            "none"
+          ]
+        },
+        "dnsName": {
+          "type": "string"
+        },
+        "adminDnsName": {
+          "type": "string"
+        },
+        "externalScheme": {
+          "type": "string",
+          "enum": [
+            "",
+            "http",
+            "https"
+          ]
+        },
+        "issuerRef": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "Issuer",
+                "ClusterIssuer"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "group": {
+              "type": "string"
+            }
+          }
+        },
+        "existingSecretName": {
+          "type": "string"
+        },
+        "allowNone": {
+          "type": "boolean"
+        },
+        "minVersion": {
+          "type": "string",
+          "enum": [
+            "VersionTLS12",
+            "VersionTLS13"
+          ]
+        },
+        "cipherSuites": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "certManager"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "dnsName",
+              "issuerRef"
+            ],
+            "properties": {
+              "dnsName": {
+                "minLength": 1
+              },
+              "issuerRef": {
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "existingSecret"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "dnsName",
+              "existingSecretName"
+            ],
+            "properties": {
+              "dnsName": {
+                "minLength": 1
+              },
+              "existingSecretName": {
+                "minLength": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "none"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "allowNone"
+            ],
+            "properties": {
+              "allowNone": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "existingSecretName",
+        "secretKey",
+        "mountPath"
+      ],
+      "properties": {
+        "existingSecretName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "secretKey": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mountPath": {
+          "type": "string",
+          "pattern": "^/"
+        }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecretName": {
+          "type": "string"
+        },
+        "jwtSecret": {
+          "type": "string"
+        },
+        "internalAuthSecret": {
+          "type": "string"
+        },
+        "encryptionMasterKey": {
+          "type": "string"
+        }
+      }
+    },
+    "billing": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Billing provider credentials. Currently only Stripe is supported. When everything here is empty admin-service starts up with placeholder defaults and every billing endpoint errors \u2014 only do that when running without billing intentionally.",
+      "properties": {
+        "stripe": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "existingSecretName": {
+              "type": "string"
+            },
+            "secretKey": {
+              "type": "string"
+            },
+            "publishableKey": {
+              "type": "string"
+            },
+            "webhookSecret": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "podSecurityContext": {
+      "type": "object"
+    },
+    "containerSecurityContext": {
+      "type": "object"
+    },
+    "datastores": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "postgres",
+        "redis",
+        "influxdb",
+        "nats"
+      ],
+      "properties": {
+        "storageClassName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "postgres": {
+          "$ref": "#/definitions/datastoreSpec"
+        },
+        "redis": {
+          "$ref": "#/definitions/datastoreSpec"
+        },
+        "influxdb": {
+          "$ref": "#/definitions/datastoreSpec"
+        },
+        "nats": {
+          "$ref": "#/definitions/datastoreSpec"
+        }
+      }
+    },
+    "appConfig": {
+      "type": "object"
+    },
+    "backends": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "image": {
+            "type": "object"
+          },
+          "replicas": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "needs": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "postgres": {
+                "type": "boolean"
+              },
+              "redis": {
+                "type": "boolean"
+              },
+              "nats": {
+                "type": "boolean"
+              },
+              "influxdb": {
+                "type": "boolean"
+              }
+            }
+          },
+          "secrets": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "jwtSecret": {
+                "type": "boolean"
+              },
+              "internalAuthSecret": {
+                "type": "boolean"
+              },
+              "encryptionMasterKey": {
+                "type": "boolean"
+              },
+              "redisUrl": {
+                "type": "boolean"
+              },
+              "stripeKeys": {
+                "type": "boolean",
+                "description": "When true, inject STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY, STRIPE_WEBHOOK_SECRET from the billing secret. Currently only admin-service consumes Stripe."
+              }
+            }
+          },
+          "resources": {
+            "$ref": "#/definitions/resources"
+          },
+          "extraEnv": {
+            "type": "array"
+          },
+          "extraVolumes": {
+            "type": "array"
+          },
+          "extraVolumeMounts": {
+            "type": "array"
+          },
+          "strategy": {
+            "type": "string",
+            "enum": [
+              "RollingUpdate",
+              "Recreate"
+            ],
+            "description": "Deployment update strategy. Defaults to RollingUpdate (Kubernetes default). Set to Recreate for services holding a ReadWriteOnce PVC, to avoid Multi-Attach deadlocks during upgrade. ~30s downtime per upgrade is the tradeoff."
+          }
+        }
+      }
+    },
+    "frontend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "webUi",
+        "adminUi"
+      ],
+      "properties": {
+        "webUi": {
+          "$ref": "#/definitions/uiSpec"
+        },
+        "adminUi": {
+          "$ref": "#/definitions/uiSpec"
+        },
+        "sso": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allowedIdpHosts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowedIdpSuffixes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "gateway": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "extraCorsOrigins": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "controller": {
+          "type": "string",
+          "enum": [
+            "traefik",
+            "none"
+          ],
+          "description": "Which ingress controller the chart renders resources for. 'traefik' emits Traefik IngressRoute + Middleware CRDs (cluster Traefik must be installed). 'none' renders no ingress resources \u2014 the cluster operator brings their own (nginx-ingress, Istio Gateway API, ALB, etc.) and points it at the chart's backend Services per the documented Ingress contract."
+        },
+        "alb": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "AWS ALB integration for EKS. When enabled, renders a K8s Ingress that causes the AWS Load Balancer Controller to provision an ALB. TLS terminates at the ALB via ACM; Traefik receives plain HTTP.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Set true to render the K8s Ingress resource for ALB provisioning. Requires AWS Load Balancer Controller installed in the cluster."
+            },
+            "certificateArn": {
+              "type": "string",
+              "description": "ACM certificate ARN. Required when enabled. From Terraform output: acm_certificate_arn."
+            },
+            "scheme": {
+              "type": "string",
+              "enum": [
+                "internet-facing",
+                "internal"
+              ],
+              "description": "ALB scheme. 'internet-facing' for public access; 'internal' for VPC-only."
+            },
+            "targetType": {
+              "type": "string",
+              "enum": [
+                "ip",
+                "instance"
+              ],
+              "description": "ALB target type. 'ip' routes directly to Traefik pod IPs (recommended; works regardless of Traefik namespace)."
+            },
+            "annotations": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Additional annotations merged onto the K8s Ingress. Use to override default alb.ingress.kubernetes.io/* annotations."
+            }
+          }
+        }
+      }
+    },
+    "monitoring": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "syntheticChecks": {
+          "type": "array",
+          "description": "External-path edge probes the monitoring-service runs each interval. Each entry exercises the customer-facing URL end-to-end and reports as 'synthetic-<name>' in the admin status dashboard.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "url"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Short label appearing in the dashboard (prefixed with 'synthetic-' at runtime)"
+              },
+              "url": {
+                "type": "string",
+                "format": "uri",
+                "description": "Full https:// URL to GET. Use the customer-facing host so the probe exercises DNS + LB + ingress."
+              },
+              "expectedStatus": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 599,
+                "description": "HTTP status that counts as healthy. Defaults to 200."
+              },
+              "timeoutSeconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 60,
+                "description": "Probe timeout in seconds. Defaults to 5."
+              },
+              "insecureSkipVerify": {
+                "type": "boolean",
+                "description": "Skip TLS certificate verification. Lab clusters only \u2014 when the edge cert is signed by an internal CA the monitoring-service pod doesn't trust. Production deployments using publicly-trusted certs should leave this false."
+              }
+            }
+          }
+        }
+      }
+    },
+    "pcapUploads": {
+      "type": "object",
+      "properties": {
+        "size": {
+          "type": "string",
+          "pattern": "^[0-9]+(Mi|Gi|Ti)$"
+        },
+        "accessMode": {
+          "type": "string",
+          "enum": [
+            "ReadWriteOnce",
+            "ReadWriteMany"
+          ]
+        }
+      }
+    },
+    "schemaMigration": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "type": "object"
+        }
+      }
+    },
+    "enterprise": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contentBundle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "verifierImage": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "repository": {
+                  "type": "string"
+                },
+                "tag": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "ingressControllerNamespace": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "definitions": {
+    "datastoreSpec": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "type": "object"
+        },
+        "storageClassName": {
+          "type": "string",
+          "description": "Per-datastore storage class override. When non-empty, takes precedence over datastores.storageClassName for this datastore's PVC."
+        },
+        "persistence": {
+          "type": "object",
+          "properties": {
+            "size": {
+              "type": "string",
+              "pattern": "^[0-9]+(Mi|Gi|Ti)$"
+            }
+          }
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        }
+      }
+    },
+    "uiSpec": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "image": {
+          "type": "object"
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests": {
+          "type": "object",
+          "properties": {
+            "cpu": {
+              "type": "string"
+            },
+            "memory": {
+              "type": "string"
+            }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "cpu": {
+              "type": "string"
+            },
+            "memory": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

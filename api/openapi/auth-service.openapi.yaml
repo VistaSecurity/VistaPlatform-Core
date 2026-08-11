@@ -1,0 +1,4234 @@
+openapi: 3.1.0
+info:
+  title: VistaPlatform — auth-service API
+  version: "0.1.0"
+  description: |
+    Spec-first contract for auth-service (ADR-0001). Eighth (and final
+    pre-spec) vertical slice for the queue: covers the three **cross-cutter**
+    endpoints every page in any future surface calls on load.
+
+    ## Scope of this slice
+
+    Three endpoints on the v1 path prefix `/api/v1/auth-service`:
+
+      - `GET /auth/me`           — current user + tenant context (web-ui `auth-context.tsx` on every login + bootstrap)
+      - `GET /user/permissions`  — string-array of effective permissions for RBAC gating (web-ui `PermissionGate` / `usePermissions()`)
+      - `GET /tenant/features`   — resolved feature-flag map plus usage limits (web-ui `useFeatures()` / `useFeature()`)
+
+    Out of scope for this slice (each is a larger surface that needs its own
+    slice with the design track's input):
+
+      - Login / logout / register / refresh / forgot-password / reset-password
+      - SSO authorize / callback / link / unlink (both tenant and platform)
+      - `/auth/me` writes (PUT, change-password), preferences, EULA, onboarding
+      - Sessions, connections, avatar uploads
+      - Users-admin CRUD, RBAC role + permission management, permission-check POST
+      - Billing, tier selection, subscription tier reads
+      - Tenant read/update, branding, UI config
+      - Platform-admin and impersonation surfaces
+
+    Later slices have since extended this file beyond those three cross-cutters
+    (rbac reads, notification preferences, tenant-RBAC management, and now the
+    **public platform config** + **tenant trial-status** reads the app shell
+    fetches on load). The intro above is kept as the original framing.
+
+    ## Shape status (important)
+
+    These paths document the **current, pre-envelope shapes** the service
+    returns today, captured from the real gin handlers
+    (`services/auth-service/internal/api/handlers.go` GetMe,
+    `services/auth-service/internal/rbac/handlers.go` GetCurrentUserPermissions,
+    `services/auth-service/internal/api/features.go` getTenantFeaturesHandler).
+    `/auth/me` wraps as `{ "user": {...}, "tenant": {...} }`,
+    `/user/permissions` wraps as `{ "permissions": ["..."] }`,
+    `/tenant/features` wraps as `{ "features": {...}, "limits": {...} }`,
+    errors as `{ "error": "string" }`. They are specced as-is per ADR-0001
+    step 2, and the Go contract test
+    (`services/auth-service/internal/api/cross_cutter_contract_test.go`)
+    asserts the live handlers match them.
+
+    The **go-forward ADR-0002 envelope** (`Error`, `Pagination`, the `data`
+    wrapper) is defined under `components.schemas` as the documented standard
+    that NEW or HARDENED endpoints conform to. The current cross-cutter paths
+    do not yet use it; they are hardened to it when the frontend-v2 surface
+    first consumes them (ADR-0001 step 5), at which point this file and the
+    contract test move together.
+  contact:
+    name: VistaPlatform Platform
+servers:
+  - url: /api/v1/auth-service
+    description: auth-service, mounted behind the API gateway.
+
+tags:
+  - name: me
+    description: Current-user + tenant context (cross-cutter).
+  - name: auth
+    description: >
+      Public, unauthenticated sign-in helpers the shared login page calls
+      before a session exists. UI consumer: frontend-v2 login-page.tsx
+      (email-first SSO discovery → "Continue with <provider>").
+  - name: profile
+    description: Self-service My Profile — active sessions/devices and linked SSO connections.
+  - name: permissions
+    description: Effective per-user permission list (cross-cutter).
+  - name: features
+    description: Resolved tenant feature flags + usage limits (cross-cutter).
+  - name: rbac
+    description: >
+      Tenant role-based access control reads — roles, the tenant permission
+      catalogue, and a user's assigned roles. UI consumer:
+      web-ui/src/services/rbac-api.ts (Settings → Roles & Permissions,
+      Tenant Admin only).
+  - name: platform-config
+    description: >
+      Public, unauthenticated platform branding config (name + logos) the
+      web-ui app shell fetches before login. UI consumer:
+      web-ui/src/contexts/platform-config-context.tsx.
+  - name: trial
+    description: >
+      Per-tenant trial phase the web-ui trial banner + hard-lock route guards
+      read on load. UI consumer: web-ui/src/hooks/useTrialStatus.ts.
+  - name: tenant-org
+    description: >
+      Current-tenant organization details — self-service partial update of the
+      tenant row (name / domain / billing email / config blobs). UI consumer:
+      frontend-v2 Settings → Organization → Overview (Tenant Admin).
+  - name: tenant-branding
+    description: >
+      Tenant branding (logo / favicon / colors / company name / custom CSS) +
+      logo/favicon asset upload. UI consumer: web-ui Settings → Organization
+      branding (Tenant Admin).
+  - name: tenant-ui-config
+    description: >
+      Resolved tenant UI configuration (theme / palette / layout / feature
+      toggles) + the public platform UI defaults the login screen reads. UI
+      consumer: web-ui/src/services/api.ts (app shell + Settings).
+  - name: tenant-users
+    description: >
+      Tenant membership — list users (with roles + auth methods) and invite new
+      members. UI consumer: web-ui Settings → Users (Tenant Admin).
+  - name: tenant-sso
+    description: >
+      Tenant SSO configuration — list/delete providers and the authentication
+      policy. UI consumer: web-ui Settings → SSO (Tenant Admin). Provider
+      create/update/test (secret-encryption coupled) are a separate slice.
+  - name: onboarding
+    description: >
+      First-run onboarding workflow — status, the per-step workflow, the current
+      user's progress, and step complete/skip. UI consumer: web-ui onboarding
+      wizard + banner.
+  - name: billing
+    description: >
+      Tenant billing reads the web-ui surfaces — current-period usage + limits.
+      UI consumer: web-ui Settings → Billing / usage widgets.
+
+paths:
+  /auth/me:
+    get:
+      operationId: getCurrentUser
+      tags: [me]
+      summary: Get current user + tenant context
+      description: >
+        The bootstrap call every web-ui page makes after login. Returns the
+        authenticated user and, on a best-effort basis, the user's tenant. The
+        password hash is always stripped before serialization.
+      responses:
+        "200":
+          description: >
+            Current user, optionally with tenant context. Tenant is **omitted
+            entirely** (not null) when the tenant lookup fails — see x-quirks.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "200 with no tenant: when GetTenantByID errors, the handler still returns 200 with just `{ \"user\": ... }` — the `tenant` key is OMITTED from the JSON body (not present-but-null). Clients must treat missing `tenant` and explicitly-null `tenant` as equivalent (the auth-context.tsx already does)."
+        - "user.role is populated from a secondary RBAC lookup (`getUserPrimaryRole`). When no `user_tenant_roles` row exists for the user/tenant pair, the handler returns the literal string `\"viewer\"` as a default (per the explicit comment in `auth/service.go:getUserPrimaryRole`) — NOT an empty string or null. The spec types role as `string` so any value validates, but clients must not branch on `role === \"\"` to detect 'no role'."
+        - "user.password_hash is stripped (`json:\"-\"` on the model and an explicit empty-string assignment) — it is never present in the response body."
+        - "Several optional time/string fields on `user` (last_login_at, avatar_url, timezone, preferences, password_changed_at, locked_until, eula_accepted_at, eula_version, onboarding_completed_at, deleted_at) are typed as `*T` in Go and serialize as either the value or `null`. The schema accepts both nullable forms."
+        - "tenant.domain is `omitempty` in Go and may be absent from the body when null; the schema makes it optional. Other tenant time fields (trial_ends_at, deleted_at) keep their `null` shape because the struct tag is not `omitempty`."
+        - "tenant.subscription_tier_id is a uuid.UUID and serializes as the zero-uuid string when the tenant has no tier (onboarding); schema documents this as a uuid-format string but does NOT enforce non-zero."
+    put:
+      operationId: updateMe
+      tags: [me]
+      summary: Update the current user's profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateMeRequest"
+      responses:
+        "200":
+          description: Updated user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateMeResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "409":
+          description: Email already exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /auth/change-password:
+    post:
+      operationId: changePassword
+      tags: [me]
+      summary: Change the current user's password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordRequest"
+      responses:
+        "200":
+          description: Password changed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /auth/upload-avatar:
+    post:
+      operationId: uploadAvatar
+      tags: [me]
+      summary: Upload a new avatar image for the current user
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [avatar]
+              properties:
+                avatar:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: Avatar uploaded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadAvatarResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /user/permissions:
+    get:
+      operationId: getCurrentUserPermissions
+      tags: [permissions]
+      summary: Get the current user's effective permission names
+      description: >
+        Returns a flat string array of permission names (e.g. `compliance.manage`,
+        `users.read`) that the authenticated user has been granted via their
+        role assignments under the current tenant. Used by the web-ui
+        PermissionGate / PermissionRoute components.
+      responses:
+        "200":
+          description: The user's effective permission names.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PermissionsResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "200 with empty permissions: when a user has no role assignments (e.g. a fresh tenant or a not-yet-provisioned admin), the handler returns `{ \"permissions\": [] }`. The web-ui's hasPermission()/hasAnyPermission()/hasAllPermissions() helpers all treat the empty array as the safe (deny-all) default."
+        - "Permissions are returned as plain strings (not the rich Permission objects with id/description/resource/action). For the resource/action breakdown, callers must use a different endpoint (e.g. `/permissions` with tenant-admin role)."
+
+  /tenant/features:
+    get:
+      operationId: getTenantFeatures
+      tags: [features]
+      summary: Get the resolved feature flags + usage limits for the current tenant
+      description: >
+        Returns the union of (tier features) and (active per-tenant overrides),
+        plus any usage-bound limits the frontend needs to make UI gating
+        decisions (e.g. disabling Subscribe at cap). The response always
+        includes every entry in the platform's canonical feature list
+        (`knownFeatures` in `features.go`) so the frontend can rely on a
+        stable shape.
+      responses:
+        "200":
+          description: The tenant's resolved feature flags + usage limits.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeaturesResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "features map is closed-shape but unenforced: the handler iterates the server-side `knownFeatures` list and the spec freezes it as the four flags the web-ui's `FeatureName` union already declares (`custom_policies`, `threshold_overrides`, `ot_active_probing`, `ot_primary_lens`). Adding a flag is a server+client+spec change; until then, unknown keys are forbidden in this slice's schema (`additionalProperties: false`)."
+        - "limits is degraded-shape: when GetComplianceFrameworkUsage errors, the `compliance_frameworks` key is OMITTED rather than present-but-null. The handler logs and continues so the UI degrades to 'always enabled' (matching the pre-limits behavior)."
+        - "limits.compliance_frameworks.limit is `null` (not absent) when the tier is unlimited."
+        - "Per-feature failure is silent: if `CheckFeatureAccess(feature)` returns an error, that one feature is set to `false` (the safe default) and the call still succeeds with the other features populated."
+
+  /auth/register:
+    post:
+      operationId: register
+      tags: [auth]
+      summary: Register a new user (and tenant)
+      description: >
+        Unauthenticated signup. Creates the tenant and its first user, then
+        returns the created user (password_hash stripped). Does NOT log the user
+        in — no cookies are set; the client logs in separately afterwards.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: The created user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "409":
+          description: A user with this email already exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "400 covers BOTH a malformed body and a personal-email rejection, distinguished only by the `error` string (\"Personal email addresses are not allowed...\")."
+        - "When legal documents are published, `accepted_legal` must be true or the request 400s before any tenant/user is created."
+        - "Unlike /auth/login, no auth cookies are set on success."
+
+  /auth/register/complete:
+    post:
+      operationId: completeRegistration
+      tags: [auth]
+      summary: Complete registration with an optional tier selection
+      description: >
+        The signup/invite-accept variant the onboarding flow posts to: a
+        RegisterRequest body PLUS an optional `subscription_tier_id`. Same result
+        as /auth/register (creates tenant + user) and additionally applies the
+        chosen subscription tier and bootstraps a trial row when applicable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompleteRegistrationRequest"
+      responses:
+        "201":
+          description: The created user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "409":
+          description: A user with this email already exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "`subscription_tier_id` is best-effort: if the tier UPDATE fails, signup still succeeds (the tenant keeps the default tier) and the trial bootstrap is skipped — the response is unchanged."
+        - "400 also covers the personal-email rejection (see /auth/register)."
+        - "When legal documents are published, `accepted_legal` must be true or the request 400s before any tenant/user is created."
+
+  /auth/legal/current:
+    get:
+      operationId: getCurrentLegalDocuments
+      tags: [auth]
+      summary: List current legal documents (public)
+      description: >
+        Unauthenticated. Returns the current published version of every legal
+        document (Terms of Service, Privacy Policy) for display on the signup
+        page. Empty list when nothing is published.
+      responses:
+        "200":
+          description: Current legal documents.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegalDocumentList"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /auth/legal/documents/{docType}:
+    get:
+      operationId: getLegalDocumentByType
+      tags: [auth]
+      summary: Get one current legal document by type (public)
+      description: >
+        Unauthenticated. Returns the current published version of a single
+        document type — backs the standalone /legal/terms and /legal/privacy
+        pages.
+      parameters:
+        - name: docType
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [terms_of_service, privacy_policy]
+      responses:
+        "200":
+          description: The current document.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegalDocument"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /auth/legal/pending:
+    get:
+      operationId: getPendingLegalAcceptances
+      tags: [auth]
+      summary: List legal documents the current user must still accept
+      description: >
+        Authenticated. Returns the current legal documents the signed-in user
+        has not yet accepted (never accepted, or accepted an older version).
+        The frontend shows a blocking re-acceptance modal when non-empty.
+      responses:
+        "200":
+          description: Documents pending acceptance (possibly empty).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegalDocumentList"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /auth/legal/accept:
+    post:
+      operationId: acceptLegalDocuments
+      tags: [auth]
+      summary: Record the current user's acceptance of all current legal documents
+      description: >
+        Authenticated. Writes an append-only acceptance row (server-observed IP
+        and user agent) for every current legal document. Idempotent.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LegalAcceptRequest"
+      responses:
+        "200":
+          description: Acceptance recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegalAcceptResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /auth/verify-email:
+    post:
+      operationId: verifyEmail
+      tags: [auth]
+      summary: Verify an email address with a token
+      description: >
+        Unauthenticated. Consumes the email-verification token (from the link in
+        the verification email) passed as the `token` query parameter and marks
+        the user's email verified. 400 covers a missing, invalid/unknown, OR
+        expired token — distinguished only by the `error` string.
+      parameters:
+        - name: token
+          in: query
+          required: true
+          description: The email-verification token from the verification email link.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Email verified.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /auth/resend-verification:
+    post:
+      operationId: resendEmailVerification
+      tags: [auth]
+      summary: Resend the email-verification email
+      description: >
+        Unauthenticated. Sends a fresh verification email for the given address
+        if it exists and is unverified. Always returns 200 with the same message
+        regardless of whether the user exists or is already verified — deliberate
+        anti-enumeration behavior.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResendVerificationRequest"
+      responses:
+        "200":
+          description: Acknowledged (same response whether or not the email exists).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /auth/reset-password:
+    post:
+      operationId: resetPassword
+      tags: [auth]
+      summary: Reset a password using a reset token
+      description: >
+        Unauthenticated. Consumes a password-reset token (from the
+        forgot-password email) and sets the new password.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResetPasswordRequest"
+      responses:
+        "200":
+          description: Password reset.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "400 covers a malformed body, an invalid/unknown token, AND an expired token — distinguished only by the `error` string."
+
+  /auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: Authenticate with email + password
+      description: >
+        Verifies credentials and, on success, sets httpOnly `access_token` and
+        `refresh_token` cookies plus a JS-readable `csrf_token` cookie. The body
+        also echoes the raw tokens for backward-compat, but cookie auth is the
+        real mechanism — clients must NOT persist the body tokens (the web-ui
+        `tokenManager.setToken` is a deliberate no-op).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Authenticated. Sets httpOnly auth cookies + csrf_token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "Sets httpOnly `access_token` + `refresh_token` cookies and a JS-readable `csrf_token` cookie; the body ALSO contains the raw tokens for backward-compat. Cookie auth is authoritative — do not store the body tokens."
+        - "403 covers both inactive account and unverified email (distinguished only by the `error` string). A 429 (not enumerated) is returned for per-email rate-limit / account-lockout with a `Retry-After` header and a `retry_after` seconds field."
+        - "Bare error shape `{ \"error\": \"...\" }` (pre-ADR-0002), matching the Legacy* responses."
+
+  /auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: Log out the current session
+      description: >
+        Revokes the current session server-side and clears the auth cookies.
+        Requires authentication.
+      responses:
+        "200":
+          description: Logged out; auth cookies cleared.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /auth/refresh:
+    post:
+      operationId: refreshSession
+      tags: [auth]
+      summary: Rotate the session using the refresh-token cookie
+      description: >
+        Exchanges the httpOnly `refresh_token` cookie (or a body token) for a
+        fresh access/refresh pair, rotating all auth cookies. The body is
+        optional — when omitted, the refresh token is read from the cookie.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshRequest"
+      responses:
+        "200":
+          description: Rotated. Sets fresh httpOnly auth cookies + csrf_token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "Refresh token travels as the httpOnly `refresh_token` cookie; the body `refresh_token` is an optional fallback. 401 covers invalid/expired token AND token-reuse-detected (which also revokes all sessions)."
+
+  /tenant/{tenantId}/roles:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+    get:
+      operationId: getTenantRoles
+      tags: [rbac]
+      summary: List the tenant's roles
+      description: >
+        Returns the roles defined for the tenant, each with its embedded
+        permissions map. tenantId comes from the path.
+      responses:
+        "200":
+          description: The tenant's roles.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleListResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /permissions:
+    get:
+      operationId: getTenantPermissions
+      tags: [rbac]
+      summary: List the tenant's permission catalogue
+      description: >
+        Returns the full permission catalogue (rich Permission objects with
+        resource/action) for the current tenant. The tenant is taken from the
+        auth context, not the path.
+      responses:
+        "200":
+          description: The tenant's permissions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PermissionListResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /tenant/{tenantId}/users/{userId}/roles:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+      - $ref: "#/components/parameters/UserId"
+    get:
+      operationId: getUserRoles
+      tags: [rbac]
+      summary: List a user's assigned roles
+      description: Returns the roles assigned to a specific user within the tenant.
+      responses:
+        "200":
+          description: The user's assigned roles.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleListResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    post:
+      operationId: assignUserRole
+      tags: [rbac]
+      summary: Assign a role to a user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoleAssignmentRequest"
+      responses:
+        "200":
+          description: 'Assigned — `{ "user_id": ..., "role_id": ..., "message": "Role assigned" }`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleAssignmentResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "403":
+          description: Access denied to this tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /tenant/{tenantId}/users/{userId}/roles/{roleId}:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+      - $ref: "#/components/parameters/UserId"
+      - name: roleId
+        in: path
+        required: true
+        description: Role UUID.
+        schema:
+          type: string
+          format: uuid
+    delete:
+      operationId: removeUserRole
+      tags: [rbac]
+      summary: Remove a role assignment from a user
+      responses:
+        "200":
+          description: 'Removed — `{ "user_id": ..., "role_id": ..., "message": "Role removed" }`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleAssignmentResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "403":
+          description: Access denied to this tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /tenant/{tenantId}/roles/{roleId}/matrix:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+      - name: roleId
+        in: path
+        required: true
+        description: Role UUID.
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getRolePermissionMatrix
+      tags: [rbac]
+      summary: Get a role's permission matrix
+      responses:
+        "200":
+          description: The role's permission matrix (opaque shape — passed through from the service).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PermissionMatrixResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /tenant/{tenantId}/roles/{roleId}/permissions:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+      - name: roleId
+        in: path
+        required: true
+        description: Role UUID.
+        schema:
+          type: string
+          format: uuid
+    put:
+      operationId: updateRolePermissions
+      tags: [rbac]
+      summary: Replace a role's permission set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateRolePermissionsRequest"
+      responses:
+        "200":
+          description: 'Updated — `{ "role_id": ..., "updated": N }`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateRolePermissionsResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /auth/me/preferences/notifications:
+    get:
+      operationId: getNotificationPreferences
+      tags: [cross-cutters]
+      summary: Get the current user's notification preferences
+      responses:
+        "200":
+          description: 'The user''s notification preferences — `{ "preferences": {...} }`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationPreferencesResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    put:
+      operationId: updateNotificationPreferences
+      tags: [cross-cutters]
+      summary: Update the current user's notification preferences
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: An arbitrary preferences object (merged server-side).
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /platform/config:
+    get:
+      operationId: getPublicPlatformConfig
+      tags: [platform-config]
+      summary: Get public platform branding config
+      description: >
+        Returns the platform display name and optional logo URLs the web-ui app
+        shell renders before (and after) login. Unauthenticated. Every field is
+        best-effort: a missing or unreadable platform_settings row leaves the
+        built-in default in place, so this endpoint always returns 200.
+      responses:
+        "200":
+          description: The public platform config.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformConfig"
+      x-quirks:
+        - "Always 200: storage/parse failures are swallowed per-field and fall back to the built-in default (`platform_name: \"VistaPlatform\"`, logos omitted). The endpoint has no error path."
+        - "Logo URLs are OMITTED (not present-but-null) when unset — they are `omitempty` pointers server-side. The web-ui reads them as possibly-undefined."
+
+  /tenant/trial-status:
+    get:
+      operationId: getTenantTrialStatus
+      tags: [trial]
+      summary: Get the current tenant's trial phase
+      description: >
+        Resolves the calling tenant's trial phase from its tier's trial-day
+        configuration and its billing_trial_tracking row. Drives the web-ui
+        trial banner and hard-lock route guards. Always 200 with a phase for an
+        authenticated tenant; paid tenants and tenants with no trial row resolve
+        to `none`.
+      responses:
+        "200":
+          description: The tenant's resolved trial phase.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrialStatusResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+      x-quirks:
+        - "Lookup errors degrade to `{ \"phase\": \"none\", \"days_remaining\": 0 }` (logged, still 200) — the banner is cosmetic and must never break the rest of the UI."
+        - "Non-trial tiers (paid, or onboarding with no tier) resolve to `none` with `days_remaining: 0` even when an obsolete billing_trial_tracking row survives a tier migration."
+        - "trial_start / trial_end / trial_days_full / trial_days_soft are OMITTED (not present-but-null) when unset — they are `omitempty` pointers server-side. `phase` and `days_remaining` are always present."
+
+  # ===========================================================================
+  # Platform admin impersonation (admin-ui). Behind platform-admin auth +
+  # platform.impersonate permission. UI consumer: admin-ui/src/services/impersonation-api.ts.
+  # ===========================================================================
+  /admin/impersonations:
+    post:
+      operationId: initiateAdminImpersonation
+      tags:
+        - impersonation
+      summary: Start impersonating a tenant user
+      description: Mints a short-lived impersonation token for the target user and writes an audit entry.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminImpersonationRequest"
+      responses:
+        "200":
+          description: The impersonation token and actor/target identity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImpersonationResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "403":
+          description: MFA verification required (when impersonation MFA is enabled).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /admin/impersonations/stop:
+    post:
+      operationId: stopAdminImpersonation
+      tags:
+        - impersonation
+      summary: Stop an active impersonation
+      description: Adds the impersonation token's JTI to the revocation denylist. Returns 204 with no body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StopImpersonationRequest"
+      responses:
+        "204":
+          description: Impersonation revoked (no body).
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /admin/impersonations/audit:
+    get:
+      operationId: listImpersonationAudit
+      tags:
+        - impersonation
+      summary: Recent impersonation audit entries
+      description: "Returns the 50 most recent impersonation start/stop events. `events` is null when there are none."
+      responses:
+        "200":
+          description: The impersonation audit trail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImpersonationAuditResponse"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /tenant:
+    put:
+      operationId: updateCurrentTenant
+      tags:
+        - tenant-org
+      summary: Update the current tenant's organization details (partial)
+      description: >
+        Partial update of the current tenant row — only the fields present in
+        the body are written (name, domain, billing_email, custom_branding,
+        ui_config, settings); omitted fields are left untouched. The tenant is
+        resolved from the auth context, never from the body. Sending a body
+        with none of the updatable fields returns 400 ("No fields to update").
+        Gated by settings.update. UI consumer: frontend-v2 Settings →
+        Organization → Overview.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateTenantRequest"
+      responses:
+        "200":
+          description: Tenant updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /tenant/branding:
+    get:
+      operationId: getTenantBranding
+      tags:
+        - tenant-branding
+      summary: Get the tenant's branding
+      responses:
+        "200":
+          description: The tenant's branding.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BrandingResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    put:
+      operationId: updateTenantBranding
+      tags:
+        - tenant-branding
+      summary: Update the tenant's branding (partial)
+      description: "Partial update — only provided fields are merged into the stored branding (so a request may omit any field, despite the Branding schema marking the colors required for responses). Gated by settings.update."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Branding"
+      responses:
+        "200":
+          description: Branding updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateBrandingResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /tenant/branding/upload:
+    post:
+      operationId: uploadBrandingAsset
+      tags:
+        - tenant-branding
+      summary: Upload a branding logo/favicon asset
+      description: "Multipart upload (form fields `type` = logo|favicon and `file`). PNG/JPEG/ICO only, max 5MB. Stored to S3 with a local-filesystem fallback; returns the asset URL. Gated by settings.update."
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - type
+                - file
+              properties:
+                type:
+                  type: string
+                  enum: [logo, favicon]
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: Asset uploaded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadBrandingResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /tenant/ui-config:
+    get:
+      operationId: getTenantUIConfig
+      tags:
+        - tenant-ui-config
+      summary: Get the tenant's resolved UI config
+      description: "Resolved UI config = code defaults merged with platform_settings ui_config, then the tenant's own ui_config overrides."
+      responses:
+        "200":
+          description: The resolved UI config.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UIConfigResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    put:
+      operationId: updateTenantUIConfig
+      tags:
+        - tenant-ui-config
+      summary: Update the tenant's UI config (platform-admin only)
+      description: "Sets the tenant's design defaults. Requires the platform_admin role (checked in-handler -> 403 otherwise). Partial merge over the existing config."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UIConfig"
+      responses:
+        "200":
+          description: UI config updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateUIConfigResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /platform/ui-config:
+    get:
+      operationId: getPublicPlatformUIConfig
+      tags:
+        - tenant-ui-config
+      summary: Get the public platform UI defaults (unauthenticated)
+      description: "Platform UI defaults for the login screen (code defaults merged with platform_settings ui_config). No auth required; always 200."
+      responses:
+        "200":
+          description: The platform UI defaults.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UIConfigResponse"
+  /tenant/{tenantId}/users:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+    get:
+      operationId: listTenantUsers
+      tags:
+        - tenant-users
+      summary: List a tenant's users (with roles + auth methods)
+      description: "Lists users in the tenant, each with their primary role, all roles, and detected auth methods. The caller's token tenant must match the path tenant (403 otherwise)."
+      responses:
+        "200":
+          description: The tenant's users.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantUsersResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /tenant/{tenantId}/users/invite:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+    post:
+      operationId: inviteTenantMember
+      tags:
+        - tenant-users
+      summary: Invite a member to the tenant
+      description: >
+        Creates a user in the tenant and emails them a password-reset link.
+        Requires the users.create permission and a token tenant matching the path
+        tenant. The 201 success path is auth/email-coupled (integration-tested);
+        the request-validation paths (400 / 401 / 403) are contract-tested here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InviteTenantUserRequest"
+      responses:
+        "201":
+          description: Invitation created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InviteTenantUserResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "409":
+          description: A user with this email already exists in the tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /auth/sessions:
+    get:
+      operationId: listSessions
+      tags: [profile]
+      summary: List the current user's active sessions
+      description: >
+        Returns the authenticated user's active (non-revoked, unexpired)
+        refresh-token sessions, most-recently-used first. Backs the My Profile
+        "Sessions & Devices" page. The token hash is never serialized.
+      responses:
+        "200":
+          description: The user's active sessions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionsResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "`sessions` is `null` (not `[]`) when the user has no active sessions: the handler returns the service's nil slice verbatim, which marshals to JSON null."
+  /auth/sessions/{id}:
+    delete:
+      operationId: revokeSession
+      tags: [profile]
+      summary: Revoke one of the current user's sessions
+      description: >
+        Revokes the refresh-token session with the given id for the
+        authenticated user (logs that device out). The session must belong to
+        the caller.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Session (refresh-token) UUID.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Session revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "A non-UUID id returns 400 {\"error\":\"Invalid session ID\"}; an unknown or foreign session returns 404 {\"error\":\"Session not found\"} (auth.ErrUserNotFound)."
+  /auth/connections:
+    get:
+      operationId: listConnections
+      tags: [profile]
+      summary: List the current user's linked authentication connections
+      description: >
+        Returns the authenticated user's authentication methods (password plus
+        any linked SSO providers), primary first. Backs the My Profile
+        "Connected Accounts" page.
+      responses:
+        "200":
+          description: The user's authentication connections.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectionsResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "`connections` is `null` (not `[]`) when the user has none: the handler returns the service's nil slice verbatim, which marshals to JSON null."
+  /auth/connections/{id}/primary:
+    put:
+      operationId: setPrimaryConnection
+      tags: [profile]
+      summary: Set a connection as the primary authentication method
+      description: >
+        Marks the given authentication connection as primary for the
+        authenticated user (unsetting the previous primary). The connection must
+        belong to the caller.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Connection (user_auth_methods) UUID.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Primary connection updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "A non-UUID id returns 400 {\"error\":\"Invalid connection ID\"}; an unknown or foreign connection returns 404 {\"error\":\"Connection not found\"} (auth.ErrUserNotFound)."
+  /auth/methods:
+    post:
+      operationId: authMethods
+      tags: [auth]
+      summary: List available sign-in methods for an email
+      description: >
+        Public, pre-session lookup the shared login page uses to discover how a
+        given email can sign in. Resolves the user by email and returns the
+        tenant's enabled SSO providers (plus the always-present password method),
+        so the login page can render "Continue with <provider>" and build the
+        SSO authorize URL without a second round-trip.
+
+
+        The flow: the page POSTs the email here, then for an `sso` method
+        navigates the browser to
+        `/api/v1/auth-service/auth/sso/{provider_name}/authorize?tenant_id={tenant_id}`
+        using the returned `tenant_id` + the method's `provider_name`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthMethodsRequest"
+      responses:
+        "200":
+          description: >
+            Available methods for the email. Always 200, even for an unknown
+            email (returns just the password method, `tenant_id` empty) so the
+            endpoint does not reveal whether an account exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthMethodsResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "Unauthenticated/public. A missing or non-email `email` returns 400 {\"error\":\"Invalid request format\"}."
+        - "`tenant_id` is empty when the email matches no active user. SSO methods are only included for a known user whose tenant has enabled providers."
+        - "A `platform_sso` method type can also appear (user signed up via Google/Microsoft at the platform level on a password_only tenant); the login page may ignore it."
+  /auth/invitations/lookup:
+    get:
+      operationId: lookupInvitation
+      tags: [auth]
+      summary: Look up a member invitation by token (public)
+      description: >
+        Public, pre-session lookup the /accept-invite page uses to render the
+        accept form: the invited email plus the sign-in methods the tenant
+        offers (password and/or each enabled SSO provider). #891.
+      parameters:
+        - name: token
+          in: query
+          required: true
+          description: The raw invitation token from the accept link.
+          schema: { type: string }
+      responses:
+        "200":
+          description: The invitation's email + available methods.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvitationLookupResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "410":
+          description: The invitation is expired, used, or revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /auth/invitations/accept:
+    post:
+      operationId: acceptInvitation
+      tags: [auth]
+      summary: Accept a member invitation with a password (public)
+      description: >
+        Public password-path acceptance: creates the member with the invited
+        role and signs them in (sets httpOnly cookies). SSO acceptance instead
+        rides the token through /auth/sso/{provider}/authorize?invitation_token=.
+.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AcceptInvitationRequest"
+      responses:
+        "200":
+          description: Accepted; session cookies set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "403":
+          description: The org requires SSO; password acceptance is not allowed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "409":
+          description: An account with this email already exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "410":
+          description: The invitation is expired, used, or revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /tenant/{tenantId}/invitations:
+    get:
+      operationId: listTenantInvitations
+      tags: [tenant-sso]
+      summary: List the tenant's pending member invitations
+      description: "Pending invitations for the People & Access view. Gated by users.read. #891."
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Pending invitations.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PendingInvitationsResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /tenant/{tenantId}/invitations/{id}:
+    delete:
+      operationId: revokeTenantInvitation
+      tags: [tenant-sso]
+      summary: Revoke a pending member invitation
+      description: "Gated by users.create. #891."
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /tenant/{tenantId}/invitations/{id}/resend:
+    post:
+      operationId: resendTenantInvitation
+      tags: [tenant-sso]
+      summary: Resend a pending member invitation (new token + expiry)
+      description: "Mints a fresh token and re-sends the invite email. Gated by users.create. #891."
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Resent; includes the new accept URL.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvitationResendResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /platform/sso-providers:
+    get:
+      operationId: listPlatformSsoProviders
+      tags: [auth]
+      summary: List enabled platform SSO providers (public)
+      description: "Vista's own Google/Microsoft OAuth apps for social signup, for the /signup page to render 'Sign up with …' buttons. Public; only safe fields. #895."
+      responses:
+        '200':
+          description: Enabled providers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformSsoProvidersResponse'
+        '500':
+          $ref: "#/components/responses/LegacyServerError"
+  /auth/sso/platform/register/complete:
+    post:
+      operationId: completePlatformSsoRegistration
+      tags: [auth]
+      summary: Finish a social-signup registration (public)
+      description: "After the IdP callback stashes a pending registration, the org-name step posts the sso_token + tenant_name here to create the tenant + founder and sign in (sets cookies). #895."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlatformSsoRegisterCompleteRequest'
+      responses:
+        '201':
+          description: Registered; session cookies set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformSsoRegisterCompleteResponse'
+        '400':
+          $ref: "#/components/responses/LegacyBadRequest"
+        '409':
+          description: An account with this email already exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          $ref: "#/components/responses/LegacyServerError"
+  /auth/sso/unlink:
+    delete:
+      operationId: unlinkSSO
+      tags: [profile]
+      summary: Unlink an SSO provider from the current user
+      description: >
+        Removes the link between the authenticated user and the given SSO
+        provider. Refuses to remove the user's last remaining authentication
+        method so they cannot lock themselves out.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SSOUnlinkRequest"
+      responses:
+        "200":
+          description: SSO account unlinked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "Body requires `provider_id` (binding:\"required\"); a missing/malformed body or non-UUID provider_id returns 400."
+        - "Removing the only remaining auth method is refused with 400 {\"error\":\"Cannot unlink last authentication method\"}; a provider the user isn't linked to returns 404 {\"error\":\"SSO account not linked\"}."
+  /tenant/sso/providers:
+    get:
+      operationId: listSSOProviders
+      tags:
+        - tenant-sso
+      summary: List the tenant's SSO providers
+      description: "Admins (tenant_admin / security_admin) get the full config + group-role mappings; other roles get the minimal enabled-only view for the login page. An unauthenticated request returns an empty list."
+      responses:
+        "200":
+          description: The tenant's SSO providers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SSOProvidersResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    post:
+      operationId: createSSOProvider
+      tags:
+        - tenant-sso
+      summary: Create an SSO provider
+      description: "Creates an SSO provider for the tenant. provider_type + provider_name are required; OAuth2 types additionally require client_id/client_secret/auth_url/token_url, SAML types require saml_entity_id/saml_sso_url. Client secrets are encrypted at rest. Returns the created provider (secrets not included)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSSOProviderRequest"
+      responses:
+        "201":
+          description: The created provider.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SSOProviderResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /tenant/sso/providers/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: SSO provider UUID.
+        schema:
+          type: string
+          format: uuid
+    put:
+      operationId: updateSSOProvider
+      tags:
+        - tenant-sso
+      summary: Update an SSO provider (partial)
+      description: "Partial update of a provider owned by the caller's tenant — only provided fields are changed. At least one field (or group_role_mappings) is required (400 otherwise). client_secret / saml_private_key are re-encrypted at rest. Returns the updated provider."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateSSOProviderRequest"
+      responses:
+        "200":
+          description: The updated provider.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SSOProviderResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    delete:
+      operationId: deleteSSOProvider
+      tags:
+        - tenant-sso
+      summary: Delete an SSO provider
+      description: "Deletes a provider owned by the caller's tenant. Returns 400 if the provider is still in use by any user (with a user_count hint)."
+      responses:
+        "200":
+          description: Provider deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /tenant/sso/providers/{id}/test:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: SSO provider UUID.
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: testSSOProvider
+      tags:
+        - tenant-sso
+      summary: Test an SSO provider's configuration
+      description: "Validates the provider's stored configuration completeness (no live IdP call) and returns a status/message result."
+      responses:
+        "200":
+          description: The test result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SSOTestResult"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /tenant/sso/authentication-policy:
+    get:
+      operationId: getAuthenticationPolicy
+      tags:
+        - tenant-sso
+      summary: Get the tenant's authentication policy
+      responses:
+        "200":
+          description: The authentication policy + whether SSO is enabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthPolicyResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    put:
+      operationId: updateAuthenticationPolicy
+      tags:
+        - tenant-sso
+      summary: Update the tenant's authentication policy
+      description: "Sets the policy (password_only / prefer_sso / enforce_sso / sso_only). Enforcing SSO requires at least one enabled provider (400 otherwise)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAuthPolicyRequest"
+      responses:
+        "200":
+          description: Policy updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /onboarding/status:
+    get:
+      operationId: getOnboardingStatus
+      tags:
+        - onboarding
+      summary: Get the current user's onboarding status
+      description: "Whether onboarding is required (tenant setting, default true), whether this user has completed it, and whether to show the banner."
+      responses:
+        "200":
+          description: The onboarding status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnboardingStatusResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /onboarding/workflow:
+    get:
+      operationId: getOnboardingWorkflow
+      tags:
+        - onboarding
+      summary: Get the onboarding workflow with per-step status
+      description: "The tenant's (or default) onboarding workflow, each step annotated with the current user's status (pending/completed/skipped) and timestamps."
+      responses:
+        "200":
+          description: The onboarding workflow.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnboardingWorkflowResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /onboarding/progress:
+    get:
+      operationId: getOnboardingProgress
+      tags:
+        - onboarding
+      summary: Get the current user's onboarding progress
+      description: "Progress statistics + per-step status for the current user against the active onboarding workflow."
+      responses:
+        "200":
+          description: The onboarding progress.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnboardingProgress"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /onboarding/steps/{id}/complete:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Step id (string key within the workflow).
+        schema:
+          type: string
+    post:
+      operationId: completeOnboardingStep
+      tags:
+        - onboarding
+      summary: Mark an onboarding step complete
+      description: "Marks the step complete for the current user. The body is optional step data. When all required steps are complete, onboarding is marked complete. 400 if the step is already completed; 404 if the workflow or step is not found."
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompleteStepRequest"
+      responses:
+        "200":
+          description: Step completed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StepResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /onboarding/steps/{id}/skip:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Step id (string key within the workflow).
+        schema:
+          type: string
+    post:
+      operationId: skipOnboardingStep
+      tags:
+        - onboarding
+      summary: Skip an onboarding step
+      description: "Skips a non-required step for the current user. 400 if the step is required, already completed, or already skipped; 404 if the workflow or step is not found."
+      responses:
+        "200":
+          description: Step skipped.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkipStepResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /onboarding/dismiss:
+    post:
+      operationId: dismissOnboarding
+      tags:
+        - onboarding
+      summary: Dismiss the onboarding wizard for the current user
+      description: "Permanently dismisses the Getting Started wizard for the current user (per-user, persisted server-side). Idempotent."
+      responses:
+        "200":
+          description: Onboarding dismissed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnboardingDismissResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /onboarding/settings:
+    put:
+      operationId: updateOnboardingSettings
+      tags:
+        - onboarding
+      summary: Set the org-wide onboarding toggle (tenant admin)
+      description: "Enables or disables onboarding for the whole tenant by setting onboarding_required in tenant_admin_settings. Requires settings.update."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OnboardingSettingsRequest"
+      responses:
+        "200":
+          description: The resolved tenant onboarding setting.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnboardingSettingsResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /billing/usage/current:
+    get:
+      operationId: getCurrentUsage
+      tags:
+        - billing
+      summary: Get the tenant's current-period usage + limits
+      description: "Usage metrics for the current billing month (recorded, or live counts when no record exists yet), the tier limits, and computed percentages."
+      responses:
+        "200":
+          description: The current usage info.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UsageInfo"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /tenant/billing:
+    get:
+      operationId: getTenantBilling
+      tags:
+        - billing
+      summary: Get the tenant's billing / subscription info
+      description: "The tenant's subscription (tier, status, period, cancel flag), a billing-portal URL (currently empty — the Stripe portal call is not yet wired), and optional tier details. db-only today."
+      responses:
+        "200":
+          description: The tenant's billing info.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantBillingResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /tiers:
+    get:
+      operationId: getPublicTiers
+      tags:
+        - billing
+      summary: List active subscription tiers (public)
+      description: "Public list of active subscription tiers for pricing/registration. No auth required."
+      responses:
+        "200":
+          description: The active subscription tiers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicTiersResponse"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  # ===========================================================================
+  # API tokens (PATs) — bearer credentials for programmatic access. The v1
+  # consumer is mcp-service (Settings → API Tokens mints a token; an MCP
+  # client presents it as `Authorization: Bearer qvpat_...`). Tokens are
+  # user-owned: every route operates on the caller's own tokens only, no
+  # cross-user administration in v1. The plaintext token appears exactly once,
+  # in the 201 create response. The HMAC-guarded internal exchange endpoint
+  # (/internal/api-tokens/exchange) is deliberately NOT in this spec — it is
+  # service-to-service only, never client-facing.
+  # Handlers: services/auth-service/internal/apitokens/handlers.go.
+  # ===========================================================================
+  /api-tokens:
+    get:
+      operationId: listApiTokens
+      tags: [api-tokens]
+      summary: List the caller's API tokens
+      description: >
+        Returns every API token the calling user has minted in the current
+        tenant, newest first — revoked and expired tokens included (the row is
+        the audit record of the credential). Plaintext token values are never
+        returned here.
+      responses:
+        "200":
+          description: The caller's tokens.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APITokenListResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    post:
+      operationId: createApiToken
+      tags: [api-tokens]
+      summary: Mint a new API token
+      description: >
+        Creates a token owned by the calling user. `permissions` must be a
+        subset of the allowed read-only set (`assets.read`, `compliance.read`,
+        `reports.read`, `discovery.read`, `sensors.read`, `settings.read`);
+        omitted means the default set (`assets.read`, `compliance.read`,
+        `reports.read`). `expires_in_days` defaults to 90, max 365. The
+        response's `plaintext_token` is shown exactly once and never
+        retrievable again.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/APITokenCreateRequest"
+      responses:
+        "201":
+          description: Token created; plaintext included this one time.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APITokenCreateResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "409":
+          description: Active-token limit reached (25 per user).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /api-tokens/{id}:
+    delete:
+      operationId: revokeApiToken
+      tags: [api-tokens]
+      summary: Revoke an API token
+      description: >
+        Marks the token revoked (rows are never deleted). Owner-only: a token
+        belonging to another user reads as 404. Revoking an already-revoked
+        token returns 409.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Token UUID.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Token revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APITokenRevokeResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "409":
+          description: Token already revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+components:
+  parameters:
+    TenantId:
+      name: tenantId
+      in: path
+      required: true
+      description: Tenant UUID.
+      schema:
+        type: string
+        format: uuid
+    UserId:
+      name: userId
+      in: path
+      required: true
+      description: User UUID.
+      schema:
+        type: string
+        format: uuid
+  responses:
+    LegacyBadRequest:
+      description: Invalid request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyError"
+    LegacyUnauthorized:
+      description: Missing or invalid auth / tenant context.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyError"
+    LegacyNotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyError"
+    LegacyForbidden:
+      description: Caller lacks the required role/permission.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyError"
+    LegacyServerError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyError"
+
+  schemas:
+    # --- Public sign-in helpers (login page) --------------------------------
+    AuthMethodsRequest:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+    AuthMethod:
+      type: object
+      description: >
+        One available sign-in method. `password` is always present for a known
+        user; `sso` entries carry the provider identity needed to start the
+        authorize flow. A `platform_sso` type may also appear.
+      required: [type, enabled]
+      properties:
+        type:
+          type: string
+          enum: [password, sso, platform_sso]
+        enabled: { type: boolean }
+        provider:
+          type: string
+          description: "Provider type (e.g. google, microsoft). Present for sso / platform_sso."
+        provider_id:
+          type: string
+          format: uuid
+          description: "sso_providers row id. Present for tenant sso methods."
+        provider_name:
+          type: string
+          description: "Tenant-chosen provider name; the URL segment for the authorize endpoint. Present for tenant sso methods."
+    AuthMethodsResponse:
+      type: object
+      required: [email, methods]
+      properties:
+        email: { type: string, format: email }
+        tenant_id:
+          type: string
+          description: "The resolved user's tenant id, or empty string when the email matches no active user. Used to build the SSO authorize URL."
+        methods:
+          type: array
+          items: { $ref: "#/components/schemas/AuthMethod" }
+    # --- Member invitations ------------------------------------------
+    InvitationLookupResponse:
+      type: object
+      required: [email, allow_password]
+      properties:
+        email: { type: string, format: email }
+        tenant_name: { type: string }
+        allow_password:
+          type: boolean
+          description: "False when the tenant's policy is sso_only."
+        sso_providers:
+          type: array
+          items:
+            type: object
+            required: [provider, provider_name]
+            properties:
+              provider: { type: string, description: "Provider type (google, microsoft, azure)." }
+              provider_name: { type: string, description: "The authorize URL segment for this provider." }
+    AcceptInvitationRequest:
+      type: object
+      required: [token, password]
+      properties:
+        token: { type: string }
+        password: { type: string }
+    PendingInvitation:
+      type: object
+      required: [id, email, role, status, created_at, expires_at]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        role: { type: string }
+        status: { type: string }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+    PendingInvitationsResponse:
+      type: object
+      required: [invitations]
+      properties:
+        invitations:
+          type: array
+          items: { $ref: "#/components/schemas/PendingInvitation" }
+    InvitationResendResponse:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }
+        accept_url: { type: string }
+    # --- Platform social signup --------------------------------------
+    PlatformSsoProvider:
+      type: object
+      required: [id, provider_type, provider_name]
+      properties:
+        id: { type: string, format: uuid }
+        provider_type: { type: string, enum: [google, microsoft] }
+        provider_name: { type: string }
+    PlatformSsoProvidersResponse:
+      type: object
+      required: [providers]
+      properties:
+        providers:
+          type: array
+          items: { $ref: '#/components/schemas/PlatformSsoProvider' }
+    PlatformSsoRegisterCompleteRequest:
+      type: object
+      required: [sso_token, tenant_name]
+      properties:
+        sso_token: { type: string }
+        tenant_name: { type: string, minLength: 2 }
+        accepted_legal:
+          type: boolean
+          description: >
+            Whether the social signup accepted the current Terms of Service and
+            Privacy Policy. Server-enforced when legal documents are published.
+    PlatformSsoRegisterCompleteResponse:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }
+        tenant_id: { type: string, format: uuid }
+        user: { type: object, additionalProperties: true }
+        requires_verification:
+          type: boolean
+          description: "True for Microsoft signups (Entra omits email_verified): the account is created but the user must click a verification email before signing in. No session is set."
+        email: { type: string }
+    # --- API tokens (PATs) --------------------------------------------------
+    APIToken:
+      type: object
+      description: >
+        A personal access token record. `token_prefix` is the only fragment of
+        the credential ever stored or returned ("qvpat_" + 4 chars) — enough
+        to recognize a token in a list, useless for authentication.
+        `expires_at` / `last_used_at` / `revoked_at` are OMITTED (not
+        present-but-null) when unset; they are omitempty pointers server-side.
+      required: [id, tenant_id, user_id, name, token_prefix, permissions, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        name: { type: string, maxLength: 255 }
+        token_prefix: { type: string, maxLength: 16 }
+        permissions:
+          type: array
+          items: { type: string }
+        expires_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    APITokenCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Human label, e.g. "Claude Code on my laptop".
+        permissions:
+          type: array
+          items:
+            type: string
+            enum: [assets.read, compliance.read, reports.read, discovery.read, sensors.read, settings.read]
+          description: Subset of the allowed read-only set; omitted = default set.
+        expires_in_days:
+          type: integer
+          minimum: 1
+          maximum: 365
+          description: Lifetime in days; omitted = 90.
+    APITokenCreateResponse:
+      type: object
+      required: [token, plaintext_token]
+      properties:
+        token:
+          $ref: "#/components/schemas/APIToken"
+        plaintext_token:
+          type: string
+          description: The full token (qvpat_...). Shown exactly once; store it now.
+    APITokenListResponse:
+      type: object
+      required: [tokens]
+      properties:
+        tokens:
+          type: array
+          items:
+            $ref: "#/components/schemas/APIToken"
+    APITokenRevokeResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: revoked
+    # ============================================================
+    # rbac (roles / permissions)
+    # ============================================================
+    Role:
+      type: object
+      additionalProperties: false
+      description: >
+        A tenant role (rbac.Role). `permissions` is an embedded map and is
+        required but nullable (it serializes as null when the role carries no
+        permissions map).
+      required:
+        - id
+        - name
+        - description
+        - permissions
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        permissions:
+          type: [object, "null"]
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Permission:
+      type: object
+      additionalProperties: false
+      description: A permission catalogue entry (rbac.Permission).
+      required:
+        - id
+        - name
+        - description
+        - resource
+        - action
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        resource:
+          type: string
+        action:
+          type: string
+    RoleListResponse:
+      type: object
+      additionalProperties: false
+      description: >
+        CURRENT envelope for GET /tenant/{tenantId}/roles and
+        /tenant/{tenantId}/users/{userId}/roles — `{ "roles": [...] }`. On an
+        empty/nil result `roles` can serialize as JSON null, so it is typed as a
+        nullable array.
+      required:
+        - roles
+      properties:
+        roles:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/Role"
+    PermissionListResponse:
+      type: object
+      additionalProperties: false
+      description: >
+        CURRENT envelope for GET /permissions — `{ "permissions": [...] }`. On
+        an empty/nil result `permissions` can serialize as JSON null, so it is
+        typed as a nullable array.
+      required:
+        - permissions
+      properties:
+        permissions:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/Permission"
+    # ============================================================
+    # /auth/me
+    # ============================================================
+    MeResponse:
+      type: object
+      additionalProperties: false
+      description: >
+        CURRENT response shape for `GET /auth/me`. `user` is always present;
+        `tenant` is present on the happy path and **omitted** when the tenant
+        lookup fails (see endpoint x-quirks). Hardening to ADR-0002 would wrap
+        this as `{ data: { user, tenant }, ... }` and make tenant explicitly
+        nullable.
+      required: [user]
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+        tenant:
+          $ref: "#/components/schemas/Tenant"
+
+    User:
+      type: object
+      additionalProperties: false
+      description: >
+        Authenticated user. `password_hash` is stripped before serialization
+        and never present in the response body. `role` is populated from a
+        secondary RBAC lookup (primary role for the user under the tenant);
+        defaults to the literal `"viewer"` when no `user_tenant_roles` assignment exists.
+      required:
+        - id
+        - tenant_id
+        - email
+        - first_name
+        - last_name
+        - role
+        - is_active
+        - email_verified
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        first_name:
+          type: string
+        last_name:
+          type: string
+        role:
+          type: string
+          description: Primary role name from RBAC; defaults to `"viewer"` when no `user_tenant_roles` assignment exists.
+        is_active:
+          type: boolean
+        email_verified:
+          type: boolean
+        last_login_at:
+          type: [string, "null"]
+          format: date-time
+        avatar_url:
+          type: [string, "null"]
+        timezone:
+          type: [string, "null"]
+        preferences:
+          type: [object, "null"]
+          additionalProperties: true
+          description: Free-form per-user preferences map; `null` when never set.
+        password_changed_at:
+          type: [string, "null"]
+          format: date-time
+        locked_until:
+          type: [string, "null"]
+          format: date-time
+        eula_accepted_at:
+          type: [string, "null"]
+          format: date-time
+        eula_version:
+          type: [string, "null"]
+        onboarding_completed_at:
+          type: [string, "null"]
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        deleted_at:
+          type: [string, "null"]
+          format: date-time
+
+    Tenant:
+      type: object
+      additionalProperties: false
+      description: >
+        Tenant organization for the current user. `domain` is `omitempty` in
+        Go and may be absent from the body; other optional time fields
+        (`trial_ends_at`, `deleted_at`) serialize as `null` when unset.
+      required:
+        - id
+        - name
+        - slug
+        - subscription_tier_id
+        - billing_email
+        - payment_status
+        - settings
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+        domain:
+          type: [string, "null"]
+          description: Optional; omitted when absent (Go `omitempty`).
+        subscription_tier_id:
+          type: string
+          format: uuid
+          description: >
+            Zero-uuid string during onboarding (tenant with no tier yet).
+        trial_ends_at:
+          type: [string, "null"]
+          format: date-time
+        billing_email:
+          type: string
+        payment_status:
+          type: string
+        settings:
+          type: [object, "null"]
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        deleted_at:
+          type: [string, "null"]
+          format: date-time
+
+    # ============================================================
+    # /user/permissions
+    # ============================================================
+    PermissionsResponse:
+      type: object
+      additionalProperties: false
+      description: >
+        CURRENT response shape for `GET /user/permissions`. A flat string
+        array under the `permissions` key. Hardening to ADR-0002 would wrap
+        as `{ data: [...], pagination: {...} }`.
+      required: [permissions]
+      properties:
+        permissions:
+          type: array
+          items:
+            type: string
+          description: Permission names (e.g. `compliance.manage`, `users.read`).
+
+    # ============================================================
+    # /tenant/features
+    # ============================================================
+    FeaturesResponse:
+      type: object
+      additionalProperties: false
+      description: >
+        CURRENT response shape for `GET /tenant/features`. `features` is the
+        closed-shape map of every flag in the platform's canonical
+        `knownFeatures` list; `limits` is a sparse map (a key is OMITTED when
+        the underlying usage lookup failed).
+      required: [features, limits]
+      properties:
+        features:
+          $ref: "#/components/schemas/FeatureFlags"
+        limits:
+          $ref: "#/components/schemas/UsageLimits"
+
+    FeatureFlags:
+      type: object
+      additionalProperties: false
+      description: >
+        Closed-shape feature-flag map. Every flag in the platform's
+        `knownFeatures` list is present; values are booleans. Adding a new
+        flag is a coordinated server + client + spec change.
+      required:
+        - custom_policies
+        - threshold_overrides
+        - ot_active_probing
+        - ot_primary_lens
+        - cbom_signing
+        - sso_saml
+        - custom_branding
+        - cmdb_sync
+        - siem_export
+        - billing_portal
+      properties:
+        custom_policies:
+          type: boolean
+          description: Tenant may author custom (non-platform) compliance frameworks.
+        threshold_overrides:
+          type: boolean
+          description: Tenant may customize measurement predicates on licensed framework controls.
+        ot_active_probing:
+          type: boolean
+          description: Discovery jobs may opt into active OT/ICS probing (Modbus, OPC UA, etc.).
+        ot_primary_lens:
+          type: boolean
+          description: Promote the "OT" inventory lens out of the overflow dropdown to a primary tab.
+        cbom_signing:
+          type: boolean
+          description: >
+            CBOM artifacts may be signed and carry compliance-attestation
+            layers, and artifact comparison/drift is available. Generation and
+            CycloneDX export are unconditional.
+        sso_saml:
+          type: boolean
+          description: >
+            Federated sign-in (tenant OIDC/SAML, social signup, staff SSO).
+            Local users, invitations, and RBAC are unconditional.
+        custom_branding:
+          type: boolean
+          description: >
+            White-label the UI with the tenant's own marks (logo, favicon,
+            custom CSS). The palette/theme selector is unconditional.
+        cmdb_sync:
+          type: boolean
+          description: Tenant may sync inventory to an external CMDB/ITSM (ServiceNow, Device42, SolarWinds).
+        siem_export:
+          type: boolean
+          description: Tenant may forward audit events to an external SIEM (Splunk, Datadog, Elastic, webhook).
+        billing_portal:
+          type: boolean
+          description: >
+            Tenant-facing self-service billing — subscription, invoices, plan
+            change and the payment portal (admin-service `/my-billing/**`).
+            Core mounts none of it; usage-against-limits stays unconditional.
+
+    UsageLimits:
+      type: object
+      additionalProperties: false
+      description: >
+        Sparse map — a key is OMITTED (not present-but-null) when the
+        underlying usage lookup errored. Currently only `compliance_frameworks`
+        is published.
+      properties:
+        compliance_frameworks:
+          $ref: "#/components/schemas/UsageLimit"
+
+    UsageLimit:
+      type: object
+      additionalProperties: false
+      required: [current, limit]
+      properties:
+        current:
+          type: integer
+          description: Current usage count.
+        limit:
+          type: [integer, "null"]
+          description: Effective cap; `null` means unlimited.
+
+    # ============================================================
+    # Platform admin impersonation
+    # ============================================================
+    AdminImpersonationRequest:
+      type: object
+      additionalProperties: true
+      description: Body for POST /admin/impersonations.
+      required: [tenant_id, user_id, reason]
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        reason:
+          type: string
+          description: 5–500 chars.
+        ttl_seconds:
+          type: integer
+          description: Optional; 60–3600. Clamped server-side to [1m, 30m]; defaults to 15m.
+    ImpersonationResponse:
+      type: object
+      additionalProperties: false
+      description: The minted impersonation token plus actor/target identity.
+      required: [access_token, expires_at, token_type, jti, target_user, actor]
+      properties:
+        access_token:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        token_type:
+          type: string
+        jti:
+          type: string
+        target_user:
+          type: object
+          additionalProperties: false
+          required: [id, email]
+          properties:
+            id:
+              type: string
+            email:
+              type: string
+        actor:
+          type: object
+          additionalProperties: false
+          required: [id, email]
+          properties:
+            id:
+              type: string
+            email:
+              type: string
+    StopImpersonationRequest:
+      type: object
+      additionalProperties: true
+      description: Body for POST /admin/impersonations/stop.
+      required: [jti]
+      properties:
+        jti:
+          type: string
+    ImpersonationEvent:
+      type: object
+      additionalProperties: false
+      description: One impersonation audit entry (auth.ImpersonationEvent). `event_data` is the audit JSONB serialized as a string.
+      required: [occurred_at, event_type, event_status, ip_address, user_agent, event_data]
+      properties:
+        occurred_at:
+          type: string
+          format: date-time
+        event_type:
+          type: string
+        event_status:
+          type: string
+        ip_address:
+          type: string
+        user_agent:
+          type: string
+        event_data:
+          type: string
+    ImpersonationAuditResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope `{ "events": [...] }`. `events` is null when there are none.'
+      required: [events]
+      properties:
+        events:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/ImpersonationEvent"
+
+    # ============================================================
+    # Tenant branding
+    # ============================================================
+    Branding:
+      type: object
+      additionalProperties: false
+      description: >
+        Tenant branding (api.Branding). The three color fields are always
+        present in responses (defaults applied); the URL / company-name / CSS
+        fields are omitempty and appear only when set. PUT requests may send any
+        subset (partial merge).
+      required:
+        - primary_color
+        - secondary_color
+        - accent_color
+      properties:
+        logo_url:
+          type: string
+        favicon_url:
+          type: string
+        company_name:
+          type: string
+        primary_color:
+          type: string
+        secondary_color:
+          type: string
+        accent_color:
+          type: string
+        custom_css:
+          type: string
+    BrandingResponse:
+      type: object
+      additionalProperties: false
+      description: 'GET /tenant/branding — `{ "branding": {...} }`.'
+      required:
+        - branding
+      properties:
+        branding:
+          $ref: "#/components/schemas/Branding"
+    UpdateBrandingResponse:
+      type: object
+      additionalProperties: false
+      description: 'PUT /tenant/branding — `{ "message", "branding" }`.'
+      required:
+        - message
+        - branding
+      properties:
+        message:
+          type: string
+        branding:
+          $ref: "#/components/schemas/Branding"
+    UploadBrandingResponse:
+      type: object
+      additionalProperties: false
+      description: 'POST /tenant/branding/upload — `{ "message", "url" }`.'
+      required:
+        - message
+        - url
+      properties:
+        message:
+          type: string
+        url:
+          type: string
+
+    # ============================================================
+    # Tenant / platform UI config
+    # ============================================================
+    UIConfig:
+      type: object
+      additionalProperties: false
+      description: >
+        Resolved UI configuration (api.UIConfig). Color/theme/palette/layout
+        fields are always present (defaults applied; accent_color may be an
+        empty string). enhancements + features serialize as JSON null when unset
+        (nil map). custom_css is omitempty. PUT requests may send any subset.
+      required:
+        - theme
+        - primary_color
+        - secondary_color
+        - accent_color
+        - palette
+        - enhancements
+        - layout
+        - features
+      properties:
+        theme:
+          type: string
+        primary_color:
+          type: string
+        secondary_color:
+          type: string
+        accent_color:
+          type: string
+        palette:
+          type: string
+        enhancements:
+          type: [object, "null"]
+          additionalProperties:
+            type: boolean
+        layout:
+          type: string
+        features:
+          type: [object, "null"]
+        custom_css:
+          type: string
+    UIConfigResponse:
+      type: object
+      additionalProperties: false
+      description: 'GET /tenant/ui-config and /platform/ui-config — `{ "config": {...} }`.'
+      required:
+        - config
+      properties:
+        config:
+          $ref: "#/components/schemas/UIConfig"
+    UpdateUIConfigResponse:
+      type: object
+      additionalProperties: false
+      description: 'PUT /tenant/ui-config — `{ "message", "config" }`.'
+      required:
+        - message
+        - config
+      properties:
+        message:
+          type: string
+        config:
+          $ref: "#/components/schemas/UIConfig"
+
+    # ============================================================
+    # Tenant users
+    # ============================================================
+    TenantUser:
+      type: object
+      additionalProperties: false
+      description: "A tenant member (api.TenantUser) with primary role, all roles, and detected auth methods. last_login_at is omitempty."
+      required:
+        - id
+        - tenant_id
+        - email
+        - first_name
+        - last_name
+        - role
+        - roles
+        - is_active
+        - email_verified
+        - created_at
+        - updated_at
+        - auth_methods
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        first_name:
+          type: string
+        last_name:
+          type: string
+        role:
+          type: string
+        roles:
+          type: array
+          items:
+            type: string
+        is_active:
+          type: boolean
+        email_verified:
+          type: boolean
+        last_login_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        auth_methods:
+          type: array
+          items:
+            type: string
+    TenantUsersResponse:
+      type: object
+      additionalProperties: false
+      description: 'GET /tenant/{tenantId}/users — `{ "users": [...] }`. `users` is null when the tenant has no members.'
+      required:
+        - users
+      properties:
+        users:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/TenantUser"
+    InviteTenantUserRequest:
+      type: object
+      additionalProperties: false
+      description: "Request body for POST /tenant/{tenantId}/users/invite."
+      required:
+        - email
+        - role
+      properties:
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+    InviteTenantUserResponse:
+      type: object
+      additionalProperties: false
+      description: 'POST /tenant/{tenantId}/users/invite (201) — `{ "invitation_id", "message" }`.'
+      required:
+        - invitation_id
+        - message
+      properties:
+        invitation_id:
+          type: string
+        message:
+          type: string
+
+    # ============================================================
+    # Tenant SSO
+    # ============================================================
+    GroupRoleMapping:
+      type: object
+      additionalProperties: false
+      description: "Maps an external IdP group to a tenant role (api.GroupRoleMapping)."
+      required:
+        - external_group_name
+        - role_id
+      properties:
+        id:
+          type: string
+        sso_provider_id:
+          type: string
+        external_group_name:
+          type: string
+        role_id:
+          type: string
+        role_name:
+          type: string
+    SSOProvider:
+      type: object
+      additionalProperties: false
+      description: >
+        An SSO provider (api.SSOProvider). The base fields are always present;
+        the OAuth/OIDC + SAML config fields and group mappings are omitempty and
+        appear only in the admin (full-config) view. Client secrets are never
+        returned. attribute_mapping serializes as JSON null when unset.
+      required:
+        - id
+        - tenant_id
+        - provider_type
+        - provider_name
+        - is_enabled
+        - is_default
+        - auto_provision_users
+        - attribute_mapping
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        provider_type:
+          type: string
+        provider_name:
+          type: string
+        is_enabled:
+          type: boolean
+        is_default:
+          type: boolean
+        auto_provision_users:
+          type: boolean
+        attribute_mapping:
+          type: [object, "null"]
+        default_role_id:
+          type: string
+        allowed_domains:
+          type: array
+          items:
+            type: string
+        groups_claim_name:
+          type: string
+        group_role_mappings:
+          type: array
+          items:
+            $ref: "#/components/schemas/GroupRoleMapping"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        client_id:
+          type: string
+        auth_url:
+          type: string
+        token_url:
+          type: string
+        userinfo_url:
+          type: string
+        scopes:
+          type: string
+        saml_entity_id:
+          type: string
+        saml_sso_url:
+          type: string
+    SSOProvidersResponse:
+      type: object
+      additionalProperties: false
+      description: 'GET /tenant/sso/providers — `{ "providers": [...] }`.'
+      required:
+        - providers
+      properties:
+        providers:
+          type: array
+          items:
+            $ref: "#/components/schemas/SSOProvider"
+    SSOProviderResponse:
+      type: object
+      additionalProperties: false
+      description: 'POST /tenant/sso/providers (201) — `{ "provider": {...} }`.'
+      required:
+        - provider
+      properties:
+        provider:
+          $ref: "#/components/schemas/SSOProvider"
+    CreateSSOProviderRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        Request body for POST /tenant/sso/providers (api.CreateSSOProviderRequest).
+        provider_type + provider_name are required; the rest depend on the type
+        (OAuth2 vs SAML). client_secret / saml_private_key are write-only and are
+        encrypted at rest.
+      required:
+        - provider_type
+        - provider_name
+      properties:
+        provider_type:
+          type: string
+        provider_name:
+          type: string
+        is_enabled:
+          type: boolean
+        is_default:
+          type: boolean
+        auto_provision_users:
+          type: boolean
+        attribute_mapping:
+          type: object
+        default_role_id:
+          type: string
+        allowed_domains:
+          type: array
+          items:
+            type: string
+        groups_claim_name:
+          type: string
+        group_role_mappings:
+          type: array
+          items:
+            $ref: "#/components/schemas/GroupRoleMapping"
+        client_id:
+          type: string
+        client_secret:
+          type: string
+        auth_url:
+          type: string
+        token_url:
+          type: string
+        userinfo_url:
+          type: string
+        scopes:
+          type: string
+        saml_entity_id:
+          type: string
+        saml_sso_url:
+          type: string
+        saml_certificate:
+          type: string
+        saml_private_key:
+          type: string
+    UpdateSSOProviderRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        Request body for PUT /tenant/sso/providers/{id}
+        (api.UpdateSSOProviderRequest). All fields optional — only provided fields
+        are updated. At least one field (or group_role_mappings) must be present.
+        client_secret / saml_private_key are write-only and re-encrypted at rest.
+      properties:
+        provider_name:
+          type: string
+        is_enabled:
+          type: boolean
+        is_default:
+          type: boolean
+        auto_provision_users:
+          type: boolean
+        attribute_mapping:
+          type: object
+        default_role_id:
+          type: string
+        allowed_domains:
+          type: array
+          items:
+            type: string
+        groups_claim_name:
+          type: string
+        group_role_mappings:
+          type: array
+          items:
+            $ref: "#/components/schemas/GroupRoleMapping"
+        client_id:
+          type: string
+        client_secret:
+          type: string
+        auth_url:
+          type: string
+        token_url:
+          type: string
+        userinfo_url:
+          type: string
+        scopes:
+          type: string
+        saml_entity_id:
+          type: string
+        saml_sso_url:
+          type: string
+        saml_certificate:
+          type: string
+        saml_private_key:
+          type: string
+    SSOTestResult:
+      type: object
+      additionalProperties: true
+      description: >
+        POST /tenant/sso/providers/{id}/test — config-validation result. status is
+        "success" or "error"; message explains. (Open object — additional
+        diagnostic keys may be added.)
+      required:
+        - provider_id
+        - provider_type
+        - status
+        - message
+      properties:
+        provider_id:
+          type: string
+        provider_type:
+          type: string
+        status:
+          type: string
+        message:
+          type: string
+    AuthPolicyResponse:
+      type: object
+      additionalProperties: false
+      description: 'GET /tenant/sso/authentication-policy — `{ "authentication_policy", "sso_enabled" }`.'
+      required:
+        - authentication_policy
+        - sso_enabled
+      properties:
+        authentication_policy:
+          type: string
+        sso_enabled:
+          type: boolean
+    UpdateAuthPolicyRequest:
+      type: object
+      additionalProperties: false
+      description: "Request body for PUT /tenant/sso/authentication-policy."
+      required:
+        - authentication_policy
+      properties:
+        authentication_policy:
+          type: string
+          enum: [password_only, prefer_sso, enforce_sso, sso_only]
+
+    # ============================================================
+    # Onboarding
+    # ============================================================
+    OnboardingStatusResponse:
+      type: object
+      additionalProperties: false
+      description: 'GET /onboarding/status — `{ required, completed, dismissed, show_banner }`. show_banner = required (tenant setting) AND NOT completed AND NOT dismissed.'
+      required:
+        - required
+        - completed
+        - dismissed
+        - show_banner
+      properties:
+        required:
+          type: boolean
+        completed:
+          type: boolean
+        dismissed:
+          type: boolean
+        show_banner:
+          type: boolean
+    OnboardingSettingsRequest:
+      type: object
+      additionalProperties: false
+      description: 'PUT /onboarding/settings body — org-wide onboarding toggle.'
+      required:
+        - enabled
+      properties:
+        enabled:
+          type: boolean
+    OnboardingSettingsResponse:
+      type: object
+      additionalProperties: false
+      description: 'PUT /onboarding/settings — the resolved tenant setting.'
+      required:
+        - enabled
+      properties:
+        enabled:
+          type: boolean
+    OnboardingDismissResponse:
+      type: object
+      additionalProperties: false
+      description: 'POST /onboarding/dismiss — `{ message, dismissed }`.'
+      required:
+        - message
+        - dismissed
+      properties:
+        message:
+          type: string
+        dismissed:
+          type: boolean
+    OnboardingStep:
+      type: object
+      additionalProperties: false
+      description: "A workflow step annotated with the current user's status."
+      required:
+        - id
+        - title
+        - description
+        - order
+        - required
+        - status
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        order:
+          type: integer
+        required:
+          type: boolean
+        status:
+          type: string
+          description: pending / completed / skipped.
+        completed_at:
+          type: string
+          format: date-time
+        skipped_at:
+          type: string
+          format: date-time
+    OnboardingWorkflow:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - steps
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/OnboardingStep"
+    OnboardingWorkflowResponse:
+      type: object
+      additionalProperties: false
+      description: 'GET /onboarding/workflow — `{ "workflow": {...} }`.'
+      required:
+        - workflow
+      properties:
+        workflow:
+          $ref: "#/components/schemas/OnboardingWorkflow"
+    ProgressInfo:
+      type: object
+      additionalProperties: false
+      required:
+        - completed_steps
+        - total_steps
+        - required_completed
+        - required_total
+        - percentage
+      properties:
+        completed_steps:
+          type: integer
+        total_steps:
+          type: integer
+        required_completed:
+          type: integer
+        required_total:
+          type: integer
+        percentage:
+          type: number
+    OnboardingProgress:
+      type: object
+      additionalProperties: false
+      description: 'GET /onboarding/progress — progress stats + per-step status (bare object).'
+      required:
+        - user_id
+        - tenant_id
+        - onboarding_completed
+        - progress
+        - steps
+      properties:
+        user_id:
+          type: string
+        tenant_id:
+          type: string
+        onboarding_completed:
+          type: boolean
+        onboarding_completed_at:
+          type: string
+          format: date-time
+        progress:
+          $ref: "#/components/schemas/ProgressInfo"
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/OnboardingStep"
+
+    # ============================================================
+    # Onboarding step writes
+    # ============================================================
+    CompleteStepRequest:
+      type: object
+      additionalProperties: true
+      description: "Optional step data for POST /onboarding/steps/{id}/complete."
+      properties:
+        data:
+          type: object
+    StepResponse:
+      type: object
+      additionalProperties: false
+      description: 'POST /onboarding/steps/{id}/complete — `{ message, step, progress, onboarding_complete }`.'
+      required:
+        - message
+        - step
+        - progress
+        - onboarding_complete
+      properties:
+        message:
+          type: string
+        step:
+          $ref: "#/components/schemas/OnboardingStep"
+        progress:
+          $ref: "#/components/schemas/ProgressInfo"
+        onboarding_complete:
+          type: boolean
+    SkipStepResponse:
+      type: object
+      additionalProperties: false
+      description: 'POST /onboarding/steps/{id}/skip — `{ message, step }`.'
+      required:
+        - message
+        - step
+      properties:
+        message:
+          type: string
+        step:
+          $ref: "#/components/schemas/OnboardingStep"
+
+    # ============================================================
+    # Billing usage
+    # ============================================================
+    UsageMetrics:
+      type: object
+      additionalProperties: false
+      required:
+        - api_requests
+        - storage_bytes
+        - assets_count
+        - sensors_count
+        - users_count
+      properties:
+        api_requests:
+          type: integer
+        storage_bytes:
+          type: integer
+        assets_count:
+          type: integer
+        sensors_count:
+          type: integer
+        users_count:
+          type: integer
+    UsagePeriod:
+      type: object
+      additionalProperties: false
+      required:
+        - start
+        - end
+      properties:
+        start:
+          type: string
+          format: date-time
+        end:
+          type: string
+          format: date-time
+    UsageInfo:
+      type: object
+      additionalProperties: false
+      description: 'GET /billing/usage/current — usage + limits + percentages + period.'
+      required:
+        - usage
+        - limits
+        - percentages
+        - period
+      properties:
+        usage:
+          $ref: "#/components/schemas/UsageMetrics"
+        limits:
+          $ref: "#/components/schemas/UsageMetrics"
+        percentages:
+          type: object
+          additionalProperties:
+            type: number
+        period:
+          $ref: "#/components/schemas/UsagePeriod"
+
+    # ============================================================
+    # Tenant billing + public tiers
+    # ============================================================
+    SubscriptionInfo:
+      type: object
+      additionalProperties: false
+      description: "api.SubscriptionInfo. Period timestamps are the zero time when no active subscription period exists."
+      required:
+        - tier_id
+        - tier_name
+        - status
+        - current_period_start
+        - current_period_end
+        - cancel_at_period_end
+      properties:
+        tier_id:
+          type: string
+        tier_name:
+          type: string
+        status:
+          type: string
+        current_period_start:
+          type: string
+          format: date-time
+        current_period_end:
+          type: string
+          format: date-time
+        cancel_at_period_end:
+          type: boolean
+    TenantBillingResponse:
+      type: object
+      additionalProperties: false
+      description: 'GET /tenant/billing — `{ subscription, billing_portal_url, tier? }`. `tier` is present only when the tenant has a subscription tier.'
+      required:
+        - subscription
+        - billing_portal_url
+      properties:
+        subscription:
+          $ref: "#/components/schemas/SubscriptionInfo"
+        billing_portal_url:
+          type: string
+        tier:
+          type: object
+          additionalProperties: true
+          description: "Tier detail (id/name/display_name + optional price/interval/features/limits). Loose — built dynamically."
+    PublicTier:
+      type: object
+      additionalProperties: false
+      description: "A subscription tier in the public list. Base fields always present; max_*/retention/features/limits are conditional."
+      required:
+        - id
+        - name
+        - display_name
+        - billing_interval
+        - price_cents
+        - annual_price_cents
+        - is_active
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        display_name:
+          type: string
+        billing_interval:
+          type: string
+        price_cents:
+          type: integer
+        annual_price_cents:
+          type: integer
+        is_active:
+          type: boolean
+        max_sensors:
+          type: integer
+        max_assets:
+          type: integer
+        max_users:
+          type: integer
+        retention_days:
+          type: integer
+        features:
+          type: object
+        limits:
+          type: object
+    PublicTiersResponse:
+      type: object
+      additionalProperties: false
+      description: 'GET /tiers — `{ "tiers": [...] }`.'
+      required:
+        - tiers
+      properties:
+        tiers:
+          type: array
+          items:
+            $ref: "#/components/schemas/PublicTier"
+
+    # ============================================================
+    # Legacy error envelope (current shape for every error response above)
+    # ============================================================
+    LegacyError:
+      type: object
+      additionalProperties: true
+      description: >
+        CURRENT error shape returned by these endpoints today: a single
+        human-readable string under `error`. Some 400s carry extra sibling keys
+        (e.g. `details`, `required_permission`), so additionalProperties is
+        permitted here. Unstructured — cannot be branched on safely. Superseded
+        by the ADR-0002 `Error` envelope below as endpoints are hardened.
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    NotificationPreferencesResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /auth/me/preferences/notifications — `{ "preferences": {...} }`. The preferences object is free-form and nullable when none are stored.'
+      required: [preferences]
+      properties:
+        preferences:
+          type: [object, "null"]
+          additionalProperties: true
+
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      description: 'Signup body. email, password (min 8), first_name and last_name are required; tenant_name and accepted_legal are optional.'
+      required: [email, password, first_name, last_name]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+        first_name:
+          type: string
+        last_name:
+          type: string
+        tenant_name:
+          type: string
+        accepted_legal:
+          type: boolean
+          description: >
+            Whether the signup affirmatively accepted the current Terms of
+            Service and Privacy Policy. Required (server-enforced) only when
+            legal documents are currently published; the acceptance is recorded
+            as an audit row against the tenant founder.
+
+    CompleteRegistrationRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        register/complete body — the RegisterRequest fields plus an optional
+        `subscription_tier_id`. (The handler embeds models.RegisterRequest and
+        adds the tier id, so the fields are flat, not nested.)
+      required: [email, password, first_name, last_name]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+        first_name:
+          type: string
+        last_name:
+          type: string
+        tenant_name:
+          type: string
+        subscription_tier_id:
+          type: string
+          format: uuid
+          description: Optional tier chosen during signup; applied best-effort.
+        accepted_legal:
+          type: boolean
+          description: >
+            Whether the signup affirmatively accepted the current Terms of
+            Service and Privacy Policy. Required (server-enforced) only when
+            legal documents are currently published; the acceptance is recorded
+            as an audit row against the tenant founder.
+
+    LegalDocument:
+      type: object
+      additionalProperties: false
+      description: A published, versioned legal document (Terms of Service or Privacy Policy).
+      required: [id, doc_type, version, title, body, content_hash, effective_date]
+      properties:
+        id: { type: string, format: uuid }
+        doc_type:
+          type: string
+          enum: [terms_of_service, privacy_policy]
+        version: { type: integer }
+        title: { type: string }
+        body: { type: string }
+        content_hash:
+          type: string
+          description: Hex SHA-256 of the document body; pins each acceptance to exact text.
+        effective_date: { type: string, format: date-time }
+
+    LegalDocumentList:
+      type: object
+      additionalProperties: false
+      required: [documents]
+      properties:
+        documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/LegalDocument"
+
+    LegalAcceptRequest:
+      type: object
+      additionalProperties: false
+      description: Optional body for POST /auth/legal/accept. Absent body is treated as accept-all.
+      properties:
+        accepted:
+          type: boolean
+
+    LegalAcceptResponse:
+      type: object
+      additionalProperties: false
+      required: [message, accepted_count]
+      properties:
+        message: { type: string }
+        accepted_count:
+          type: integer
+          description: Number of current documents the user is now on record as accepting.
+
+    ResetPasswordRequest:
+      type: object
+      additionalProperties: false
+      description: 'Password-reset body (models.ResetPasswordRequest). token, password and new_password are all required (the two password fields are min 8).'
+      required: [token, password, new_password]
+      properties:
+        token:
+          type: string
+        password:
+          type: string
+          minLength: 8
+        new_password:
+          type: string
+          minLength: 8
+
+    ResendVerificationRequest:
+      type: object
+      additionalProperties: false
+      description: 'Body for POST /auth/resend-verification — the email to resend verification to.'
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+
+    RegisterResponse:
+      type: object
+      additionalProperties: false
+      description: 'Response for /auth/register and /auth/register/complete: a message plus the created user (password_hash stripped).'
+      required: [message, user]
+      properties:
+        message:
+          type: string
+        user:
+          $ref: "#/components/schemas/User"
+
+    MessageResponse:
+      type: object
+      additionalProperties: false
+      description: Generic mutation acknowledgement (a single human-readable string under `message`).
+      required: [message]
+      properties:
+        message:
+          type: string
+
+    UpdateTenantRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        Partial current-tenant update — every field optional; only present
+        fields are written. The handler applies no per-field validation beyond
+        JSON binding (billing_email is a plain string, not format-checked), so
+        the spec types match the handler, not an aspiration. The three JSONB
+        blobs (custom_branding / ui_config / settings) are replaced wholesale
+        when present, not merged — prefer the dedicated
+        /tenant/branding and /tenant/ui-config endpoints for those.
+      properties:
+        name:
+          type: string
+          description: Organization display name.
+        domain:
+          type: string
+          description: Primary domain (SSO / invite matching).
+        billing_email:
+          type: string
+          description: Billing contact email. Not format-validated server-side.
+        custom_branding:
+          type: object
+          additionalProperties: true
+          description: Replaces the stored custom_branding JSONB wholesale.
+        ui_config:
+          type: object
+          additionalProperties: true
+          description: Replaces the stored ui_config JSONB wholesale.
+        settings:
+          type: object
+          additionalProperties: true
+          description: Replaces the stored settings JSONB wholesale.
+
+    UpdateMeRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        first_name:
+          type: string
+        last_name:
+          type: string
+        email:
+          type: string
+          format: email
+        avatar_url:
+          type: [string, "null"]
+        timezone:
+          type: string
+
+    UpdateMeResponse:
+      type: object
+      additionalProperties: false
+      required: [message, user]
+      properties:
+        message:
+          type: string
+        user:
+          $ref: "#/components/schemas/User"
+
+    ChangePasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [current_password, new_password]
+      properties:
+        current_password:
+          type: string
+        new_password:
+          type: string
+          minLength: 8
+
+    UploadAvatarResponse:
+      type: object
+      additionalProperties: false
+      required: [message, avatar_url]
+      properties:
+        message:
+          type: string
+        avatar_url:
+          type: string
+
+    Session:
+      type: object
+      additionalProperties: false
+      description: >
+        An active refresh-token session (models.Session). token_hash is
+        `json:"-"` and never serialized. Nullable fields are present-but-null
+        (the struct tags are not omitempty).
+      required: [id, user_id, family_id, expires_at, last_used_at, is_revoked, created_from_ip, user_agent, created_at, revoked_at]
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        family_id: { type: string, format: uuid }
+        expires_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time }
+        is_revoked: { type: boolean }
+        created_from_ip:
+          type: [string, "null"]
+          description: Source IP captured when the session was created; null when unknown.
+        user_agent:
+          type: [string, "null"]
+          description: User-Agent captured at session creation; null when unknown.
+        created_at: { type: string, format: date-time }
+        revoked_at:
+          type: [string, "null"]
+          format: date-time
+
+    SessionsResponse:
+      type: object
+      additionalProperties: false
+      description: ListSessions envelope — the user's sessions under `sessions` (null when the user has none).
+      required: [sessions]
+      properties:
+        sessions:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/Session"
+
+    Connection:
+      type: object
+      additionalProperties: false
+      description: >
+        A linked authentication method (models.Connection) — either the local
+        password (`auth_type: password`) or an SSO provider link. Nullable fields
+        are present-but-null (struct tags are not omitempty).
+      required: [id, user_id, auth_type, sso_provider_id, external_user_id, external_email, is_primary, last_used_at, metadata, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        auth_type: { type: string }
+        sso_provider_id:
+          type: [string, "null"]
+          format: uuid
+        external_user_id:
+          type: [string, "null"]
+        external_email:
+          type: [string, "null"]
+        is_primary: { type: boolean }
+        last_used_at:
+          type: [string, "null"]
+          format: date-time
+        metadata:
+          type: [object, "null"]
+          additionalProperties: true
+          description: Free-form provider metadata; null when unset.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ConnectionsResponse:
+      type: object
+      additionalProperties: false
+      description: ListConnections envelope — the user's auth connections under `connections` (null when the user has none).
+      required: [connections]
+      properties:
+        connections:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/Connection"
+
+    SSOUnlinkRequest:
+      type: object
+      additionalProperties: false
+      description: DELETE /auth/sso/unlink body. `provider_id` is required (binding:"required").
+      required: [provider_id]
+      properties:
+        provider_id:
+          type: string
+          format: uuid
+
+    PlatformConfig:
+      type: object
+      additionalProperties: false
+      description: >
+        Public platform branding (api.PlatformConfig). Returned bare (not
+        wrapped). `platform_name` is always present (defaults to "VistaPlatform");
+        the logo/favicon URLs are present only when configured (omitempty pointers).
+        `signup_enabled` mirrors platform_settings.registration_enabled (default
+        true) so the /signup page knows whether to render the form.
+      required: [platform_name, signup_enabled]
+      properties:
+        platform_name:
+          type: string
+        platform_logo_url:
+          type: string
+          description: Optional branding logo URL; omitted when unset.
+        platform_login_logo_url:
+          type: string
+          description: Optional login-screen logo URL; omitted when unset.
+        platform_favicon_url:
+          type: string
+          description: Optional favicon URL; omitted when unset.
+        signup_enabled:
+          type: boolean
+          description: Whether self-service sign-up is open (#941).
+
+    TrialStatusResponse:
+      type: object
+      additionalProperties: false
+      description: >
+        Resolved tenant trial phase (api.trialStatusResponse). Returned bare
+        (not wrapped). `phase` and `days_remaining` are always present; the
+        remaining fields are omitted (not null) when unset.
+      required: [phase, days_remaining]
+      properties:
+        phase:
+          type: string
+          enum: [none, full, soft_prompt, locked, converted]
+          description: Canonical trial state the UI gates everything off of.
+        days_remaining:
+          type: integer
+          description: Floored days until the next transition; 0 in none/locked/converted.
+        trial_start:
+          type: string
+          format: date-time
+          description: Trial start (from billing_trial_tracking); omitted for paid tenants.
+        trial_end:
+          type: string
+          format: date-time
+          description: Computed/extended trial end; omitted for paid tenants.
+        trial_days_full:
+          type: integer
+          description: Tier's full-access trial-day count; omitted when no trial tier.
+        trial_days_soft:
+          type: integer
+          description: Tier's soft-prompt trial-day count; omitted when no trial tier.
+
+    RoleAssignmentRequest:
+      type: object
+      additionalProperties: true
+      description: Body for POST /tenant/{tenantId}/users/{userId}/roles.
+      required: [role_id]
+      properties:
+        role_id:
+          type: string
+          format: uuid
+    RoleAssignmentResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for role assign / remove — `{ "user_id": ..., "role_id": ..., "message": "..." }`.'
+      required: [user_id, role_id, message]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        role_id:
+          type: string
+          format: uuid
+        message:
+          type: string
+    UpdateRolePermissionsRequest:
+      type: object
+      additionalProperties: true
+      description: Body for PUT /tenant/{tenantId}/roles/{roleId}/permissions.
+      properties:
+        permission_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+    UpdateRolePermissionsResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for PUT role permissions — `{ "role_id": ..., "updated": N }`.'
+      required: [role_id, updated]
+      properties:
+        role_id:
+          type: string
+          format: uuid
+        updated:
+          type: integer
+    PermissionMatrixResponse:
+      type: object
+      additionalProperties: true
+      description: 'Opaque permission matrix for a role — passed through verbatim from the RBAC service (shape not constrained here).'
+
+    # ============================================================
+    # /auth login flow (login / logout / refresh)
+    # ============================================================
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+          description: Min 8 chars (server `binding:"required,min=8"`).
+
+    RefreshRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        Optional body. When omitted (or `refresh_token` empty), the server reads
+        the refresh token from the httpOnly `refresh_token` cookie.
+      properties:
+        refresh_token:
+          type: string
+
+    AuthResponse:
+      type: object
+      additionalProperties: false
+      description: >
+        Login/refresh success body. The raw tokens are echoed for backward-compat
+        but cookie auth is authoritative — clients must not persist them.
+      required: [user, access_token, refresh_token, expires_in]
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        expires_in:
+          type: integer
+          format: int64
+          description: Access-token lifetime in seconds.
+
+    MessageResult:
+      type: object
+      additionalProperties: false
+      required: [message]
+      properties:
+        message:
+          type: string
+
+    # ============================================================
+    # ADR-0002 go-forward envelope (the documented standard).
+    # NOT yet applied to the v1 cross-cutter paths above. New and hardened
+    # endpoints conform to these. The generated client carries these types
+    # ahead of the backend so the frontend-v2 surface can target them.
+    # ============================================================
+    Error:
+      type: object
+      additionalProperties: false
+      description: ADR-0002 error envelope. Clients branch on `error.code`, never on `message`.
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Stable, machine-readable enum (e.g. unauthorized).
+            message:
+              type: string
+              description: Human-readable, safe to surface in UI.
+            details:
+              type: array
+              items:
+                $ref: "#/components/schemas/ErrorDetail"
+            request_id:
+              type: string
+              description: For support correlation.
+
+    ErrorDetail:
+      type: object
+      additionalProperties: false
+      required: [field, issue]
+      properties:
+        field:
+          type: string
+        issue:
+          type: string
+
+    Pagination:
+      type: object
+      additionalProperties: false
+      description: ADR-0002 pagination block for collection envelopes.
+      required: [total, limit, offset]
+      properties:
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+        next_offset:
+          type: [integer, "null"]
+          description: Offset of the next page, or null when there are no more.

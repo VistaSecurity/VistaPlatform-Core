@@ -1,0 +1,17 @@
+# GENERATED. Do not edit. Source: standards/service-registry.yaml
+# auth-service: /api/v1/auth-service/ -> auth-service:8080
+# inventory-service: /api/v1/inventory-service/ -> inventory-service:8080
+# compliance-engine: /api/v1/compliance-engine/ -> compliance-engine:8080
+# cbom-service: /api/v1/cbom-service/ -> cbom-service:8080
+# sensor-manager: /api/v1/sensor-manager/ -> sensor-manager:8080
+# cluster-sensor-service: /api/v1/cluster-sensor-service/ -> cluster-sensor-service:8080
+# admin-service: /api/v1/admin-service/ -> admin-service:8080
+# monitoring-service: /api/v1/monitoring-service/ -> monitoring-service:8080
+# resource-tracker-service: /api/v1/resource-tracker-service/ -> resource-tracker-service:8080
+# tenant-health-service: /api/v1/tenant-health-service/ -> tenant-health-service:8080
+# device-interrogation-service: /api/v1/device-interrogation-service/ -> device-interrogation-service:8080
+# audit-service: /api/v1/audit-service/ -> audit-service:8080
+# notification-service: /api/v1/notification-service/ -> notification-service:8080
+# discovery-processor-service: /api/v1/discovery-processor-service/ -> discovery-processor-service:8080
+# mcp-service: /api/v1/mcp-service/ -> mcp-service:8080
+# pcap-processor: /api/v1/pcap-processor/ -> pcap-processor:8080

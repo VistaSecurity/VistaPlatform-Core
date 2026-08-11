@@ -1,0 +1,138 @@
+# Git
+.git
+.gitignore
+.gitattributes
+.github/
+
+# Documentation (keep only README.md)
+docsv3/
+archive/
+docs/
+docs_v2/
+docs_outdated/
+*.md
+!README.md
+
+# Node.js
+node_modules/
+**/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn-integrity
+
+# Development configs
+.env*
+!.env.example
+*.local
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Test files and directories
+*_test.go
+**/*_test.go
+**/test_*.go
+test/
+tests/
+coverage/
+*.lcov
+.nyc_output
+
+# Build artifacts
+bin/
+artifacts/
+dist/
+build/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.tar.gz
+*.zip
+*.tgz
+
+# Go vendor (not used in workspace mode)
+vendor/
+
+# Development scripts (keep only generation scripts)
+scripts/dev/
+scripts/test-*
+scripts/setup-*
+scripts/cleanup-*
+scripts/validate-*
+scripts/check-*
+scripts/fix-*
+scripts/bootstrap/
+!scripts/generate-*.mjs
+!scripts/generate-*.sh
+
+# Docker files (except production)
+Dockerfile.dev
+docker-compose*.yml
+!docker-compose.prod.yml
+!docker-compose.ec2-smoke.yml
+
+# CI/CD
+.gitlab-ci.yml
+.travis.yml
+.circleci/
+buildspec.yml
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Cache directories
+.cache
+.parcel-cache
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+.eslintcache
+.node_repl_history
+
+# Other
+jspm_packages/
+.serverless/
+.fusebox/
+.dynamodb/
+.tern-port
+.vscode-test
+.next
+.nuxt
+.vuepress/dist

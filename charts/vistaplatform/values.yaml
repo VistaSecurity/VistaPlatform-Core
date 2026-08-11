@@ -1,0 +1,1164 @@
+# VistaPlatform default values. Override in your customer values.yaml.
+# See charts/vistaplatform/examples/values-customer.yaml.example for a starter.
+
+# -- Create the release Namespace from the chart (with PSA labels). When false,
+# the customer creates the namespace separately (e.g. via `helm install
+# --create-namespace`). Default false to avoid double-managing the namespace.
+createNamespace: false
+
+# -- Override the chart name. Defaults to .Chart.Name.
+nameOverride: ""
+# -- Override the full release name. Defaults to "<Release.Name>-<Chart.Name>".
+fullnameOverride: ""
+
+image:
+  # -- Image registry hosting all product images. Defaults to GHCR, where
+  # the Core images are published by .github/workflows/release-core.yml —
+  # built from this source, unobfuscated, and cosign-signed so you can
+  # verify them. GHCR rather than Docker Hub because a full install pulls
+  # ~20 images and Docker Hub's anonymous rate limit would fail a first
+  # install from behind a shared NAT. Override for a mirror or air-gap.
+  registry: ghcr.io
+  # -- Image repository prefix under the registry.
+  repoPrefix: vistasecurity
+  # -- Default image tag (used when a backend entry omits image.tag/digest).
+  tag: ""
+  # -- Pull policy. Use IfNotPresent with digest-pinned images.
+  pullPolicy: IfNotPresent
+  # -- Names of imagePullSecrets in the release namespace.
+  pullSecrets: []
+
+# Supply-chain verification. Only ever read by NOTES.txt, to print a `cosign
+# verify` command a user can paste. Nothing in the chart enforces it.
+verification:
+  # -- Cosign --certificate-identity-regexp for the workflow that signed this
+  # chart and its images. Keyless signing means the identity IS the workflow,
+  # so this differs per edition and must be stamped, not guessed:
+  #   Core       — release-core.yml in the public repo (the default below)
+  #   Commercial — stamped at package time by release-customer.yml
+  # Defaulting to the Core identity keeps the private org name out of the
+  # public tree; the export's leak gate enforces that it stays out.
+  certificateIdentityRegexp: "https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*"
+
+# Customer-supplied secrets. Either provide values inline (NOT recommended for
+# production), or pre-apply a Secret matching platform.existingSecretName and
+# leave the values empty.
+#
+# When using External Secrets Operator (ESO) on EKS, configure an ExternalSecret
+# that syncs from AWS Secrets Manager into a K8s Secret, then set
+# platform.existingSecretName to that Secret's name.
+#
+# Required keys in the referenced Secret:
+#   jwt-secret              — always required
+#   internal-auth-secret    — always required
+#   encryption-master-key   — always required
+#   database-url            — required when datastores.postgres.enabled: false (external RDS)
+#   redis-url               — required when datastores.redis.enabled: false (external ElastiCache)
+#
+# See k8s/eks/11-external-secrets.yaml for the ExternalSecret definition and
+# k8s/eks/secrets-manager-bootstrap.sh for the one-time Secrets Manager setup.
+platform:
+  # -- Existing Secret in the release namespace holding platform secrets. If set,
+  # values below are ignored. Required keys: jwt-secret, internal-auth-secret,
+  # encryption-master-key (+ database-url and redis-url when datastores are external).
+  existingSecretName: ""
+  # -- Inline platform secret values (ignored if existingSecretName is set).
+  jwtSecret: ""
+  internalAuthSecret: ""
+  encryptionMasterKey: ""
+
+# Billing — Stripe integration consumed by admin-service.
+#
+# admin-service owns the Stripe integration (services/admin-service/internal/
+# billing/). Three keys are required together:
+#   STRIPE_SECRET_KEY        — server-side API key (sk_live_... or sk_test_...)
+#   STRIPE_PUBLISHABLE_KEY   — surfaced to the browser via runtime config
+#   STRIPE_WEBHOOK_SECRET    — signature verification for /admin/billing/webhook
+#
+# Two delivery modes, matching the platform secret pattern:
+#   1. Production/EKS: pre-apply a Secret (or have ESO sync one from Secrets
+#      Manager / Vault) with stripe-secret-key, stripe-publishable-key,
+#      stripe-webhook-secret keys, then set billing.stripe.existingSecretName.
+#   2. Dev/lab:        provide values inline (not recommended for production).
+#
+# When all three inline values are empty AND existingSecretName is unset, the
+# chart still renders but admin-service falls back to "change-me" defaults
+# baked into config.go — every billing API call returns an error. Use this
+# mode only when billing is intentionally disabled.
+billing:
+  stripe:
+    # -- Existing Secret holding stripe-secret-key, stripe-publishable-key,
+    # stripe-webhook-secret. If set, the three inline values below are ignored.
+    existingSecretName: ""
+    # -- Inline Stripe credentials (ignored if existingSecretName is set).
+    secretKey: ""
+    publishableKey: ""
+    webhookSecret: ""
+
+# Entitlement token (JWT), for Enterprise/MSP editions only. The customer
+# applies a Secret containing the token; the chart mounts it as a file and never
+# templates the value itself.
+#
+# The mount is OPTIONAL: a Core deployment supplies no token and runs with the
+# Community entitlement floor. The token GRANTS capability with an expiry — it is
+# not a boot gate, and no service refuses to start without one.
+license:
+  # -- Existing Secret in the release namespace holding the entitlement JWT.
+  # Mounted at <mountPath>/<secretKey>; LICENSE_TOKEN_FILE points at it.
+  # Harmless to leave as-is on a Core install — the Secret simply won't exist.
+  existingSecretName: vistaplatform-license
+  # -- Key inside the Secret that holds the JWT.
+  secretKey: token
+  # -- Mount path for the license file inside each backend pod.
+  mountPath: /etc/vistaplatform/license
+
+# TLS termination at the cluster ingress.
+tls:
+  # -- One of: certManager, existingSecret, selfSigned, none.
+  #
+  # selfSigned is the default so that `helm install` works with no values at
+  # all and still serves HTTPS. It generates a certificate in-chart, which your
+  # browser will warn about — that warning is accurate, and the right answer for
+  # anything real is certManager (or existingSecret if you bring your own).
+  # "none" serves plain HTTP and additionally requires allowNone: true.
+  mode: selfSigned
+  # -- Tenant host: web-UI + API + uploads + WebSocket.
+  # Required for certManager and existingSecret. For selfSigned it names the
+  # certificate and defaults to vista.local if left empty.
+  dnsName: ""
+  # -- Admin host: admin-UI served at the root of this hostname (no path prefix).
+  # When unset, admin-UI is not externally reachable. The convention is a
+  # sibling subdomain (e.g. admin.vistaplatform.example) so vite's default
+  # root-relative asset paths resolve correctly.
+  adminDnsName: ""
+  # -- Override the URL scheme injected into the frontend config.json.
+  # Useful when TLS is terminated externally (NLB/ALB) with tls.mode=none:
+  # the in-cluster traffic is HTTP but the public URL is still https.
+  # When empty, the scheme is derived from tls.mode ("https" unless mode=none).
+  externalScheme: ""
+  # -- cert-manager Issuer reference. Required when mode = certManager.
+  # `name` is required (set it to a (Cluster)Issuer cert-manager already manages).
+  # `group` is optional; defaults to "cert-manager.io".
+  # When adminDnsName is set, the issued Certificate covers both hosts.
+  issuerRef:
+    kind: ClusterIssuer
+    name: ""
+    group: cert-manager.io
+  # -- Existing TLS Secret name (must contain tls.crt and tls.key — and, when
+  # adminDnsName is set, SANs covering both hosts). Required when mode =
+  # existingSecret.
+  existingSecretName: ""
+  # -- Set true to allow tls.mode=none (HTTP only). Refuses to render otherwise.
+  allowNone: false
+  # -- Minimum TLS protocol version negotiated at the Traefik edge. Rendered
+  # into a Traefik TLSOption CRD referenced by every TLS-terminating
+  # IngressRoute. Valid values: VersionTLS12, VersionTLS13. Default VersionTLS12
+  # keeps broad client compatibility while disabling TLS 1.0/1.1.
+  minVersion: VersionTLS12
+  # -- Cipher-suite allowlist for TLS 1.2 (TLS 1.3 suites are not configurable
+  # in Traefik/Go and are always enabled). Defaults to modern AEAD suites only
+  # (ECDHE forward secrecy + AES-GCM / ChaCha20-Poly1305) to target an A grade
+  # on SSL Labs / testssl.sh. Override only if a legacy client requires it.
+  cipherSuites:
+    - TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305
+    - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+    - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+    - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+    - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+    - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+
+# When true, pods of the same component prefer different nodes via
+# podAntiAffinity. Combined with replicas > 1 this delivers HA across worker
+# nodes; with only 1 replica the rule is a no-op. Set true in values-ha.yaml.
+enableSpreadAcrossNodes: false
+
+# Common pod-level security defaults applied to every workload via _helpers.tpl.
+#
+# runAsUser/runAsGroup/fsGroup are set to 1001 because that's the uid/gid
+# baked into the application images (Dockerfile.licensed: useradd -u 1001
+# appuser). Pod Security Admission's runAsNonRoot enforcement requires a
+# *numeric* uid to verify "is not root" — the image's USER appuser (a name)
+# isn't sufficient on its own. These values must match the uid/gid the
+# image was built with; changing here without rebuilding will break.
+#
+# fsGroupChangePolicy: OnRootMismatch makes pod restarts cheap on large
+# volumes — kubelet only chowns the volume root if it's not already gid
+# 1001, instead of walking every file on every restart.
+#
+# Datastores (postgres, redis, influxdb) override runAsUser/fsGroup at the
+# per-StatefulSet level with their own image-specific uids (postgres: 70,
+# redis: 999, influxdb: 1000) — those overrides take precedence here.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  fsGroup: 1001
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop: [ALL]
+  seccompProfile:
+    type: RuntimeDefault
+
+# Datastores running in-cluster.
+#
+# storageClassName default is "longhorn" — the recommended production
+# storage backend for VistaPlatform on RKE2. Longhorn is a native CSI driver
+# (no privileged helper-pods), provides replicated block storage across
+# nodes, scales from single-node lab to multi-rack production by
+# changing replica count, and aligns with the Rancher/SUSE RKE2
+# ecosystem. Customers who already have a CSI driver (Longhorn, EBS,
+# NetApp, Pure, Rook-Ceph, etc.) override this with their class name.
+#
+# For lab/eval deployments without dedicated storage infrastructure,
+# install Longhorn first per the deployment guide §5. local-path-
+# provisioner is documented as a lab-only fallback in deployment guide
+# Appendix A and is NOT a recommended customer default — its hostPath
+# helper-pods conflict with restricted-tier Pod Security Admission.
+datastores:
+  # -- Global storage class for all in-cluster datastores. Override globally here
+  # or per-datastore with the storageClassName field on each datastore entry.
+  # EKS: use "gp3" (EBS CSI driver). RKE2: use "longhorn".
+  storageClassName: longhorn
+
+  postgres:
+    enabled: true
+    image:
+      repository: postgres
+      tag: "17-alpine"
+    db: crypto_inventory
+    user: crypto_user
+    # Postgres in-transit TLS ( Phase 3). When enabled, the bundled postgres
+    # serves TLS (postgres-mtls server cert) and REQUIRES it for all remote
+    # connections (custom pg_hba: hostssl + scram); backends/Jobs connect with
+    # sslmode=verify-full. REQUIRES serviceMtls.enabled (the certs + the
+    # backends' /app/certs/ca.crt come from that).
+    #
+    # ON by default: encrypted internal transport is the shipped posture.
+    # Set to false ONLY on a cluster that cannot provide the serviceMtls
+    # prerequisites (cert-manager + Stakater Reloader) — see the opt-out note on
+    # serviceMtls.enabled below. For a live release, stage this AFTER
+    # serviceMtls (a later helm upgrade); toggling it on an existing release
+    # recreates the schema-migration Job (see jobs/rls-roles.yaml +/).
+    tls:
+      enabled: true
+    persistence:
+      size: 20Gi
+    # -- Per-datastore storage class override. When non-empty, takes precedence
+    # over datastores.storageClassName for this datastore's PVC.
+    storageClassName: ""
+    resources:
+      requests: {cpu: 250m, memory: 512Mi}
+      limits: {cpu: 1000m, memory: 1Gi}
+
+  redis:
+    enabled: true
+    image:
+      repository: redis
+      tag: "7-alpine"
+    persistence:
+      size: 5Gi
+    # -- Per-datastore storage class override.
+    storageClassName: ""
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {cpu: 250m, memory: 256Mi}
+
+  influxdb:
+    enabled: true
+    image:
+      repository: influxdb
+      tag: "2.8-alpine"
+    org: vistaplatform
+    bucket: metrics
+    adminUser: admin
+    persistence:
+      size: 20Gi
+    # -- Per-datastore storage class override.
+    storageClassName: ""
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: 500m, memory: 512Mi}
+
+  nats:
+    enabled: true
+    image:
+      repository: nats
+      tag: "2.10-alpine"
+    # NATS mTLS ( Phase 4). When enabled, NATS requires + verifies a
+    # platform-CA-signed client cert (verify: true) and the shared NATS_TOKEN is
+    # retired; backends connect with their per-service <svc>-mtls cert (the Go
+    # shared/events client auto-enables TLS from the NATS_TLS_* env). REQUIRES
+    # serviceMtls.enabled (certs + the backends' /app/certs).
+    #
+    # ON by default: encrypted internal transport is the shipped posture.
+    # Set to false ONLY on a cluster that cannot provide the serviceMtls
+    # prerequisites (cert-manager + Stakater Reloader) — see the opt-out note on
+    # serviceMtls.enabled below. For a live release, stage this AFTER
+    # serviceMtls (a later helm upgrade).
+    tls:
+      enabled: true
+    persistence:
+      size: 5Gi
+    # -- Per-datastore storage class override.
+    storageClassName: ""
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: 500m, memory: 512Mi}
+    # Monitoring port (8222) is for in-cluster health checks; not exposed via
+    # the headless or main Service anymore (see templates/datastores/nats.yaml).
+
+# Shared application config (becomes the main ConfigMap).
+appConfig:
+  env: production
+  logLevel: info
+  port: "8080"
+  # Public base URL (scheme://host) the auth-service uses to build the OAuth/OIDC
+  # redirect_uri for tenant SSO (e.g. Google). The callback route
+  # /api/v1/auth-service/auth/sso/<provider>/callback is served on the tenant app
+  # host, so when this is empty the chart derives it from tls.dnsName (same host as
+  # WEB_UI_BASE_URL). Set it explicitly only if the OAuth callback is terminated on
+  # a different host than the tenant app. Without a correct value the service falls
+  # back to a localhost default and Google rejects the redirect_uri.
+  oauthCallbackBaseURL: ""
+  dbMaxOpenConns: "15"
+  dbMaxIdleConns: "5"
+  natsStreamReplicas: "1"
+  redisPoolSize: "50"
+  redisMinIdleConns: "10"
+
+# Backend services. Each entry produces a Deployment + Service + PDB. The same
+# map drives NetworkPolicy egress rules — needs.{postgres,redis,nats} are the
+# single source of truth for which datastores each service may reach.
+#
+# secrets:
+#   - jwtSecret, internalAuthSecret, encryptionMasterKey, redisUrl
+#     each opts the service into mounting that key from the platform/generated
+#     Secrets as an env var. database-url is mounted on every backend by default.
+#
+# Resources are taken from k8s/rke2/04-deployments-backend.yaml; tune as needed.
+backends:
+  auth-service:
+    needs: {postgres: true, redis: true, nats: false}
+    secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: 
+        true, redisUrl: true}
+    resources:
+      requests: {cpu: 150m, memory: 192Mi}
+      limits: {cpu: 400m, memory: 384Mi}
+    image:
+      digest: ""
+
+  inventory-service:
+    needs: {postgres: true, redis: true, nats: true}
+    # encryptionMasterKey: CMDB connector credentials are encrypted at rest.
+    secrets: {jwtSecret: true, internalAuthSecret: true, redisUrl: true, encryptionMasterKey: true}
+    resources:
+      requests: {cpu: 150m, memory: 256Mi}
+      limits: {cpu: 500m, memory: 512Mi}
+    image:
+      digest: ""
+
+  compliance-engine:
+    needs: {postgres: true, redis: false, nats: true}
+    # compliance-engine validates incoming JWT bearer tokens (jwtSecret) AND is
+    # an HMAC client: the resource-tracking middleware signs metric posts to
+    # resource-tracker-service and the audit middleware signs activity logs to
+    # audit-service, both via INTERNAL_AUTH_SECRET. Without internalAuthSecret
+    # those signed calls are rejected with 401.
+    secrets: {jwtSecret: true, internalAuthSecret: true}
+    resources:
+      requests: {cpu: 200m, memory: 256Mi}
+      limits: {cpu: 500m, memory: 512Mi}
+    extraEnv:
+      # ADR-0014 continuous materialized evaluation's kill switch. Default on;
+      # override to "false" to disable BOTH the NATS reconcile consumer and job
+      # enqueuing (degrades to on-asset-change evaluation only). Previously only
+      # settable by editing the pod env directly (SEC-5) — this is the
+      # operator-facing toggle, consistent with other extraEnv overrides above.
+      - {name: COMPLIANCE_RECONCILE_WORKER_ENABLED, value: "true"}
+    image:
+      digest: ""
+
+  cbom-service:
+    needs: {postgres: true, redis: false, nats: true}
+    secrets: {jwtSecret: true, internalAuthSecret: true}
+    resources:
+      requests: {cpu: 150m, memory: 192Mi}
+      limits: {cpu: 400m, memory: 384Mi}
+    image:
+      digest: ""
+
+  sensor-manager:
+    needs: {postgres: true, redis: false, nats: true, influxdb: true}
+    secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: 
+        true}
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: 400m, memory: 512Mi}
+    # Co-locate with pcap-processor so both pods share the same node and can
+    # both mount the pcap-uploads RWO PVC. Without this, on multi-node clusters
+    # the scheduler may split them and the second pod hits Multi-Attach.
+    colocateWith: pcap-processor
+    # Recreate (not RollingUpdate) for the same reason as pcap-processor:
+    # sensor-manager also mounts the pcap-uploads RWO PVC. While the
+    # colocateWith hard-affinity keeps both pods on the same node (where
+    # Longhorn allows RWO multi-mount), a rolling-update's brief overlap
+    # window depends on the CSI driver permitting two pods on the same
+    # volume simultaneously — defensive to enforce strict serial replacement
+    # instead. ~30s downtime per upgrade; sensor-manager is a command-
+    # dispatch service, not in the user-facing request path.
+    strategy: Recreate
+    extraVolumes:
+      - name: pcap-uploads
+        persistentVolumeClaim: {claimName: pcap-uploads}
+    extraVolumeMounts:
+      - {name: pcap-uploads, mountPath: /tmp/pcap-uploads}
+
+    image:
+      digest: ""
+  admin-service:
+    # stripeKeys: true wires STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY, and
+    # STRIPE_WEBHOOK_SECRET from the billing secret into this pod. See
+    # `billing.stripe` below and templates/secrets-billing.yaml.
+    needs: {postgres: true, redis: true, nats: true}
+    secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: 
+        true, redisUrl: true, stripeKeys: true}
+    resources:
+      requests: {cpu: 150m, memory: 192Mi}
+      limits: {cpu: 400m, memory: 384Mi}
+    image:
+      digest: ""
+    # The admin dashboard aggregates platform metrics by calling these backends
+    # DIRECTLY (HMAC-signed) — there is no in-cluster api-gateway pod. Peer URLs
+    # (monitoring-service, resource-tracker-service) are derived from USE_MTLS in
+    # shared/config (PeerServiceURLAuto): http://<svc>:8080 without mTLS,
+    # https://<svc>:8443 with it. No explicit *_SERVICE_URL override here — a
+    # hardcoded http://:8080 would break these calls once serviceMtls is enabled.
+
+  monitoring-service:
+    needs: {postgres: true, redis: true, nats: true, influxdb: true}
+    secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: 
+        true, redisUrl: true}
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 300m, memory: 256Mi}
+    extraEnv:
+      # NATS monitor port (8222) is only published on the headless Service —
+      # the regular `nats` ClusterIP Service publishes 4222 only by design
+      # (see datastores/nats.yaml header).
+      - {name: NATS_MONITOR_URL, value: "http://nats-headless:8222"}
+      # No in-cluster api-gateway pod (cluster Traefik routes per-service via
+      # IngressRoute CRDs). Reporting `disabled` for these probes is honest;
+      # `down` would be a false alarm.
+      - {name: API_GATEWAY_URL, value: ""}
+      - {name: TRAEFIK_API_URL, value: ""}
+      # Traefik dashboard-API proxy target. Empty = feature reports "not
+      # configured" instead of dialing the nonexistent api-gateway host. Cluster
+      # Traefik's dashboard API lives in kube-system and isn't exposed here.
+      - {name: TRAEFIK_DASHBOARD_URL, value: ""}
+
+    image:
+      digest: ""
+  cluster-sensor-service:
+    needs: {postgres: true, redis: true, nats: true}
+    secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: 
+        true, redisUrl: true}
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 300m, memory: 256Mi}
+    image:
+      digest: ""
+
+  resource-tracker-service:
+    needs: {postgres: true, redis: false, nats: true}
+    secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: 
+        true}
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 300m, memory: 256Mi}
+    image:
+      digest: ""
+
+  tenant-health-service:
+    needs: {postgres: true, redis: false, nats: true}
+    secrets: {jwtSecret: true, internalAuthSecret: true}
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 300m, memory: 256Mi}
+    image:
+      digest: ""
+    # The four backends tenant-health-service polls every 30 min for health-score
+    # inputs (monitoring-, auth-, inventory-, resource-tracker-service) are reached
+    # via peer URLs derived from USE_MTLS in shared/config (PeerServiceURLAuto):
+    # http://<svc>:8080 without mTLS, https://<svc>:8443 with it. No explicit
+    # *_SERVICE_URL override — a hardcoded http://:8080 would break these polls
+    # once serviceMtls is enabled.
+
+  device-interrogation-service:
+    needs: {postgres: true, redis: true, nats: true}
+    secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: 
+        true, redisUrl: true}
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 300m, memory: 256Mi}
+    image:
+      digest: ""
+
+  audit-service:
+    needs: {postgres: true, redis: false, nats: true}
+    secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey:
+        true}
+    resources:
+      requests: {cpu: 150m, memory: 192Mi}
+      limits: {cpu: 400m, memory: 384Mi}
+    image:
+      digest: ""
+
+  notification-service:
+    needs: {postgres: true, redis: false, nats: true}
+    secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: 
+        true}
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 300m, memory: 256Mi}
+    image:
+      digest: ""
+
+  discovery-processor-service:
+    needs: {postgres: true, redis: false, nats: true}
+    secrets: {internalAuthSecret: true}
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 300m, memory: 256Mi}
+    image:
+      digest: ""
+
+  mcp-service:
+    # Stateless MCP (Model Context Protocol) façade: no datastore. It signs
+    # the PAT→JWT exchange call to auth-service with INTERNAL_AUTH_SECRET
+    # and reaches auth/inventory/compliance/cbom via peer URLs derived from
+    # USE_MTLS in shared/config (PeerServiceURLAuto) — no explicit
+    # *_SERVICE_URL overrides, same reasoning as tenant-health-service.
+    needs: {postgres: false, redis: false, nats: false}
+    secrets: {internalAuthSecret: true}
+    resources:
+      requests: {cpu: 50m, memory: 64Mi}
+      limits: {cpu: 300m, memory: 256Mi}
+    image:
+      digest: ""
+
+  pcap-processor:
+    needs: {postgres: true, redis: false, nats: true}
+    secrets: {internalAuthSecret: true}
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: 500m, memory: 512Mi}
+    # Locked at 1 — pcap-processor consumes file paths sent over NATS by
+    # sensor-manager via a shared PVC. Horizontal scaling needs a sensor-manager
+    # refactor to pass content rather than paths.
+    replicas: 1
+    # Recreate (not RollingUpdate) so the old pod fully releases the
+    # pcap-uploads RWO volume before the new pod tries to attach. With
+    # RollingUpdate, the new pod hangs on Multi-Attach while the old pod
+    # waits for the new one to become Ready — a classic deadlock pattern
+    # for single-replica Deployments holding a RWO PVC. ~30s downtime on
+    # upgrade is the tradeoff.
+    strategy: Recreate
+    extraVolumes:
+      - name: pcap-uploads
+        persistentVolumeClaim: {claimName: pcap-uploads}
+    extraVolumeMounts:
+      - {name: pcap-uploads, mountPath: /tmp/pcap-uploads}
+
+# Default replica count for backends that don't specify one.
+    image:
+      digest: ""
+defaultReplicas: 1
+
+frontend:
+  webUi:
+    image:
+      repository: web-ui
+      tag: ""
+      digest: ""
+    resources:
+      requests: {cpu: 50m, memory: 64Mi}
+      limits: {cpu: 200m, memory: 128Mi}
+  # admin-ui ("VISTA Operations") — the platform admin console. Built from the
+  # admin-ui-v2/ source (build-and-swap, ADR-0013) and deployed under its original
+  # admin-ui identity, mirroring how web-ui builds from frontend-v2/. Caddy on
+  # :3007, same-origin /api via Traefik, no runtime config baked in. The admin-host
+  # IngressRoute (tls.adminDnsName) points at it. Customer-neutral.
+  adminUi:
+    # -- Render the admin-ui Deployment/Service. On by default — it is THE admin UI.
+    enabled: true
+    image:
+      repository: admin-ui
+      tag: ""
+      digest: ""
+    resources:
+      requests: {cpu: 50m, memory: 64Mi}
+      limits: {cpu: 200m, memory: 128Mi}
+  # -- SSO IdP allowlist for the login-page redirect-URL open-redirect guard
+  # (applies to both web-UI and admin-UI). The built-in well-known IdPs
+  # (Microsoft, Google, Salesforce, Okta, Auth0) are always allowed; these
+  # values merge in additional customer-run IdPs so a self-hosted Keycloak,
+  # ADFS, etc. works without a code change. Empty by default. Customer-neutral.
+  # See.
+  sso:
+    # Exact IdP hostnames to allow, e.g. ["keycloak.corp.example.com"].
+    allowedIdpHosts: []
+    # IdP host suffixes to allow, e.g. [".sso.example.com"].
+    allowedIdpSuffixes: []
+
+# Gateway / ingress routing.
+#
+# There is no in-cluster api-gateway pod. The chart installs Traefik
+# IngressRoute and Middleware CRDs (templates/ingress/) and relies on
+# the cluster's own Traefik (kube-system on RKE2; ALB + Traefik on EKS)
+# to terminate TLS and route per-service.
+#
+# Regenerate the CRDs from standards/service-registry.yaml with:
+#     make generate-k8s-ingress
+gateway:
+  # -- Additional origins to allow in CORS responses, beyond the
+  # auto-included https://{{ .Values.tls.dnsName }}. Useful when an
+  # external admin tool, a second hostname, or a localhost dev port
+  # needs to call the API.
+  extraCorsOrigins: []
+
+# Ingress controller selection.
+#
+#   traefik (default) — chart renders Traefik IngressRoute + Middleware CRDs
+#                       under templates/ingress/. Requires a cluster Traefik
+#                       v3+ (RKE2 ships one in kube-system; EKS users typically
+#                       install one alongside ALB).
+#   none            — chart renders no ingress resources. The cluster operator
+#                       supplies their own Ingress / Gateway-API / mesh routing
+#                       against the chart's backend Services. See
+#                       docsv4/core/operate/deployment/rke2-v1/deployment-guide.md for
+#                       the Ingress contract (paths, hosts, Service names,
+#                       and required behaviors like CORS / rate-limit / HSTS).
+#
+# The chart is currently Traefik-aware (Middleware CRDs encode rate limits,
+# circuit breakers, security headers, path rewrites, HSTS, etc.). Customers
+# running nginx-ingress, Istio, or Gateway API can set this to "none" and
+# author their own ingress objects with equivalent annotations / filters.
+ingress:
+  controller: traefik
+
+  # AWS ALB integration (EKS only).
+  #
+  # When enabled, the chart renders a Kubernetes Ingress resource alongside the
+  # Traefik IngressRoutes. The AWS Load Balancer Controller watches this Ingress
+  # and provisions an internet-facing ALB that terminates TLS via ACM and
+  # forwards plain HTTP to Traefik pod IPs (target-type: ip).
+  #
+  # Prerequisites:
+  #   - AWS Load Balancer Controller installed in the cluster (kube-system)
+  #   - An ACM certificate ARN covering tls.dnsName and tls.adminDnsName
+  #   - tls.mode must be "none" (ALB terminates TLS; Traefik receives HTTP)
+  #   - Traefik installed and running (any namespace is fine with target-type: ip)
+  #
+  # After apply, get the ALB hostname and create Route 53 alias/CNAME records:
+  #   kubectl get ingress -n <release-ns> -o jsonpath='{..hostname}'
+  alb:
+    # -- Set true to render the K8s Ingress resource for ALB provisioning.
+    enabled: false
+    # -- ACM certificate ARN. Required when enabled. From Terraform output: acm_certificate_arn.
+    certificateArn: ""
+    # -- ALB scheme. "internet-facing" for public access; "internal" for VPC-only.
+    scheme: internet-facing
+    # -- ALB target type. "ip" routes to Traefik pod IPs directly (recommended;
+    # works regardless of which namespace Traefik is installed in).
+    targetType: ip
+    # -- Additional annotations merged onto the Ingress. Use to override any
+    # default alb.ingress.kubernetes.io/* annotation set by the chart.
+    annotations: {}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JWT signing keys.
+#
+# Sessions used to be signed AND verified with one shared HS256 secret
+# (platform.jwtSecret) held by every service. That is a symmetric key in ~17
+# pods: any one of them, or any log line or core dump that touched it, could
+# mint a token for any user, any tenant, any role. There was no key id, so
+# rotation was all-or-nothing — change the secret, break every live session.
+#
+# With this on, one ECDSA P-256 private key is generated into a Secret and
+# mounted ONLY into the two services that issue tokens (auth-service for tenant
+# sessions, admin-service for platform sessions). Every other service verifies
+# with the public half, fetched from auth-service's JWKS endpoint. A leak from a
+# verifier grants nothing: public keys are public.
+jwtSigning:
+  # -- Sign session tokens with ES256 + a key id instead of the shared HS256
+  # secret.
+  #
+  # Safe to enable on a running release: tokens minted before the switch keep
+  # verifying for their full TTL, because verifiers accept BOTH generations for
+  # as long as platform.jwtSecret is still set. Nobody is logged out.
+  enabled: true
+
+  # -- URL the verifying services poll for the issuer's public keys.
+  #
+  # Defaults to auth-service's plaintext listener, which serves JWKS beside
+  # /health. That port is deliberate: with serviceMtls on, the API listener
+  # moves to :8443 and demands a client certificate, and requiring a client cert
+  # to fetch the keys you need in order to authenticate is a circularity with no
+  # security value. The document is public key material either way.
+  #
+  # Set this to the external URL (https://<tls.dnsName>/.well-known/jwks.json)
+  # only if you have a reason to route the fetch through the edge.
+  jwksUrl: ""
+
+  # -- How often verifiers re-fetch the JWKS, in seconds. This is also the
+  # window a rotation needs: a newly promoted key must be PUBLISHED for at least
+  # this long before it starts signing, or verifiers will see an unknown kid and
+  # correctly reject the tokens. See deployment-guide §5H.
+  jwksRefreshSeconds: 300
+
+  # -- Import an existing ECDSA P-256 private key (PKCS#8 PEM) instead of
+  # generating one. Use to pin the same key across two clusters, or to bring one
+  # in from a KMS/HSM export.
+  #
+  # Only consulted on FIRST render. Once the Secret exists its stored key wins,
+  # so changing this later is a no-op rather than a silent rotation that would
+  # log everyone out.
+  existingPrivateKeyPEM: ""
+
+  # -- Keep accepting HS256 tokens signed with the legacy shared secret.
+  #
+  # Required during the migration: sessions minted before the switch are HS256
+  # and must keep working until they expire. Set to false one max-token-TTL
+  # after enabling (the refresh-token lifetime, 7 days by default) — THAT is the
+  # step that finally makes a leaked platform.jwtSecret worthless. Until then
+  # the shared secret is still a forgery key, and this change has only reduced
+  # the number of pods holding it from ~17 to 2.
+  acceptLegacyHmac: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin plane — the platform-admin console and the cross-tenant API behind it.
+#
+# These endpoints are not scoped to one tenant: a caller who reaches them with a
+# valid platform-admin session can read and change data across EVERY tenant in
+# the deployment. Their role check is the only thing standing in the way, so
+# where they are reachable FROM matters as much as who may call them.
+#
+# The exact route set is declared in standards/service-registry.yaml under
+# `admin_plane:` and rendered into templates/ingress/ingressroutes.yaml — read
+# that block if you need the authoritative list.
+adminPlane:
+  # -- Serve the platform-admin API on tls.adminDnsName only, and return 404 for
+  # it on the public tenant host.
+  #
+  # Requires tls.adminDnsName: without a second host there is nowhere else to
+  # serve the console from, and this is skipped entirely (the install still
+  # works — the admin API just stays on the single host, protected only by its
+  # role check).
+  #
+  # Turn this off only if something outside your operator network genuinely has
+  # to call the platform-admin API on the tenant host. Inbound billing-provider
+  # webhooks do NOT need it — they are already carved out as a documented
+  # exception and keep working with this on.
+  restrictToAdminHost: true
+
+  # -- Restrict the admin console + platform-admin API to named source networks.
+  #
+  # Off by default because the chart cannot guess your operator network, and a
+  # wrong guess locks you out of your own platform. Leaving it off is a real
+  # exposure, not a neutral default: with it off, anyone who can resolve
+  # tls.adminDnsName can reach the admin login page and the whole admin API,
+  # and only the password (or SSO) stands between them and cross-tenant data.
+  # `helm install` prints a warning while this is off.
+  #
+  # ipStrategy is as important as sourceRange. Traefik allow-lists the address
+  # it sees on the connection, which behind a load balancer is the LOAD
+  # BALANCER, not your operator. Set `depth` to the number of trusted proxies in
+  # front of Traefik so the client IP is read from X-Forwarded-For instead:
+  #
+  #   RKE2 + MetalLB, externalTrafficPolicy: Local  → depth: 0 (real client IP)
+  #   AWS ALB in front of Traefik (ingress.alb)     → depth: 1
+  #   ALB behind CloudFront / another proxy         → depth: 2
+  #
+  # Get this wrong in one direction and every operator is locked out; get it
+  # wrong in the other and the allow-list matches the proxy's own address, which
+  # lets EVERYONE in while looking like it is working. Verify after enabling:
+  # a request from an address outside sourceRange must be rejected.
+  ipAllowList:
+    # -- Set true to enforce the allow-list. Requires a non-empty sourceRange
+    # (the chart refuses to render an allow-list with no entries).
+    enabled: false
+    # -- CIDRs permitted to reach the admin plane, e.g.
+    # ["203.0.113.0/24", "10.20.0.0/16"].
+    sourceRange: []
+    ipStrategy:
+      # -- Number of trusted proxies in front of Traefik. 0 = use the connecting
+      # address as-is.
+      depth: 0
+      # -- Addresses to ignore when walking X-Forwarded-For right-to-left.
+      # An alternative to depth when the proxy count varies.
+      excludedIPs: []
+
+# monitoring-service-specific operator config.
+#
+# syntheticChecks: external-path edge probes the monitoring-service runs
+# every HEALTH_CHECK_INTERVAL seconds. Each entry hits the customer-facing
+# URL with a normal HTTP GET — exercising DNS, the load balancer, the
+# cluster ingress controller, all middlewares (TLS, CORS, rate limit,
+# path rewrites), and the backend Service. A "down" here means the
+# chart-owned routing layer is broken even when every in-cluster Service
+# probe is green — the failure class nothing else in the dashboard catches.
+#
+# Each result appears as "synthetic-<name>" in the admin status dashboard.
+# Leave the list empty to disable edge probing.
+#
+# Fields:
+#   name (required)                — short label; appears in the dashboard
+#   url (required)                 — full https:// URL to GET
+#   expectedStatus (optional, 200) — HTTP status that counts as healthy
+#   timeoutSeconds (optional, 5)   — probe timeout
+#   insecureSkipVerify (optional)  — skip TLS verify. ONLY for lab clusters
+#                                    where the edge cert is signed by an
+#                                    internal CA the pod doesn't trust.
+#                                    Public-cert deployments leave this off.
+monitoring:
+  syntheticChecks: []
+  # Example:
+  # syntheticChecks:
+  #   - name: edge-tenant
+  #     url: https://vistaplatform.example.com/api/v1/auth-service/health
+  #   - name: edge-admin
+  #     url: https://admin.vistaplatform.example.com/api/v1/auth-service/health
+
+# Persistent storage for files uploaded to sensor-manager and consumed by
+# pcap-processor. ReadWriteOnce is sufficient because both pods land on the
+# same node when pcap-processor.replicas = 1.
+pcapUploads:
+  size: 10Gi
+  accessMode: ReadWriteOnce
+
+# Schema migration Job. Runs scripts/database/schema.sql via psql against
+# Postgres on every install and upgrade. The schema is idempotent.
+schemaMigration:
+  enabled: true
+  image:
+    repository: postgres
+    tag: "17-alpine"
+
+# Seed data Job. Runs scripts/database/seed.sql after schema-migration on every
+# install and upgrade. Inserts platform roles, the initial platform admin user,
+# subscription tiers, measurement types, and platform frameworks. seed.sql is
+# fully idempotent (ON CONFLICT DO NOTHING / DO UPDATE) so upgrades are safe.
+# Disable only if you manage seed data entirely outside of Helm.
+#
+# seed.sql seeds SIX compliance frameworks, all free: best-practices,
+# pqc-readiness, cert-hygiene and the three cert-expiry frameworks. The five
+# regulated frameworks (SOC 2, PCI-DSS 4.0, ISO/IEC 27001:2022, NIST CSF 1.1,
+# IEC 62351-3) are Enterprise content and are applied separately — see
+# enterprise.contentBundle below.
+seedData:
+  enabled: true
+
+# ---------------------------------------------------------------------------
+# Enterprise
+# ---------------------------------------------------------------------------
+# Everything under this key is OFF by default. A Core deployment renders exactly
+# the same manifests it would without this section.
+enterprise:
+  # Regulated compliance-framework content bundle.
+  #
+  # WHAT IT IS: a signed SQL bundle, shipped inside the chart, holding the five
+  # regulated frameworks Enterprise customers license — SOC 2 Type 2,
+  # PCI-DSS 4.0, ISO/IEC 27001:2022, NIST CSF 1.1 and IEC 62351-3, with their
+  # controls and measurement rules. It is applied by the seed-data Job right
+  # after seed.sql, under `psql -v ON_ERROR_STOP=1`.
+  #
+  # WHY A BUNDLE AND NOT A HOSTED FEED: it is revocable by non-renewal,
+  # versioned with the release, works air-gapped, and needs no service running.
+  #
+  # BEFORE IT IS APPLIED, its detached signature is verified against the
+  # Enterprise public key (the same ECDSA P-256 key that verifies entitlement
+  # tokens). A missing, empty, or invalid signature FAILS the Job — an
+  # unverified bundle is never applied.
+  #
+  # Turning this OFF later removes nothing: frameworks already in the database
+  # stay, they simply stop being refreshed on upgrade.
+  #
+  # Only enable this on a licensed deployment. On a Core chart (or any chart
+  # packaged without the bundle files) enabling it fails at `helm template`
+  # time with an explicit message rather than silently seeding nothing.
+  contentBundle:
+    enabled: false
+
+    # Image used ONLY by the signature-verification init container. It differs
+    # from schemaMigration.image on purpose: postgres:*-alpine does NOT ship the
+    # openssl CLI (Alpine keeps it in a separate apk package), and installing it
+    # at runtime would break air-gapped installs. The Debian-based postgres tag
+    # has openssl 3.x, so this stays inside the one image repository the chart
+    # already requires you to mirror. Point it at any image with `openssl` and
+    # `sha256sum` on PATH if you prefer.
+    verifierImage:
+      repository: postgres
+      tag: "17"
+
+# Network policies. Default-deny ingress on the namespace; allow rules generated
+# from the backends map and the gateway/frontend definitions.
+networkPolicy:
+  enabled: true
+  # Namespace selectors for the cluster's ingress controller. Override if your
+  # ingress runs in a different namespace.
+  ingressControllerNamespace: kube-system
+
+  # Egress restrictions are opt-in. When false (default) the chart only
+  # enforces ingress policies — a compromised backend pod can still call out
+  # anywhere on the Internet or to other namespaces (data exfil, SSRF
+  # amplification, attacker C2). Set to true to default-deny egress and rely
+  # on the generated allow-rules-egress.yaml for legitimate traffic: kube-dns
+  # in kube-system, the four datastores via the registry's needs.* fields,
+  # backend-to-backend HTTP on 8080, and Internet egress for the services
+  # listed in externalEgressBackends below.
+  #
+  # Recommended rollout: enable on a staging cluster first,
+  # observe for a release cycle, then flip the chart default. Customers on
+  # EKS with VPC CNI or GKE with NetworkPolicy v2 may need vendor tweaks.
+  egressEnabled: false
+
+  # Backends that legitimately need to reach the public Internet:
+  #   * sensor-manager / cluster-sensor-service — TLS probing of arbitrary endpoints
+  #   * device-interrogation-service — vendor mgmt APIs on customer networks
+  #   * notification-service — webhook + SMTP delivery
+  #   * integration-sync — third-party integrations (cloud providers, ticket systems)
+  # Every other backend stays cluster-internal.
+  externalEgressBackends:
+    - sensor-manager
+    - cluster-sensor-service
+    - device-interrogation-service
+    - notification-service
+    - integration-sync
+
+  # kube-dns / CoreDNS Service location. Used for the DNS egress allow rule.
+  # Override if your cluster runs CoreDNS in a non-standard namespace.
+  dnsNamespace: kube-system
+
+# ---------------------------------------------------------------------------
+# RLS role split (ADR platform-0001, Phase 2) —
+# ---------------------------------------------------------------------------
+# OFF by default. When OFF, rendered output is byte-for-byte identical to a
+# release without this block: every backend connects as the owner role
+# (datastores.postgres.user, default crypto_user), there is NO
+# BYPASS_DATABASE_URL, and the chart emits NO role-altering Job. The owner
+# bypasses RLS, so multi-tenant isolation is enforced in application code only
+# (the pre- behavior). This is the safe, unchanged default.
+#
+# When enabled, the chart flips the backend connection over to the two
+# non-owner roles that schema.sql already CREATEs (as NOLOGIN):
+#
+#   crypto_app    — NOBYPASSRLS. Each backend's DATABASE_URL points here, so
+#                   every tenant_isolation RLS policy is enforced at the
+#                   database. Services MUST set app.tenant_id (via
+#                   shared/database.WithTenantTx) or tenant-scoped queries
+#                   fail closed (zero rows).
+#   crypto_bypass — BYPASSRLS. Each backend ALSO gets BYPASS_DATABASE_URL
+#                   pointing here, used only for the deliberate cross-tenant
+#                   paths (platform-admin aggregations, background workers,
+#                   auth lookups where the tenant is the query's OUTPUT).
+#
+# What the chart does when enabled:
+#   * Backend DATABASE_URL username -> roleApp; same host/db/sslmode/sslrootcert
+#     as the owner URL (only the username changes). BYPASS_DATABASE_URL added
+#     pointing at roleBypass.
+#   * A one-shot Job (rendered only while enabled) connects as the OWNER and
+#     runs `ALTER ROLE <role> LOGIN PASSWORD ...` for both roles, granting them
+#     login. schema.sql creates them NOLOGIN and leaves them passwordless; this
+#     Job is the deploy-layer step that turns that into a usable login. The
+#     password is read from a Secret via an env var and passed to psql with
+#     `-v` — it never appears in plaintext in rendered SQL or any ConfigMap.
+#   * schema-migration and seed Jobs are UNCHANGED — they keep running as the
+#     owner (datastores.postgres.user); they MUST own the objects.
+#
+# Password source: both roles reuse the chart-generated postgres-password
+# (the same Secret/key the operator uses). This mirrors the staging flip and
+# is the simplest correct approach — no extra Secret to manage, and the value
+# is already chart-generated + kept across upgrades. The roles are distinct
+# Postgres identities with distinct RLS behavior; sharing the password only
+# means "same secret to authenticate," not "same privileges."
+#
+# Prerequisite: the schema must already define crypto_app / crypto_bypass
+# (it does, in scripts/database/schema.sql under "RLS ROLE SPLIT"). This
+# toggle is the deploy plumbing, not the role definitions.
+#
+# ⚠ Independent of serviceMtls — the role split is about *which DB identity*
+# connects; mTLS/postgres-TLS is about *transport security*. Either can be on
+# without the other. (When postgres.tls is also on, the role URLs inherit
+# sslmode=verify-full automatically via the shared databaseURL helper.)
+serviceRls:
+  # ON by default. Enforced tenant isolation is the shipped posture.
+  #
+  # Why this is not optional-feeling: schema.sql puts a tenant_isolation POLICY
+  # on 241 tables, but a table OWNER bypasses RLS and no table is declared FORCE
+  # ROW LEVEL SECURITY. With this toggle off, the app connects as crypto_user
+  # (which owns every table, because schema-migration runs as it) and every one
+  # of those 241 policies is inert. The product README advertises row-level
+  # security for tenant isolation; off-by-default made that claim untrue on a
+  # default install, which is the whole reason this flipped.
+  #
+  # Application-layer tenant filtering is unchanged either way — this is the
+  # database-level backstop underneath it, not the only control.
+  #
+  # Requires the BUNDLED postgres (datastores.postgres.enabled: true). The
+  # rls-roles Job that grants these two roles LOGIN only renders for the bundled
+  # datastore, so an external/managed Postgres cannot be wired up by the chart;
+  # vistaplatform.validateRls fails the render rather than letting the toggle
+  # silently no-op. See that helper for the external-Postgres path.
+  enabled: true
+  # Non-owner roles. Must match the role names CREATEd in schema.sql.
+  roleApp: crypto_app
+  roleBypass: crypto_bypass
+
+# ---------------------------------------------------------------------------
+# Service-to-service mTLS (v0.1.2+)
+# ---------------------------------------------------------------------------
+# When enabled, the chart provisions an in-cluster Platform CA via
+# cert-manager, issues per-service mTLS certificates, mounts them into each
+# backend pod, configures postgres + NATS to require client cert auth, and
+# wires up Traefik api-gateway → backends with mTLS via ServersTransport.
+#
+# ON by default: encrypted internal transport is the shipped posture.
+# Every organization that self-hosts VistaPlatform receives a guided install
+# instruction set, so the cluster prerequisites below are a documented,
+# mandatory part of that install — not an obstacle for a bare self-service
+# cluster (there are no self-service installs of the whole platform).
+#
+# Hard prerequisites when enabled (the chart does NOT install these — the
+# install fails fast at `helm install/upgrade` time with a clear message if
+# cert-manager's CRDs are absent, see vistaplatform.validateMtls in _helpers.tpl):
+#   - cert-manager v1.13+ with CRDs installed (issues the Platform CA +
+#     per-service certs).
+#   - Stakater Reloader — restarts pods when a cert auto-rotates. WITHOUT it,
+#     mTLS silently breaks ~60 days in (first cert renewal) even though the
+#     install succeeds. NOTES.txt reminds you on every install/upgrade.
+#
+# OPT-OUT (clusters that cannot provide the prerequisites): set ALL THREE of
+# serviceMtls.enabled, datastores.postgres.tls.enabled, and
+# datastores.nats.tls.enabled to false. The two datastore toggles REQUIRE
+# serviceMtls.enabled — leaving a datastore TLS toggle on while serviceMtls is
+# off is a misconfiguration the chart rejects at render time.
+#
+# EXISTING RELEASES (upgrade from a pre- chart that ran all three off):
+# do NOT let a single upgrade flip all three at once. Stage it — enable
+# serviceMtls first (one helm upgrade), then the datastore toggles in a later
+# upgrade (deployment-guide §5E). Toggling postgres.tls on a live release
+# recreates the schema-migration Job. That used to fail, because a Job's pod
+# template is immutable; the Job name now embeds a hash of its rendered pod
+# template, so any template change creates a fresh Job instead of patching an
+# immutable one.
+serviceMtls:
+  enabled: true
+
+  # Issuer for the in-cluster Platform CA. Default: chart provisions a
+  # self-signed bootstrap Issuer that signs the Platform CA cert. Override
+  # to chain off a customer-provided root by setting externalCaSecretName.
+  platformCa:
+    duration: 87600h    # 10 years
+    privateKey:
+      algorithm: RSA
+      size: 4096
+    # When set, skip the chart-provisioned bootstrap and use this Secret
+    # as the Platform CA (must contain tls.crt + tls.key + ca.crt).
+    externalCaSecretName: ""
+
+  # Per-service certificate properties. Same values applied to every
+  # Certificate the chart emits.
+  certificate:
+    duration: 2160h     # 90 days
+    renewBefore: 720h   # 30 days
+    privateKey:
+      algorithm: RSA
+      size: 2048
+      rotationPolicy: Always
+
+  # Postgres TLS — applies when serviceMtls.enabled is true.
+  postgres:
+    # Mode for the backend → postgres connection. Valid: disable, require,
+    # verify-ca, verify-full. Decoupled from .Values.tls.mode (which scopes
+    # to the API gateway's external TLS only). Default verify-full.
+    mode: verify-full
+    # When using BYO-postgres (datastores.postgres.enabled: false), point
+    # at customer-provided Secrets:
+    caSecretName: ""              # Secret with ca.crt
+    clientCertSecretName: ""      # Secret with tls.crt + tls.key
+
+  # NATS mTLS — applies when serviceMtls.enabled is true.
+  nats:
+    # When true, NATS pod is configured for client-cert auth via
+    # verify_and_map; backends connect with mTLS, no shared NATS_TOKEN.
+    # Kept for backwards-compatible customer values; the active runtime toggle is
+    # datastores.nats.tls.enabled.
+    mtlsEnabled: true
+
+# ---------------------------------------------------------------------------
+# Agent / sensor outbound mTLS (fail-closed) —
+# ---------------------------------------------------------------------------
+# Device-agents and sensors authenticate their outbound calls
+# (/agents/:id/{jobs,results,heartbeat}, /sensors/:sensor_id/{heartbeat,
+# commands/poll,...}) with the per-tenant mTLS client cert issued at
+# registration. When this is OFF (default), those routes tolerate a missing
+# client cert (the pre- fail-OPEN behavior) — any pod-network caller that
+# knows an agent/sensor UUID can poll jobs, submit results, or heartbeat.
+#
+# When ON, the backend FAILS CLOSED: device-interrogation-service and
+# sensor-manager require a verified client cert (cert CN -> identity ->
+# tenant -> tenant-CA chain check) and reject otherwise. The agent's cert must
+# reach the backend intact, so a dedicated mTLS listener is exposed on
+# `port` and the agent/sensor traffic must arrive via TLS *passthrough* (the
+# edge must NOT terminate it) — see the IngressRouteTCP rendered into the
+# release namespace and the deployment prerequisites below.
+#
+# Prerequisites when enabled (the chart does NOT install these):
+#   - serviceMtls.enabled MUST be true — the listener reuses the per-service
+#     mesh cert (Secret <svc>-mtls mounted at /app/certs) as its server cert.
+#   - The cluster Traefik must have a TLS-passthrough entrypoint on `port`
+#     (e.g. a Kubernetes Service/NLB forwarding TCP <port> to Traefik's
+#     passthrough entrypoint). The chart owns only the IngressRouteTCP CRD,
+#     not the cluster Traefik static config / entrypoints.
+#   - A DNS name (`dnsName`) resolving to that entrypoint, used as the
+#     HostSNI match and as the host agents/sensors connect to.
+#
+# End-to-end enablement flow ( →, complete): agents/sensors register
+#   on the edge-terminated public host (tls.dnsName) using a registration key —
+#   they hold no client cert yet, and the passthrough listener requires one at
+#   the handshake. The registration response then hands them (a) a client cert,
+#   (b) the Platform CA as SERVER trust anchor (the passthrough listener
+#   presents the Platform-CA-signed mesh cert, not the per-tenant CA), and
+#   (c) the advertised passthrough URL (AGENT_MTLS_ADVERTISED_URL, derived from
+#   dnsName+port below) — which they switch to, persist, and use for all
+#   subsequent mTLS traffic. Agents/sensors enrolled BEFORE this was enabled
+#   keep calling the edge host and are 401'd fail-closed: re-register them (or
+#   point their configured URL at the passthrough host) after enabling.
+agentMtls:
+  enabled: false
+  # Dedicated agent/sensor mTLS listener port (container + Service + the
+  # cluster-Traefik passthrough entrypoint). Both backends share this port;
+  # they are disambiguated by HostSNI (per-backend dnsName below), so a single
+  # passthrough entrypoint fans out to both services.
+  port: 8444
+  # Cluster Traefik entrypoint configured for TLS passthrough on `port`.
+  # Must be pre-provisioned on the cluster Traefik (not owned by this chart).
+  entryPoint: agent-mtls
+  # Backends that expose the passthrough listener, keyed by service name, each
+  # with its own dnsName (the HostSNI the agent/sensor connects to and the
+  # IngressRouteTCP match). Required when enabled. Keep these distinct from
+  # tls.dnsName — that host's TLS is terminated at the edge; these must be
+  # passed through. Only these backends terminate agent/sensor mTLS; no other
+  # backend is affected.
+  backends:
+    device-interrogation-service:
+      dnsName: ""   # e.g. agents.example.com
+    sensor-manager:
+      dnsName: ""   # e.g. sensors.example.com

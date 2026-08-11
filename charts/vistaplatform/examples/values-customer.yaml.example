@@ -1,0 +1,309 @@
+# Vista customer values — copy this file into your own infrastructure
+# or config-management repo, fill in the marked fields, and point
+# `helm install -f` at your copy. Don't keep editing this file inside the
+# chart tree — your real values belong with your infrastructure code.
+#
+#   helm install vista oci://docker.io/vistasecurity/vistaplatform \
+#     --version <pinned-version> \
+#     -f values-ha.yaml \
+#     -f /path/to/your/values-customer.yaml \
+#     -n vista --create-namespace --wait --timeout 10m
+#
+
+# Give in-cluster resources a clean "vista-" prefix. Without this, a release
+# named "vista" would produce "vista-vistaplatform-*" names. (Omit it to accept
+# the chart default, or set your own.)
+fullnameOverride: vista
+
+# Use values-minimal.yaml instead of values-ha.yaml for single-worker labs.
+# Required fields are flagged FIXME. Optional sections are commented out
+# at the bottom. See values.yaml for the full set of knobs.
+
+# -----------------------------------------------------------------------------
+# REQUIRED: two external hostnames your users reach VistaPlatform at, and how the
+# chart should obtain its TLS cert.
+#
+# The tenant host (dnsName) serves the tenant web-UI, the REST API, uploads,
+# and WebSocket. The admin host (adminDnsName) serves the platform admin-UI
+# at its root. Both records must resolve to the same ingress LB — Traefik
+# routes by Host header. A single TLS cert covers both names as SANs.
+# -----------------------------------------------------------------------------
+tls:
+  dnsName: vistaplatform.example.com         # FIXME: tenant web-UI + API host
+  adminDnsName: admin.vistaplatform.example.com  # FIXME: platform admin-UI host
+
+  # --- Mode A: certManager (recommended) -----------------------------------
+  # cert-manager populates the Secret and auto-renews. Requires cert-manager
+  # plus a (Cluster)Issuer your cluster admin has already set up — e.g. a
+  # Let's Encrypt ACME issuer or an Issuer backed by your internal CA.
+  mode: certManager
+  issuerRef:
+    kind: ClusterIssuer
+    name: ""                              # FIXME: e.g. letsencrypt-prod
+    # group: cert-manager.io              # optional; defaults to cert-manager.io
+
+  # --- Mode B: existingSecret ----------------------------------------------
+  # Bring your own cert in a kubernetes.io/tls Secret. No auto-renewal —
+  # you rotate manually before expiry.
+  # mode: existingSecret
+  # existingSecretName: vistaplatform-tls
+
+  # --- Mode C: none (dev only) ---------------------------------------------
+  # HTTP only. Refuses to render unless tls.allowNone: true.
+  # mode: none
+  # allowNone: true
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: ingress controller selection.
+#
+# The chart ships Traefik IngressRoute + Middleware CRDs that configure
+# routing, rate limiting, CORS, security headers, HSTS, and per-service
+# circuit breakers for cluster Traefik (kube-system on RKE2; bundled with
+# many enterprise distros).
+#
+# Set to "none" if your cluster runs nginx-ingress, Istio, Gateway API, or
+# an external load balancer (ALB, NLB, F5, etc.) and you want to author
+# your own ingress objects. The chart renders no Ingress/IngressRoute/
+# Middleware resources in that mode, but still emits the NetworkPolicies
+# that allow your ingress controller's namespace to reach the chart's
+# backend Services on port 8080 and the UI Services on port 80.
+#
+# See docsv4/core/operate/deployment/rke2-v1/deployment-guide.md (§ Bring-your-own
+# ingress contract) for the route table, host header expectations, CORS
+# requirements, and recommended rate-limit / body-size / HSTS values.
+# -----------------------------------------------------------------------------
+ingress:
+  controller: traefik     # alternatives: none
+  # controller: none
+
+# -----------------------------------------------------------------------------
+# STRONGLY RECOMMENDED: restrict the admin plane to your operator networks.
+#
+# tls.adminDnsName above already moves the cross-tenant platform-admin API onto
+# the admin host and returns 404 for it on the tenant host (that is the default;
+# adminPlane.restrictToAdminHost turns it off). But a hostname is not an access
+# control — anyone who can resolve and reach the admin host reaches the admin
+# login page and the whole admin API.
+#
+# Uncomment and fill in the networks your operators connect from.
+#
+# ipStrategy.depth is not optional detail: Traefik allow-lists the address it
+# sees on the connection, which behind a load balancer is the LOAD BALANCER. Set
+# depth to the number of trusted proxies in front of Traefik (MetalLB with
+# externalTrafficPolicy: Local => 0; AWS ALB => 1). Getting it wrong in that
+# direction matches the balancer's own address and admits everyone while looking
+# like it works — so verify from an address OUTSIDE sourceRange (expect 403).
+#
+# See deployment-guide §5G.
+# -----------------------------------------------------------------------------
+# adminPlane:
+#   ipAllowList:
+#     enabled: true
+#     sourceRange:
+#       - 203.0.113.0/24     # FIXME: office egress
+#       - 10.20.0.0/16       # FIXME: operator VPN
+#     ipStrategy:
+#       depth: 0             # FIXME: 1 behind an ALB
+
+# -----------------------------------------------------------------------------
+# REQUIRED: license token Secret. Apply this Secret separately before
+# running `helm install` (so the JWT never lands in your values.yaml or
+# git history):
+#
+#   kubectl create secret generic vistaplatform-license \
+#     -n vistaplatform \
+#     --from-literal=token='<JWT-DELIVERED-OUT-OF-BAND>'
+#
+# The chart references the Secret by name and mounts it inside each
+# backend pod. Rotating the license is a one-line `kubectl create secret
+# ... --dry-run=client -o yaml | kubectl apply -f -` followed by a
+# rolling restart of the deployments — no helm upgrade required.
+# -----------------------------------------------------------------------------
+license:
+  existingSecretName: vistaplatform-license
+
+# -----------------------------------------------------------------------------
+# REQUIRED: platform secrets. Apply this Secret separately:
+#
+#   kubectl create secret generic vistaplatform-platform \
+#     -n vistaplatform \
+#     --from-literal=jwt-secret="$(openssl rand -hex 32)" \
+#     --from-literal=internal-auth-secret="$(openssl rand -hex 32)" \
+#     --from-literal=encryption-master-key="$(openssl rand -hex 32)"
+#
+# Alternatively, inline the three values below — acceptable for eval
+# only; doing so means values.yaml itself is sensitive and must never
+# be committed to git.
+# -----------------------------------------------------------------------------
+platform:
+  existingSecretName: vistaplatform-platform
+  # Inline alternative (eval only):
+  # existingSecretName: ""
+  # jwtSecret: "<openssl rand -hex 32>"
+  # internalAuthSecret: "<openssl rand -hex 32>"
+  # encryptionMasterKey: "<openssl rand -hex 32>"
+
+# -----------------------------------------------------------------------------
+# REQUIRED: image source. Defaults pull from Docker Hub.
+#
+# Apply the registry pull-secret separately:
+#
+#   kubectl create secret docker-registry vistaplatform-registry \
+#     -n vistaplatform \
+#     --docker-server=docker.io \
+#     --docker-username='<DOCKERHUB-USER>' \
+#     --docker-password='<DOCKERHUB-TOKEN>'
+# -----------------------------------------------------------------------------
+image:
+  registry: docker.io
+  repoPrefix: vistasecurity            # URL namespace of the VistaPlatform Docker Hub org
+  tag: <image-tag>                        # FIXME: e.g. v2.2.0 (from your license package)
+  pullSecrets: [vistaplatform-registry]
+
+# ECR delivery — only if your contract specifically delivers via ECR.
+# Comment out the Docker Hub block above and uncomment this block instead.
+# Substitute <your-ecr-account> and <your-region> with the values your
+# VistaPlatform contact provided.
+# image:
+#   registry: <your-ecr-account>.dkr.ecr.<your-region>.amazonaws.com
+#   repoPrefix: vistaplatform                # ECR repo prefix (not the Docker Hub URL namespace)
+#   tag: <image-tag>                      # from your license package README.txt
+#   pullSecrets: [vistaplatform-registry]
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: synthetic edge probes.
+#
+# Each entry below makes the monitoring-service issue a real HTTP GET against
+# the customer-facing URL every health-check interval (~30 s) and surfaces
+# the result as "synthetic-<name>" in the admin status dashboard. Catches
+# the failure class that per-service probes miss — broken IngressRoute /
+# Middleware, expired cert, NetworkPolicy regression, ingress controller
+# misbehaviour. Recommended for every production install.
+#
+# Leave the list empty (default) to disable edge probing.
+# -----------------------------------------------------------------------------
+# monitoring:
+#   syntheticChecks:
+#     - name: edge-tenant
+#       url: https://vistaplatform.example.com/api/v1/auth-service/health
+#     - name: edge-admin
+#       url: https://admin.vistaplatform.example.com/api/v1/auth-service/health
+#       # insecureSkipVerify: true  # lab clusters only (internal CA not in pod trust store)
+#       # expectedStatus: 200       # optional, default 200
+#       # timeoutSeconds: 5         # optional, default 5
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: storage class for postgres, redis, influxdb, and the pcap-uploads
+# PVCs. Default is 'longhorn'. Override if your cluster uses a different
+# CSI driver (e.g. gp3, rook-ceph-block, netapp-trident).
+# -----------------------------------------------------------------------------
+# datastores:
+#   storageClassName: longhorn
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: bump persistent volume sizes for production workloads. Defaults
+# are small to keep eval clusters lean.
+# -----------------------------------------------------------------------------
+# datastores:
+#   postgres:
+#     persistence: { size: 100Gi }
+#   influxdb:
+#     persistence: { size: 50Gi }
+# pcapUploads:
+#   size: 50Gi
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: ingress controller namespace for NetworkPolicy. Default kube-system
+# matches the Traefik install from deployment-guide §3.5. Override if your
+# cluster runs Traefik (or another controller) in a different namespace.
+# -----------------------------------------------------------------------------
+# networkPolicy:
+#   ingressControllerNamespace: traefik
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: disable the chart's NetworkPolicies entirely. Use only if you're
+# applying your own policy set (e.g. a CiliumNetworkPolicy overlay). Mixing
+# two policy systems on the same workloads produces union-of-allows
+# surprises.
+# -----------------------------------------------------------------------------
+# networkPolicy:
+#   enabled: false
+
+# -----------------------------------------------------------------------------
+# Encrypted internal transport (service-mesh mTLS + Postgres/NATS TLS).
+# ON BY DEFAULT since #965 — you do NOT need to set anything here to get it.
+#
+# This is INDEPENDENT of the tls.* block above. tls.* is your browser-facing
+# edge cert (must be trusted by your users). serviceMtls is INTERNAL: it
+# encrypts + mutually authenticates in-cluster service-to-service traffic
+# (and, via the datastore toggles, Postgres + NATS) using a private,
+# self-signed Platform CA the chart generates. Nobody's browser sees that CA.
+# A self-signed *mesh* CA does not make your *UI* cert self-signed.
+#
+# REQUIRED cluster prerequisites (cluster infra, NOT installed by the chart —
+# your guided install instructions cover installing these):
+#   - cert-manager v1.13+  (issues the Platform CA + per-service certs).
+#     The install FAILS FAST with a clear message if its CRDs are absent.
+#   - Stakater Reloader    (restarts pods on cert auto-rotation). The install
+#     does NOT fail without it, but ~60 days later the first cert renewal
+#     silently breaks mTLS if Reloader isn't present. Install it up front.
+#
+# TO OPT OUT (only for a cluster that cannot provide the prerequisites above),
+# turn ALL THREE toggles off — the two datastore toggles REQUIRE serviceMtls,
+# so a partial opt-out is rejected at install time:
+#
+#   serviceMtls:
+#     enabled: false
+#   datastores:
+#     postgres:
+#       tls:
+#         enabled: false
+#     nats:
+#       tls:
+#         enabled: false
+#
+# UPGRADING AN EXISTING RELEASE that previously ran with all three OFF: do NOT
+# flip them all in one upgrade. Stage it — enable serviceMtls FIRST (one helm
+# upgrade; it provisions the Platform CA + per-service certs), then enable the
+# two datastore toggles in a later upgrade. Toggling postgres.tls on a live
+# release recreates the schema-migration Job (former #421 immutability bug,
+# fixed by #983). See deployment-guide §5E.
+#
+# Advanced — chain the mesh off your corporate root instead of the chart's
+# self-signed Platform CA (Secret must hold tls.crt+tls.key+ca.crt):
+# serviceMtls:
+#   platformCa:
+#     externalCaSecretName: vistaplatform-platform-ca
+
+# -----------------------------------------------------------------------------
+# Row-level security (serviceRls) — ON by default
+# -----------------------------------------------------------------------------
+# Postgres enforces tenant isolation directly: the app connects as a non-owner
+# role (crypto_app) so the per-table tenant policies actually apply, instead of
+# being bypassed by the table owner. Leave it on if you use the bundled
+# Postgres — nothing to configure.
+#
+# ⚠️ USING AN EXTERNAL / MANAGED POSTGRES (RDS, Cloud SQL, Azure Flexible
+# Server)? You MUST pin this off, or the render fails with an explanatory
+# error. The Job that grants the crypto_app/crypto_bypass roles LOGIN only
+# renders for the bundled Postgres, so on a managed instance the toggle would
+# enforce nothing. Set it off and create + grant those roles yourself:
+#
+#   serviceRls:
+#     enabled: false
+#
+# Application-layer tenant filtering is unchanged either way — this decides
+# whether the database enforces isolation as a second, independent layer.
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: allow your own SSO IdP hostnames for the login-page redirect guard.
+# The well-known IdPs (Microsoft, Google, Salesforce, Okta, Auth0) are always
+# allowed. Add your self-hosted IdP here so SSO works without a code change —
+# e.g. a Keycloak or ADFS host. Applies to both the tenant and admin UIs.
+# -----------------------------------------------------------------------------
+# frontend:
+#   sso:
+#     allowedIdpHosts:
+#       - keycloak.corp.example.com
+#     allowedIdpSuffixes:
+#       - .sso.example.com

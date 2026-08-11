@@ -1,0 +1,281 @@
+package middleware
+
+import (
+	"net/http"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/audit-service/internal/config"
+	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
+	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
+)
+
+// UserType constants for distinguishing platform vs tenant users
+const (
+	UserTypePlatform = "platform"
+	UserTypeTenant   = "tenant"
+)
+
+func RequireAuth(cfg *config.Config) gin.HandlerFunc {
+	// Signing keys are resolved once, not per request: the keyfunc picks
+	// by algorithm class — ES256 tokens resolve their `kid` against the trusted
+	// public keys, HS256 tokens get the legacy shared secret while one is
+	// configured. See shared/security/jwtkeys.
+	verifier := sharedmw.VerifierFromEnv(cfg.JWT.Secret)
+
+	return func(c *gin.Context) {
+		// Skip auth for health check
+		if c.Request.URL.Path == "/health" || c.Request.URL.Path == "/ready" {
+			c.Next()
+			return
+		}
+
+		// Get token from Authorization header, falling back to httpOnly cookie
+		var tokenString string
+		authHeader := c.GetHeader("Authorization")
+		if len(authHeader) >= 7 && authHeader[:7] == "Bearer " {
+			tokenString = authHeader[7:]
+		} else if cookie, err := c.Cookie("access_token"); err == nil && cookie != "" {
+			tokenString = cookie
+			// Cookie-based requests must pass CSRF validation for state-mutating
+			// methods, and the token must be SESSION-BOUND:
+			// HMAC(this access token's jti), not just header == cookie.
+			if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead && c.Request.Method != http.MethodOptions {
+				csrfHeader := c.GetHeader("X-CSRF-Token")
+				csrfCookie, _ := c.Cookie("csrf_token")
+				if csrfHeader == "" || csrfCookie == "" || csrfHeader != csrfCookie ||
+					!sharedmw.ValidCSRFForToken(cfg.JWT.Secret, cookie, csrfHeader) {
+					c.JSON(http.StatusForbidden, gin.H{"error": "CSRF token missing or invalid"})
+					c.Abort()
+					return
+				}
+			}
+		} else if pcookie, err := c.Cookie("platform_access_token"); err == nil && pcookie != "" {
+			// Platform-admin cookie session (set by admin-service, distinct from the
+			// tenant access_token). The platform Audit section in admin-ui-v2 reads
+			// the audit trail with this; downstream this middleware already defaults
+			// userType=platform and skips tenant scoping for no-tenant tokens.
+			// Mirrors the platform-cookie-auth pattern in the other platform services.
+			tokenString = pcookie
+			if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead && c.Request.Method != http.MethodOptions {
+				csrfHeader := c.GetHeader("X-CSRF-Token")
+				csrfCookie, _ := c.Cookie("platform_csrf_token")
+				if csrfHeader == "" || csrfCookie == "" || csrfHeader != csrfCookie ||
+					!sharedmw.ValidCSRFForToken(cfg.JWT.Secret, pcookie, csrfHeader) {
+					c.JSON(http.StatusForbidden, gin.H{"error": "CSRF token missing or invalid"})
+					c.Abort()
+					return
+				}
+			}
+		}
+
+		if tokenString == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization required"})
+			c.Abort()
+			return
+		}
+
+		// Use MapClaims for flexible parsing (handles both platform and tenant tokens)
+		claims := jwt.MapClaims{}
+		token, err := jwt.ParseWithClaims(tokenString, claims, verifier.Keyfunc(),
+			append(verifier.ParserOptions(),
+				jwt.WithIssuer("crypto-inventory-auth"), jwt.WithAudience("crypto-inventory"))...)
+
+		if err != nil || !token.Valid {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+			c.Abort()
+			return
+		}
+
+		// Validate token type (must be "access" or "impersonation")
+		tokenType, _ := claims["type"].(string)
+		if tokenType != "access" && tokenType != "impersonation" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token type"})
+			c.Abort()
+			return
+		}
+
+		if passwordChangeRequired, _ := claims["pwd_change_required"].(bool); passwordChangeRequired && !sharedmw.IsPasswordChangeAllowedPath(c.Request.URL.Path) {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "Password change required before this action is allowed",
+				"code":  "password_change_required",
+			})
+			c.Abort()
+			return
+		}
+
+		// Extract user_id (required)
+		userIDStr, ok := claims["user_id"].(string)
+		if !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token: missing user_id"})
+			c.Abort()
+			return
+		}
+		userID, err := uuid.Parse(userIDStr)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token: invalid user_id"})
+			c.Abort()
+			return
+		}
+
+		// Extract email and role
+		email, _ := claims["email"].(string)
+		role, _ := claims["role"].(string)
+
+		// Determine user type based on tenant_id
+		// Platform users have uuid.Nil or no tenant_id
+		var tenantID uuid.UUID
+		userType := UserTypePlatform // default to platform
+
+		if tenantIDStr, ok := claims["tenant_id"].(string); ok && tenantIDStr != "" {
+			if parsed, err := uuid.Parse(tenantIDStr); err == nil {
+				// Check if it's uuid.Nil (all zeros)
+				if parsed != uuid.Nil {
+					tenantID = parsed
+					userType = UserTypeTenant
+				}
+			}
+		}
+
+		// Set user context
+		c.Set("userID", userID)
+		c.Set("email", email)
+		c.Set("role", role)
+		c.Set("userType", userType)
+		c.Set("tokenType", tokenType)
+
+		// Only set tenantID for tenant users
+		if userType == UserTypeTenant {
+			c.Set("tenantID", tenantID)
+		}
+
+		// Check for impersonation context
+		if tokenType == "impersonation" {
+			if actorClaims, ok := claims["act"].(map[string]interface{}); ok {
+				c.Set("actorID", actorClaims["sub"])
+				c.Set("actorEmail", actorClaims["email"])
+				c.Set("impersonationReason", actorClaims["reason"])
+			}
+		}
+
+		c.Next()
+	}
+}
+
+// RequirePermission creates middleware that checks for a specific permission
+// Platform users are checked against platform_permissions, tenant users against tenant_permissions
+func RequirePermission(permission string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userType, exists := c.Get("userType")
+		if !exists {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+			c.Abort()
+			return
+		}
+
+		role, _ := c.Get("role")
+		roleStr, _ := role.(string)
+
+		// For now, use role-based authorization
+		// Platform admins (super_admin, platform_admin) have access to platform.* permissions
+		// Tenant admins have access to audit.* permissions
+		allowed := false
+
+		if userType == UserTypePlatform {
+			// Platform users: check if role grants the permission
+			switch roleStr {
+			case "super_admin":
+				allowed = true // Super admins have all permissions
+			case "platform_admin":
+				// Platform admins have platform.audit and related permissions
+				allowed = strings.HasPrefix(permission, "platform.") ||
+					strings.HasPrefix(permission, "audit.") ||
+					permission == "platform_users.manage"
+			case "support_admin":
+				// Support admins have read-only audit access
+				allowed = permission == "platform.audit" ||
+					permission == "audit.read" ||
+					permission == "platform.audit.read"
+			}
+		} else {
+			// Tenant users: check tenant role permissions
+			switch roleStr {
+			case "tenant_admin", "admin":
+				allowed = strings.HasPrefix(permission, "audit.")
+			case "security_admin":
+				allowed = permission == "audit.read" ||
+					permission == "audit.security" ||
+					permission == "audit.export"
+			}
+		}
+
+		if !allowed {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":      "Permission denied",
+				"permission": permission,
+			})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// GetUserType retrieves the user type from context
+func GetUserType(c *gin.Context) string {
+	if userType, exists := c.Get("userType"); exists {
+		if ut, ok := userType.(string); ok {
+			return ut
+		}
+	}
+	return ""
+}
+
+// GetTenantID retrieves the tenant ID from context (only for tenant users).
+// Delegates to shared middleware for type-safe extraction.
+func GetTenantID(c *gin.Context) *uuid.UUID {
+	if tid, ok := sharedmw.GetTenantIDFromContext(c); ok {
+		return &tid
+	}
+	return nil
+}
+
+// GetUserID retrieves the user ID from context
+func GetUserID(c *gin.Context) uuid.UUID {
+	if userID, exists := c.Get("userID"); exists {
+		if uid, ok := userID.(uuid.UUID); ok {
+			return uid
+		}
+	}
+	return uuid.Nil
+}
+
+// RequireInternalAuth validates HMAC-signed service-to-service requests.
+// Requires the caller to sign requests using shared/serviceauth with INTERNAL_AUTH_SECRET.
+func RequireInternalAuth(internalSecret string) gin.HandlerFunc {
+	var verifier *serviceauth.Verifier
+	if internalSecret != "" {
+		verifier = serviceauth.NewVerifier(internalSecret)
+	}
+
+	return func(c *gin.Context) {
+		if verifier == nil {
+			// No secret configured — reject all requests in production
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Internal auth not configured"})
+			c.Abort()
+			return
+		}
+
+		if !verifier.Verify(c) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid internal service signature"})
+			c.Abort()
+			return
+		}
+
+		c.Set("isInternalCall", true)
+		c.Next()
+	}
+}

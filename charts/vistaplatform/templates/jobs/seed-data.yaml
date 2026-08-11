@@ -1,0 +1,280 @@
+{{- if .Values.seedData.enabled }}
+{{/*
+Applies scripts/database/seed.sql on every install and upgrade.
+
+This is a post-install/post-upgrade hook, but schema-migration is a regular
+release resource (NOT a hook — see its header), so Helm does not order the two
+and they would otherwise race. On a fresh install seed.sql could run before the
+schema exists; because psql here omits ON_ERROR_STOP (see below) the failed
+INSERTs exit 0, silently leaving an empty database (no platform admin → nobody
+can log in). To prevent that, schema-migration records a completion marker
+(public.schema_migration_status, keyed by the schema-content hash) once the
+schema is fully applied, and this Job blocks until the marker for the current
+schema hash is present before seeding. Keying on the hash makes it correct for
+upgrades too (it waits for THIS schema version, not a stale prior marker).
+
+seed.sql is idempotent — every INSERT uses ON CONFLICT DO NOTHING or
+ON CONFLICT DO UPDATE — so re-running on upgrades is safe and ensures new seed
+rows added in future chart versions are picked up.
+
+psql is invoked without -v ON_ERROR_STOP=1 (unlike schema-migration) because
+"already exists" NOTICEs from RLS policies and idempotency guards are expected
+on a re-run and must not fail the Job.
+
+ENTERPRISE CONTENT BUNDLE (enterprise.contentBundle.enabled, default false)
+
+seed.sql seeds only the six FREE frameworks. The five regulated ones (SOC 2,
+PCI-DSS, ISO 27001, NIST CSF, IEC 62351-3) ship as a separately signed bundle
+staged into files/ee/ at release time. When the flag is on:
+
+  1. `helm template` FAILS if the bundle, its signature, or the public key is
+     missing/empty. That guard exists because seed.sql already taught us the
+     failure mode: an empty ConfigMap value makes psql exit 0 and seed nothing,
+     so the install "succeeds" with no content. Better to fail at render.
+  2. An init container verifies the detached signature against the Enterprise
+     public key with openssl before anything touches the database. A bad or
+     missing signature leaves the pod in Init:Error and fails the release —
+     it never degrades to applying an unverified bundle.
+  3. Only then does the main container apply the bundle, with
+     ON_ERROR_STOP=1 (stricter than seed.sql: a paid-content apply that
+     half-fails must not report success).
+
+Re-applying is a no-op for the deployments that already hold these frameworks
+(UPSERT by code/version and by control id, NOT EXISTS guards on
+control_measurements). Turning the flag off deletes nothing.
+*/}}
+{{- if .Values.enterprise.contentBundle.enabled }}
+{{- $bundleSQL := .Files.Get "files/ee/frameworks-regulated.sql" }}
+{{- $bundleSig := .Files.Get "files/ee/frameworks-regulated.sql.sig" }}
+{{- $bundleKey := .Files.Get "files/ee/edition-public-key.pem" }}
+{{- if or (not $bundleSQL) (not $bundleSig) (not $bundleKey) }}
+{{- fail "enterprise.contentBundle.enabled=true but this chart was packaged WITHOUT the Enterprise content bundle (charts/vistaplatform/files/ee/{frameworks-regulated.sql,frameworks-regulated.sql.sig,edition-public-key.pem}). Install the licensed chart, or set enterprise.contentBundle.enabled=false to run Core. From an Enterprise checkout, stage the bundle first: make stage-content-bundle" }}
+{{- end }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vistaplatform.fullname" . }}-seed
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: seed-data
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-4"
+    helm.sh/hook-delete-policy: before-hook-creation
+data:
+  seed.sql: |
+{{ .Files.Get "files/schema/seed.sql" | indent 4 }}
+  {{- if .Values.enterprise.contentBundle.enabled }}
+  frameworks-regulated.sql: |
+{{ .Files.Get "files/ee/frameworks-regulated.sql" | indent 4 }}
+  frameworks-regulated.sql.sig: |
+{{ .Files.Get "files/ee/frameworks-regulated.sql.sig" | indent 4 }}
+  edition-public-key.pem: |
+{{ .Files.Get "files/ee/edition-public-key.pem" | indent 4 }}
+  {{- end }}
+---
+{{- $schemaHash := .Files.Get "files/schema/schema.sql" | sha256sum | trunc 10 }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "vistaplatform.fullname" . }}-seed-data
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: seed-data
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "vistaplatform.labels" . | nindent 8 }}
+        app.kubernetes.io/component: seed-data
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "vistaplatform.podSecurityContext" . | nindent 8 }}
+      {{- if .Values.enterprise.contentBundle.enabled }}
+      initContainers:
+        # Verify the Enterprise content bundle BEFORE the seed container runs.
+        # An unverified bundle is worse than no bundle: it would let anyone with
+        # write access to the chart or the ConfigMap inject arbitrary SQL that
+        # runs as the database owner. So this gate is fail-closed in every
+        # direction — missing file, empty file, unreadable key, undecodable
+        # signature, or a signature that does not match all exit non-zero, and
+        # the Job's backoffLimit turns that into a failed helm release.
+        #
+        # Nothing here touches Postgres, so a bad bundle is caught in seconds,
+        # before any statement is applied.
+        - name: verify-content-bundle
+          image: "{{ .Values.enterprise.contentBundle.verifierImage.repository }}:{{ .Values.enterprise.contentBundle.verifierImage.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "vistaplatform.containerSecurityContext" . | nindent 12 }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              BUNDLE=/seed/frameworks-regulated.sql
+              SIG=/seed/frameworks-regulated.sql.sig
+              KEY=/seed/edition-public-key.pem
+
+              for f in "$BUNDLE" "$SIG" "$KEY"; do
+                if [ ! -s "$f" ]; then
+                  echo "FATAL: $f is missing or empty."
+                  echo "  The chart was packaged without a complete Enterprise content bundle."
+                  echo "  Set enterprise.contentBundle.enabled=false to run Core, or install the licensed chart."
+                  exit 1
+                fi
+              done
+
+              if ! command -v openssl >/dev/null 2>&1; then
+                echo "FATAL: openssl not found in $(cat /etc/os-release 2>/dev/null | head -1)."
+                echo "  enterprise.contentBundle.verifierImage must be an image with the openssl CLI."
+                echo "  postgres:*-alpine does NOT have it; the Debian postgres tags do."
+                exit 1
+              fi
+
+              echo "Enterprise content bundle: $(wc -c < "$BUNDLE") bytes, sha256 $(sha256sum "$BUNDLE" | cut -d' ' -f1)"
+              echo "Verifying detached signature against $KEY ..."
+
+              if ! openssl base64 -d -in "$SIG" -out /tmp/bundle.sig; then
+                echo "FATAL: signature file is not valid base64 — refusing to apply the bundle."
+                exit 1
+              fi
+
+              if ! openssl dgst -sha256 -verify "$KEY" -signature /tmp/bundle.sig "$BUNDLE"; then
+                echo "FATAL: content bundle signature verification FAILED."
+                echo "  The bundle does not match its signature. Either it was modified after"
+                echo "  signing, or it was signed with a key this deployment does not trust."
+                echo "  Refusing to apply it. No database changes were made."
+                exit 1
+              fi
+
+              echo "✅ Content bundle signature verified."
+          volumeMounts:
+            - name: seed
+              mountPath: /seed
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      {{- end }}
+      containers:
+        - name: psql
+          image: "{{ .Values.schemaMigration.image.repository }}:{{ .Values.schemaMigration.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "vistaplatform.containerSecurityContext" . | nindent 12 }}
+          env:
+            {{- if .Values.datastores.postgres.enabled }}
+            - name: PGHOST
+              value: postgres
+            - name: PGPORT
+              value: "5432"
+            - name: PGUSER
+              value: {{ .Values.datastores.postgres.user | quote }}
+            - name: PGDATABASE
+              value: {{ .Values.datastores.postgres.db | quote }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vistaplatform.generatedSecretName" . }}
+                  key: postgres-password
+            {{- if .Values.datastores.postgres.tls.enabled }}
+            # Postgres requires TLS ( Phase 3); psql/pg_isready (libpq) honor these. prefer (not verify-full) so the pre/post-upgrade hook connects whether postgres is mid-transition (plain) or TLS.
+            - name: PGSSLMODE
+              value: prefer
+            - name: PGSSLROOTCERT
+              value: /etc/db-ca/ca.crt
+            {{- end }}
+            {{- else }}
+            # External database (e.g. RDS): connect via the full DATABASE_URL from
+            # the platform secret (correct host/user/password + sslmode=require).
+            # See schema-migration.yaml for why the discrete PG* path fails RDS.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vistaplatform.platformSecretName" . }}
+                  key: database-url
+            {{- end }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              echo "Waiting for Postgres to be ready..."
+              {{- if .Values.datastores.postgres.enabled }}
+              until pg_isready -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE"; do
+                sleep 2
+              done
+              echo "Waiting for schema-migration (hash {{ $schemaHash }}) to finish..."
+              i=0
+              until psql -tAc "SELECT 1 FROM public.schema_migration_status WHERE schema_hash = '{{ $schemaHash }}'" 2>/dev/null | grep -q 1; do
+                i=$((i + 1))
+                if [ "$i" -gt 200 ]; then
+                  echo "ERROR: schema-migration completion marker not present after ~10m; aborting seed"
+                  exit 1
+                fi
+                sleep 3
+              done
+              echo "Applying seed data..."
+              psql -f /seed/seed.sql
+              {{- if .Values.enterprise.contentBundle.enabled }}
+              # Signature already verified by the init container.
+              echo "Applying Enterprise content bundle (regulated compliance frameworks)..."
+              psql -v ON_ERROR_STOP=1 -f /seed/frameworks-regulated.sql
+              {{- end }}
+              {{- else }}
+              until pg_isready -d "$DATABASE_URL"; do
+                sleep 2
+              done
+              echo "Waiting for schema-migration (hash {{ $schemaHash }}) to finish..."
+              i=0
+              until psql -d "$DATABASE_URL" -tAc "SELECT 1 FROM public.schema_migration_status WHERE schema_hash = '{{ $schemaHash }}'" 2>/dev/null | grep -q 1; do
+                i=$((i + 1))
+                if [ "$i" -gt 200 ]; then
+                  echo "ERROR: schema-migration completion marker not present after ~10m; aborting seed"
+                  exit 1
+                fi
+                sleep 3
+              done
+              echo "Applying seed data..."
+              psql -d "$DATABASE_URL" -f /seed/seed.sql
+              {{- if .Values.enterprise.contentBundle.enabled }}
+              # Signature already verified by the init container.
+              echo "Applying Enterprise content bundle (regulated compliance frameworks)..."
+              psql -d "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /seed/frameworks-regulated.sql
+              {{- end }}
+              {{- end }}
+              echo "Seed data applied."
+          volumeMounts:
+            - name: seed
+              mountPath: /seed
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            {{- if and .Values.datastores.postgres.enabled .Values.datastores.postgres.tls.enabled }}
+            - name: db-ca
+              mountPath: /etc/db-ca
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: seed
+          configMap:
+            name: {{ include "vistaplatform.fullname" . }}-seed
+        {{- if and .Values.datastores.postgres.enabled .Values.datastores.postgres.tls.enabled }}
+        - name: db-ca
+          secret:
+            secretName: postgres-mtls
+            items:
+              - { key: ca.crt, path: ca.crt }
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+{{- end }}

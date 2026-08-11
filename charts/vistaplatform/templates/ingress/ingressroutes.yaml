@@ -1,0 +1,2929 @@
+{{/*
+  GENERATED FILE. DO NOT EDIT.
+  Source: standards/service-registry.yaml
+  Generator: scripts/generate-k8s-ingress.mjs
+  Regenerate with: make generate-k8s-ingress
+*/}}
+{{/*
+  Gated on .Values.ingress.controller: this entire file emits nothing
+  when the operator selected an ingress controller other than Traefik
+  (e.g. "none" — bring-your-own-ingress, nginx-ingress, Istio, Gateway
+  API). See values.yaml `ingress:` block for the supported values.
+*/}}
+{{- if eq (.Values.ingress.controller | default "traefik") "traefik" }}
+{{- include "vistaplatform.validateTLS" . -}}
+{{- $tlsMode := .Values.tls.mode -}}
+{{- $fullname := include "vistaplatform.fullname" . -}}
+{{- $namespace := .Release.Namespace -}}
+{{- $dnsName := include "vistaplatform.publicHost" . -}}
+{{- $adminDnsName := .Values.tls.adminDnsName | default "" -}}
+{{- $apiHost := printf "Host(`%s`)" $dnsName -}}
+{{- if $adminDnsName }}{{- $apiHost = printf "(Host(`%s`) || Host(`%s`))" $dnsName $adminDnsName -}}{{- end -}}
+{{- $entryPoints := list "websecure" -}}
+{{- $tlsSecret := "" -}}
+{{- if or (eq $tlsMode "certManager") (eq $tlsMode "selfSigned") -}}{{- $tlsSecret = printf "%s-tls" $fullname -}}{{- end -}}
+{{- if eq $tlsMode "existingSecret" -}}{{- $tlsSecret = .Values.tls.existingSecretName -}}{{- end -}}
+{{- if eq $tlsMode "none" -}}{{- $entryPoints = list "web" -}}{{- end -}}
+{{- $adminPlaneSplit := and $adminDnsName .Values.adminPlane.restrictToAdminHost -}}
+{{- $adminAllowList := "" -}}
+{{- if and $adminPlaneSplit .Values.adminPlane.ipAllowList.enabled -}}
+{{- if not .Values.adminPlane.ipAllowList.sourceRange -}}
+{{- fail "adminPlane.ipAllowList.enabled is true but adminPlane.ipAllowList.sourceRange is empty — an allow-list with no entries would lock every operator out of the admin console" -}}
+{{- end -}}
+{{- $adminAllowList = .Values.adminPlane.ipAllowList -}}
+{{- end -}}
+
+{{- if $adminPlaneSplit }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ $fullname }}-admin-plane
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  entryPoints: {{ $entryPoints | toJson }}
+  routes:
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/admin-service/admin/billing/webhook/`) || Path(`/api/v1/admin-service/admin/billing/webhook`))
+      kind: Rule
+      priority: 950
+      services:
+        - name: admin-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-admin-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/admin-service/admin/billing/webhook/`) || Path(`/api/v2/admin-service/admin/billing/webhook`))
+      kind: Rule
+      priority: 950
+      services:
+        - name: admin-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-admin-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-admin-service
+    - match: Host(`{{ $dnsName }}`) && PathPrefix(`/api/v1/auth-service/platform/config`)
+      kind: Rule
+      priority: 950
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-auth-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && PathPrefix(`/api/v2/auth-service/platform/config`)
+      kind: Rule
+      priority: 950
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-auth-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-auth-service
+    - match: Host(`{{ $dnsName }}`) && PathPrefix(`/api/v1/auth-service/platform/ui-config`)
+      kind: Rule
+      priority: 950
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-auth-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && PathPrefix(`/api/v2/auth-service/platform/ui-config`)
+      kind: Rule
+      priority: 950
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-auth-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-auth-service
+    - match: Host(`{{ $dnsName }}`) && PathPrefix(`/api/v1/auth-service/platform/sso-providers`)
+      kind: Rule
+      priority: 950
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-auth-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && PathPrefix(`/api/v2/auth-service/platform/sso-providers`)
+      kind: Rule
+      priority: 950
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-auth-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-auth-service
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/admin-service/auth/`) || Path(`/api/v1/admin-service/auth`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: admin-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-admin-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-auth
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/admin-service/auth/`) || Path(`/api/v1/admin-service/auth`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: admin-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/admin-service/auth/`) || Path(`/api/v2/admin-service/auth`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: admin-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-admin-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-auth
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-admin-service
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/admin-service/auth/`) || Path(`/api/v2/admin-service/auth`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: admin-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/admin-service/admin/`) || Path(`/api/v1/admin-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: admin-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-admin-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/admin-service/admin/`) || Path(`/api/v1/admin-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: admin-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/admin-service/admin/`) || Path(`/api/v2/admin-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: admin-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-admin-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-admin-service
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/admin-service/admin/`) || Path(`/api/v2/admin-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: admin-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/admin-service/status/`) || Path(`/api/v1/admin-service/status`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-monitoring-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/admin-service/status/`) || Path(`/api/v1/admin-service/status`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/admin-service/status/`) || Path(`/api/v2/admin-service/status`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-monitoring-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-admin-service
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/admin-service/status/`) || Path(`/api/v2/admin-service/status`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/auth-service/admin/`) || Path(`/api/v1/auth-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-auth-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/auth-service/admin/`) || Path(`/api/v1/auth-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/auth-service/admin/`) || Path(`/api/v2/auth-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-auth-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-auth-service
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/auth-service/admin/`) || Path(`/api/v2/auth-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/auth-service/platform/`) || Path(`/api/v1/auth-service/platform`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-auth-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/auth-service/platform/`) || Path(`/api/v1/auth-service/platform`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/auth-service/platform/`) || Path(`/api/v2/auth-service/platform`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-auth-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-auth-service
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/auth-service/platform/`) || Path(`/api/v2/auth-service/platform`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && PathPrefix(`/api/v1/sensor-manager/admin/sensors`)
+      kind: Rule
+      priority: 900
+      services:
+        - name: sensor-manager
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-sensor-manager
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && PathPrefix(`/api/v1/sensor-manager/admin/sensors`)
+      kind: Rule
+      priority: 900
+      services:
+        - name: sensor-manager
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && PathPrefix(`/api/v2/sensor-manager/admin/sensors`)
+      kind: Rule
+      priority: 900
+      services:
+        - name: sensor-manager
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-sensor-manager
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-sensor-manager
+    - match: Host(`{{ $dnsName }}`) && PathPrefix(`/api/v2/sensor-manager/admin/sensors`)
+      kind: Rule
+      priority: 900
+      services:
+        - name: sensor-manager
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/sensor-manager/platform/`) || Path(`/api/v1/sensor-manager/platform`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: sensor-manager
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-sensor-manager
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/sensor-manager/platform/`) || Path(`/api/v1/sensor-manager/platform`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: sensor-manager
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/sensor-manager/platform/`) || Path(`/api/v2/sensor-manager/platform`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: sensor-manager
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-sensor-manager
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-sensor-manager
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/sensor-manager/platform/`) || Path(`/api/v2/sensor-manager/platform`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: sensor-manager
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/platform/`) || Path(`/api/v1/monitoring-service/platform`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-monitoring-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/platform/`) || Path(`/api/v1/monitoring-service/platform`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/platform/`) || Path(`/api/v2/monitoring-service/platform`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-monitoring-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-monitoring-service
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/platform/`) || Path(`/api/v2/monitoring-service/platform`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/logs/`) || Path(`/api/v1/monitoring-service/logs`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-monitoring-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/logs/`) || Path(`/api/v1/monitoring-service/logs`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/logs/`) || Path(`/api/v2/monitoring-service/logs`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-monitoring-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-monitoring-service
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/logs/`) || Path(`/api/v2/monitoring-service/logs`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/alerting/`) || Path(`/api/v1/monitoring-service/alerting`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-monitoring-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/alerting/`) || Path(`/api/v1/monitoring-service/alerting`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/alerting/`) || Path(`/api/v2/monitoring-service/alerting`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-monitoring-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-monitoring-service
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/alerting/`) || Path(`/api/v2/monitoring-service/alerting`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/trends/`) || Path(`/api/v1/monitoring-service/trends`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-monitoring-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/trends/`) || Path(`/api/v1/monitoring-service/trends`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/trends/`) || Path(`/api/v2/monitoring-service/trends`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-monitoring-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-monitoring-service
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/trends/`) || Path(`/api/v2/monitoring-service/trends`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/gateway/`) || Path(`/api/v1/monitoring-service/gateway`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-monitoring-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/gateway/`) || Path(`/api/v1/monitoring-service/gateway`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/gateway/`) || Path(`/api/v2/monitoring-service/gateway`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-monitoring-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-monitoring-service
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/gateway/`) || Path(`/api/v2/monitoring-service/gateway`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/admin/`) || Path(`/api/v1/monitoring-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-monitoring-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/admin/`) || Path(`/api/v1/monitoring-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/admin/`) || Path(`/api/v2/monitoring-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-monitoring-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-monitoring-service
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/admin/`) || Path(`/api/v2/monitoring-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/compliance-engine/admin/`) || Path(`/api/v1/compliance-engine/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: compliance-engine
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-compliance-engine
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/compliance-engine/admin/`) || Path(`/api/v1/compliance-engine/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: compliance-engine
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/compliance-engine/admin/`) || Path(`/api/v2/compliance-engine/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: compliance-engine
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-compliance-engine
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-compliance-engine
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/compliance-engine/admin/`) || Path(`/api/v2/compliance-engine/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: compliance-engine
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/device-interrogation-service/admin/`) || Path(`/api/v1/device-interrogation-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: device-interrogation-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-device-interrogation-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/device-interrogation-service/admin/`) || Path(`/api/v1/device-interrogation-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: device-interrogation-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/device-interrogation-service/admin/`) || Path(`/api/v2/device-interrogation-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: device-interrogation-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-device-interrogation-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-device-interrogation-service
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/device-interrogation-service/admin/`) || Path(`/api/v2/device-interrogation-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: device-interrogation-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/notification-service/platform/`) || Path(`/api/v1/notification-service/platform`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: notification-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-notification-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/notification-service/platform/`) || Path(`/api/v1/notification-service/platform`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: notification-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/notification-service/platform/`) || Path(`/api/v2/notification-service/platform`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: notification-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-notification-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-notification-service
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/notification-service/platform/`) || Path(`/api/v2/notification-service/platform`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: notification-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/tenant-health-service/`) || Path(`/api/v1/tenant-health-service`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: tenant-health-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-tenant-health-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/tenant-health-service/`) || Path(`/api/v1/tenant-health-service`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: tenant-health-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/tenant-health-service/`) || Path(`/api/v2/tenant-health-service`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: tenant-health-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-tenant-health-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-tenant-health-service
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/tenant-health-service/`) || Path(`/api/v2/tenant-health-service`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: tenant-health-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+  {{- if $tlsSecret }}
+  tls:
+    secretName: {{ $tlsSecret }}
+    options:
+      name: {{ $fullname }}-tls-options
+      namespace: {{ $namespace }}
+  {{- end }}
+{{- end }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ $fullname }}-internal-plane
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  entryPoints: {{ $entryPoints | toJson }}
+  routes:
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/notification-service/internal/`) || Path(`/api/v1/notification-service/internal`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: notification-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/notification-service/internal/`) || Path(`/api/v2/notification-service/internal`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: notification-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/sensor-manager/internal/`) || Path(`/api/v1/sensor-manager/internal`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: sensor-manager
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/sensor-manager/internal/`) || Path(`/api/v2/sensor-manager/internal`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: sensor-manager
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/auth-service/internal/`) || Path(`/api/v1/auth-service/internal`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/auth-service/internal/`) || Path(`/api/v2/auth-service/internal`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+  {{- if $tlsSecret }}
+  tls:
+    secretName: {{ $tlsSecret }}
+    options:
+      name: {{ $fullname }}-tls-options
+      namespace: {{ $namespace }}
+  {{- end }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ $fullname }}-api
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  entryPoints: {{ $entryPoints | toJson }}
+  routes:
+    - match: {{ $apiHost }} && (Path(`/api/v1/auth-service/health`))
+      kind: Rule
+      priority: 150
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: rewrite-auth-service-health
+        - name: retry
+    - match: {{ $apiHost }} && (Path(`/api/v1/auth-service/auth/sso/providers`))
+      kind: Rule
+      priority: 200
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-auth-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (Path(`/api/v2/auth-service/auth/sso/providers`))
+      kind: Rule
+      priority: 200
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-auth-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-auth-service
+    - match: {{ $apiHost }} && (Path(`/.well-known/oauth-authorization-server`))
+      kind: Rule
+      priority: 200
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-auth-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (Path(`/.well-known/jwks.json`))
+      kind: Rule
+      priority: 200
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-auth-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/auth-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-auth-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-auth
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/auth-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-auth-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-auth
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-auth-service
+    - match: {{ $apiHost }} && (Path(`/api/v1/inventory-service/health`))
+      kind: Rule
+      priority: 150
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: rewrite-inventory-service-health
+        - name: retry
+    - match: {{ $apiHost }} && PathPrefix(`/api/v1/inventory-service/discovery/jobs/`) && PathRegexp(`^/api/v1/inventory-service/discovery/jobs/[^/]+/import$`)
+      kind: Rule
+      priority: 200
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-inventory-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && PathPrefix(`/api/v2/inventory-service/discovery/jobs/`) && PathRegexp(`^/api/v2/inventory-service/discovery/jobs/[^/]+/import$`)
+      kind: Rule
+      priority: 200
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-inventory-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/inventory-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-inventory-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/inventory-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-inventory-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (Path(`/api/v1/compliance-engine/health`))
+      kind: Rule
+      priority: 150
+      services:
+        - name: compliance-engine
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: rewrite-compliance-engine-health
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/compliance-engine/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: compliance-engine
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-compliance-engine
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/compliance-engine/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: compliance-engine
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-compliance-engine
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-compliance-engine
+    - match: {{ $apiHost }} && (Path(`/api/v1/cbom-service/health`))
+      kind: Rule
+      priority: 150
+      services:
+        - name: cbom-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: rewrite-cbom-service-health
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/cbom-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: cbom-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-cbom-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/cbom-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: cbom-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-cbom-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-cbom-service
+    - match: {{ $apiHost }} && (Path(`/api/v1/sensor-manager/health`))
+      kind: Rule
+      priority: 150
+      services:
+        - name: sensor-manager
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: rewrite-sensor-manager-health
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/sensor-manager/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: sensor-manager
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-sensor-manager
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/sensor-manager/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: sensor-manager
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-sensor-manager
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-sensor-manager
+    - match: {{ $apiHost }} && (Path(`/api/v1/cluster-sensor-service/health`))
+      kind: Rule
+      priority: 150
+      services:
+        - name: cluster-sensor-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: rewrite-cluster-sensor-service-health
+        - name: retry
+    - match: {{ $apiHost }} && PathPrefix(`/api/v1/discovery/jobs/`) && PathRegexp(`^/api/v1/discovery/jobs/[^/]+/import$`)
+      kind: Rule
+      priority: 200
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-inventory-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/discovery/`))
+      kind: Rule
+      priority: 110
+      services:
+        - name: cluster-sensor-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-cluster-sensor-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/cluster-sensor-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: cluster-sensor-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-cluster-sensor-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/cluster-sensor-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: cluster-sensor-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-cluster-sensor-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-cluster-sensor-service
+    - match: {{ $apiHost }} && (Path(`/api/v1/admin-service/health`))
+      kind: Rule
+      priority: 150
+      services:
+        - name: admin-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: rewrite-admin-service-health
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/admin-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: admin-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-admin-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/admin-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: admin-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-admin-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-admin-service
+    - match: {{ $apiHost }} && (Path(`/api/v1/monitoring-service/health`))
+      kind: Rule
+      priority: 150
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: rewrite-monitoring-service-health
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/admin-service/status/`))
+      kind: Rule
+      priority: 300
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-monitoring-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/admin-service/status/`))
+      kind: Rule
+      priority: 300
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-monitoring-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-admin-service
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/monitoring-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-monitoring-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/monitoring-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: monitoring-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-monitoring-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-monitoring-service
+    - match: {{ $apiHost }} && (Path(`/api/v1/resource-tracker-service/health`))
+      kind: Rule
+      priority: 150
+      services:
+        - name: resource-tracker-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: rewrite-resource-tracker-service-health
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/resource-tracker-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: resource-tracker-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-resource-tracker-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/resource-tracker-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: resource-tracker-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-resource-tracker-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-resource-tracker-service
+    - match: {{ $apiHost }} && (Path(`/api/v1/tenant-health-service/health`))
+      kind: Rule
+      priority: 150
+      services:
+        - name: tenant-health-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: rewrite-tenant-health-service-health
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/tenant-health-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: tenant-health-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-tenant-health-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/tenant-health-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: tenant-health-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-tenant-health-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-tenant-health-service
+    - match: {{ $apiHost }} && (Path(`/api/v1/device-interrogation-service/health`))
+      kind: Rule
+      priority: 150
+      services:
+        - name: device-interrogation-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: rewrite-device-interrogation-service-health
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/device-interrogation-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: device-interrogation-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-device-interrogation-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/device-interrogation-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: device-interrogation-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-device-interrogation-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-device-interrogation-service
+    - match: {{ $apiHost }} && (Path(`/api/v1/audit-service/health`))
+      kind: Rule
+      priority: 150
+      services:
+        - name: audit-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: rewrite-audit-service-health
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/audit-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: audit-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-audit-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/audit-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: audit-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-audit-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-audit-service
+    - match: {{ $apiHost }} && (Path(`/api/v1/notification-service/health`))
+      kind: Rule
+      priority: 150
+      services:
+        - name: notification-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: rewrite-notification-service-health
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/notification-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: notification-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-notification-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/notification-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: notification-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-notification-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-notification-service
+    - match: {{ $apiHost }} && (Path(`/api/v1/discovery-processor-service/health`))
+      kind: Rule
+      priority: 150
+      services:
+        - name: discovery-processor-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: rewrite-discovery-processor-service-health
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/discovery-processor-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: discovery-processor-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-discovery-processor-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/discovery-processor-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: discovery-processor-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-discovery-processor-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-discovery-processor-service
+    - match: {{ $apiHost }} && (Path(`/api/v1/mcp-service/health`))
+      kind: Rule
+      priority: 150
+      services:
+        - name: mcp-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: rewrite-mcp-service-health
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/mcp-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: mcp-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-mcp-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/mcp-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: mcp-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-mcp-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-mcp-service
+    - match: {{ $apiHost }} && (Path(`/api/v1/pcap-processor/health`))
+      kind: Rule
+      priority: 150
+      services:
+        - name: pcap-processor
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: rewrite-pcap-processor-health
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/pcap-processor/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: pcap-processor
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-pcap-processor
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/pcap-processor/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: pcap-processor
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-pcap-processor
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-pcap-processor
+    - match: {{ $apiHost }} && (PathPrefix(`/uploads/platform-branding/`))
+      kind: Rule
+      priority: 120
+      services:
+        - name: admin-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-admin-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: compress
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/uploads/branding/`))
+      kind: Rule
+      priority: 120
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-auth-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: compress
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/uploads/avatars/`))
+      kind: Rule
+      priority: 120
+      services:
+        - name: auth-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-auth-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: compress
+        - name: retry
+    - match: {{ $apiHost }} && (PathPrefix(`/ws/`))
+      kind: Rule
+      priority: 120
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: retry
+  {{- if $tlsSecret }}
+  tls:
+    secretName: {{ $tlsSecret }}
+    options:
+      name: {{ $fullname }}-tls-options
+      namespace: {{ $namespace }}
+  {{- end }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ $fullname }}-app
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  entryPoints: {{ $entryPoints | toJson }}
+  routes:
+    - match: Host(`{{ $dnsName }}`)
+      kind: Rule
+      services:
+        - name: web-ui
+          port: 80
+      middlewares:
+        - name: security-headers
+  {{- if $tlsSecret }}
+  tls:
+    secretName: {{ $tlsSecret }}
+    options:
+      name: {{ $fullname }}-tls-options
+      namespace: {{ $namespace }}
+  {{- end }}
+{{- if $adminDnsName }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ $fullname }}-admin
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  entryPoints: {{ $entryPoints | toJson }}
+  routes:
+    - match: Host(`{{ $adminDnsName }}`)
+      kind: Rule
+      services:
+        - name: admin-ui
+          port: 80
+      middlewares:
+        - name: security-headers
+  {{- if $tlsSecret }}
+  tls:
+    secretName: {{ $tlsSecret }}
+    options:
+      name: {{ $fullname }}-tls-options
+      namespace: {{ $namespace }}
+  {{- end }}
+{{- end }}
+{{- if ne $tlsMode "none" }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ $fullname }}-redirect
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  entryPoints: ["web"]
+  routes:
+    - match: Host(`{{ $dnsName }}`) || Host(`{{ $adminDnsName }}`)
+      kind: Rule
+      services:
+        - name: web-ui
+          port: 80
+      middlewares:
+        - name: redirect-https
+{{- end }}
+{{- end }}

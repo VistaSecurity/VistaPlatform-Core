@@ -1,0 +1,21 @@
+{
+  "//": [
+    "Solution-style root config: no files of its own, just references so that",
+    "`tsc -b` from the repo root type-checks every TypeScript workspace.",
+    "",
+    "It pointed at ./admin-ui until 2026-08-06. That directory moved to _legacy/",
+    "in the v1 cutover (#692) and was deleted outright in #1059, so `tsc -b` had",
+    "been failing with TS5083 'Cannot read file' ever since — the root build was",
+    "broken for months without anyone noticing, because each workspace is",
+    "normally checked individually via its own `tsc -p`.",
+    "",
+    "Keep this list in step with the npm workspaces in package.json."
+  ],
+  "files": [],
+  "references": [
+    { "path": "./api" },
+    { "path": "./packages/primitives" },
+    { "path": "./frontend-v2" },
+    { "path": "./admin-ui-v2" }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+    "services": [
+        {
+            "name": "auth-service",
+            "namespace": "/api/v1/auth-service",
+            "health": "/health",
+            "ready": "/ready",
+            "port": 8081
+        },
+        {
+            "name": "inventory-service",
+            "namespace": "/api/v1/inventory-service",
+            "health": "/health",
+            "ready": "/ready",
+            "port": 8082
+        },
+        {
+            "name": "compliance-engine",
+            "namespace": "/api/v1/compliance-engine",
+            "health": "/health",
+            "ready": "/ready",
+            "port": 8083
+        },
+        {
+            "name": "report-generator",
+            "namespace": "/api/v1/report-generator",
+            "health": "/health",
+            "ready": "/ready",
+            "port": 8084
+        },
+        {
+            "name": "sensor-manager",
+            "namespace": "/api/v1/sensor-manager",
+            "health": "/health",
+            "ready": "/ready",
+            "port": 8085
+        },
+        {
+            "name": "admin-service",
+            "namespace": "/api/v1/admin-service",
+            "health": "/health",
+            "ready": "/ready",
+            "port": 8089
+        }
+    ]
+}

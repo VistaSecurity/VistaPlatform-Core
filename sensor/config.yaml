@@ -1,0 +1,19 @@
+sensorId: "test-sensor-$(hostname)"
+controlPlaneUrl: "http://localhost:8085"
+registrationKey: ""
+reportingIntervalSeconds: 30
+
+storage:
+  maxStorageSize: 104857600    # 100 MB
+  rotationSize: 10485760       # 10 MB
+  retentionDays: 7
+  dataPath: "/tmp/crypto-sensor-test"
+  encryptionKey: ""
+
+capture:
+  interfaces: ["eth0"]
+  activeProbing: true
+  networkDiscovery: true
+  maxConnections: 1000
+  timeoutSeconds: 30
+  bufferSize: 1048576         # 1 MB

@@ -1,0 +1,4 @@
+{{- range $name, $svc := .Values.backends }}
+---
+{{ include "vistaplatform.backend" (dict "ctx" $ "name" $name "svc" $svc) }}
+{{- end }}

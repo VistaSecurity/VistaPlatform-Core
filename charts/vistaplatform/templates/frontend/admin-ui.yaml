@@ -1,0 +1,78 @@
+{{- /*
+admin-ui ("VISTA Operations") — the platform admin console. Built from the
+admin-ui-v2/ source (build-and-swap, ADR-0013) and deployed under its original
+admin-ui identity, mirroring how web-ui builds from frontend-v2/. Serves with
+Caddy on :3007 and bakes NO runtime config (relative /api/* via Traefik,
+same-origin), so there is no runtime-config ConfigMap. The admin-host
+IngressRoute (tls.adminDnsName) points at the Service.
+*/ -}}
+{{- if .Values.frontend.adminUi.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admin-ui
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admin-ui
+spec:
+  replicas: {{ default .Values.defaultReplicas .Values.frontend.adminUi.replicas }}
+  selector:
+    matchLabels:
+      {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "admin-ui") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vistaplatform.labels" . | nindent 8 }}
+        app.kubernetes.io/component: admin-ui
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "vistaplatform.podSecurityContext" . | nindent 8 }}
+      {{- $antiAffinity := include "vistaplatform.podAntiAffinity" (dict "ctx" . "component" "admin-ui") }}
+      {{- if $antiAffinity }}
+      affinity:
+        {{- $antiAffinity | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: admin-ui
+          image: {{ include "vistaplatform.image" (dict "ctx" . "repo" "admin-ui" "tag" .Values.frontend.adminUi.image.tag) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "vistaplatform.containerSecurityContext" . | nindent 12 }}
+          ports:
+            - { name: http, containerPort: 3007 }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: caddy-config, mountPath: /config }
+            - { name: caddy-data, mountPath: /data }
+          resources:
+            {{- toYaml .Values.frontend.adminUi.resources | nindent 12 }}
+          livenessProbe:
+            httpGet: { path: /health, port: 3007 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /health, port: 3007 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: caddy-config
+          emptyDir: {}
+        - name: caddy-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin-ui
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admin-ui
+spec:
+  selector:
+    {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "admin-ui") | nindent 4 }}
+  ports:
+    - { name: http, port: 80, targetPort: 3007 }
+{{- end }}

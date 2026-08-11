@@ -1,0 +1,150 @@
+{{- if .Values.datastores.nats.enabled }}
+{{/*
+NATS server configuration. Authorization token enabled by default; clients
+connect with nats://:<token>@nats:4222. Monitoring port (8222) is exposed via
+the headless Service for liveness probes only — it is NOT included in the
+client Service so it cannot be reached from outside the StatefulSet's pods.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-config
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+data:
+  nats.conf: |
+    port: 4222
+    http_port: 8222
+    server_name: $POD_NAME
+    jetstream {
+      store_dir: /data
+    }
+    {{- if .Values.datastores.nats.tls.enabled }}
+    # mTLS ( Phase 4): require + verify a platform-CA-signed client cert.
+    # The verified cert IS the auth — the shared NATS_TOKEN is retired. Clients
+    # present their per-service <svc>-mtls cert (shared/events nats_tls.go).
+    # v0.1.2 ships authenticated-but-unrestricted (no per-subject perms yet).
+    tls {
+      cert_file: "/etc/nats-tls/tls.crt"
+      key_file:  "/etc/nats-tls/tls.key"
+      ca_file:   "/etc/nats-tls/ca.crt"
+      verify: true
+      timeout: 5
+    }
+    {{- else }}
+    authorization {
+      token: $NATS_TOKEN
+    }
+    {{- end }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nats
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+spec:
+  serviceName: nats-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "nats") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vistaplatform.labels" . | nindent 8 }}
+        app.kubernetes.io/component: nats
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "vistaplatform.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: nats
+          image: "{{ .Values.datastores.nats.image.repository }}:{{ .Values.datastores.nats.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "vistaplatform.containerSecurityContext" . | nindent 12 }}
+          command: [nats-server, -c, /etc/nats/nats.conf]
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- if not .Values.datastores.nats.tls.enabled }}
+            - name: NATS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vistaplatform.generatedSecretName" . }}
+                  key: nats-token
+            {{- end }}
+          ports:
+            - { name: client,  containerPort: 4222 }
+            - { name: cluster, containerPort: 6222 }
+            - { name: monitor, containerPort: 8222 }
+          resources:
+            {{- toYaml .Values.datastores.nats.resources | nindent 12 }}
+          volumeMounts:
+            - name: nats-config
+              mountPath: /etc/nats
+            - name: nats-data
+              mountPath: /data
+            {{- if .Values.datastores.nats.tls.enabled }}
+            - name: nats-tls
+              mountPath: /etc/nats-tls
+              readOnly: true
+            {{- end }}
+          livenessProbe:
+            tcpSocket: { port: 4222 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: nats-config
+          configMap:
+            name: nats-config
+        {{- if .Values.datastores.nats.tls.enabled }}
+        - name: nats-tls
+          secret:
+            secretName: nats-mtls
+            defaultMode: 0640
+        {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: nats-data
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: {{ coalesce .Values.datastores.nats.storageClassName .Values.datastores.storageClassName }}
+        resources:
+          requests:
+            storage: {{ .Values.datastores.nats.persistence.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats-headless
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+spec:
+  clusterIP: None
+  selector:
+    {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "nats") | nindent 4 }}
+  ports:
+    - { name: client,  port: 4222, targetPort: 4222 }
+    - { name: cluster, port: 6222, targetPort: 6222 }
+    - { name: monitor, port: 8222, targetPort: 8222 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+spec:
+  selector:
+    {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "nats") | nindent 4 }}
+  ports:
+    - { name: client, port: 4222, targetPort: 4222 }
+{{- end }}

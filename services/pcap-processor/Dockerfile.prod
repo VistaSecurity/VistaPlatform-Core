@@ -1,0 +1,33 @@
+# Production Dockerfile for PCAP Processor Service (requires CGO + libpcap)
+ARG GO_BUILDER_IMAGE=golang:1.26-alpine
+ARG RUNTIME_IMAGE=alpine:3.24.1
+FROM ${GO_BUILDER_IMAGE} AS builder
+
+WORKDIR /workspace
+RUN apk add --no-cache ca-certificates tzdata git gcc musl-dev libpcap-dev
+
+# Explicitly enable workspace mode
+ENV GOWORK=/workspace/go.work
+ENV GOTOOLCHAIN=local
+
+# Copy workspace files in correct order (go.work lists all service modules)
+COPY go.work ./
+COPY shared ./shared
+COPY shared/rbac ./shared/rbac
+COPY services ./services
+COPY sensor ./sensor
+COPY device-agent ./device-agent
+# Build with CGO enabled for libpcap, optimized for production
+RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-w -s" -o /out/main ./services/pcap-processor/cmd
+
+FROM ${RUNTIME_IMAGE}
+RUN apk --no-cache add ca-certificates tzdata libpcap
+WORKDIR /app
+RUN addgroup -g 1001 -S appgroup && adduser -u 1001 -S appuser -G appgroup
+COPY --from=builder /out/main ./main
+RUN mkdir -p /tmp/pcap-uploads && chown appuser:appgroup /tmp/pcap-uploads
+RUN chown appuser:appgroup ./main && chmod +x ./main
+USER appuser
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 CMD ["wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+CMD ["./main"]

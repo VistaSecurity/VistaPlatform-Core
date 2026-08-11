@@ -1,0 +1,18 @@
+# Trivy ignore file
+#
+# Documented in docsv4/operations/security/SECURITY_AUDIT_FOLLOWUP.md under
+# "Sprint — CVE Sweep". Each entry below is a known false-positive
+# secret detection in React form input placeholder text — these are not real
+# credentials, just visual hints shown to the user when the form field is empty.
+#
+# If trivy ever flags a real secret in one of these files, the file path filter
+# below will silence it too — re-evaluate before adding new entries.
+
+secrets:
+  - id: gcp-service-account
+    paths:
+      - "admin-ui/src/components/integrations/gcp-integration-form.tsx"
+      - "web-ui/src/components/integrations/cloud-integration-form.tsx"
+  - id: github-pat
+    paths:
+      - "web-ui/src/pages/experimental/code-scan-page.tsx"

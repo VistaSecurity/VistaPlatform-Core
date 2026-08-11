@@ -1,0 +1,661 @@
+{
+  "version": 1,
+  "updated": "2025-09-29",
+  "metadata": {
+    "organization": "VistaSecurity",
+    "project": "vistaplatform",
+    "gateway": {
+      "host": "https://api.example.com",
+      "api_prefix": "/api/v2",
+      "legacy_api_prefix": "/api/v1",
+      "api_host_subdomain": "api"
+    }
+  },
+  "deployments": {
+    "development": {
+      "gateway_routes_ui": false
+    },
+    "ec2-smoke": {
+      "gateway_routes_ui": true
+    },
+    "production": {
+      "gateway_routes_ui": false
+    }
+  },
+  "infrastructure": {
+    "exceptions": [
+      "postgres",
+      "redis",
+      "nats",
+      "influxdb",
+      "api-gateway",
+      "otel-collector",
+      "prometheus",
+      "jaeger",
+      "grafana",
+      "adminer",
+      "portainer"
+    ],
+    "rationale": "Infrastructure and observability services are environment-specific and not driven by service registry",
+    "dev_port_generation": {
+      "base_port": 18000,
+      "fixed_ports": {
+        "api_gateway": 8080,
+        "web_ui": 3000,
+        "admin_ui": 3006,
+        "jaeger_ui": 16686
+      },
+      "generated_ports": {
+        "nats_client": 0,
+        "nats_http": 1,
+        "grafana": 2,
+        "adminer": 3,
+        "portainer": 4
+      },
+      "default_ports": {
+        "postgres": 5432,
+        "redis": 6379,
+        "influxdb": 8086,
+        "otel_grpc": 4317,
+        "otel_http": 4318
+      },
+      "port_env_vars": {
+        "api_gateway": "API_GATEWAY_HOST_PORT",
+        "web_ui": "WEB_UI_HOST_PORT",
+        "admin_ui": "ADMIN_UI_HOST_PORT",
+        "postgres": "POSTGRES_HOST_PORT",
+        "redis": "REDIS_HOST_PORT",
+        "nats_client": "NATS_CLIENT_HOST_PORT",
+        "nats_http": "NATS_HTTP_HOST_PORT",
+        "influxdb": "INFLUXDB_HOST_PORT",
+        "grafana": "GRAFANA_HOST_PORT",
+        "adminer": "ADMINER_HOST_PORT",
+        "portainer": "PORTAINER_HTTPS_HOST_PORT",
+        "otel_grpc": "OTEL_GRPC_HOST_PORT",
+        "otel_http": "OTEL_HTTP_HOST_PORT",
+        "jaeger_ui": "JAEGER_UI_HOST_PORT",
+        "resource-tracker-service": "RESOURCE_TRACKER_HOST_PORT",
+        "tenant-health-service": "TENANT_HEALTH_HOST_PORT",
+        "cluster-sensor-service": "CLUSTER_SENSOR_HOST_PORT"
+      }
+    }
+  },
+  "docker_images": {
+    "go_builder": "golang:1.26-alpine",
+    "runtime": "alpine:3.24.1",
+    "node": "node:24-alpine",
+    "dhi": {
+      "go_builder": "dhi.io/golang:1.26-alpine3.24-dev",
+      "runtime": "dhi.io/alpine-base:3.24-dev",
+      "node": "dhi.io/node:24-alpine3.22-dev"
+    }
+  },
+  "ui": {
+    "tenant": {
+      "name": "web-ui",
+      "external_port": 3000,
+      "internal_port": 3001,
+      "path": "frontend-v2",
+      "host_subdomain": "app"
+    },
+    "admin": {
+      "name": "admin-ui",
+      "external_port": 3006,
+      "internal_port": 3007,
+      "path": "admin-ui-v2",
+      "host_subdomain": "admin"
+    }
+  },
+  "admin_plane": {
+    "prefixes": [
+      "/admin-service/auth/",
+      "/admin-service/admin/",
+      "/admin-service/status/",
+      "/auth-service/admin/",
+      "/auth-service/platform/",
+      "/sensor-manager/admin/sensors",
+      "/sensor-manager/platform/",
+      "/monitoring-service/platform/",
+      "/monitoring-service/logs/",
+      "/monitoring-service/alerting/",
+      "/monitoring-service/trends/",
+      "/monitoring-service/gateway/",
+      "/monitoring-service/admin/",
+      "/compliance-engine/admin/",
+      "/device-interrogation-service/admin/",
+      "/notification-service/platform/",
+      "/tenant-health-service/"
+    ],
+    "internal_prefixes": [
+      "/notification-service/internal/",
+      "/sensor-manager/internal/",
+      "/auth-service/internal/"
+    ],
+    "service_overrides": {
+      "/admin-service/status/": "monitoring-service"
+    },
+    "public_exceptions": [
+      "/admin-service/admin/billing/webhook/",
+      "/auth-service/platform/config",
+      "/auth-service/platform/ui-config",
+      "/auth-service/platform/sso-providers"
+    ],
+    "admin_host_public": [
+      "/admin-service/auth/",
+      "/admin-service/admin/sso/"
+    ]
+  },
+  "services": [
+    {
+      "key": "auth-service",
+      "name": "auth-service",
+      "dir": "services/auth-service",
+      "description": "Tenant authentication and authorization",
+      "internal_port": 8080,
+      "external_port": 8081,
+      "route_prefix": "/auth-service",
+      "gateway_timeout": "15s",
+      "status": "active",
+      "required_secrets": [
+        "INTERNAL_AUTH_SECRET",
+        "ENCRYPTION_MASTER_KEY",
+        "JWT_SECRET"
+      ],
+      "docker": {
+        "type": "go-service",
+        "dependencies": [
+          "postgres",
+          "redis"
+        ],
+        "env_template": "standard-go-service"
+      },
+      "endpoints": [
+        {
+          "path": "/tenant/:id/security-summary",
+          "method": "GET",
+          "description": "Get security metrics for a specific tenant (for tenant health service)",
+          "auth_required": true,
+          "rbac_permissions": [
+            "platform.analytics",
+            "platform.health"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "inventory-service",
+      "name": "inventory-service",
+      "dir": "services/inventory-service",
+      "description": "Asset and inventory management (Infrastructure Assets, Crypto Configurations, CMDB sync)",
+      "internal_port": 8080,
+      "external_port": 8082,
+      "route_prefix": "/inventory-service",
+      "gateway_timeout": "30s",
+      "api_versions": [
+        "v1",
+        "v2"
+      ],
+      "status": "active",
+      "required_secrets": [
+        "INTERNAL_AUTH_SECRET",
+        "ENCRYPTION_MASTER_KEY",
+        "JWT_SECRET"
+      ],
+      "docker": {
+        "type": "go-service",
+        "dependencies": [
+          "postgres",
+          "redis",
+          "nats"
+        ],
+        "env_template": "standard-go-service"
+      },
+      "endpoints": [
+        {
+          "path": "/tenant/:id/activity-summary",
+          "method": "GET",
+          "description": "Get activity metrics for a specific tenant (for tenant health service)",
+          "auth_required": true,
+          "rbac_permissions": [
+            "platform.analytics",
+            "platform.health"
+          ]
+        }
+      ],
+      "v2_routes": {
+        "description": "CMDB-aligned terminology. v2 routes point to same handlers as v1.",
+        "renamed_paths": {
+          "/assets": "/infrastructure-assets",
+          "/crypto-implementations": "/crypto-configurations"
+        },
+        "new_paths": [
+          "/cmdb/profiles",
+          "/cmdb/profiles/:id",
+          "/cmdb/profiles/:id/test",
+          "/cmdb/profiles/:id/sync",
+          "/cmdb/profiles/:id/jobs"
+        ]
+      }
+    },
+    {
+      "key": "compliance-engine",
+      "name": "compliance-engine",
+      "dir": "services/compliance-engine",
+      "description": "Compliance checks and monitoring",
+      "internal_port": 8080,
+      "external_port": 8083,
+      "route_prefix": "/compliance-engine",
+      "gateway_timeout": "30s",
+      "status": "active",
+      "required_secrets": [
+        "INTERNAL_AUTH_SECRET",
+        "JWT_SECRET"
+      ],
+      "docker": {
+        "type": "go-service",
+        "dependencies": [
+          "postgres",
+          "nats"
+        ],
+        "env_template": "standard-go-service"
+      }
+    },
+    {
+      "key": "cbom-service",
+      "name": "cbom-service",
+      "dir": "services/cbom-service",
+      "description": "CBOM (Cryptographic Bill of Materials) artifacts, scopes, comparison",
+      "internal_port": 8080,
+      "external_port": 8084,
+      "route_prefix": "/cbom-service",
+      "gateway_timeout": "60s",
+      "status": "active",
+      "required_secrets": [
+        "INTERNAL_AUTH_SECRET",
+        "JWT_SECRET"
+      ],
+      "docker": {
+        "type": "go-service",
+        "dependencies": [
+          "postgres",
+          "nats"
+        ],
+        "env_template": "standard-go-service"
+      }
+    },
+    {
+      "key": "sensor-manager",
+      "name": "sensor-manager",
+      "dir": "services/sensor-manager",
+      "description": "Sensor deployment and management",
+      "internal_port": 8080,
+      "external_port": 8085,
+      "route_prefix": "/sensor-manager",
+      "gateway_timeout": "30s",
+      "status": "active",
+      "required_secrets": [
+        "INTERNAL_AUTH_SECRET",
+        "ENCRYPTION_MASTER_KEY",
+        "JWT_SECRET"
+      ],
+      "docker": {
+        "type": "go-service",
+        "dependencies": [
+          "postgres",
+          "influxdb",
+          "nats"
+        ],
+        "env_template": "standard-go-service"
+      }
+    },
+    {
+      "key": "cluster-sensor-service",
+      "name": "cluster-sensor-service",
+      "dir": "services/cluster-sensor-service",
+      "description": "Cluster discovery service",
+      "internal_port": 8080,
+      "external_port": 8088,
+      "route_prefix": "/cluster-sensor-service",
+      "gateway_timeout": "30s",
+      "status": "active",
+      "required_secrets": [
+        "INTERNAL_AUTH_SECRET",
+        "ENCRYPTION_MASTER_KEY",
+        "JWT_SECRET"
+      ],
+      "docker": {
+        "type": "go-service",
+        "dependencies": [
+          "postgres",
+          "redis",
+          "nats"
+        ],
+        "env_template": "standard-go-service"
+      }
+    },
+    {
+      "key": "admin-service",
+      "name": "admin-service",
+      "dir": "services/admin-service",
+      "description": "Platform administration service",
+      "internal_port": 8080,
+      "external_port": 8089,
+      "route_prefix": "/admin-service",
+      "gateway_timeout": "15s",
+      "status": "active",
+      "required_secrets": [
+        "INTERNAL_AUTH_SECRET",
+        "ENCRYPTION_MASTER_KEY",
+        "JWT_SECRET",
+        "STRIPE_SECRET_KEY",
+        "STRIPE_PUBLISHABLE_KEY",
+        "STRIPE_WEBHOOK_SECRET"
+      ],
+      "docker": {
+        "type": "go-service",
+        "dependencies": [
+          "postgres",
+          "redis",
+          "nats"
+        ],
+        "env_template": "standard-go-service"
+      }
+    },
+    {
+      "key": "monitoring-service",
+      "name": "monitoring-service",
+      "dir": "services/monitoring-service",
+      "description": "System health monitoring",
+      "internal_port": 8080,
+      "external_port": 8091,
+      "route_prefix": "/monitoring-service",
+      "gateway_timeout": "15s",
+      "status": "active",
+      "required_secrets": [
+        "INTERNAL_AUTH_SECRET",
+        "ENCRYPTION_MASTER_KEY",
+        "JWT_SECRET"
+      ],
+      "docker": {
+        "type": "go-service",
+        "dependencies": [
+          "postgres",
+          "redis",
+          "nats",
+          "influxdb"
+        ],
+        "env_template": "standard-go-service"
+      },
+      "endpoints": [
+        {
+          "path": "/platform/summary",
+          "method": "GET",
+          "description": "Get aggregated platform metrics summary for a time range",
+          "auth_required": true,
+          "rbac_permissions": [
+            "platform.analytics",
+            "platform.health"
+          ]
+        },
+        {
+          "path": "/platform/services/:name",
+          "method": "GET",
+          "description": "Get detailed metrics for a specific service",
+          "auth_required": true,
+          "rbac_permissions": [
+            "platform.analytics",
+            "platform.health"
+          ]
+        },
+        {
+          "path": "/platform/incidents",
+          "method": "GET",
+          "description": "Get recent service incidents",
+          "auth_required": true,
+          "rbac_permissions": [
+            "platform.analytics",
+            "platform.health"
+          ]
+        },
+        {
+          "path": "/platform/uptime",
+          "method": "GET",
+          "description": "Get system uptime statistics",
+          "auth_required": true,
+          "rbac_permissions": [
+            "platform.analytics",
+            "platform.health"
+          ]
+        },
+        {
+          "path": "/tenant/:id/performance-summary",
+          "method": "GET",
+          "description": "Get performance metrics for a specific tenant (for tenant health service)",
+          "auth_required": true,
+          "rbac_permissions": [
+            "platform.analytics",
+            "platform.health"
+          ]
+        },
+        {
+          "path": "/version",
+          "method": "GET",
+          "description": "Aggregated version info for the web-UI About page (web/chart/per-service versions + skew detection)",
+          "auth_required": true,
+          "rbac_permissions": []
+        }
+      ]
+    },
+    {
+      "key": "resource-tracker-service",
+      "name": "resource-tracker-service",
+      "dir": "services/resource-tracker-service",
+      "description": "Resource tracking and management",
+      "internal_port": 8080,
+      "external_port": 8092,
+      "route_prefix": "/resource-tracker-service",
+      "gateway_timeout": "15s",
+      "status": "active",
+      "required_secrets": [
+        "INTERNAL_AUTH_SECRET",
+        "ENCRYPTION_MASTER_KEY",
+        "JWT_SECRET"
+      ],
+      "docker": {
+        "type": "go-service",
+        "dependencies": [
+          "postgres",
+          "nats"
+        ],
+        "env_template": "standard-go-service"
+      },
+      "endpoints": [
+        {
+          "path": "/tenant/:id/resource-summary",
+          "method": "GET",
+          "description": "Get resource health metrics for a specific tenant (for tenant health service)",
+          "auth_required": true,
+          "rbac_permissions": [
+            "platform.analytics",
+            "platform.health"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "tenant-health-service",
+      "name": "tenant-health-service",
+      "dir": "services/tenant-health-service",
+      "description": "Tenant health monitoring service",
+      "internal_port": 8080,
+      "external_port": 8093,
+      "route_prefix": "/tenant-health-service",
+      "gateway_timeout": "15s",
+      "status": "active",
+      "required_secrets": [
+        "INTERNAL_AUTH_SECRET",
+        "JWT_SECRET"
+      ],
+      "docker": {
+        "type": "go-service",
+        "dependencies": [
+          "postgres",
+          "nats"
+        ],
+        "env_template": "standard-go-service"
+      }
+    },
+    {
+      "key": "device-interrogation-service",
+      "name": "device-interrogation-service",
+      "dir": "services/device-interrogation-service",
+      "description": "Network device and cloud provider cryptographic configuration interrogation",
+      "internal_port": 8080,
+      "external_port": 8095,
+      "route_prefix": "/device-interrogation-service",
+      "gateway_timeout": "45s",
+      "status": "active",
+      "required_secrets": [
+        "INTERNAL_AUTH_SECRET",
+        "ENCRYPTION_MASTER_KEY",
+        "JWT_SECRET"
+      ],
+      "docker": {
+        "type": "go-service",
+        "dependencies": [
+          "postgres",
+          "redis",
+          "nats"
+        ],
+        "env_template": "standard-go-service"
+      }
+    },
+    {
+      "key": "audit-service",
+      "name": "audit-service",
+      "dir": "services/audit-service",
+      "description": "Centralized audit logging service for compliance and security",
+      "internal_port": 8080,
+      "external_port": 8096,
+      "route_prefix": "/audit-service",
+      "gateway_timeout": "15s",
+      "status": "active",
+      "required_secrets": [
+        "INTERNAL_AUTH_SECRET",
+        "ENCRYPTION_MASTER_KEY",
+        "JWT_SECRET"
+      ],
+      "docker": {
+        "type": "go-service",
+        "dependencies": [
+          "postgres",
+          "nats"
+        ],
+        "env_template": "standard-go-service"
+      }
+    },
+    {
+      "key": "notification-service",
+      "name": "notification-service",
+      "dir": "services/notification-service",
+      "description": "Unified notification service for multi-channel alert delivery",
+      "internal_port": 8080,
+      "external_port": 8097,
+      "route_prefix": "/notification-service",
+      "gateway_timeout": "15s",
+      "status": "active",
+      "required_secrets": [
+        "INTERNAL_AUTH_SECRET",
+        "ENCRYPTION_MASTER_KEY",
+        "JWT_SECRET"
+      ],
+      "docker": {
+        "type": "go-service",
+        "dependencies": [
+          "postgres",
+          "nats"
+        ],
+        "env_template": "standard-go-service"
+      }
+    },
+    {
+      "key": "discovery-processor-service",
+      "name": "discovery-processor-service",
+      "dir": "services/discovery-processor-service",
+      "description": "Automatic processing of sensor discoveries into assets",
+      "internal_port": 8080,
+      "external_port": 8090,
+      "route_prefix": "/discovery-processor-service",
+      "gateway_timeout": "15s",
+      "status": "active",
+      "required_secrets": [
+        "INTERNAL_AUTH_SECRET"
+      ],
+      "docker": {
+        "type": "go-service",
+        "dependencies": [
+          "postgres",
+          "nats"
+        ],
+        "env_template": "standard-go-service"
+      }
+    },
+    {
+      "key": "mcp-service",
+      "name": "mcp-service",
+      "dir": "services/mcp-service",
+      "description": "Read-only MCP (Model Context Protocol) server exposing tenant inventory, compliance and CBOM tools to AI agents",
+      "internal_port": 8080,
+      "external_port": 8100,
+      "route_prefix": "/mcp-service",
+      "gateway_timeout": "30s",
+      "status": "active",
+      "required_secrets": [
+        "INTERNAL_AUTH_SECRET"
+      ],
+      "docker": {
+        "type": "go-service",
+        "dependencies": [],
+        "env_template": "standard-go-service"
+      }
+    },
+    {
+      "key": "pcap-processor",
+      "name": "pcap-processor",
+      "dir": "services/pcap-processor",
+      "description": "PCAP file processing worker for TLS/SSH/STARTTLS crypto extraction",
+      "internal_port": 8080,
+      "external_port": 8098,
+      "route_prefix": "/pcap-processor",
+      "gateway_timeout": "30s",
+      "status": "active",
+      "required_secrets": [
+        "INTERNAL_AUTH_SECRET"
+      ],
+      "docker": {
+        "type": "go-service",
+        "dependencies": [
+          "postgres",
+          "nats"
+        ],
+        "env_template": "standard-go-service"
+      }
+    }
+  ],
+  "docs": {
+    "architecture_dir": "docsv4/architecture",
+    "features_dir": "docsv4/product/features",
+    "operations_dir": "docsv4/operations",
+    "standards_dir": "docsv4/development/standards"
+  },
+  "rules": {
+    "internal_service_port": 8080,
+    "gateway_first": true,
+    "route_pattern": "/api/v1/{service-name}/{resource}",
+    "dir_naming": "kebab-case",
+    "file_naming": {
+      "config": "kebab-case",
+      "code": "camelCase"
+    }
+  }
+}

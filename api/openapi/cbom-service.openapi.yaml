@@ -1,0 +1,1207 @@
+openapi: 3.1.0
+info:
+  title: VistaPlatform — cbom-service API
+  version: "0.2.0"
+  description: |
+    Spec-first contract for cbom-service (ADR-0001). Covers the cbom-service
+    product surface: **Scopes** (Phase 1 — tenant-owned predicate definitions),
+    **CBOM Artifacts** (Phase 2 — immutable, dated, content-hashed snapshots
+    of a scope), and **Comparison** (Phase 3 — diff two artifacts).
+
+    ## Shape status (important)
+
+    All paths below document the **current, pre-envelope shapes** the service
+    returns today — single resources returned bare, collections wrapped under
+    a domain key (`{ "scopes": [...] }`, `{ "artifacts": [...] }`), errors
+    as `{ "error": "string" }`. They are specced as-is per ADR-0001 step 2
+    ("seed the spec from the real shape"), and the Go contract tests assert
+    the live handlers match.
+
+    The **go-forward ADR-0002 envelope** (`Error`, `Pagination`, the `data`
+    wrapper) is defined under `components.schemas` as the documented standard
+    that NEW or HARDENED endpoints conform to. The current v1 paths do not
+    yet use it; they are hardened to it when the frontend-v2 surface first
+    consumes them (ADR-0001 step 5), at which point this file and the contract
+    tests move together.
+  contact:
+    name: VistaPlatform Platform
+servers:
+  - url: /api/v1/cbom-service
+    description: cbom-service, mounted behind the API gateway.
+
+tags:
+  - name: scopes
+    description: Scope CRUD (Phase 1).
+  - name: cbom-artifacts
+    description: CBOM artifact lifecycle (Phase 2 + Phase 4).
+  - name: cbom-comparison
+    description: Diff two CBOM artifacts (Phase 3).
+
+paths:
+  /scopes:
+    get:
+      operationId: listScopes
+      tags: [scopes]
+      summary: List scopes for the current tenant
+      description: >
+        Returns all non-deleted scopes for the tenant. Lazily seeds the three
+        system defaults (All / Production / Non-Dev-Test) on the first call for
+        a tenant.
+      responses:
+        "200":
+          description: The tenant's scopes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScopeListResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    post:
+      operationId: createScope
+      tags: [scopes]
+      summary: Create a scope
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateScopeRequest"
+      responses:
+        "201":
+          description: The created scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Scope"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /scopes/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ScopeId"
+    get:
+      operationId: getScope
+      tags: [scopes]
+      summary: Get a scope by id
+      responses:
+        "200":
+          description: The scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Scope"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    put:
+      operationId: updateScope
+      tags: [scopes]
+      summary: Update a scope
+      description: >
+        Overwrites name/description/predicate. Version is bumped (and an audit
+        row written) only when name or predicate actually changed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateScopeRequest"
+      responses:
+        "200":
+          description: The updated scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Scope"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    delete:
+      operationId: deleteScope
+      tags: [scopes]
+      summary: Soft-delete a scope
+      description: >
+        Soft-deletes a non-system scope. System scopes (All / Production /
+        Non-Dev-Test) cannot be deleted and return 409.
+      responses:
+        "204":
+          description: Deleted. No body.
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "409":
+          $ref: "#/components/responses/LegacyConflict"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /scopes/{id}/preview:
+    parameters:
+      - $ref: "#/components/parameters/ScopeId"
+    post:
+      operationId: previewScope
+      tags: [scopes]
+      summary: Preview the assets a scope matches
+      description: >
+        Phase 1 stub — echoes the predicate with a not_implemented preview.
+        Phase 2 resolves the predicate against inventory-service and returns a
+        matched asset count.
+      responses:
+        "200":
+          description: The preview result (Phase 1 stub).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreviewResult"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  # ============================================================
+  # CBOM Artifact lifecycle (Phase 2 + Phase 4)
+  # ============================================================
+  /cbom/generate:
+    post:
+      operationId: generateCBOMArtifact
+      tags: [cbom-artifacts]
+      summary: Generate a new CBOM artifact from a scope
+      description: |
+        Snapshots inventory matching `scope_id` as of now and writes one
+        immutable, hashed (and optionally HMAC-signed + compliance-attested)
+        artifact row.
+
+        Phase 2 generation is **synchronous-but-quick** despite the 202
+        response code: by the time the call returns the artifact row is
+        committed and `GET /cbom/artifacts/{id}` will return it. The 202 +
+        `status: "ready"` shape is preserved so consumers don't need to
+        change if generation moves to a queue in the future.
+      x-quirks:
+        - "The status code is **202 Accepted** but generation is currently synchronous. `GET /cbom/artifacts/{artifact_id}` is safe to call immediately after this returns."
+        - "`include_attestation` and `sign` default to `true` only when the tenant has `cbom_signing`; Core/unentitled tenants generate unsigned, unattested CycloneDX artifacts unless they explicitly request paid evidence, which returns 402."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateCBOMRequest"
+      responses:
+        "202":
+          description: Artifact generated. Body carries the new artifact's id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerateCBOMResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "402":
+          description: The request explicitly asked for CBOM signing or compliance attestation, but the tenant lacks `cbom_signing`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "404":
+          description: Scope not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "422":
+          description: >
+            The scope's predicate uses fields this deployment cannot evaluate.
+            Generation is refused rather than producing an artifact whose
+            contents are wider than the boundary it names.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnsupportedPredicateError"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /cbom/artifacts:
+    get:
+      operationId: listCBOMArtifacts
+      tags: [cbom-artifacts]
+      summary: List CBOM artifacts for the current tenant
+      description: |
+        Returns non-deleted artifacts ordered by `generated_at` DESC.
+
+        `limit` defaults to 50 and is clamped to 200. Values below 1 or
+        non-numeric are rejected with 400. `scope_id` filters server-side.
+      x-quirks:
+        - "List envelope is `{ \"artifacts\": [...] }` with no pagination block. Hardening to the ADR-0002 collection envelope is the documented go-forward change."
+      parameters:
+        - name: scope_id
+          in: query
+          required: false
+          description: Filter to artifacts generated from this scope.
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          required: false
+          description: >
+            Maximum number of artifacts to return. Defaults to 50; values above
+            200 are clamped to 200.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        "200":
+          description: The tenant's artifacts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CBOMArtifactListResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /cbom/artifacts/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ArtifactId"
+    get:
+      operationId: getCBOMArtifact
+      tags: [cbom-artifacts]
+      summary: Get a CBOM artifact by id
+      responses:
+        "200":
+          description: The artifact.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CBOMArtifact"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    delete:
+      operationId: softDeleteCBOMArtifact
+      tags: [cbom-artifacts]
+      summary: Soft-delete a CBOM artifact
+      description: >
+        Soft delete only. The row is retained so dangling references from
+        comparison runs surface as "deleted by X" rather than 404.
+      responses:
+        "204":
+          description: Deleted. No body.
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /cbom/artifacts/{id}/download:
+    parameters:
+      - $ref: "#/components/parameters/ArtifactId"
+    get:
+      operationId: downloadCBOMArtifact
+      tags: [cbom-artifacts]
+      summary: Download the artifact bytes in a chosen format
+      description: |
+        Returns the artifact rendered in the requested wire format.
+
+        - `cyclonedx` (default) → the artifact's canonical CycloneDX JSON, byte-stable
+          against `content_hash`. Inline-stored artifacts stream the bytes
+          directly with `Content-Type: application/vnd.cyclonedx+json`;
+          object-stored artifacts return a 302 redirect to a presigned URL.
+        - `spdx` → SPDX 2.3 JSON projection (re-rendered from canonical bytes).
+          **Enterprise edition only.**
+        - `pdf` → PDF rendering for human review (re-rendered from canonical
+          bytes). **Enterprise edition only.**
+
+        SPDX and PDF re-render server-side and therefore need the raw bytes
+        to be loadable. Inline-stored artifacts read from
+        `cbom_artifacts.inline_content` directly; object-stored artifacts stream
+        the bytes via `shared/storage.Stream()` (wired through
+        `cbom/storage_read.go::ReadStoredBytes`). The handler returns 500 only
+        when storage is mis-wired or the underlying bytes can't be fetched.
+
+        Edition and entitlement boundary: `cyclonedx` is served by every
+        edition — it is the CBOM standard and the form `content_hash` refers
+        to. `spdx` and `pdf` need both the Enterprise renderer and the
+        tenant's `cbom_signing` entitlement; otherwise the handler returns
+        **402**. The `format` enum is edition-independent on purpose, so
+        clients can tell "valid format, wrong edition/subscription" (402)
+        from "unknown format" (400).
+      x-quirks:
+        - "`cyclonedx` for inline-stored artifacts returns the bytes directly with status 200. `cyclonedx` for object-stored artifacts returns **302 Found** with a presigned URL in `Location`."
+        - "SPDX and PDF re-render from canonical bytes for both inline and object-stored artifacts — `shared/storage.Stream()` is wired. A 500 indicates a storage misconfiguration, not a contract gap."
+        - "Successful responses for SPDX/PDF/inline-CycloneDX are binary bodies, not JSON; they are not schema-validated by the contract test."
+        - "`format=spdx|pdf` returns **402 Payment Required** on a Core (open-source) deployment or for a tenant without `cbom_signing`. The 402 is checked *before* the artifact is loaded, so an unknown id with an Enterprise-only format returns 402, not 404. Clients should surface it as an upgrade prompt, never as a retryable error."
+      parameters:
+        - name: format
+          in: query
+          required: false
+          description: Wire format. Defaults to `cyclonedx`.
+          schema:
+            type: string
+            enum: [cyclonedx, spdx, pdf]
+            default: cyclonedx
+      responses:
+        "200":
+          description: The artifact bytes in the requested format.
+          content:
+            application/vnd.cyclonedx+json:
+              schema:
+                type: string
+                format: binary
+            application/spdx+json:
+              schema:
+                type: string
+                format: binary
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "302":
+          description: >
+            Object-stored CycloneDX downloads return a presigned URL in
+            `Location`.
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "402":
+          description: >
+            The requested format (`spdx` or `pdf`) requires an Enterprise
+            renderer and the tenant's `cbom_signing` entitlement.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /cbom/artifacts/{id}/verify:
+    parameters:
+      - $ref: "#/components/parameters/ArtifactId"
+    post:
+      operationId: verifyCBOMArtifact
+      tags: [cbom-artifacts]
+      summary: Recompute hash and (if signed) signature for an artifact
+      description: |
+        Loads the artifact's canonical bytes (from inline content or storage),
+        re-hashes them, and compares to the row's `content_hash`. When the
+        artifact was signed and a signer is configured **and** the hash check
+        passed, also re-derives the HMAC and compares.
+
+        When bytes can't be loaded (no inline content and no storage wired)
+        the call still returns 200 with `hash_valid` and `signature_checked`
+        false — the UI greys the result rather than erroring.
+      x-quirks:
+        - "The signer is **only consulted when the hash check passed** — re-signing a body whose hash already drifted would be misleading and is treated as tamper-suspicious."
+        - "`signature_checked: false` covers three distinct cases: artifact unsigned, no verifier wired, or hash check failed. The UI must treat the result as `not asserted` rather than `asserted invalid`."
+      responses:
+        "200":
+          description: Verify result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerifyResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  # ============================================================
+  # CBOM Comparison (Phase 3)
+  # ============================================================
+  /cbom/compare:
+    post:
+      operationId: compareCBOMArtifacts
+      tags: [cbom-comparison]
+      summary: Diff two CBOM artifacts (request-body form)
+      description: |
+        Computes a structured diff between two artifacts of the same tenant.
+        Artifacts are immutable, so the result is deterministic for any
+        (base_id, head_id) pair; Phase 3 recomputes on demand (no cache).
+
+        Component-level matching aligns on purl / OID / fingerprint /
+        type+name; each change is categorized `improvement` / `regression` /
+        `drift` / `neutral` with a one-phrase reason.
+
+        Requires the tenant's `cbom_signing` entitlement.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompareRequest"
+      responses:
+        "200":
+          description: The diff result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiffResult"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "402":
+          description: Artifact comparison requires the tenant's `cbom_signing` entitlement.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /cbom/compare/{base}/{head}:
+    parameters:
+      - name: base
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: head
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      operationId: compareCBOMArtifactsByURL
+      tags: [cbom-comparison]
+      summary: Diff two CBOM artifacts (URL form)
+      description: >
+        Same semantics as `POST /cbom/compare`, with the artifact ids in the
+        URL so a diff can be shared as a deep link. Requires the tenant's
+        `cbom_signing` entitlement.
+      responses:
+        "200":
+          description: The diff result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiffResult"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "402":
+          description: Artifact comparison requires the tenant's `cbom_signing` entitlement.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+components:
+  parameters:
+    ScopeId:
+      name: id
+      in: path
+      required: true
+      description: Scope UUID.
+      schema:
+        type: string
+        format: uuid
+    ArtifactId:
+      name: id
+      in: path
+      required: true
+      description: CBOM artifact UUID.
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    # --- Current ("legacy") error envelope: { "error": "string" } ---
+    LegacyBadRequest:
+      description: Invalid request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyError"
+    LegacyUnauthorized:
+      description: Missing or invalid tenant/auth context.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyError"
+    LegacyNotFound:
+      description: Scope not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyError"
+    LegacyConflict:
+      description: Operation not permitted (e.g. deleting a system scope).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyError"
+    LegacyServerError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyError"
+
+  schemas:
+    # ============================================================
+    # Scopes domain (current shapes — what the service returns today)
+    # ============================================================
+    Scope:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - tenant_id
+        - name
+        - predicate
+        - version
+        - is_default
+        - is_system
+        - created_by
+        - updated_by
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+          description: Optional; omitted when empty.
+        predicate:
+          $ref: "#/components/schemas/Predicate"
+        version:
+          type: integer
+        is_default:
+          type: boolean
+        is_system:
+          type: boolean
+          description: >
+            System scopes are editable but not deletable (deleting one would
+            orphan CBOM artifacts that reference it by id).
+        deleted_at:
+          type: [string, "null"]
+          format: date-time
+          description: Soft-delete timestamp; omitted/null for live scopes.
+        created_by:
+          type: string
+          format: uuid
+        updated_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Predicate:
+      type: object
+      additionalProperties: false
+      description: >
+        Selection rule stored as JSONB. An empty predicate (no include and no
+        exclude) matches every asset visible to the tenant under RLS.
+      properties:
+        include:
+          $ref: "#/components/schemas/PredicateClause"
+        exclude:
+          $ref: "#/components/schemas/PredicateClause"
+
+    PredicateClause:
+      type: object
+      additionalProperties: false
+      description: >
+        A set of asset-attribute filters joined OR-within-a-field and
+        OR-across-fields. Used for both include and exclude clauses.
+      properties:
+        environment:
+          type: array
+          items: { type: string }
+        asset_type:
+          type: array
+          items: { type: string }
+        asset_ownership:
+          type: array
+          items: { type: string }
+        asset_status:
+          type: array
+          items: { type: string }
+        business_unit:
+          type: array
+          items: { type: string }
+        location_region:
+          type: array
+          items: { type: string }
+        risk_level:
+          type: array
+          items: { type: string }
+        tags_any_of:
+          type: array
+          items: { type: string }
+          description: Case-insensitive match against the asset's tags JSONB.
+
+    ScopeListResponse:
+      type: object
+      additionalProperties: false
+      description: >
+        CURRENT list envelope for GET /scopes. Pre-ADR-0002; a collection wrapped
+        under the `scopes` key with no pagination. Hardening this to the
+        ADR-0002 collection envelope (`{ data, pagination }`) is the documented
+        go-forward change.
+      required: [scopes]
+      properties:
+        scopes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Scope"
+
+    CreateScopeRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        description:
+          type: string
+        predicate:
+          $ref: "#/components/schemas/Predicate"
+
+    UpdateScopeRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        description:
+          type: string
+        predicate:
+          $ref: "#/components/schemas/Predicate"
+
+    PreviewResult:
+      type: object
+      additionalProperties: false
+      required: [scope_id, name, predicate, preview]
+      properties:
+        scope_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        predicate:
+          $ref: "#/components/schemas/Predicate"
+        preview:
+          type: object
+          additionalProperties: false
+          required: [status, matched_count, note]
+          properties:
+            status:
+              type: string
+              enum: [not_implemented, ok]
+            matched_count:
+              type: [integer, "null"]
+            note:
+              type: string
+
+    # ============================================================
+    # CBOM Artifact domain (Phase 2 + Phase 4 — current shapes)
+    # ============================================================
+    CBOMArtifact:
+      type: object
+      additionalProperties: false
+      description: >
+        An immutable, dated, content-hashed snapshot of every cryptographic
+        component matching a Scope at the moment of generation. Storage is
+        dual-path: exactly one of `storage_key` (S3) or inline content (dev,
+        gated by `has_inline_content`).
+      required:
+        - id
+        - tenant_id
+        - scope_id
+        - scope_version
+        - scope_name_snapshot
+        - has_inline_content
+        - content_hash
+        - size_bytes
+        - component_count
+        - cyclonedx_spec_version
+        - input_data_freshness_at
+        - generated_at
+        - generated_by
+        - provenance
+        - layers
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        scope_id:
+          type: string
+          format: uuid
+        scope_version:
+          type: integer
+          description: Version of the scope predicate that was in force.
+        scope_name_snapshot:
+          type: string
+          description: Scope name as of generation. Stored so renames don't rewrite history.
+        name:
+          type: string
+          description: Optional human-meaningful name; omitted when empty.
+        storage_key:
+          type: string
+          description: >
+            Object-storage key when the canonical bytes live in S3. Omitted
+            when the artifact is stored inline.
+        has_inline_content:
+          type: boolean
+          description: True when the canonical bytes live in Postgres (dev / no-S3).
+        content_hash:
+          type: string
+          description: Hex SHA-256 over the canonical CycloneDX bytes.
+        size_bytes:
+          type: integer
+        component_count:
+          type: integer
+        cyclonedx_spec_version:
+          type: string
+          description: >
+            The CycloneDX specification version the stored bytes declare.
+            Artifacts generated from v0.2.0 onward say "1.7"; earlier ones say
+            "1.6" and keep their bytes — artifacts are immutable evidence and
+            are never re-rendered.
+        storage_degraded:
+          type: string
+          description: >
+            Generation-time only, echoed from POST /cbom/generate. Never
+            returned by GET — it is not a stored column.
+        attestation_error:
+          type: string
+          description: >
+            Generation-time only, echoed from POST /cbom/generate. Never
+            returned by GET — it is not a stored column.
+        input_data_freshness_at:
+          type: string
+          format: date-time
+          description: How recent the inventory was when generation ran.
+        generated_at:
+          type: string
+          format: date-time
+        generated_by:
+          type: string
+          format: uuid
+        signature_hmac:
+          type: string
+          description: >
+            Phase 4. Hex HMAC-SHA256 over `content_hash`. Empty when
+            unsigned.
+        signature_kid:
+          type: string
+          description: Phase 4. Key id used to sign. Empty when unsigned.
+        provenance:
+          $ref: "#/components/schemas/Provenance"
+        layers:
+          type: [array, "null"]
+          description: >
+            Optional attestation/annotation layers (e.g. compliance_attestation).
+            Emitted as `null` when generation ran with `include_attestation: false`,
+            when the attestation builder is unwired, or when the build produced
+            no attestable findings — `Layers []Layer` in Go lacks `omitempty`,
+            so a nil slice serializes as `null` rather than `[]`. Consumers must
+            tolerate both.
+          items:
+            $ref: "#/components/schemas/Layer"
+        deleted_at:
+          type: [string, "null"]
+          format: date-time
+          description: Soft-delete timestamp; omitted/null for live artifacts.
+        created_at:
+          type: string
+          format: date-time
+
+    Provenance:
+      type: object
+      additionalProperties: false
+      description: Non-canonical context about how the artifact was generated.
+      properties:
+        generator_service:
+          type: string
+        generator_version:
+          type: string
+        request_id:
+          type: string
+
+    Layer:
+      type: object
+      additionalProperties: false
+      description: >
+        Optional annotation attached to an artifact. Each layer carries its
+        own type+version so the schema can evolve without breaking older
+        artifacts.
+      required: [type]
+      properties:
+        type:
+          type: string
+          description: e.g. "compliance_attestation".
+        version:
+          type: string
+        data:
+          type: object
+          description: Layer-specific payload; opaque to the generic schema.
+          additionalProperties: true
+
+    CBOMArtifactListResponse:
+      type: object
+      additionalProperties: false
+      description: >
+        CURRENT list envelope for GET /cbom/artifacts. Pre-ADR-0002 — a
+        collection wrapped under the `artifacts` key with no pagination.
+        Hardening this to the ADR-0002 collection envelope (`{ data,
+        pagination }`) is the documented go-forward change.
+      required: [artifacts]
+      properties:
+        artifacts:
+          type: array
+          items:
+            $ref: "#/components/schemas/CBOMArtifact"
+
+    GenerateCBOMRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id]
+      properties:
+        scope_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          description: Optional human-meaningful name.
+        include_attestation:
+          type: boolean
+          description: >
+            Phase 4. Attach a compliance_attestation layer summarizing open
+            findings for the scope's asset set. Server defaults to true when
+            omitted — audit-ready by default.
+        sign:
+          type: boolean
+          description: >
+            Phase 4. HMAC-sign the artifact. Server defaults to true when
+            omitted (requires INTERNAL_AUTH_SECRET on the server side).
+
+    UnsupportedPredicateError:
+      type: object
+      additionalProperties: false
+      required: [error, unsupported_fields]
+      properties:
+        error:
+          type: string
+        unsupported_fields:
+          type: array
+          items:
+            type: string
+          description: The predicate field names that could not be evaluated.
+
+    GenerateCBOMResponse:
+      type: object
+      additionalProperties: false
+      required: [artifact_id, status]
+      properties:
+        artifact_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [ready, queued]
+          description: >
+            Phase 2 returns "ready" — generation is synchronous-but-quick,
+            the row is already committed when this response is sent. The
+            "queued" value is reserved for a future async path so the wire
+            shape doesn't change when that lands.
+        storage_degraded:
+          type: string
+          description: >
+            Present when the artifact was produced but not stored the way the
+            deployment is configured to store it — an object-store upload
+            failed and the bytes went to the database instead. The artifact is
+            complete and valid; regenerating once storage is healthy will place
+            the object in the bucket.
+        attestation_error:
+          type: string
+          description: >
+            Present when a compliance-attestation layer was requested and could
+            not be built. Absent means either not requested or built
+            successfully — the artifact's `layers` distinguishes the two.
+
+    VerifyResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - artifact_id
+        - hash_valid
+        - hash_stored
+        - signature_valid
+        - signature_checked
+      properties:
+        artifact_id:
+          type: string
+          format: uuid
+        hash_valid:
+          type: boolean
+          description: True when the recomputed hash matched the stored hash.
+        hash_recomputed:
+          type: string
+          description: >
+            Hex SHA-256 we just computed. Omitted when the bytes were not
+            loadable; the UI can render "expected X, got Y" when both
+            recomputed and stored are present.
+        hash_stored:
+          type: string
+          description: The content_hash recorded on the row.
+        signature_valid:
+          type: boolean
+          description: >
+            True when the stored HMAC matched a recomputed HMAC against the
+            platform's current signing key. Only meaningful when
+            `signature_checked` is true.
+        signature_checked:
+          type: boolean
+          description: >
+            False covers three cases: artifact unsigned, no verifier wired,
+            or the hash check failed (in which case re-signing would be
+            misleading). Treat false as "not asserted," not "asserted invalid."
+        signature_kid:
+          type: string
+          description: Key id stored on the artifact; empty for unsigned.
+
+    # ============================================================
+    # CBOM Comparison (Phase 3 — current shapes)
+    # ============================================================
+    CompareRequest:
+      type: object
+      additionalProperties: false
+      required: [base_id, head_id]
+      properties:
+        base_id:
+          type: string
+          format: uuid
+        head_id:
+          type: string
+          format: uuid
+
+    ChangeKind:
+      type: string
+      enum: [added, removed, modified]
+
+    ChangeCategory:
+      type: string
+      enum: [improvement, regression, drift, neutral]
+
+    DiffChange:
+      type: object
+      additionalProperties: false
+      required: [kind, category, match_key, component_type, name, reason]
+      properties:
+        kind:
+          $ref: "#/components/schemas/ChangeKind"
+        category:
+          $ref: "#/components/schemas/ChangeCategory"
+        match_key:
+          type: string
+          description: Stable identity used to align the two components.
+        component_type:
+          type: string
+          description: e.g. algorithm / certificate / protocol / key / library.
+        name:
+          type: string
+        reason:
+          type: string
+          description: Short human-readable phrase explaining the category.
+        base:
+          type: object
+          additionalProperties: true
+          description: >
+            Original component object from the base artifact. nil/omitted
+            for `added` changes (no base). Shape passed through verbatim
+            from CycloneDX — kept open so the diff UI doesn't couple to the
+            full component schema.
+        head:
+          type: object
+          additionalProperties: true
+          description: >
+            Component object from the head artifact. nil/omitted for
+            `removed` changes (no head). See `base` for shape note.
+
+    DiffResult:
+      type: object
+      additionalProperties: false
+      required:
+        - base_artifact_id
+        - head_artifact_id
+        - count_by_category
+        - count_by_kind
+        - narrative
+      properties:
+        base_artifact_id:
+          type: string
+          format: uuid
+        head_artifact_id:
+          type: string
+          format: uuid
+        count_by_category:
+          type: object
+          additionalProperties:
+            type: integer
+          description: >
+            Map keyed by category enum value to count. Keys are open because
+            Go's `map[Category]int` marshals only categories with non-zero
+            counts; absent keys mean zero.
+        count_by_kind:
+          type: object
+          additionalProperties:
+            type: integer
+          description: >
+            Map keyed by kind enum value to count. See `count_by_category`
+            for the absent-means-zero convention.
+        changes:
+          type: [array, "null"]
+          description: >
+            The change list. Currently serializes as `null` when there are
+            no changes (Go nil slice) instead of `[]` — a known quirk
+            mirroring the scopes `null`-on-empty finding, to be addressed in
+            the same hardening pass.
+          items:
+            $ref: "#/components/schemas/DiffChange"
+        narrative:
+          type: string
+          description: One or two prose sentences summarizing the net change.
+
+    LegacyError:
+      type: object
+      additionalProperties: false
+      description: >
+        CURRENT error shape returned by every cbom-service endpoint today: a
+        single human-readable string under `error`. Unstructured — cannot be
+        branched on safely. Superseded by the ADR-0002 `Error` envelope below
+        as endpoints are hardened.
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    # ============================================================
+    # ADR-0002 go-forward envelope (the documented standard).
+    # NOT yet applied to the v1 Scopes paths above. New and hardened
+    # endpoints conform to these. The generated client carries these types
+    # ahead of the backend so the frontend-v2 surface can target them.
+    # ============================================================
+    Error:
+      type: object
+      additionalProperties: false
+      description: ADR-0002 error envelope. Clients branch on `error.code`, never on `message`.
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Stable, machine-readable enum (e.g. scope_not_found).
+            message:
+              type: string
+              description: Human-readable, safe to surface in UI.
+            details:
+              type: array
+              items:
+                $ref: "#/components/schemas/ErrorDetail"
+            request_id:
+              type: string
+              description: For support correlation.
+
+    ErrorDetail:
+      type: object
+      additionalProperties: false
+      required: [field, issue]
+      properties:
+        field:
+          type: string
+        issue:
+          type: string
+
+    Pagination:
+      type: object
+      additionalProperties: false
+      description: ADR-0002 pagination block for collection envelopes.
+      required: [total, limit, offset]
+      properties:
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+        next_offset:
+          type: [integer, "null"]
+          description: Offset of the next page, or null when there are no more.

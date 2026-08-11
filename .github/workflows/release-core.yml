@@ -1,0 +1,436 @@
+# Build and publish the Core edition from source.
+#
+# This is the PUBLIC repository's release pipeline, and it is deliberately not
+# the one the commercial editions use. Those are promoted bit-for-bit from an
+# internal staging registry so the bytes we tested are the bytes that ship.
+# Core has the opposite requirement: the images must be reproducible from the
+# public source, so anyone can rebuild a tag and diff it against what we
+# published. That claim is only worth making if the build starts from the same
+# tree a reader can see, so this builds from source, in the open, every time.
+#
+# Two properties follow from that and are worth stating:
+#
+#   * Dockerfile.prod, NOT Dockerfile.dist. .dist compiles with `-tags ee` and
+#     runs the result through garble. Enterprise code in a Core image would make
+#     the edition boundary a runtime check only, and an obfuscated binary cannot
+#     be checked against source at all — which would make "read the code you
+#     run" untrue in the one place it matters.
+#   * ghcr.io, not Docker Hub. A full install pulls ~20 images; Docker Hub's
+#     anonymous rate limit is ~100 pulls per 6h per IP, so an evaluator behind a
+#     shared NAT can fail their first install through no fault of their own and
+#     read it as our bug. GHCR has no equivalent cliff and needs no credentials
+#     beyond the built-in GITHUB_TOKEN.
+#
+# Base images: the official builds start from Docker Hardened Images (dhi.io) —
+# the same hardened bases the commercial line uses — when DOCKERHUB_USERNAME /
+# DOCKERHUB_TOKEN are configured (dhi.io authenticates with a Docker Hub account
+# that holds a DHI subscription). Without those secrets — a fork, or a fresh
+# repo before secrets land — the build falls back to the public library images
+# the Dockerfiles default to, so anyone can still rebuild a tag from source
+# without a subscription. The Dockerfile ARG defaults stay public for the same
+# reason: `docker compose up` must work with no registry login.
+name: Release Core
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag to build (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  # contents: write is needed by the `release` job to create the GitHub Release
+  # and upload the sensor/agent binaries to it. Every other job reads only.
+  contents: write
+
+env:
+  RELEASE_REF: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  # This workflow ships in the public tree, which means it also exists in the
+  # private working tree it is exported from. Building Core there would publish
+  # a second, confusing image line under the wrong owner. Rather than hard-code
+  # a repository name (which breaks the day anything is renamed), detect what
+  # kind of tree this is: Core is precisely the tree with no services/*/ee.
+  guard:
+    runs-on: ubuntu-latest
+    # Reads the tree and nothing else. Without this it inherits the workflow's
+    # top-level contents: write, which only the `release` job actually needs.
+    permissions:
+      contents: read
+    outputs:
+      is_core: ${{ steps.check.outputs.is_core }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          ref: ${{ env.RELEASE_REF }}
+      - id: check
+        run: |
+          if compgen -G "services/*/ee" > /dev/null; then
+            echo "This tree contains services/*/ee — it is not the Core tree. Skipping."
+            echo "is_core=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_core=true" >> "$GITHUB_OUTPUT"
+          fi
+          VERSION="${RELEASE_REF}"
+          case "$VERSION" in
+            v*.*.*) ;;
+            *) echo "::error::'$VERSION' is not a vX.Y.Z tag"; exit 1 ;;
+          esac
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+  images:
+    needs: guard
+    if: needs.guard.outputs.is_core == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write        # keyless cosign signing via Fulcio/Rekor
+    # Lifted to job env because the `secrets` context is NOT available in `if:`
+    # — only env/github/inputs/job/matrix/needs/runner/steps/strategy/vars are.
+    # A workflow referencing secrets there does not fail at runtime, it fails to
+    # COMPILE, and GitHub reports it as a nameless "workflow file issue" with no
+    # line number. Two workflows in this repo carried that bug unnoticed from
+    # 2026-05 to 2026-08 because a workflow that never compiles never reports.
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - { name: auth-service,                 context: ., dockerfile: services/auth-service/Dockerfile.prod }
+          - { name: inventory-service,            context: ., dockerfile: services/inventory-service/Dockerfile.prod }
+          - { name: compliance-engine,            context: ., dockerfile: services/compliance-engine/Dockerfile.prod }
+          - { name: cbom-service,                 context: ., dockerfile: services/cbom-service/Dockerfile.prod }
+          - { name: sensor-manager,               context: ., dockerfile: services/sensor-manager/Dockerfile.prod }
+          - { name: admin-service,                context: ., dockerfile: services/admin-service/Dockerfile.prod }
+          - { name: monitoring-service,           context: ., dockerfile: services/monitoring-service/Dockerfile.prod }
+          - { name: cluster-sensor-service,       context: ., dockerfile: services/cluster-sensor-service/Dockerfile.prod }
+          - { name: resource-tracker-service,     context: ., dockerfile: services/resource-tracker-service/Dockerfile.prod }
+          - { name: tenant-health-service,        context: ., dockerfile: services/tenant-health-service/Dockerfile.prod }
+          - { name: audit-service,                context: ., dockerfile: services/audit-service/Dockerfile.prod }
+          - { name: device-interrogation-service, context: ., dockerfile: services/device-interrogation-service/Dockerfile.prod }
+          - { name: discovery-processor-service,  context: ., dockerfile: services/discovery-processor-service/Dockerfile.prod }
+          - { name: notification-service,         context: ., dockerfile: services/notification-service/Dockerfile.prod }
+          - { name: pcap-processor,               context: ., dockerfile: services/pcap-processor/Dockerfile.prod }
+          - { name: mcp-service,                  context: ., dockerfile: services/mcp-service/Dockerfile.prod }
+          - { name: web-ui,                       context: ., dockerfile: frontend-v2/Dockerfile.prod }
+          - { name: admin-ui,                     context: ., dockerfile: admin-ui-v2/Dockerfile.prod }
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          ref: ${{ needs.guard.outputs.version }}
+
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2  # v3.10.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # GHCR paths must be lowercase; GitHub org names are not guaranteed to be.
+      - id: owner
+        run: echo "lc=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      # Hardened bases when we can authenticate, public bases otherwise — see
+      # the header comment. The secrets context is only readable at step level,
+      # so the choice is computed here rather than in a job-level condition.
+      - name: Log in to dhi.io (Docker Hardened Images)
+        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+        run: echo "$DOCKERHUB_TOKEN" | docker login dhi.io -u "$DOCKERHUB_USERNAME" --password-stdin
+
+      - name: Choose base images
+        id: bases
+        run: |
+          if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+            echo "go=dhi.io/golang:1.26-alpine3.24-dev"    >> "$GITHUB_OUTPUT"
+            echo "runtime=dhi.io/alpine-base:3.24-dev"     >> "$GITHUB_OUTPUT"
+            echo "node=dhi.io/node:24-alpine3.22-dev"      >> "$GITHUB_OUTPUT"
+            echo "Building from Docker Hardened Images (dhi.io)"
+          else
+            echo "go=golang:1.26-alpine"                   >> "$GITHUB_OUTPUT"
+            echo "runtime=alpine:3.24.1"                   >> "$GITHUB_OUTPUT"
+            echo "node=node:24-alpine"                     >> "$GITHUB_OUTPUT"
+            echo "No Docker Hub credentials — building from public library images"
+          fi
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: ${{ matrix.image.context }}
+          file: ${{ matrix.image.dockerfile }}
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: |
+            ghcr.io/${{ steps.owner.outputs.lc }}/${{ matrix.image.name }}:${{ needs.guard.outputs.version }}
+            ghcr.io/${{ steps.owner.outputs.lc }}/${{ matrix.image.name }}:latest
+          build-args: |
+            GO_BUILDER_IMAGE=${{ steps.bases.outputs.go }}
+            RUNTIME_IMAGE=${{ steps.bases.outputs.runtime }}
+            NODE_BUILDER=${{ steps.bases.outputs.node }}
+
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159  # v3.9.2
+
+      # Keyless: the signing identity is this workflow's OIDC token, so what a
+      # verifier checks is "built by this workflow in this repo", not "signed by
+      # a key we hold". There is no private key to leak or rotate.
+      - name: Sign the image
+        env:
+          COSIGN_EXPERIMENTAL: '1'
+        run: |
+          cosign sign --yes \
+            "ghcr.io/${{ steps.owner.outputs.lc }}/${{ matrix.image.name }}@${{ steps.build.outputs.digest }}"
+
+  chart:
+    needs: [guard, images]
+    if: needs.guard.outputs.is_core == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          ref: ${{ needs.guard.outputs.version }}
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
+
+      - id: owner
+        run: echo "lc=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      # TWO logins, and they are not redundant. `helm registry login` writes
+      # helm's own credential store (~/.config/helm/registry/config.json); cosign
+      # reads Docker's (~/.docker/config.json) and knows nothing about helm's.
+      # With only the helm login the chart PUSHES fine and then signing dies on
+      # `UNAUTHORIZED: authentication required` while pulling back the artifact
+      # it just wrote. The images job never hit this because docker/login-action
+      # happens to write the file cosign wants.
+      - name: Log in to GHCR (helm — for the push)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      - name: Log in to GHCR (docker config — for cosign)
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # seed.sql is not committed under charts/ (see CLAUDE.md); the release is
+      # where it gets copied in. Without this the chart installs a schema and
+      # silently seeds nothing, and every lookup table comes up empty.
+      - name: Stage schema and seed into the chart
+        run: |
+          mkdir -p charts/vistaplatform/files/schema
+          cp scripts/database/schema.sql charts/vistaplatform/files/schema/schema.sql
+          cp scripts/database/seed.sql   charts/vistaplatform/files/schema/seed.sql
+
+      - name: Stamp the version from the tag
+        run: |
+          V="${{ needs.guard.outputs.version }}"; V="${V#v}"
+          helm show chart charts/vistaplatform >/dev/null
+          sed -i "s/^version:.*/version: ${V}/"    charts/vistaplatform/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${{ needs.guard.outputs.version }}\"/" charts/vistaplatform/Chart.yaml
+
+      - name: Package and push
+        id: push
+        run: |
+          helm package charts/vistaplatform -d /tmp/chart
+          TGZ=$(ls /tmp/chart/*.tgz)
+          OUT=$(helm push "$TGZ" "oci://ghcr.io/${{ steps.owner.outputs.lc }}" 2>&1)
+          echo "$OUT"
+          echo "digest=$(echo "$OUT" | grep -oE 'sha256:[a-f0-9]{64}' | head -1)" >> "$GITHUB_OUTPUT"
+
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159  # v3.9.2
+      - name: Sign the chart
+        env:
+          COSIGN_EXPERIMENTAL: '1'
+        run: |
+          cosign sign --yes \
+            "ghcr.io/${{ steps.owner.outputs.lc }}/vistaplatform@${{ steps.push.outputs.digest }}"
+
+  # ─── Sensor and agent binaries ──────────────────────────────────────────
+  #
+  # These two binaries run INSIDE a customer's network, on machines we never
+  # see. Anyone can build them from this repository — and should be able to,
+  # which is why the source is here — but requiring a Go toolchain and libpcap
+  # headers before you can look at your own network is a bad first hour. Most
+  # people evaluating this are not going to compile it.
+  #
+  # Why the runner matrix is not one Linux box:
+  #
+  #   sensor   libpcap => CGO_ENABLED=1 on linux and darwin, so those cannot be
+  #            cross-compiled from a single host. linux/arm64 builds natively on
+  #            an arm runner rather than dragging in an aarch64 toolchain plus a
+  #            cross libpcap; darwin needs actual macOS. Windows is CGO-free
+  #            (capture is loaded at runtime), so it cross-compiles from Linux.
+  #
+  #   agent    no cgo anywhere. Every platform cross-compiles from one Linux
+  #            job, which is why it is a single entry below rather than a matrix.
+  #
+  # GitHub-hosted runners are free for public repositories, so this costs
+  # nothing on the repo where it runs.
+  binaries:
+    needs: guard
+    if: needs.guard.outputs.is_core == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # sensor — CGO, native per platform
+          - { runner: ubuntu-latest,    target: sensor-linux-amd64,    artifact: crypto-sensor-linux-amd64 }
+          - { runner: ubuntu-24.04-arm, target: sensor-linux-arm64,    artifact: crypto-sensor-linux-arm64 }
+          - { runner: macos-15-intel,   target: sensor-darwin-amd64,   artifact: crypto-sensor-darwin-amd64 }
+          - { runner: macos-14,         target: sensor-darwin-arm64,   artifact: crypto-sensor-darwin-arm64 }
+          # sensor — CGO-free, cross-compiled
+          - { runner: ubuntu-latest,    target: sensor-windows-amd64,  artifact: crypto-sensor-windows-amd64.exe }
+          - { runner: ubuntu-latest,    target: sensor-windows-386,    artifact: crypto-sensor-windows-386.exe }
+          # device agent — CGO-free everywhere, all six from one job
+          - { runner: ubuntu-latest,    target: device-agent-all-platforms, artifact: 'device-agent-*' }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          ref: ${{ needs.guard.outputs.version }}
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.work
+          cache: false
+
+      # linux only; macOS ships libpcap headers in the SDK, and the Windows
+      # targets are CGO-free.
+      - name: Install libpcap
+        if: startsWith(matrix.runner, 'ubuntu') && startsWith(matrix.target, 'sensor-') && !contains(matrix.target, 'windows')
+        run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+
+      - name: Build
+        run: make ${{ matrix.target }}
+
+      # Unquoted on purpose: the device-agent entry is a glob covering all five
+      # of its platforms from one job.
+      - name: Stage
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp bin/${{ matrix.artifact }} dist/
+          ls -la dist/
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: bin-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ─── GitHub Release ─────────────────────────────────────────────────────
+  #
+  # The public repo had a bare tag and no Release page, which is where an
+  # open-source project's users actually look for "what changed" and "give me a
+  # binary". This creates it, attaches every binary, and signs the checksum file.
+  #
+  # Signing SHA256SUMS rather than each binary is deliberate: one signature
+  # covers everything, and verifying it is two commands instead of fourteen.
+  release:
+    needs: [guard, binaries, images, chart]
+    if: needs.guard.outputs.is_core == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write   # keyless cosign
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          ref: ${{ needs.guard.outputs.version }}
+
+      # `pattern` is not optional here. Without it this downloads EVERY artifact
+      # the run produced, and docker/build-push-action silently uploads a
+      # `<random>.dockerbuild` provenance artifact per image — 19 of them beside
+      # the 7 binaries we actually want. Two consequences, one loud and one not:
+      # the download died with "Artifact download failed after 5 retries" after
+      # fetching exactly the 7 bin-* artifacts (v0.1.1 failed twice this way),
+      # and had it succeeded, all 19 would have been copied into dist/, listed
+      # in SHA256SUMS, signed, and attached to the public release.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: bin-*
+          path: staged
+          merge-multiple: true
+
+      # The release is worth failing over an empty dist/. A rename of the
+      # binaries jobs' artifact names would otherwise leave `pattern` matching
+      # nothing and publish a release with no binaries and an empty SHA256SUMS,
+      # which reads as "this release ships no binaries" rather than as a bug.
+      - name: Assert the binaries arrived
+        run: |
+          set -euo pipefail
+          n=$(find staged -type f | wc -l)
+          echo "staged $n binary artifact(s):"; find staged -type f | sed 's/^/  /'
+          [ "$n" -ge 7 ] || { echo "::error::expected at least 7 binaries, found $n"; exit 1; }
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          mkdir -p dist && find staged -type f -exec cp {} dist/ \;
+          cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159  # v3.9.2
+
+      - name: Sign the checksums
+        run: cosign sign-blob --yes --output-signature dist/SHA256SUMS.sig --output-certificate dist/SHA256SUMS.pem dist/SHA256SUMS
+
+      # Release notes come from the CHANGELOG section for this version, the same
+      # source the commercial line uses. Absent (a Core-only tree restarts its
+      # CHANGELOG at the current version), fall back to a pointer rather than
+      # failing the release over prose.
+      - name: Release notes
+        run: |
+          set -euo pipefail
+          V="${{ needs.guard.outputs.version }}"; V="${V#v}"
+          if awk -v v="$V" '$0 ~ "^## \\[" v "\\]" {f=1;next} f && /^## \[/ {exit} f' CHANGELOG.md > notes.md && [ -s notes.md ]; then
+            echo "using the CHANGELOG section for $V"
+          else
+            printf 'See CHANGELOG.md for details.\n' > notes.md
+          fi
+          {
+            printf '\n\n## Binaries\n\n'
+            printf 'Pre-built sensor and device-agent binaries are attached. Both also build\n'
+            printf 'from source in this repository — `make build-sensor`, `make build-device-agent`.\n\n'
+            printf '**The sensor is dynamically linked against libpcap** (it captures packets;\n'
+            printf 'that is the point). Install it before running, or the loader fails with an\n'
+            printf 'error that does not mention libpcap:\n\n'
+            printf '| | |\n|---|---|\n'
+            printf '| Debian / Ubuntu | `apt install libpcap0.8` |\n'
+            printf '| RHEL / Fedora | `dnf install libpcap` |\n'
+            printf '| macOS | already present |\n'
+            printf '| Windows | install [Npcap](https://npcap.com/) |\n\n'
+            printf 'The device agent is statically linked and needs nothing.\n'
+            printf '\n\n## Verifying these binaries\n\n```bash\n'
+            printf 'cosign verify-blob SHA256SUMS \\\n'
+            printf '  --signature SHA256SUMS.sig --certificate SHA256SUMS.pem \\\n'
+            # Double-quoted (GITHUB_REPOSITORY must expand), so the line
+            # continuation needs FOUR backslashes: shell collapses \\\\ to \\,
+            # printf renders \\ as one backslash and \n as the newline. The
+            # previous \\\n reached printf as \\ + n — a literal "\n" in the
+            # release body, which broke the command when pasted.
+            printf "  --certificate-identity-regexp 'https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-core.yml@.*' \\\\\n"
+            printf "  --certificate-oidc-issuer https://token.actions.githubusercontent.com\n"
+            printf 'sha256sum -c SHA256SUMS\n```\n'
+          } >> notes.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.guard.outputs.version }}"
+          gh release create "$TAG" --title "$TAG" --notes-file notes.md --verify-tag dist/* \
+            || gh release upload "$TAG" dist/* --clobber

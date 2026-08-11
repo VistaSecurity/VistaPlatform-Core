@@ -1,0 +1,12 @@
+{
+  "name": "cip-scripts",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Build and audit scripts for VistaPlatform",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "dependencies": {
+    "fs-extra": "^11.2.0",
+    "yaml": "^2.8.3"
+  }
+}

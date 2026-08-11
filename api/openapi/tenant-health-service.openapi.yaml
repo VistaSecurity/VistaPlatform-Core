@@ -1,0 +1,956 @@
+openapi: 3.1.0
+info:
+  title: VistaPlatform — tenant-health-service API
+  version: 0.1.0
+  description: |
+    Spec-first contract for tenant-health-service (ADR-0001). First slice for
+    this service, covering the **platform-admin tenant-health** surface
+    (`/api/v1/tenant-health-service/*`) — the per-tenant health scoring,
+    trends, recommendations, alerts, metrics, comparison, insights, and
+    cross-tenant benchmarks a Platform Admin sees in the admin-ui.
+
+    UI consumer: `admin-ui/src/services/tenant-health-api.ts` (the hand-rolled
+    axios client). The base path the admin-ui uses is
+    `/api/v1/tenant-health-service`.
+
+    ## Scope of this spec
+
+    Every endpoint the admin-ui client calls, plus the two sibling write
+    endpoints the handler exposes on the same surface
+    (`POST /calculate/auto/:tenantId` is not yet wired into the admin-ui but is
+    part of the health-scoring surface):
+
+      - `POST /calculate`                       — calculate health from supplied metrics
+      - `POST /calculate/auto/{tenantId}`       — auto-collect metrics + calculate
+      - `GET  /tenants`                         — cross-tenant health summaries (paged)
+      - `GET  /benchmarks`                      — platform/industry benchmarks
+      - `GET  /tenants/{tenantId}`              — one tenant's full health record
+      - `GET  /tenants/{tenantId}/alerts`       — health alerts for a tenant
+      - `GET  /tenants/{tenantId}/metrics`      — raw health metrics time series
+      - `GET  /tenants/{tenantId}/comparison`   — tenant rank/percentile vs platform
+      - `GET  /tenants/{tenantId}/insights`     — AI-driven health insights
+
+    Out of scope: the unauthenticated `GET /health` liveness probe (not under
+    the `/api/v1/tenant-health-service` group; not consumed by the admin-ui).
+
+    ## Shape status
+
+    These document the CURRENT shapes captured from the real handlers (typed Go
+    structs in `services/tenant-health-service/internal/models/health.go`,
+    list endpoints wrapped in ad-hoc `gin.H` envelopes, errors as
+    `{ "error": "..." }`). They predate the ADR-0002 envelope and are pinned
+    here as-is so drift is caught.
+
+    ## Go-vs-TS discrepancies noted
+
+    - `GET /tenants/{tenantId}` returns the Go `TenantHealth` struct (matches
+      the admin-ui `TenantHealth` interface). `POST /calculate` and
+      `POST /calculate/auto/{tenantId}` return the leaner `HealthScoreResponse`
+      struct (no `id`/`created_at`/`updated_at`) — the admin-ui `calculateTenantHealth`
+      typing agrees. No disagreement; the two response shapes are distinct on
+      purpose and modelled separately below.
+    - `GET /tenants` is paged server-side (`limit`/`offset`/`status`/`min_score`/
+      `max_score`/`sort_by`/`sort_order` query params) and the body carries
+      `count`/`limit`/`offset` alongside `tenants`. The admin-ui `getAllTenantHealth`
+      only types `{ tenants, count }` and passes no params — the spec follows the
+      Go handler (server truth), which is a strict superset of what the client reads.
+servers:
+  - url: /api/v1/tenant-health-service
+    description: Via the API gateway (platform-admin auth, cross-tenant).
+paths:
+  /calculate:
+    post:
+      operationId: calculateTenantHealth
+      tags:
+        - tenant-health
+      summary: Calculate a tenant's health score from supplied metrics
+      description: |
+        Computes a health score from a caller-supplied metrics block.
+        `tenant_id` is required (rejected with 400 when nil/zero).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HealthScoreRequest'
+      responses:
+        '200':
+          description: The calculated health score.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthScoreResponse'
+        '400':
+          description: Invalid request body or missing tenant_id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: The health score could not be calculated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /calculate/auto/{tenantId}:
+    parameters:
+      - name: tenantId
+        in: path
+        required: true
+        description: Tenant UUID to auto-calculate health for.
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: calculateTenantHealthAuto
+      tags:
+        - tenant-health
+      summary: Auto-collect metrics and calculate a tenant's health score
+      description: |
+        Collects the tenant's current metrics server-side and calculates the
+        health score in one call. Not yet wired into the admin-ui, but part of
+        the health-scoring surface.
+      responses:
+        '200':
+          description: The calculated health score.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthScoreResponse'
+        '400':
+          description: Invalid tenant ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: The health score could not be auto-calculated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenants:
+    get:
+      operationId: getAllTenantHealth
+      tags:
+        - tenant-health
+      summary: Cross-tenant health summaries
+      description: |
+        Lists per-tenant health summaries across the platform with optional
+        filtering, sorting, and pagination. The body wraps the list in
+        `{ tenants, count, limit, offset }`. `count` is the page length.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Page size (applied only when > 0).
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          required: false
+          description: Page offset (applied only when >= 0).
+          schema:
+            type: integer
+        - name: status
+          in: query
+          required: false
+          description: Filter by health_status (excellent / good / fair / poor / critical).
+          schema:
+            type: string
+        - name: min_score
+          in: query
+          required: false
+          schema:
+            type: number
+        - name: max_score
+          in: query
+          required: false
+          schema:
+            type: number
+        - name: sort_by
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: sort_order
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The matching tenant health summaries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantHealthSummaryListResponse'
+        '500':
+          description: The summaries could not be retrieved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /benchmarks:
+    get:
+      operationId: getHealthBenchmarks
+      tags:
+        - tenant-health
+      summary: Platform / industry health benchmarks
+      description: 'Returns benchmark scores per category, wrapped in `{ benchmarks, count }`.'
+      responses:
+        '200':
+          description: The benchmark list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthBenchmarkListResponse'
+        '500':
+          description: The benchmarks could not be retrieved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenants/{tenantId}:
+    parameters:
+      - name: tenantId
+        in: path
+        required: true
+        description: Tenant UUID.
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getTenantHealth
+      tags:
+        - tenant-health
+      summary: One tenant's full health record
+      description: |
+        Returns the tenant's stored health record (`TenantHealth`). When
+        `auto_calculate` is true (the default) the record is recomputed if
+        stale before being returned.
+      parameters:
+        - name: auto_calculate
+          in: query
+          required: false
+          description: Recompute the score before returning. Defaults to true.
+          schema:
+            type: boolean
+            default: true
+      responses:
+        '200':
+          description: The tenant's full health record.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantHealth'
+        '400':
+          description: Invalid tenant ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: The health record could not be retrieved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenants/{tenantId}/alerts:
+    parameters:
+      - name: tenantId
+        in: path
+        required: true
+        description: Tenant UUID.
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getHealthAlerts
+      tags:
+        - tenant-health
+      summary: Health alerts for a tenant
+      description: 'Returns the tenant''s health alerts, wrapped in `{ alerts, count }`. When `active_only` is true (the default) only active alerts are returned.'
+      parameters:
+        - name: active_only
+          in: query
+          required: false
+          description: Return only active alerts. Defaults to true.
+          schema:
+            type: boolean
+            default: true
+      responses:
+        '200':
+          description: The matching alerts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthAlertListResponse'
+        '400':
+          description: Invalid tenant ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: The alerts could not be retrieved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenants/{tenantId}/metrics:
+    parameters:
+      - name: tenantId
+        in: path
+        required: true
+        description: Tenant UUID.
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getHealthMetrics
+      tags:
+        - tenant-health
+      summary: Raw health metrics time series for a tenant
+      description: |
+        Returns the raw metric samples used for health scoring over a time
+        range. `start_time`/`end_time` are RFC3339; defaults to the last 24
+        hours when omitted. The body wraps the series in
+        `{ metrics, count, period }`.
+      parameters:
+        - name: start_time
+          in: query
+          required: false
+          description: RFC3339 start of the range. Defaults to now - 24h.
+          schema:
+            type: string
+            format: date-time
+        - name: end_time
+          in: query
+          required: false
+          description: RFC3339 end of the range. Defaults to now.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: The metric series.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthMetricsListResponse'
+        '400':
+          description: Invalid tenant ID or time format.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: The metrics could not be retrieved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenants/{tenantId}/comparison:
+    parameters:
+      - name: tenantId
+        in: path
+        required: true
+        description: Tenant UUID.
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getHealthComparison
+      tags:
+        - tenant-health
+      summary: A tenant's rank / percentile vs the platform
+      responses:
+        '200':
+          description: The tenant's comparison record.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthComparison'
+        '400':
+          description: Invalid tenant ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: The comparison could not be computed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenants/{tenantId}/insights:
+    parameters:
+      - name: tenantId
+        in: path
+        required: true
+        description: Tenant UUID.
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: generateHealthInsights
+      tags:
+        - tenant-health
+      summary: AI-driven health insights for a tenant
+      responses:
+        '200':
+          description: The generated insights.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthInsights'
+        '400':
+          description: Invalid tenant ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: The insights could not be generated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+components:
+  schemas:
+    HealthBreakdown:
+      type: object
+      additionalProperties: false
+      description: Per-factor scoring, each 0-100 (models.HealthBreakdown).
+      required:
+        - resource_efficiency
+        - performance_metrics
+        - security_posture
+        - business_activity
+        - cost_optimization
+      properties:
+        resource_efficiency:
+          type: number
+        performance_metrics:
+          type: number
+        security_posture:
+          type: number
+        business_activity:
+          type: number
+        cost_optimization:
+          type: number
+    Recommendation:
+      type: object
+      additionalProperties: false
+      description: An actionable health recommendation (models.Recommendation).
+      required:
+        - id
+        - category
+        - priority
+        - title
+        - description
+        - impact
+        - effort
+        - potential_gain
+      properties:
+        id:
+          type: string
+          format: uuid
+        category:
+          type: string
+          description: "resource / performance / security / business / cost."
+        priority:
+          type: string
+          description: "high / medium / low."
+        title:
+          type: string
+        description:
+          type: string
+        impact:
+          type: string
+          description: "high / medium / low."
+        effort:
+          type: string
+          description: "high / medium / low."
+        potential_gain:
+          type: number
+          description: Expected score improvement.
+    HealthDataPoint:
+      type: object
+      additionalProperties: false
+      description: A single historical health measurement (models.HealthDataPoint).
+      required:
+        - timestamp
+        - score
+        - status
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        score:
+          type: number
+        status:
+          type: string
+    HealthTrends:
+      type: object
+      additionalProperties: false
+      description: Historical health trend data (models.HealthTrends).
+      required:
+        - score_history
+        - trend_direction
+        - trend_strength
+        - predicted_score
+      properties:
+        score_history:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/HealthDataPoint'
+        trend_direction:
+          type: string
+          description: "improving / stable / declining."
+        trend_strength:
+          type: number
+          description: 0-1.
+        predicted_score:
+          type: number
+          description: Next-period prediction.
+    TenantHealth:
+      type: object
+      additionalProperties: false
+      description: A tenant's full stored health record (models.TenantHealth). Returned by GET /tenants/{tenantId}.
+      required:
+        - id
+        - tenant_id
+        - overall_score
+        - health_status
+        - last_calculated
+        - score_breakdown
+        - recommendations
+        - trends
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        overall_score:
+          type: number
+        health_status:
+          type: string
+          description: "excellent / good / fair / poor / critical."
+        last_calculated:
+          type: string
+          format: date-time
+        score_breakdown:
+          $ref: '#/components/schemas/HealthBreakdown'
+        recommendations:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/Recommendation'
+        trends:
+          $ref: '#/components/schemas/HealthTrends'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    HealthMetrics:
+      type: object
+      additionalProperties: false
+      description: Raw metrics used for health calculation (models.HealthMetrics).
+      required:
+        - tenant_id
+        - timestamp
+        - cpu_utilization
+        - memory_utilization
+        - storage_utilization
+        - network_utilization
+        - avg_response_time
+        - error_rate
+        - throughput
+        - uptime
+        - failed_logins
+        - security_alerts
+        - compliance_score
+        - last_security_update
+        - active_users
+        - api_calls
+        - feature_usage
+        - user_engagement
+        - resource_cost
+        - cost_per_user
+        - cost_efficiency
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        timestamp:
+          type: string
+          format: date-time
+        cpu_utilization:
+          type: number
+        memory_utilization:
+          type: number
+        storage_utilization:
+          type: number
+        network_utilization:
+          type: number
+        avg_response_time:
+          type: number
+        error_rate:
+          type: number
+        throughput:
+          type: number
+        uptime:
+          type: number
+        failed_logins:
+          type: integer
+        security_alerts:
+          type: integer
+        compliance_score:
+          type: number
+        last_security_update:
+          type: string
+          format: date-time
+        active_users:
+          type: integer
+        api_calls:
+          type: integer
+        feature_usage:
+          # Go: map[string]int — nil-able JSON object of counts.
+          type: [object, 'null']
+          additionalProperties:
+            type: integer
+        user_engagement:
+          type: number
+        resource_cost:
+          type: number
+        cost_per_user:
+          type: number
+        cost_efficiency:
+          type: number
+    HealthAlert:
+      type: object
+      additionalProperties: false
+      description: A tenant health alert (models.HealthAlert). `resolved_at` is a nullable pointer.
+      required:
+        - id
+        - tenant_id
+        - alert_type
+        - severity
+        - title
+        - description
+        - category
+        - current_value
+        - threshold
+        - is_active
+        - created_at
+        - resolved_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        alert_type:
+          type: string
+          description: "health_decline / critical_issue / improvement_opportunity."
+        severity:
+          type: string
+          description: "critical / high / medium / low."
+        title:
+          type: string
+        description:
+          type: string
+        category:
+          type: string
+          description: "resource / performance / security / business / cost."
+        current_value:
+          type: number
+        threshold:
+          type: number
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        resolved_at:
+          type: [string, 'null']
+          format: date-time
+    HealthScoreRequest:
+      type: object
+      additionalProperties: false
+      description: 'Body for POST /calculate (models.HealthScoreRequest). `tenant_id` is required.'
+      required:
+        - tenant_id
+        - metrics
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        metrics:
+          $ref: '#/components/schemas/HealthMetrics'
+        force_recalc:
+          type: boolean
+    HealthScoreResponse:
+      type: object
+      additionalProperties: false
+      description: 'Calculated health score (models.HealthScoreResponse). Returned by POST /calculate and POST /calculate/auto/{tenantId}. Leaner than TenantHealth (no id/created_at/updated_at).'
+      required:
+        - tenant_id
+        - overall_score
+        - health_status
+        - score_breakdown
+        - recommendations
+        - trends
+        - last_calculated
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        overall_score:
+          type: number
+        health_status:
+          type: string
+          description: "excellent / good / fair / poor / critical."
+        score_breakdown:
+          $ref: '#/components/schemas/HealthBreakdown'
+        recommendations:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/Recommendation'
+        trends:
+          $ref: '#/components/schemas/HealthTrends'
+        last_calculated:
+          type: string
+          format: date-time
+    TenantHealthSummary:
+      type: object
+      additionalProperties: false
+      description: Per-tenant summary row in the cross-tenant list (models.TenantHealthSummary).
+      required:
+        - tenant_id
+        - tenant_name
+        - overall_score
+        - health_status
+        - last_calculated
+        - trend_direction
+        - critical_alerts
+        - recommendations
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        tenant_name:
+          type: string
+        overall_score:
+          type: number
+        health_status:
+          type: string
+          description: "excellent / good / fair / poor / critical."
+        last_calculated:
+          type: string
+          format: date-time
+        trend_direction:
+          type: string
+          description: "improving / stable / declining."
+        critical_alerts:
+          type: integer
+        recommendations:
+          type: integer
+          description: Count of recommendations (not the list).
+    HealthComparison:
+      type: object
+      additionalProperties: false
+      description: A tenant's rank/percentile against the platform (models.HealthComparison).
+      required:
+        - tenant_id
+        - tenant_name
+        - score
+        - percentile
+        - rank
+        - benchmark_gap
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        tenant_name:
+          type: string
+        score:
+          type: number
+        percentile:
+          type: number
+          description: 0-100, where 100 is best.
+        rank:
+          type: integer
+          description: 1-based ranking.
+        benchmark_gap:
+          type: number
+          description: Gap from benchmark.
+    HealthBenchmark:
+      type: object
+      additionalProperties: false
+      description: An industry/platform benchmark for a category (models.HealthBenchmark).
+      required:
+        - category
+        - benchmark_score
+        - description
+        - source
+      properties:
+        category:
+          type: string
+        benchmark_score:
+          type: number
+        description:
+          type: string
+        source:
+          type: string
+    Insight:
+      type: object
+      additionalProperties: false
+      description: A single AI-driven health insight (models.Insight).
+      required:
+        - type
+        - category
+        - title
+        - description
+        - impact
+        - confidence
+        - actionable
+      properties:
+        type:
+          type: string
+          description: "anomaly / trend / recommendation / prediction."
+        category:
+          type: string
+          description: "resource / performance / security / business / cost."
+        title:
+          type: string
+        description:
+          type: string
+        impact:
+          type: string
+          description: "high / medium / low."
+        confidence:
+          type: number
+          description: 0-1.
+        actionable:
+          type: boolean
+    HealthInsights:
+      type: object
+      additionalProperties: false
+      description: AI-driven insights bundle for a tenant (models.HealthInsights).
+      required:
+        - tenant_id
+        - insights
+        - generated_at
+        - confidence
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        insights:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/Insight'
+        generated_at:
+          type: string
+          format: date-time
+        confidence:
+          type: number
+          description: 0-1.
+    TenantHealthSummaryListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /tenants — `{ tenants, count, limit, offset }`. `tenants` is null when none match (nil slice).'
+      required:
+        - tenants
+        - count
+        - limit
+        - offset
+      properties:
+        tenants:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/TenantHealthSummary'
+        count:
+          type: integer
+          description: Page length (length of `tenants`).
+        limit:
+          type: integer
+        offset:
+          type: integer
+    HealthBenchmarkListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /benchmarks — `{ benchmarks, count }`. `benchmarks` is null when none exist.'
+      required:
+        - benchmarks
+        - count
+      properties:
+        benchmarks:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/HealthBenchmark'
+        count:
+          type: integer
+    HealthAlertListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /tenants/{tenantId}/alerts — `{ alerts, count }`. `alerts` is null when none match.'
+      required:
+        - alerts
+        - count
+      properties:
+        alerts:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/HealthAlert'
+        count:
+          type: integer
+    HealthMetricsPeriod:
+      type: object
+      additionalProperties: false
+      description: The resolved time range echoed back by GET /tenants/{tenantId}/metrics.
+      required:
+        - start_time
+        - end_time
+      properties:
+        start_time:
+          type: string
+          format: date-time
+        end_time:
+          type: string
+          format: date-time
+    HealthMetricsListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /tenants/{tenantId}/metrics — `{ metrics, count, period }`. `metrics` is null when none match.'
+      required:
+        - metrics
+        - count
+        - period
+      properties:
+        metrics:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/HealthMetrics'
+        count:
+          type: integer
+        period:
+          $ref: '#/components/schemas/HealthMetricsPeriod'
+    LegacyError:
+      type: object
+      additionalProperties: true
+      description: CURRENT error shape — a single human-readable string under `error`. Superseded by the ADR-0002 Error envelope as endpoints are hardened.
+      required:
+        - error
+      properties:
+        error:
+          type: string

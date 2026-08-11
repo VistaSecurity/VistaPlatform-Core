@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark" data-density="comfortable" data-brand="vista-blue">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Vista Console</title>
+    <!-- Pre-paint theme bootstrap. External (not inline) so the prod CSP
+         `script-src 'self'` allows it; still runs synchronously before paint. -->
+    <script src="/theme-init.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

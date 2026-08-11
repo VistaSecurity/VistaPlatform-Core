@@ -1,0 +1,9 @@
+@import './styles/tokens.css';      /* VISTA brand atoms (fonts, accent, blue) */
+@import './styles/operator.css';    /* operator theme + component classes */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body, #root { height: 100%; }

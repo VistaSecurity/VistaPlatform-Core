@@ -1,0 +1,60 @@
+{{/*
+Platform CA setup — bootstrap selfsigned Issuer + CA Certificate + CA Issuer.
+
+Standard cert-manager three-resource pattern for an internal CA. All
+gated behind serviceMtls.enabled; rendered as a no-op when disabled so
+v0.1.1 installs aren't affected.
+
+Skipped entirely when serviceMtls.platformCa.externalCaSecretName is set —
+in that case the customer brings their own CA Secret (must contain
+tls.crt + tls.key + ca.crt) and the chart uses it directly.
+*/}}
+{{- if .Values.serviceMtls.enabled }}
+{{- if not .Values.serviceMtls.platformCa.externalCaSecretName }}
+---
+# Bootstrap selfsigned Issuer — used to sign the Platform CA Certificate.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ .Release.Name }}-selfsigned-bootstrap
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+# Platform CA Certificate — long-lived (default 10y), self-signed at
+# bootstrap, becomes the trust root for every per-service mTLS cert.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Release.Name }}-platform-ca
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  isCA: true
+  commonName: "VistaPlatform Platform CA"
+  duration: {{ .Values.serviceMtls.platformCa.duration | quote }}
+  privateKey:
+    algorithm: {{ .Values.serviceMtls.platformCa.privateKey.algorithm }}
+    size: {{ .Values.serviceMtls.platformCa.privateKey.size }}
+  secretName: platform-ca-secret
+  issuerRef:
+    name: {{ .Release.Name }}-selfsigned-bootstrap
+    kind: Issuer
+{{- end }}
+---
+# Platform CA Issuer — wraps the CA Secret (chart-provisioned or BYO),
+# signs every per-service Certificate the chart emits.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ .Release.Name }}-platform-ca-issuer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  ca:
+    secretName: {{ default "platform-ca-secret" .Values.serviceMtls.platformCa.externalCaSecretName }}
+{{- end }}

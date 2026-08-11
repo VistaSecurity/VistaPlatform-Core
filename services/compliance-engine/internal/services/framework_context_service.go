@@ -1,0 +1,528 @@
+package services
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
+	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
+	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+)
+
+// FrameworkContextService provides a consolidated view of framework data for a tenant
+// This service aggregates multiple API calls into a single response to reduce frontend overhead
+type FrameworkContextService struct {
+	db                      *sqlx.DB
+	frameworkLicenseService *FrameworkLicenseService
+	evaluationService       *EvaluationService
+}
+
+// NewFrameworkContextService creates a new framework context service
+func NewFrameworkContextService(
+	db *sqlx.DB,
+	frameworkLicenseService *FrameworkLicenseService,
+	evaluationService *EvaluationService,
+) *FrameworkContextService {
+	return &FrameworkContextService{
+		db:                      db,
+		frameworkLicenseService: frameworkLicenseService,
+		evaluationService:       evaluationService,
+	}
+}
+
+// FrameworkContextResponse is the consolidated response containing all framework data
+type FrameworkContextResponse struct {
+	Licensed           []models.LicensedFrameworkResponse `json:"licensed"`
+	DefaultFrameworkID *string                            `json:"default_framework_id"`
+	Status             *FrameworkContextStatus            `json:"status"`
+	Subscription       *FrameworkSubscriptionInfo         `json:"subscription"`
+	UserPreference     *string                            `json:"user_preference,omitempty"`
+	LastUpdated        string                             `json:"last_updated"`
+}
+
+// FrameworkContextStatus contains compliance status for all licensed frameworks
+type FrameworkContextStatus struct {
+	Frameworks   []FrameworkStatusItem `json:"frameworks"`
+	OverallScore float64               `json:"overall_score"`
+}
+
+// FrameworkStatusItem represents the compliance status for a single framework
+type FrameworkStatusItem struct {
+	ID                string `json:"id"`
+	Name              string `json:"name"`
+	Code              string `json:"code"`
+	Version           string `json:"version"`
+	CompliancePercent int    `json:"compliance_percent"`
+	ControlsTotal     int    `json:"controls_total"`
+	ControlsPassing   int    `json:"controls_passing"`
+	ControlsFailing   int    `json:"controls_failing"`
+	IsDefault         bool   `json:"is_default"`
+}
+
+// FrameworkSubscriptionInfo contains tenant subscription information related to frameworks
+type FrameworkSubscriptionInfo struct {
+	Tier           string `json:"tier"`
+	FrameworkLimit int    `json:"framework_limit"`
+	FrameworksUsed int    `json:"frameworks_used"`
+	CanAddMore     bool   `json:"can_add_more"`
+}
+
+// GetFrameworkContext returns all framework-related data for a tenant in a single call
+func (s *FrameworkContextService) GetFrameworkContext(tenantID, userID uuid.UUID) (*FrameworkContextResponse, error) {
+	response := &FrameworkContextResponse{
+		LastUpdated: time.Now().Format(time.RFC3339),
+	}
+
+	// 1. Get licensed frameworks
+	licensed, err := s.frameworkLicenseService.ListLicensedFrameworks(tenantID)
+	if err != nil {
+		log.Printf("WARN: Failed to get licensed frameworks for tenant %s: %v", tenantID, err)
+		licensed = []models.LicensedFrameworkResponse{}
+	}
+	response.Licensed = licensed
+
+	// 2. Find default framework ID
+	// First, try to find one marked as default in licensed frameworks
+	for _, lic := range licensed {
+		if lic.IsDefault {
+			response.DefaultFrameworkID = &lic.PlatformFrameworkID
+			break
+		}
+	}
+
+	// Fallback: If no default found but licensed frameworks exist, use Best Practices or first one
+	if response.DefaultFrameworkID == nil && len(licensed) > 0 {
+		// Prefer Best Practices if available
+		for _, lic := range licensed {
+			if lic.PlatformFramework != nil && lic.PlatformFramework.IsPlatformDefault {
+				response.DefaultFrameworkID = &lic.PlatformFrameworkID
+				break
+			}
+		}
+		// If still no default, use the first licensed framework
+		if response.DefaultFrameworkID == nil {
+			response.DefaultFrameworkID = &licensed[0].PlatformFrameworkID
+		}
+	}
+
+	// Final fallback: If no licensed frameworks at all, get platform default directly
+	// This should never happen in normal operation (Best Practices is auto-licensed),
+	// but provides defensive programming
+	if response.DefaultFrameworkID == nil {
+		var platformDefaultID uuid.UUID
+		err := s.db.Get(&platformDefaultID, `
+			SELECT id FROM platform_frameworks
+			WHERE is_platform_default = true AND status = 'published'
+			LIMIT 1
+		`)
+		if err == nil {
+			defaultIDStr := platformDefaultID.String()
+			response.DefaultFrameworkID = &defaultIDStr
+			log.Printf("WARN: No licensed frameworks found for tenant %s, using platform default %s", tenantID, defaultIDStr)
+		} else {
+			log.Printf("ERROR: No licensed frameworks and platform default not found for tenant %s: %v", tenantID, err)
+		}
+	}
+
+	// 3. Get user preference if userID is provided
+	if userID != uuid.Nil {
+		userPref, err := s.frameworkLicenseService.GetUserFrameworkPreference(userID, tenantID)
+		if err != nil {
+			log.Printf("WARN: Failed to get user framework preference: %v", err)
+		} else if userPref != nil {
+			prefStr := userPref.String()
+			response.UserPreference = &prefStr
+		}
+	}
+
+	// 4. Calculate compliance status for all licensed frameworks
+	statusItems := make([]FrameworkStatusItem, 0, len(licensed))
+	var totalScore float64
+	var totalWeight int
+
+	for _, lic := range licensed {
+		// Skip if PlatformFramework is not populated (shouldn't happen, but defensive)
+		if lic.PlatformFramework == nil {
+			log.Printf("WARN: Licensed framework %s has nil PlatformFramework for tenant %s", lic.PlatformFrameworkID, tenantID)
+			continue
+		}
+
+		frameworkID, err := uuid.Parse(lic.PlatformFrameworkID)
+		if err != nil {
+			log.Printf("WARN: Invalid framework ID %s for tenant %s: %v", lic.PlatformFrameworkID, tenantID, err)
+			continue
+		}
+
+		// Calculate compliance score for this framework
+		score, controlsTotal, controlsPassing, controlsFailing := s.calculateFrameworkStats(tenantID, frameworkID)
+
+		statusItems = append(statusItems, FrameworkStatusItem{
+			ID:                lic.PlatformFrameworkID,
+			Name:              lic.PlatformFramework.Name,
+			Code:              lic.PlatformFramework.Code,
+			Version:           lic.PlatformFramework.Version,
+			CompliancePercent: score,
+			ControlsTotal:     controlsTotal,
+			ControlsPassing:   controlsPassing,
+			ControlsFailing:   controlsFailing,
+			IsDefault:         lic.IsDefault,
+		})
+
+		totalScore += float64(score)
+		totalWeight++
+	}
+
+	var overallScore float64
+	if totalWeight > 0 {
+		overallScore = totalScore / float64(totalWeight)
+	}
+
+	response.Status = &FrameworkContextStatus{
+		Frameworks:   statusItems,
+		OverallScore: overallScore,
+	}
+
+	// 5. Get subscription info
+	response.Subscription = s.getSubscriptionInfo(tenantID, len(licensed))
+
+	return response, nil
+}
+
+// calculateFrameworkStats calculates compliance statistics for a framework.
+//
+// Scores through frameworkScore — the same severity-weighted model the live
+// evaluation and the materialized rollup use. It used to count controls flat,
+// which meant the Posture scorecard and the framework summary page could show
+// different percentages for the same framework.
+func (s *FrameworkContextService) calculateFrameworkStats(tenantID, frameworkID uuid.UUID) (score, total, passing, failing int) {
+	type controlRow struct {
+		ID               uuid.UUID `db:"id"`
+		BaselineSeverity string    `db:"baseline_severity"`
+	}
+	var controls []controlRow
+	err := s.db.Select(&controls, `
+		SELECT id, baseline_severity
+		FROM platform_framework_controls
+		WHERE framework_id = $1
+	`, frameworkID)
+	if err != nil {
+		log.Printf("WARN: Failed to get controls for framework %s: %v", frameworkID, err)
+		return 100, 0, 0, 0
+	}
+	if len(controls) == 0 {
+		return 100, 0, 0, 0
+	}
+
+	controlIDs := make([]uuid.UUID, len(controls))
+	for i, c := range controls {
+		controlIDs[i] = c.ID
+	}
+	statuses, err := loadControlStatuses(context.Background(), s.db.DB, tenantID, controlIDs)
+	if err != nil {
+		log.Printf("WARN: Failed to load control statuses for framework %s: %v", frameworkID, err)
+		return 100, len(controls), 0, 0
+	}
+
+	outcomes := make([]controlOutcome, 0, len(controls))
+	for _, c := range controls {
+		outcomes = append(outcomes, controlOutcome{BaselineSeverity: c.BaselineSeverity, Status: statuses[c.ID]})
+	}
+	return frameworkScore(outcomes)
+}
+
+// getSubscriptionInfo retrieves subscription information for a tenant
+func (s *FrameworkContextService) getSubscriptionInfo(tenantID uuid.UUID, currentCount int) *FrameworkSubscriptionInfo {
+	// Get subscription tier from tenants table (subscription_tier_id FK)
+	var tier string
+	var frameworkLimit int
+
+	err := s.db.QueryRow(`
+		SELECT st.tier, st.compliance_framework_limit
+		FROM tenants t
+		JOIN subscription_tiers st ON t.subscription_tier_id = st.id
+		WHERE t.id = $1
+	`, tenantID).Scan(&tier, &frameworkLimit)
+
+	if err != nil {
+		// Default to free tier if subscription not found
+		tier = "free"
+		frameworkLimit = 1
+	}
+
+	// Best Practices doesn't count toward limit, so adjust current count
+	adjustedCount := currentCount - 1
+	if adjustedCount < 0 {
+		adjustedCount = 0
+	}
+
+	return &FrameworkSubscriptionInfo{
+		Tier:           tier,
+		FrameworkLimit: frameworkLimit,
+		FrameworksUsed: adjustedCount,
+		CanAddMore:     adjustedCount < frameworkLimit,
+	}
+}
+
+// BatchEvaluateRequest represents a request to evaluate multiple frameworks
+type BatchEvaluateRequest struct {
+	FrameworkIDs []string               `json:"framework_ids" binding:"required"`
+	Filters      models.ScenarioFilters `json:"filters,omitempty"`
+}
+
+// BatchEvaluateResponse represents the response from batch evaluation
+type BatchEvaluateResponse struct {
+	Results     []BatchEvaluateResult `json:"results"`
+	LastUpdated string                `json:"last_updated"`
+}
+
+// BatchEvaluateResult represents evaluation results for a single framework
+type BatchEvaluateResult struct {
+	FrameworkID      string                `json:"framework_id"`
+	FrameworkName    string                `json:"framework_name"`
+	FrameworkCode    string                `json:"framework_code"`
+	FrameworkVersion string                `json:"framework_version"`
+	Score            int                   `json:"score"`
+	ControlsTotal    int                   `json:"controls_total"`
+	ControlsPassing  int                   `json:"controls_passing"`
+	ControlsFailing  int                   `json:"controls_failing"`
+	AffectedAssets   int                   `json:"affected_assets"`
+	Findings         []BatchFindingSummary `json:"findings,omitempty"`
+	ControlBreakdown []BatchControlStatus  `json:"control_breakdown,omitempty"`
+}
+
+// BatchFindingSummary represents a summarized finding
+type BatchFindingSummary struct {
+	ID        string `json:"id"`
+	ControlID string `json:"control_id"`
+	AssetID   string `json:"asset_id"`
+	Severity  string `json:"severity"`
+	Summary   string `json:"summary"`
+}
+
+// BatchControlStatus represents control status in batch evaluation
+type BatchControlStatus struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Status   string `json:"status"`
+	Severity string `json:"severity"`
+	Findings int    `json:"findings"`
+}
+
+// BatchEvaluateFrameworks evaluates multiple frameworks in a single call
+func (s *FrameworkContextService) BatchEvaluateFrameworks(tenantID uuid.UUID, request *BatchEvaluateRequest, includeDetails bool) (*BatchEvaluateResponse, error) {
+	response := &BatchEvaluateResponse{
+		Results:     make([]BatchEvaluateResult, 0, len(request.FrameworkIDs)),
+		LastUpdated: time.Now().Format(time.RFC3339),
+	}
+
+	for _, frameworkIDStr := range request.FrameworkIDs {
+		frameworkID, err := uuid.Parse(frameworkIDStr)
+		if err != nil {
+			log.Printf("WARN: Invalid framework ID: %s", frameworkIDStr)
+			continue
+		}
+
+		// Validate that framework is licensed for this tenant (RLS: tenant_framework_licenses)
+		var isLicensed bool
+		err = shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenantID, func(tx *sql.Tx) error {
+			return tx.QueryRowContext(context.Background(), `
+				SELECT EXISTS(
+					SELECT 1 FROM tenant_framework_licenses
+					WHERE tenant_id = $1 AND platform_framework_id = $2
+					  AND `+sqlActiveSubscription+`
+				)
+			`, tenantID, frameworkID).Scan(&isLicensed)
+		})
+		if err != nil || !isLicensed {
+			log.Printf("WARN: Framework %s not licensed for tenant %s", frameworkID, tenantID)
+			continue
+		}
+
+		result, err := s.evaluateSingleFramework(tenantID, frameworkID, request.Filters, includeDetails)
+		if err != nil {
+			log.Printf("WARN: Failed to evaluate framework %s: %v", frameworkID, err)
+			continue
+		}
+
+		response.Results = append(response.Results, *result)
+	}
+
+	return response, nil
+}
+
+// evaluateSingleFramework evaluates a single framework and returns the result
+func (s *FrameworkContextService) evaluateSingleFramework(tenantID, frameworkID uuid.UUID, filters models.ScenarioFilters, includeDetails bool) (*BatchEvaluateResult, error) {
+	// Get framework info
+	var framework models.PlatformFramework
+	err := s.db.Get(&framework, `
+		SELECT id, code, name, version, description, organization, status,
+		       is_platform_default, published_at, published_by, created_by, created_at, updated_at
+		FROM platform_frameworks
+		WHERE id = $1 AND status = 'published'
+	`, frameworkID)
+	if err != nil {
+		return nil, fmt.Errorf("framework not found: %w", err)
+	}
+
+	// Get all controls for the framework
+	var controls []struct {
+		ID               uuid.UUID `db:"id"`
+		ControlID        string    `db:"control_id"`
+		Title            string    `db:"title"`
+		BaselineSeverity string    `db:"baseline_severity"`
+	}
+	err = s.db.Select(&controls, `
+		SELECT id, control_id, title, baseline_severity
+		FROM platform_framework_controls
+		WHERE framework_id = $1
+		ORDER BY control_id
+	`, frameworkID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get controls: %w", err)
+	}
+
+	result := &BatchEvaluateResult{
+		FrameworkID:      frameworkID.String(),
+		FrameworkName:    framework.Name,
+		FrameworkCode:    framework.Code,
+		FrameworkVersion: framework.Version,
+		ControlsTotal:    len(controls),
+	}
+
+	affectedAssetSet := make(map[uuid.UUID]bool)
+	var controlBreakdown []BatchControlStatus
+	var findings []BatchFindingSummary
+
+	type controlFinding struct {
+		ID       uuid.UUID
+		AssetID  uuid.UUID
+		Severity string
+		Summary  string
+	}
+
+	// Load every ACTIVE, non-suppressed finding for ALL of the framework's
+	// controls in ONE query, keyed by control, instead of one query per control.
+	// A published framework routinely carries 50–150 controls, and this ran a
+	// separate round-trip for each of them on every batch evaluate.
+	//
+	// The read hits the RLS-policied compliance_findings table, so it runs
+	// inside a tenant tx that has set app.tenant_id.
+	findingsByControl := make(map[uuid.UUID][]controlFinding, len(controls))
+	controlIDs := make([]string, 0, len(controls))
+	for _, control := range controls {
+		controlIDs = append(controlIDs, control.ID.String())
+	}
+
+	ctx := context.Background()
+	if len(controlIDs) > 0 {
+		_ = shareddatabase.WithTenantTx(ctx, s.db.DB, tenantID, func(tx *sql.Tx) error {
+			query := `
+				SELECT control_id, id, asset_id, severity, summary
+				FROM compliance_findings
+				WHERE tenant_id = $1 AND control_id = ANY($2::uuid[])
+				  AND detection_state = 'ACTIVE'
+				  AND (workflow_status != 'SUPPRESSED' OR workflow_status IS NULL)
+				ORDER BY control_id
+			`
+			rows, qErr := tx.QueryContext(ctx, query, tenantID, pq.Array(controlIDs))
+			if qErr != nil {
+				if qErr != sql.ErrNoRows {
+					log.Printf("WARN: Failed to get findings for framework %s: %v", frameworkID, qErr)
+				}
+				return nil
+			}
+			defer func() { _ = rows.Close() }()
+
+			for rows.Next() {
+				var controlID uuid.UUID
+				var f controlFinding
+				if scanErr := rows.Scan(&controlID, &f.ID, &f.AssetID, &f.Severity, &f.Summary); scanErr != nil {
+					log.Printf("WARN: Failed to scan finding for framework %s: %v", frameworkID, scanErr)
+					continue
+				}
+				findingsByControl[controlID] = append(findingsByControl[controlID], f)
+			}
+			if rowsErr := rows.Err(); rowsErr != nil {
+				log.Printf("WARN: Failed to read findings for framework %s: %v", frameworkID, rowsErr)
+			}
+			return nil
+		})
+	}
+
+	// Roll the findings up per control, in control_id order (unchanged from the
+	// per-control-query version — `controls` is already ORDER BY control_id).
+	for _, control := range controls {
+		controlFindings := findingsByControl[control.ID]
+
+		findingCount := len(controlFindings)
+		status := "PASS"
+		severity := "Low"
+
+		if findingCount > 0 {
+			// Find highest severity
+			for _, f := range controlFindings {
+				affectedAssetSet[f.AssetID] = true
+				switch f.Severity {
+				case "Critical":
+					severity = "Critical"
+					status = "FAIL"
+				case "High":
+					if severity != "Critical" {
+						severity = "High"
+						status = "FAIL"
+					}
+				case "Med":
+					if severity == "Low" {
+						severity = "Med"
+						status = "WARN"
+					}
+				}
+
+				// Add to findings list if details requested
+				if includeDetails {
+					findings = append(findings, BatchFindingSummary{
+						ID:        f.ID.String(),
+						ControlID: control.ID.String(),
+						AssetID:   f.AssetID.String(),
+						Severity:  f.Severity,
+						Summary:   f.Summary,
+					})
+				}
+			}
+			result.ControlsFailing++
+		} else {
+			result.ControlsPassing++
+		}
+
+		if includeDetails {
+			controlBreakdown = append(controlBreakdown, BatchControlStatus{
+				ID:       control.ID.String(),
+				Name:     control.Title,
+				Status:   status,
+				Severity: severity,
+				Findings: findingCount,
+			})
+		}
+	}
+
+	// Calculate score
+	if result.ControlsTotal > 0 {
+		result.Score = (result.ControlsPassing * 100) / result.ControlsTotal
+	} else {
+		result.Score = 100
+	}
+
+	result.AffectedAssets = len(affectedAssetSet)
+
+	if includeDetails {
+		result.ControlBreakdown = controlBreakdown
+		result.Findings = findings
+	}
+
+	return result, nil
+}

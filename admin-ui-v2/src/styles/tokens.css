@@ -1,0 +1,65 @@
+/* VISTA brand tokens — the bound design-system foundation, ported from the
+   design kit's _ds/colors_and_type.css. These brand atoms (fonts, accent, blue)
+   are shared identically with the customer Console; the operator THEME that
+   sits on top of them lives in operator.css. Source of truth:
+   _incoming/admin-ui-v2-kit/design_handoff_vista_operations/prototype/_ds/colors_and_type.css */
+
+/* Type families resolve through the system-UI fallback stack defined below.
+   The brand webfonts (Archivo / DM Sans / Albert Sans) are NOT bundled: the
+   design kit pulled them from Google Fonts via @import, but this image's CSP is
+   same-origin only (`style-src 'self'`, matching frontend-v2), so that @import
+   was blocked at runtime and fell back anyway. To ship the real brand faces,
+   self-host the woff2 files + @font-face on both UIs (follow-up). */
+
+:root {
+  /* ---- Type families ---- */
+  --font-display: "Archivo Expanded", "Archivo", system-ui, sans-serif;
+  --font-head: "Archivo", system-ui, sans-serif;
+  --font-body: "DM Sans", system-ui, sans-serif;
+  --font-label: "Albert Sans", system-ui, sans-serif;
+
+  /* ---- Accent system (brand blue — was the gold signature; rationed hard
+     in the operator tool). Every brand-accent color resolves through these
+     tokens; never hardcode an accent hex or rgba tint in a component. ---- */
+  --accent: #3772FE;
+  --accent-deep: #2554D8;
+  --accent-light: #6F9BFF;
+  --accent-fg: #FFFFFF;
+  --accent-gradient: linear-gradient(180deg, #3772FE 0%, #4D83FF 30%, #6F9BFF 75%, #2554D8 100%);
+
+  /* ---- Brand blue (structural in the operator tool) + black ---- */
+  --vista-blue: #3772FE;
+  --vista-black: #0A0A0A;
+
+  /* ---- Status / severity / categorical tokens (operator palette) ----
+     Semantic colors: a red must mean danger, never "this hex looked nice".
+     Shade variants are deliberate contrast steps — keep them distinct.
+     Tint a family color with color-mix(in srgb, var(--danger) N%, transparent),
+     never a literal rgba. --info aliases the structural brand blue rather than
+     duplicating the hex; --op-blue stays the operator-layer consumer of it. */
+  --danger: #FF5A5A;        /* critical severity, destructive fills */
+  --danger-text: #FF6A6A;   /* danger as text/icon on op surfaces */
+  --danger-soft: #FF8A6A;   /* softest danger text — auth form hints */
+  --warn-strong: #F0883E;   /* high severity / needs-attention orange */
+  --warn: #E0A53B;          /* medium severity / caution amber */
+  --warn-deep: #C79A3A;     /* bronze amber — trial / open status */
+  --warn-light: #FFCF6B;    /* light amber — "Internal" ribbon text on accent */
+  --ok: #3FB984;            /* healthy / passing green */
+  --ok-lime: #9DBE4E;       /* low severity lime (yellow-green step above --ok) */
+  --info: var(--vista-blue);/* informational status blue */
+  --neutral: #8A93A0;       /* informational / inactive status grey */
+  /* categorical palette (category tags) */
+  --chart-1: #7C6FE8;       /* violet — maintenance status, device-agent tag */
+}
+
+/* Brand preset: gold — the original identity, kept switchable. The ACTIVE
+   brand is vista-blue (the :root values; no attribute needed). Set
+   <html data-brand="gold"> to restore it. --vista-blue and the status
+   tokens stay structural and do not move with the brand. */
+[data-brand="gold"] {
+  --accent: #D8A000;
+  --accent-deep: #BD8D00;
+  --accent-light: #FFD773;
+  --accent-fg: #1A1300;
+  --accent-gradient: linear-gradient(180deg, #D8A000 0%, #D8A73D 30%, #FFD773 75%, #BD8D00 100%);
+}

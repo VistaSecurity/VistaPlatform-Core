@@ -1,0 +1,29 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+{{- if .Values.networkPolicy.egressEnabled }}
+---
+# Default-deny egress when networkPolicy.egressEnabled is true. The allow
+# rules in allow-rules-egress.yaml grant the specific outbound traffic
+# that legitimate workloads need (kube-dns, datastores, backend-to-backend
+# HTTP, Internet for externalEgressBackends).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+{{- end }}
+{{- end }}

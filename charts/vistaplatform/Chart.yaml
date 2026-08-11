@@ -1,0 +1,18 @@
+apiVersion: v2
+name: vistaplatform
+description: Vista cryptographic asset inventory and compliance platform
+type: application
+version: 0.5.0
+appVersion: "v0.5.0"
+kubeVersion: ">=1.27.0-0"
+home: https://vistasecurity.io
+maintainers:
+  - name: VistaPlatform
+    email: support@vistasecurity.io
+keywords:
+  - cryptography
+  - compliance
+  - cbom
+  - inventory
+annotations:
+  artifacthub.io/license: FSL-1.1-ALv2

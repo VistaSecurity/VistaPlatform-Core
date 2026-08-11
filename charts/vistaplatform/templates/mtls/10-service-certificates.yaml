@@ -1,0 +1,95 @@
+{{/*
+Per-service mTLS Certificates.
+
+One Certificate per backend service in .Values.backends. Each emits a
+Secret containing tls.crt + tls.key + ca.crt with cert-manager's default
+filenames (NOT the dev-style server-cert.pem / client-cert.pem). The
+service-side env vars in backend/_deployment.tpl point at the new paths.
+
+Each cert is symmetric server+client (usages: server auth, client auth)
+matching dev's pattern of using the same cert for both inbound mTLS server
+and outbound mTLS client roles. SANs cover the in-cluster service DNS
+permutations.
+
+Plus a separate api-gateway client cert used by Traefik's ServersTransport
+for outbound mTLS to backends.
+*/}}
+{{- if .Values.serviceMtls.enabled }}
+{{- $cert := .Values.serviceMtls.certificate }}
+{{- range $name, $svc := .Values.backends }}
+{{- if $svc.enabled | default true }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $name }}-mtls
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "vistaplatform.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $name }}
+spec:
+  secretName: {{ $name }}-mtls
+  duration: {{ $cert.duration | quote }}
+  renewBefore: {{ $cert.renewBefore | quote }}
+  privateKey:
+    algorithm: {{ $cert.privateKey.algorithm }}
+    size: {{ $cert.privateKey.size }}
+    rotationPolicy: {{ $cert.privateKey.rotationPolicy }}
+  usages:
+    - server auth
+    - client auth
+  commonName: {{ $name }}
+  dnsNames:
+    - {{ $name }}
+    - {{ $name }}.{{ $.Release.Namespace }}
+    - {{ $name }}.{{ $.Release.Namespace }}.svc
+    - {{ $name }}.{{ $.Release.Namespace }}.svc.cluster.local
+    # Shared SAN so a single ServersTransport (serverName: <release>-backends) can
+    # verify every backend cert. Traefik load-balances to pod IPs, so it can't
+    # match a per-service DNS SAN; this common identity lets the gateway→backend
+    # mTLS hop verify the cert (platform-CA-signed + expected SAN) with one transport.
+    - {{ $.Release.Name }}-backends
+    {{- if and $.Values.agentMtls.enabled (hasKey $.Values.agentMtls.backends $name) }}
+    {{- $am := index $.Values.agentMtls.backends $name }}
+    {{- if $am.dnsName }}
+    # Agent/sensor mTLS passthrough SNI ( follow-up). The agent/sensor
+    # connects to this external hostname and the TLS terminates at this
+    # backend's :8444 listener (which presents THIS mesh cert). Including the
+    # hostname as a SAN lets the agent — now trusting the platform CA — pass
+    # server-name verification.
+    - {{ $am.dnsName }}
+    {{- end }}
+    {{- end }}
+  issuerRef:
+    name: {{ $.Release.Name }}-platform-ca-issuer
+    kind: Issuer
+{{- end }}
+{{- end }}
+---
+# api-gateway client cert — used by Traefik ServersTransport when calling
+# backends with mTLS. api-gateway pod itself doesn't terminate mTLS for
+# external clients (that's the IngressRoute's external TLS); this cert is
+# for the gateway-as-mTLS-client path to the upstream backend services.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: api-gateway-client-mtls
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api-gateway
+spec:
+  secretName: api-gateway-client-mtls
+  duration: {{ $cert.duration | quote }}
+  renewBefore: {{ $cert.renewBefore | quote }}
+  privateKey:
+    algorithm: {{ $cert.privateKey.algorithm }}
+    size: {{ $cert.privateKey.size }}
+    rotationPolicy: {{ $cert.privateKey.rotationPolicy }}
+  usages:
+    - client auth
+  commonName: api-gateway
+  issuerRef:
+    name: {{ .Release.Name }}-platform-ca-issuer
+    kind: Issuer
+{{- end }}

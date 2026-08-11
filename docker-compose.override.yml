@@ -1,0 +1,161 @@
+# Development overrides
+# This file is for development-specific configuration that differs from the base docker-compose.yml
+#
+# Two dev-wide concerns live here, applied per service:
+#   1. USE_MTLS=false — mTLS is enabled by default in docker-compose.yml for
+#      production parity, but dev talks plain HTTP on :8080.
+#   2. SERVICE_VERSION / CHART_VERSION / CHART_APP_VERSION — the version envs the
+#      Helm chart injects in a real deployment. Compose isn't a chart, so without
+#      these every service reports "unknown" and the About page can't show a
+#      version. start-session.sh stamps these into .env from `git describe`
+#      (e.g. v2.6.0-1-gb6d9f18, -dirty when the tree has uncommitted changes),
+#      so the page reports the actual revision the local images were built from.
+#      The :-dev fallback below applies only when they're unset (e.g. a raw
+#      `docker compose up` without start-session.sh).
+services:
+  auth-service:
+    environment:
+      - USE_MTLS=false
+      - RATE_LIMIT_LOGIN=50
+      - RATE_LIMIT_DEFAULT=200
+      - SERVICE_VERSION=${SERVICE_VERSION:-dev}
+      - CHART_VERSION=${CHART_VERSION:-dev}
+      - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
+
+  inventory-service:
+    environment:
+      - USE_MTLS=false
+      - SERVICE_VERSION=${SERVICE_VERSION:-dev}
+      - CHART_VERSION=${CHART_VERSION:-dev}
+      - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
+
+  compliance-engine:
+    environment:
+      - USE_MTLS=false
+      - SERVICE_VERSION=${SERVICE_VERSION:-dev}
+      - CHART_VERSION=${CHART_VERSION:-dev}
+      - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
+
+  cbom-service:
+    environment:
+      - USE_MTLS=false
+      - SERVICE_VERSION=${SERVICE_VERSION:-dev}
+      - CHART_VERSION=${CHART_VERSION:-dev}
+      - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
+
+  sensor-manager:
+    environment:
+      - USE_MTLS=false
+      - SENSOR_ARTIFACTS_DIR=/app/artifacts/sensor
+      - SERVICE_VERSION=${SERVICE_VERSION:-dev}
+      - CHART_VERSION=${CHART_VERSION:-dev}
+      - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
+    volumes:
+      - ./artifacts/sensor:/app/artifacts/sensor:ro
+
+  cluster-sensor-service:
+    environment:
+      - USE_MTLS=false
+      - SERVICE_VERSION=${SERVICE_VERSION:-dev}
+      - CHART_VERSION=${CHART_VERSION:-dev}
+      - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
+
+  admin-service:
+    environment:
+      - USE_MTLS=false
+      - SERVICE_VERSION=${SERVICE_VERSION:-dev}
+      - CHART_VERSION=${CHART_VERSION:-dev}
+      - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
+
+  monitoring-service:
+    environment:
+      - USE_MTLS=false
+      - SERVICE_VERSION=${SERVICE_VERSION:-dev}
+      - CHART_VERSION=${CHART_VERSION:-dev}
+      - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
+
+  resource-tracker-service:
+    environment:
+      - USE_MTLS=false
+      - SERVICE_VERSION=${SERVICE_VERSION:-dev}
+      - CHART_VERSION=${CHART_VERSION:-dev}
+      - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
+
+  tenant-health-service:
+    environment:
+      - USE_MTLS=false
+      - SERVICE_VERSION=${SERVICE_VERSION:-dev}
+      - CHART_VERSION=${CHART_VERSION:-dev}
+      - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
+
+  device-interrogation-service:
+    environment:
+      - USE_MTLS=false
+      - SERVICE_VERSION=${SERVICE_VERSION:-dev}
+      - CHART_VERSION=${CHART_VERSION:-dev}
+      - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
+
+  audit-service:
+    environment:
+      - USE_MTLS=false
+      - SERVICE_VERSION=${SERVICE_VERSION:-dev}
+      - CHART_VERSION=${CHART_VERSION:-dev}
+      - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
+
+  notification-service:
+    environment:
+      - USE_MTLS=false
+      - SERVICE_VERSION=${SERVICE_VERSION:-dev}
+      - CHART_VERSION=${CHART_VERSION:-dev}
+      - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
+
+  discovery-processor-service:
+    environment:
+      - USE_MTLS=false
+      - SERVICE_VERSION=${SERVICE_VERSION:-dev}
+      - CHART_VERSION=${CHART_VERSION:-dev}
+      - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
+
+  mcp-service:
+    environment:
+      - USE_MTLS=false
+      - SERVICE_VERSION=${SERVICE_VERSION:-dev}
+      - CHART_VERSION=${CHART_VERSION:-dev}
+      - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
+
+  # pcap-processor is defined in docker-compose.yml but is often not run in dev
+  # (CGO + libpcap build). When it IS started, these keep its About-page row
+  # consistent with the rest of the fleet instead of reporting "unknown".
+  pcap-processor:
+    environment:
+      - USE_MTLS=false
+      - SERVICE_VERSION=${SERVICE_VERSION:-dev}
+      - CHART_VERSION=${CHART_VERSION:-dev}
+      - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
+
+  # Dev-only Docker UI. Bind-mounts /var/run/docker.sock — a host docker
+  # socket inside a container is effectively root on the host, so this
+  # service is gated behind an opt-in compose profile. To use:
+  #
+  #   docker compose --profile portainer up -d portainer
+  #
+  # Plain `docker compose up` (with or without --profile <other>) will NOT
+  # start Portainer or mount the socket. Override files are dev-only by
+  # convention — the profile makes that boundary structural, not just
+  # convention.
+  portainer:
+    profiles: ["portainer"]
+    image: portainer/portainer-ce:2.27.2
+    container_name: crypto-portainer
+    restart: unless-stopped
+    ports:
+      - "${PORTAINER_HTTPS_HOST_PORT:-18004}:9443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    networks:
+      - crypto-network
+
+volumes:
+  portainer_data:
+    driver: local

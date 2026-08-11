@@ -1,0 +1,23 @@
+{{/*
+Shared volume between sensor-manager (writes uploaded PCAP files) and
+pcap-processor (reads them). ReadWriteOnce is sufficient because the
+sensor-manager Deployment carries a podAffinity (colocateWith:
+pcap-processor) that pins both pods to the same node, so both can mount
+the same RWO PVC.
+*/}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pcap-uploads
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pcap-uploads
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - {{ .Values.pcapUploads.accessMode }}
+  storageClassName: {{ .Values.datastores.storageClassName }}
+  resources:
+    requests:
+      storage: {{ .Values.pcapUploads.size }}

@@ -1,0 +1,75 @@
+# Caddy configuration for the Crypto Inventory Platform Vista tenant UI (frontend-v2)
+# Serves the React SPA with caching, security headers, and API proxying
+
+{
+	auto_https off
+	admin off
+}
+
+:3001 {
+	root * /srv
+
+	# Security headers
+	header {
+		X-Frame-Options "SAMEORIGIN"
+		X-Content-Type-Options "nosniff"
+		# X-XSS-Protection is deprecated and can introduce vulns in legacy browsers;
+		# "0" disables the legacy auditor. CSP below is the real defense.
+		X-XSS-Protection "0"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# CSP — same-origin everything. Tailwind requires style-src 'unsafe-inline'
+		# (utility-class arbitrary-style injection). React+Vite production output
+		# is a self-hosted bundle so script-src 'self' is sufficient. /api/* is
+		# proxied through this same Caddy so connect-src 'self' covers it. Add an
+		# external origin here rather than loosening 'self' if a future integration
+		# needs one (CDN, analytics, etc.).
+		Content-Security-Policy "default-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
+		# HSTS — Caddy serves HTTP locally; when this image sits behind Traefik
+		# HTTPS termination in the chart, this header passes through to the
+		# browser and enforces HTTPS for one year on any subdomain. No `preload`
+		# (would require an HSTS-preload submission).
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	}
+
+	# Gzip compression
+	encode gzip
+
+	# Health check endpoint
+	handle /health {
+		respond "healthy" 200
+	}
+
+	# Config files - no caching for runtime config
+	handle /config/* {
+		header Cache-Control "no-cache, no-store, must-revalidate"
+		header Pragma "no-cache"
+		file_server
+	}
+
+	# Proxy API calls to the Traefik API gateway
+	handle /api/* {
+		reverse_proxy crypto-api-gateway:80 {
+			header_up Host {host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 15s
+			}
+		}
+	}
+
+	# Static assets with long-lived cache
+	@static path *.js *.css *.png *.jpg *.jpeg *.gif *.ico *.svg
+	handle @static {
+		header Cache-Control "public, immutable, max-age=31536000"
+		file_server
+	}
+
+	# SPA fallback - serve files or fall back to index.html
+	handle {
+		try_files {path} /index.html
+		file_server
+	}
+}

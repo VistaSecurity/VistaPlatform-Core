@@ -1,0 +1,23 @@
+# values-minimal.yaml — minimal-footprint overlay (the chart defaults are
+# already minimal; this file makes the choice explicit and gives a place to
+# add cost-saving overrides if needed).
+#
+# Apply alongside the base values.yaml and your values:
+#
+#   helm install vistaplatform oci://.../charts/vistaplatform \
+#     -f values-minimal.yaml \
+#     -f values-customer.yaml
+#
+# Use this profile when:
+#   - Single-node RKE2 (lab / eval / our internal AWS RKE2 box)
+#   - You explicitly want the smallest possible footprint
+#   - You don't need fault tolerance across worker nodes
+#
+# All workloads run with replicas: 1. PodDisruptionBudgets do not engage
+# (the chart only emits PDBs when replicas > 1, which is correct — a PDB
+# blocking the only replica from draining would deadlock node maintenance).
+#
+# Cluster requirement: 1 node with at least 4 vCPU / 8 GiB RAM, 60 GiB disk.
+
+enableSpreadAcrossNodes: false
+defaultReplicas: 1

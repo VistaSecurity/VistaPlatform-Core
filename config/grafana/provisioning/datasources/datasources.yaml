@@ -1,0 +1,46 @@
+# Grafana Datasources Configuration
+apiVersion: 1
+
+datasources:
+  # Prometheus (metrics via Prometheus server — scrapes otel-collector which scrapes Traefik)
+  - name: Prometheus
+    uid: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+
+  # InfluxDB (time series metrics)
+  - name: InfluxDB
+    type: influxdb
+    access: proxy
+    url: http://influxdb:8086
+    jsonData:
+      version: Flux
+      organization: crypto-inventory
+      defaultBucket: metrics
+    secureJsonData:
+      token: $__env{INFLUXDB_TOKEN}
+    editable: false
+
+  # Jaeger (distributed traces)
+  - name: Jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    editable: false
+
+  # PostgreSQL (for direct audit log queries)
+  - name: PostgreSQL
+    type: postgres
+    url: postgres:5432
+    database: crypto_inventory
+    user: crypto_user
+    secureJsonData:
+      password: $__env{POSTGRES_PASSWORD}
+    jsonData:
+      sslmode: disable
+      maxOpenConns: 5
+      maxIdleConns: 2
+    editable: false

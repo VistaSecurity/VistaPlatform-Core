@@ -1,0 +1,156 @@
+Vista Platform {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+{{- $publicHost := include "vistaplatform.publicHost" . }}
+
+Verify the install:
+
+  1. Wait for the schema migration job to complete:
+       kubectl -n {{ .Release.Namespace }} wait --for=condition=complete --timeout=180s \
+         job -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=schema-migration
+
+     (Selected by label, not by name: the Job name carries a hash of its pod
+     template, so `job/{{ include "vistaplatform.fullname" . }}-schema-migration` does not exist.)
+
+  2. Wait for the backend and frontend pods to become Ready:
+       kubectl -n {{ .Release.Namespace }} rollout status deploy/auth-service --timeout=180s
+       kubectl -n {{ .Release.Namespace }} rollout status deploy/web-ui --timeout=180s
+       kubectl -n {{ .Release.Namespace }} rollout status deploy/admin-ui --timeout=180s
+
+  3. Run the bundled smoke test:
+       helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+{{- if eq .Values.tls.mode "none" }}
+
+  4. Reach the UI at http://{{ $publicHost }}
+
+  WARNING: TLS is disabled (tls.mode=none). This is intended for development
+  only. Do NOT expose this deployment to untrusted networks.
+{{- else }}
+
+  4. Reach the UI at https://{{ $publicHost }}
+{{- end }}
+
+{{- if eq (.Values.ingress.controller | default "traefik") "traefik" }}
+{{- $adminHost := .Values.tls.adminDnsName | default "" }}
+
+ADMIN PLANE
+{{- if not $adminHost }}
+
+  NOT ISOLATED — tls.adminDnsName is unset, so the admin console and the
+  cross-tenant platform-admin API are served on {{ $publicHost }} alongside the
+  tenant app, reachable by anyone who can reach that host. Their platform-admin
+  role check is the ONLY control on them.
+
+  Give the admin console its own hostname (e.g. admin.{{ $publicHost }}) to move
+  that API off the public host, then restrict it by source network:
+    tls.adminDnsName=admin.{{ $publicHost }}
+    adminPlane.ipAllowList.enabled=true
+    adminPlane.ipAllowList.sourceRange={<your operator CIDR>}
+{{- else if not .Values.adminPlane.restrictToAdminHost }}
+
+  SPLIT DISABLED — adminPlane.restrictToAdminHost is false, so the
+  platform-admin API remains reachable on the public host {{ $publicHost }} as
+  well as on {{ $adminHost }}. Turn it back on unless something outside your
+  operator network must call that API on the tenant host.
+{{- else if not .Values.adminPlane.ipAllowList.enabled }}
+
+  The platform-admin API is served on {{ $adminHost }} only; {{ $publicHost }}
+  returns 404 for it.
+
+  NO NETWORK CONTROL — adminPlane.ipAllowList is off, so anyone who can resolve
+  and reach {{ $adminHost }} reaches the admin login page and the whole admin
+  API. A hostname is not an access control. Restrict it to your operator
+  networks:
+    adminPlane.ipAllowList.enabled=true
+    adminPlane.ipAllowList.sourceRange={<your operator CIDR>}
+    # behind a load balancer, also set ipStrategy.depth — see values.yaml
+{{- else }}
+
+  Isolated: platform-admin API on {{ $adminHost }} only ({{ $publicHost }} returns
+  404 for it), restricted to {{ join ", " .Values.adminPlane.ipAllowList.sourceRange }}.
+
+  Verify from an address OUTSIDE that range — a check that cannot fail is
+  worse than no check. If Traefik sits behind a load balancer and
+  ipAllowList.ipStrategy.depth is wrong, the allow-list matches the balancer's
+  own address and admits everyone while appearing to work:
+
+    curl -s -o /dev/null -w '%{http_code}\n' https://{{ $adminHost }}/api/v1/admin-service/admin/auth/me
+      expect 403 from outside the range, 401 from inside it
+{{- end }}
+{{- end }}
+
+{{- if .Values.serviceMtls.enabled }}
+
+ENCRYPTED INTERNAL TRANSPORT IS ON (serviceMtls.enabled=true — default since #965)
+
+  In-cluster traffic (gateway→backend, service-to-service{{ if .Values.datastores.postgres.tls.enabled }}, Postgres{{ end }}{{ if .Values.datastores.nats.tls.enabled }}, NATS{{ end }}) is
+  mTLS-encrypted with per-service certs off a private Platform CA.
+
+  REQUIRED cluster prerequisites (this chart does NOT install them):
+    - cert-manager v1.13+  — issues the Platform CA + per-service certs.
+      The install fails fast if its CRDs are missing.
+    - Stakater Reloader    — restarts pods when a cert auto-rotates. The
+      install does NOT fail without it, but ~60 days from now the first cert
+      renewal will silently break mTLS if Reloader is absent. Verify it now:
+
+        kubectl get deploy -A -l app.kubernetes.io/name=reloader
+
+  To turn encrypted internal transport OFF (only for a cluster that cannot
+  provide the prerequisites), set all three to false:
+    serviceMtls.enabled=false
+    datastores.postgres.tls.enabled=false
+    datastores.nats.tls.enabled=false
+{{- end }}
+
+Verify chart authenticity (run on a machine with cosign installed):
+{{/*
+  Read through `default dict`, not directly. `helm upgrade --reuse-values`
+  carries the PREVIOUS release's values forward wholesale and ignores defaults
+  the new chart added, so on any release installed before this key existed
+  .Values.verification is nil — and a nil-pointer in NOTES.txt fails the whole
+  upgrade, not just the message. The fallback is the Core identity, matching
+  the default in values.yaml.
+*/}}
+{{- $verify := .Values.verification | default dict }}
+{{- $identity := $verify.certificateIdentityRegexp | default "https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*" }}
+
+  cosign verify {{ .Values.image.registry }}/{{ .Values.image.repoPrefix }}/vistaplatform:{{ .Chart.Version }} \
+    --certificate-identity-regexp '{{ $identity }}' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+  The same command verifies any individual service image — substitute the
+  image reference, e.g.
+  {{ .Values.image.registry }}/{{ .Values.image.repoPrefix }}/auth-service:{{ .Chart.AppVersion }}
+
+  Signing is keyless, so there is no key to trust: the signing identity IS
+  the release workflow named in the regexp above.
+
+For day-2 operations (upgrade, backup, support bundle), see the customer
+deployment guide at docsv4/core/operate/deployment/rke2-v1/deployment-guide.md.
+
+{{- if .Release.IsUpgrade }}
+
+UPGRADE NOTES
+
+  - Use `helm upgrade --reset-then-reuse-values` for cross-version upgrades.
+    `--reuse-values` carries the previous release's user-supplied image.tag
+    forward verbatim, which silently pins new pods to old image bytes — the
+    chart bumps, the running code does not, and helm reports success.
+
+  - For other edge-case upgrade scenarios (env-shape migrations, RWO PVC
+    deadlocks), see "Upgrade" in the deployment guide:
+    docsv4/core/operate/deployment/rke2-v1/deployment-guide.md
+{{- if .Values.serviceMtls.enabled }}
+
+  - ENCRYPTED INTERNAL TRANSPORT is now ON by default (#965). If you are
+    upgrading a release that previously ran with all three toggles OFF, do
+    NOT let this single upgrade flip them all at once. Stage it:
+      1. helm upgrade with serviceMtls.enabled=true only (postgres/nats TLS
+         still false) — provisions the Platform CA + per-service certs.
+      2. a later helm upgrade enabling datastores.postgres.tls.enabled and
+         datastores.nats.tls.enabled.
+    Toggling postgres.tls on a live release recreates the schema-migration
+    Job (the former #421 immutability bug is fixed by #983). See
+    deployment-guide §5E. To keep the prior all-off posture on this release,
+    set all three toggles to false in your values.
+{{- end }}
+{{- end }}

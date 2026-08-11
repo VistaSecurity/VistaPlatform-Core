@@ -1,0 +1,26 @@
+{{- if eq .Values.tls.mode "certManager" }}
+{{- if not .Values.tls.issuerRef.name }}
+{{- fail "tls.mode is certManager but tls.issuerRef.name is empty. Set it to the name of a (Cluster)Issuer cert-manager already manages on this cluster." }}
+{{- end }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "vistaplatform.fullname" . }}-tls
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "vistaplatform.fullname" . }}-tls
+  issuerRef:
+    # cert-manager 1.16+ rejects `apiVersion` on issuerRef; correct field is `group`.
+    group: {{ .Values.tls.issuerRef.group | default "cert-manager.io" }}
+    kind: {{ .Values.tls.issuerRef.kind }}
+    name: {{ .Values.tls.issuerRef.name }}
+  commonName: {{ .Values.tls.dnsName }}
+  dnsNames:
+    - {{ .Values.tls.dnsName }}
+    {{- if .Values.tls.adminDnsName }}
+    - {{ .Values.tls.adminDnsName }}
+    {{- end }}
+  duration: 2160h    # 90 days
+  renewBefore: 360h  # 15 days
+{{- end }}

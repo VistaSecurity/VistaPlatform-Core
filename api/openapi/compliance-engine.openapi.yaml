@@ -1,0 +1,5514 @@
+openapi: 3.1.0
+info:
+  title: VistaPlatform — compliance-engine API
+  version: "0.1.0"
+  description: |
+    Spec-first contract for compliance-engine (ADR-0001). Sixth vertical slice
+    overall; second slice for the compliance-engine service after the
+    frameworks slice that introduced this file.
+
+    ## Scope of this file
+
+    Covers the tenant-facing surface on the v1 path prefix
+    `/api/v1/compliance-engine`. Two resource groups so far:
+
+    **Frameworks** (first compliance-engine slice):
+
+      - `GET    /frameworks/published`           — list published platform frameworks (with per-tenant license flag)
+      - `GET    /frameworks/published/{id}`      — view one published platform framework (controls hidden when unlicensed)
+      - `GET    /frameworks/licenses`            — list the tenant's framework subscriptions
+      - `GET    /frameworks/available`           — list published frameworks tagged with license + platform-default flags
+      - `GET    /frameworks/default`             — get the tenant's current default framework
+      - `POST   /frameworks/subscribe`           — self-service subscribe to a platform framework
+      - `DELETE /frameworks/subscribe/{frameworkId}` — cancel a framework subscription
+      - `PUT    /frameworks/default`             — set the tenant's default framework
+
+    **Tickets** (this slice — the unified ticketing system; see CLAUDE.md
+    "Ticketing System (compliance-engine)"):
+
+      - `GET    /tickets`                        — list/filter the tenant's tickets (paginated)
+      - `POST   /tickets`                        — create a ticket (any category)
+      - `GET    /tickets/stats`                  — aggregate counts (by status, by category, overdue, total)
+      - `GET    /tickets/progress`               — time-series remediation progress over the requested window
+      - `GET    /tickets/{id}`                   — fetch a single ticket
+      - `PUT    /tickets/{id}`                   — partial update (status, priority, assignment, etc.)
+      - `DELETE /tickets/{id}`                   — delete a ticket (comments cascade)
+      - `GET    /tickets/{id}/comments`          — list a ticket's comments
+      - `POST   /tickets/{id}/comments`          — add a comment to a ticket
+
+    Out of scope for these slices:
+
+      - Tenant-authored framework CRUD (`/frameworks/tenant/*`) — Enterprise-tier
+        custom-policies surface.
+      - Control / measurement editing — same custom-policies surface.
+      - Threshold overrides (`/threshold-overrides/*`) — premium add-on.
+      - User-level framework preference (`/frameworks/user-preference`) — per-user
+        view setting, orthogonal to subscription identity.
+      - Workspace status (`/frameworks/status`) — owned by workspace_handlers,
+        separate handler package.
+      - Platform-admin framework authoring (admin-ui surface).
+      - Legacy batch `POST /frameworks/licenses` + `PUT /frameworks/licenses/unlock`
+        — superseded by the subscribe/cancel/default trio above and flagged
+        deprecated in the web-ui client.
+
+    ## Shape status (important)
+
+    These paths document the **current, pre-envelope shapes** the service
+    returns today, captured from the real gin handlers
+    (`services/compliance-engine/internal/handlers/{tenant_framework_handlers,framework_license_handlers}.go`):
+    list endpoints wrap a top-level key like `frameworks` / `licenses` /
+    `default_framework`, single GETs wrap as `{ "framework": {...}, "licensed":
+    bool }`, mutations return `{ "message": "..." }`, errors as `{ "error":
+    "string" }` (some 400s also carry a free-form `details` field). They are
+    specced as-is per ADR-0001 step 2, and the Go contract test
+    (`services/compliance-engine/internal/handlers/framework_contract_test.go`)
+    asserts the live handlers match them.
+
+    The **go-forward ADR-0002 envelope** (`Error`, `Pagination`, the `data`
+    wrapper) is defined under `components.schemas` as the documented standard
+    that NEW or HARDENED endpoints conform to. The current v1 framework paths
+    do not yet use it; they are hardened to it when the frontend-v2 surface
+    first consumes them (ADR-0001 step 5), at which point this file and the
+    contract test move together.
+  contact:
+    name: VistaPlatform Platform
+servers:
+  - url: /api/v1/compliance-engine
+    description: compliance-engine, mounted behind the API gateway.
+
+tags:
+  - name: frameworks
+    description: Tenant-facing framework reads + subscription operations.
+  - name: tickets
+    description: Unified ticket CRUD, comments, stats, and progress trend.
+  - name: findings
+    description: >
+      Compliance findings reads — per-asset findings, a finding's change
+      history, and aggregate statistics. UI consumer:
+      web-ui/src/services/compliance-api.ts (Risk & Compliance workspace).
+  - name: scenarios
+    description: >
+      Compliance what-if scenarios — named, saved filter sets evaluated against
+      a framework. Reads only in this slice.
+  - name: overrides
+    description: >
+      Compliance control overrides (severity / applicability adjustments) on a
+      framework's controls. Reads only in this slice.
+  - name: remediation-plans
+    description: >
+      Remediation plans — grouped sets of findings worked as a unit, with
+      progress rollups. Reads only in this slice. UI consumer:
+      web-ui/src/services/compliance-api.ts.
+  - name: custom-policies
+    description: >
+      Tenant-authored frameworks (custom policies) — full CRUD over a tenant's
+      own frameworks, controls, and control-measurement mappings. Mutations are
+      gated by the `custom_policies` Enterprise feature flag. UI consumer:
+      web-ui/src/services/frameworks-api.ts.
+  - name: evaluation
+    description: >
+      Framework evaluation reads — aggregate compliance score, per-framework
+      status, the consolidated framework-context payload, and multi/batch
+      framework evaluation. UI consumers: web-ui/src/services/compliance-api.ts
+      and frameworks-api.ts (Risk & Compliance workspace).
+  - name: alerts
+    description: >
+      Stateful alert engine (#943) — tenant-facing reads (list, stats, one alert
+      with its evidence chain) and the lifecycle mutations (acknowledge, snooze,
+      unsnooze, resolve, create-ticket-from-alert). Reads are open to any member;
+      mutations are gated by the `alerts.manage` permission. One open alert
+      exists per (tenant, alert_type, subject); repeated raises escalate it. UI
+      consumer: web-ui remediation surface.
+  - name: alert-catalog
+    description: >
+      Tenant alert catalog (Settings → Alert Rules) — registry alert types
+      overlaid with tenant enable/preference state and, for ladder types
+      (currently certificate_expiring), the effective escalation ladder
+      including rungs projected from activated compliance policies. Reads
+      open to any member; the update is gated by `alerts.manage`. UI
+      consumer: web-ui Settings → Alert Rules.
+  - name: admin-alerts
+    description: >
+      Platform-track stateful alerts (service_down, tenant_health_degraded, …)
+      raised under the sentinel platform tenant. Platform-admin only, read-only
+      here. UI consumer: admin-ui-v2 System Health → Alerts.
+
+paths:
+  /plans:
+    get:
+      operationId: listPlans
+      tags: [remediation-plans]
+      summary: List the tenant's remediation plans
+      responses:
+        "200":
+          description: A page of remediation plans.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RemediationPlanListResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    post:
+      operationId: createPlan
+      tags: [remediation-plans]
+      summary: Create a remediation plan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePlanRequest"
+      responses:
+        "201":
+          description: The created plan.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlanMutationResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /plans/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Plan UUID.
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getPlan
+      tags: [remediation-plans]
+      summary: Get a remediation plan by id
+      responses:
+        "200":
+          description: The remediation plan.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RemediationPlanResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    put:
+      operationId: updatePlan
+      tags: [remediation-plans]
+      summary: Update a remediation plan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdatePlanRequest"
+      responses:
+        "200":
+          description: The updated plan.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlanMutationResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    delete:
+      operationId: deletePlan
+      tags: [remediation-plans]
+      summary: Delete a remediation plan
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /plans/{id}/progress:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Plan UUID.
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getPlanProgress
+      tags: [remediation-plans]
+      summary: Get a remediation plan's progress rollup
+      responses:
+        "200":
+          description: The plan progress rollup.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlanProgress"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /plans/{id}/items:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Plan UUID.
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: listPlanItems
+      tags: [remediation-plans]
+      summary: List a remediation plan's items (findings, with joined detail)
+      responses:
+        "200":
+          description: The plan's items.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlanItemsResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    post:
+      operationId: addPlanItem
+      tags: [remediation-plans]
+      summary: Add a finding to a remediation plan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddPlanItemRequest"
+      responses:
+        "201":
+          description: The added item.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlanItemMutationResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "409":
+          description: Finding already in the plan.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /plans/{id}/items/bulk:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Plan UUID.
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: addPlanItemsBulk
+      tags: [remediation-plans]
+      summary: Add multiple findings to a remediation plan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddPlanItemsBulkRequest"
+      responses:
+        "201":
+          description: 'Items added — `{ "message": "...", "added": N }`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlanItemsBulkResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /plans/{id}/items/{itemId}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Plan UUID.
+        schema:
+          type: string
+          format: uuid
+      - name: itemId
+        in: path
+        required: true
+        description: Plan item UUID.
+        schema:
+          type: string
+          format: uuid
+    delete:
+      operationId: removePlanItem
+      tags: [remediation-plans]
+      summary: Remove a finding from a remediation plan
+      responses:
+        "200":
+          description: Removed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /plans/{id}/items/{itemId}/ticket:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Plan UUID.
+        schema:
+          type: string
+          format: uuid
+      - name: itemId
+        in: path
+        required: true
+        description: Plan item UUID.
+        schema:
+          type: string
+          format: uuid
+    put:
+      operationId: linkTicketToPlanItem
+      tags: [remediation-plans]
+      summary: Link a ticket to a remediation plan item
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LinkTicketRequest"
+      responses:
+        "200":
+          description: Linked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /scenarios:
+    get:
+      operationId: listScenarios
+      tags: [scenarios]
+      summary: List the tenant's compliance scenarios
+      responses:
+        "200":
+          description: The tenant's scenarios.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScenarioListResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    post:
+      operationId: createScenario
+      tags: [scenarios]
+      summary: Create a compliance scenario
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateScenarioRequest"
+      responses:
+        "201":
+          description: The created scenario.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScenarioMutationResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "409":
+          description: A scenario with that name already exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /scenarios/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Scenario UUID.
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getScenario
+      tags: [scenarios]
+      summary: Get a compliance scenario by id
+      responses:
+        "200":
+          description: The scenario.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScenarioResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    put:
+      operationId: updateScenario
+      tags: [scenarios]
+      summary: Update a compliance scenario
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateScenarioRequest"
+      responses:
+        "200":
+          description: The updated scenario.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScenarioMutationResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    delete:
+      operationId: deleteScenario
+      tags: [scenarios]
+      summary: Delete a compliance scenario
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /overrides:
+    get:
+      operationId: listOverrides
+      tags: [overrides]
+      summary: List the tenant's compliance control overrides
+      description: Optionally filtered by scenario_id; returns global overrides when unset.
+      responses:
+        "200":
+          description: The tenant's overrides.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OverrideListResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    post:
+      operationId: createOverride
+      tags: [overrides]
+      summary: Create a compliance control override
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOverrideRequest"
+      responses:
+        "201":
+          description: The created override.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OverrideMutationResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /overrides/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Override UUID.
+        schema:
+          type: string
+          format: uuid
+    delete:
+      operationId: deleteOverride
+      tags: [overrides]
+      summary: Delete a compliance control override
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /findings:
+    get:
+      operationId: listFindings
+      tags: [findings]
+      summary: List the tenant's compliance findings
+      description: >
+        Returns a paginated page of the tenant's ACTIVE compliance findings,
+        newest-seen first, with the owning asset joined onto each finding for
+        display (no per-asset N+1). Unlike the per-asset list, suppressed
+        findings are included so a triage surface can show and un-suppress
+        them — narrow with `workflow_status` when they aren't wanted.
+        Added for the frontend-v2 Findings workflow surface (issue #500).
+      parameters:
+        - name: page
+          in: query
+          description: 1-based page number (default 1).
+          schema:
+            type: integer
+            minimum: 1
+        - name: page_size
+          in: query
+          description: Page size (default 50, max 200).
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+        - name: workflow_status
+          in: query
+          description: Case-insensitive filter — NEW / NOTIFIED / RESOLVED / SUPPRESSED.
+          schema:
+            type: string
+        - name: severity
+          in: query
+          description: Case-insensitive filter — Low / Med / High / Critical ("medium" is accepted for Med).
+          schema:
+            type: string
+        - name: assigned_to
+          in: query
+          description: Findings assigned to this user. Takes precedence over `unassigned`.
+          schema:
+            type: string
+            format: uuid
+        - name: unassigned
+          in: query
+          description: When `true`, only findings with no assignee.
+          schema:
+            type: boolean
+        - name: control_id
+          in: query
+          description: Findings on one framework control.
+          schema:
+            type: string
+            format: uuid
+        - name: framework_id
+          in: query
+          description: Findings on any control of this platform or tenant framework.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: A page of findings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FindingListResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /findings/statistics:
+    get:
+      operationId: getFindingStatistics
+      tags: [findings]
+      summary: Aggregate finding statistics for the current tenant
+      description: Returns counts of findings by detection state and workflow status.
+      responses:
+        "200":
+          description: The finding statistics.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FindingStatistics"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /findings/by-control:
+    get:
+      operationId: getFindingsByControl
+      tags: [findings]
+      summary: Active findings grouped by framework control (top exposures)
+      description: >
+        Returns active findings aggregated per framework control — worst
+        severity, finding count, affected-asset count, and a per-severity
+        breakdown — ranked worst-severity → count → affected-assets. Backs the
+        Posture "highest-priority exposures" list. Read off the materialized
+        compliance_findings table, so it agrees with the Findings page.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 5, minimum: 1, maximum: 50 }
+          description: Maximum number of control groups to return (default 5).
+      responses:
+        "200":
+          description: The control groups, ranked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FindingsByControlResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /findings/{id}/assign:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Finding UUID.
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: assignFindingOwner
+      tags: [findings]
+      summary: Assign an owner to a finding
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssignFindingRequest"
+      responses:
+        "200":
+          description: Assigned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    delete:
+      operationId: unassignFindingOwner
+      tags: [findings]
+      summary: Remove a finding's owner assignment
+      responses:
+        "200":
+          description: Unassigned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /findings/{id}/evidence-id:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Finding UUID.
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getFindingEvidenceId
+      tags: [findings]
+      summary: Get a finding's copyable evidence id / reference
+      responses:
+        "200":
+          description: 'The evidence id — `{ "evidence_id": ..., "evidence_ref": ..., "copyable": true }`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidenceIdResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /findings/{id}/workflow-status:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Finding UUID.
+        schema:
+          type: string
+          format: uuid
+    put:
+      operationId: updateFindingWorkflowStatus
+      tags: [findings]
+      summary: Update a finding's workflow status (acknowledge / resolve / suppress)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateWorkflowStatusRequest"
+      responses:
+        "200":
+          description: 'The updated finding — `{ "finding": {...} }`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FindingResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /findings/{id}/history:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Finding UUID.
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getFindingHistory
+      tags: [findings]
+      summary: Get a finding's change history
+      responses:
+        "200":
+          description: The finding's change-history entries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FindingHistoryResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /assets/{assetId}/findings:
+    parameters:
+      - name: assetId
+        in: path
+        required: true
+        description: Asset UUID.
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getFindingsByAsset
+      tags: [findings]
+      summary: List the compliance findings for an asset
+      responses:
+        "200":
+          description: The asset's findings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FindingsByAssetResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /frameworks/published:
+    get:
+      operationId: listPublishedFrameworks
+      tags: [frameworks]
+      summary: List published platform frameworks
+      description: >
+        Returns every platform framework whose status is `published`. When a
+        tenant context is present the handler returns each framework decorated
+        with `is_licensed` (the with-license shape); without a tenant context it
+        falls back to the bare PublishedFramework list. The frontend always
+        calls this from an authenticated tenant context, so the with-license
+        shape is the practical surface.
+      responses:
+        "200":
+          description: The list of published platform frameworks.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishedFrameworkListResponse"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "Without a tenant context the response omits is_licensed on each framework (the handler picks a different service method). In practice the gateway always supplies tenant context, but the schema declares is_licensed as optional to capture both shapes."
+
+  /frameworks/published/{id}:
+    parameters:
+      - $ref: "#/components/parameters/FrameworkId"
+    get:
+      operationId: getPublishedFramework
+      tags: [frameworks]
+      summary: View a published platform framework
+      description: >
+        Returns one published platform framework with its full control +
+        measurement detail. Control detail is visible to ALL tenants for
+        transparency — a tenant must be able to read what each control measures
+        so a posture score is explainable. The `licensed` flag is informational
+        only (true when the tenant has an active subscription, false otherwise);
+        it no longer gates `controls`. Per-framework billing was retired in
+        ADR-0014.
+      responses:
+        "200":
+          description: The framework, including its controls + measurements.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishedFrameworkViewResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "`licensed` is informational (activated vs available) and does NOT change the response shape. `controls` is present for published frameworks regardless of license."
+
+  /frameworks/licenses:
+    get:
+      operationId: listLicensedFrameworks
+      tags: [frameworks]
+      summary: List the tenant's framework subscriptions
+      description: >
+        Returns every TenantFrameworkLicense row for the current tenant
+        (active, expired, and cancelled), each joined with its platform framework.
+      responses:
+        "200":
+          description: The tenant's framework licenses (subscriptions).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicensedFrameworkListResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "Missing-or-nil tenant context returns 400 (not 401) with `{\"error\":\"Tenant ID is required\"}`. The 401 path only fires when the context key itself is absent."
+
+  # ============================================================
+  # Platform-admin framework authoring (/api/v1/compliance-engine/admin/*).
+  # Platform-admin only (RequirePlatformAdmin). Backs the admin-ui-v2 Catalog →
+  # Frameworks authoring surface. Phase 1 = framework lifecycle (list incl.
+  # drafts, create, edit, publish/unpublish, delete); control + measurement
+  # authoring endpoints are a follow-up slice.
+  # ============================================================
+  /admin/alerts:
+    get:
+      operationId: adminListPlatformAlerts
+      tags: [admin-alerts]
+      summary: List platform-track stateful alerts (platform admin)
+      description: >
+        Lists the stateful alerts raised under the sentinel platform tenant
+        (service_down, tenant_health_degraded, …). Platform-admin only — no
+        tenant context is used; the handler always scopes to the reserved
+        platform tenant. Filter with the same query params as the tenant
+        `/alerts` read.
+      parameters:
+        - $ref: "#/components/parameters/AlertStatusFilter"
+        - $ref: "#/components/parameters/AlertSeverityFilter"
+        - $ref: "#/components/parameters/AlertTypeFilter"
+        - $ref: "#/components/parameters/AlertLimitParam"
+      responses:
+        "200":
+          description: The platform-track alerts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertListResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /admin/frameworks:
+    get:
+      operationId: adminListFrameworks
+      tags: [admin-frameworks]
+      summary: List all platform frameworks (platform admin)
+      description: >
+        Lists every platform framework — draft, published, and archived — with
+        controls loaded. Platform-admin only. Optional `status` filter.
+      parameters:
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+            enum: [draft, published, archived]
+          description: Filter by lifecycle status.
+      responses:
+        "200":
+          description: All platform frameworks.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminFrameworkListResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    post:
+      operationId: adminCreateFramework
+      tags: [admin-frameworks]
+      summary: Create a platform framework (draft)
+      description: Creates a new platform framework in draft status. Platform-admin only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformFrameworkInput"
+      responses:
+        "201":
+          description: Framework created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminFrameworkResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /admin/frameworks/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    put:
+      operationId: adminUpdateFramework
+      tags: [admin-frameworks]
+      summary: Update a platform framework (draft only)
+      description: Updates framework metadata. Only frameworks in draft status can be updated.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformFrameworkInput"
+      responses:
+        "200":
+          description: Framework updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminFrameworkResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    delete:
+      operationId: adminDeleteFramework
+      tags: [admin-frameworks]
+      summary: Delete a platform framework
+      responses:
+        "200":
+          description: Framework deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /admin/frameworks/{id}/publish:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: adminPublishFramework
+      tags: [admin-frameworks]
+      summary: Publish or archive a platform framework
+      description: >
+        Sets the framework's lifecycle status. `published` makes it
+        tenant-visible and activatable (and triggers the ADR-0014 reconcile
+        fan-out); `archived` retires it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishFrameworkInput"
+      responses:
+        "200":
+          description: Framework status changed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminFrameworkResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /admin/tenants/{tenantId}/reevaluate:
+    parameters:
+      - in: path
+        name: tenantId
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: adminReevaluateTenant
+      tags: [admin-frameworks]
+      summary: Re-evaluate a tenant's inventory against all frameworks
+      description: >
+        Platform-admin action (ADR-0015). Enqueues a bounded, asynchronous full
+        re-evaluation of the tenant's inventory against every published framework's
+        controls. Findings reconcile idempotently, so it is safe to re-run; it is an
+        explicit, extraordinary action (suspected drift, an engine fix, a bulk
+        import) — there is no scheduled re-evaluation. Returns 202 once enqueued.
+      responses:
+        "202":
+          description: Re-evaluation enqueued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /admin/frameworks/{id}/unpublish:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: adminUnpublishFramework
+      tags: [admin-frameworks]
+      summary: Unpublish (archive) a platform framework
+      description: Convenience for archiving — equivalent to publish with status `archived`.
+      responses:
+        "200":
+          description: Framework unpublished.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminFrameworkResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  # ---- Control authoring (admin framework Phase 2a) ----
+  /admin/frameworks/{id}/controls:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: adminCreateControl
+      tags: [admin-frameworks]
+      summary: Add a control to a platform framework
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformFrameworkControlInput"
+      responses:
+        "201":
+          description: Control created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminControlResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /admin/frameworks/{id}/controls/{controlId}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - in: path
+        name: controlId
+        required: true
+        schema:
+          type: string
+          format: uuid
+    put:
+      operationId: adminUpdateControl
+      tags: [admin-frameworks]
+      summary: Update a platform framework control
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformFrameworkControlInput"
+      responses:
+        "200":
+          description: Control updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminControlResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    delete:
+      operationId: adminDeleteControl
+      tags: [admin-frameworks]
+      summary: Delete a platform framework control
+      responses:
+        "200":
+          description: Control deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  # ---- Measurement rule authoring (admin framework Phase 2b) ----
+  /measurement-types:
+    get:
+      operationId: listMeasurementTypes
+      tags: [admin-frameworks]
+      summary: List measurement types (rule-builder catalog)
+      description: >
+        The catalog of measurement types a control rule can target (TLS version,
+        key size, cert expiry, …) with data type, allowed rule types, valid
+        operators, and enum values. Drives the measurement rule builder.
+      responses:
+        "200":
+          description: Measurement types.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeasurementTypeListResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /admin/controls/{id}/measurements:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: adminListControlMeasurements
+      tags: [admin-frameworks]
+      summary: List a control's measurement rules
+      responses:
+        "200":
+          description: Measurement rules for the control.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeasurementListResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    post:
+      operationId: adminAddControlMeasurement
+      tags: [admin-frameworks]
+      summary: Add a measurement rule to a control
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ControlMeasurementInput"
+      responses:
+        "201":
+          description: Measurement added.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminMeasurementResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /admin/controls/{id}/measurements/{measurementId}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - in: path
+        name: measurementId
+        required: true
+        schema:
+          type: string
+          format: uuid
+    put:
+      operationId: adminUpdateControlMeasurement
+      tags: [admin-frameworks]
+      summary: Update a control measurement rule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ControlMeasurementInput"
+      responses:
+        "200":
+          description: Measurement updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminMeasurementResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    delete:
+      operationId: adminDeleteControlMeasurement
+      tags: [admin-frameworks]
+      summary: Delete a control measurement rule
+      responses:
+        "200":
+          description: Measurement deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /frameworks/available:
+    get:
+      operationId: getAvailableFrameworks
+      tags: [frameworks]
+      summary: List published frameworks with license + platform-default flags
+      description: >
+        Returns every published platform framework tagged with `is_licensed`
+        (does this tenant already subscribe?) and `is_platform_default`. Used
+        by the framework selection UI to render subscribe/unsubscribe affordances.
+      responses:
+        "200":
+          description: Published frameworks with per-tenant flags.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AvailableFrameworkListResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "Same nil-tenant 400 quirk as /frameworks/licenses."
+
+  /frameworks/default:
+    get:
+      operationId: getDefaultFramework
+      tags: [frameworks]
+      summary: Get the tenant's default framework
+      description: >
+        Returns the tenant's default framework — their licensed default if one
+        is set, otherwise the platform default. The wrapper key carries the
+        result; `framework_type` distinguishes `licensed` vs `platform_default`.
+      responses:
+        "200":
+          description: The default framework descriptor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DefaultFrameworkResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFoundWithDetails"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "When the tenant row itself doesn't exist this returns 404 with an extra free-form `details` field on the error envelope — the only published-frameworks endpoint that distinguishes tenant-missing from generic server error."
+    put:
+      operationId: setDefaultFramework
+      tags: [frameworks]
+      summary: Set the tenant's default framework
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetDefaultFrameworkRequest"
+      responses:
+        "200":
+          description: The default framework was updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "Any service-layer failure (framework not licensed, framework not found, DB error) collapses to 400 carrying the raw service error string. The 500 path is never taken by the current handler."
+
+  /frameworks/subscribe:
+    post:
+      operationId: subscribeFramework
+      tags: [frameworks]
+      summary: Self-service subscribe to a platform framework
+      description: >
+        Creates an active tenant_framework_licenses row for the current tenant.
+        `provisioned_by` is forced to `self_service` and `expires_at` to null —
+        the request body's `framework_id` and `set_as_default` are the only
+        fields read.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscribeFrameworkRequest"
+      responses:
+        "201":
+          description: Subscription created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "Service errors (already subscribed, framework not published, tier limit reached, DB error) all return 400 with the raw service error string in `error`. No 409 for duplicate subscription, no 402/403 for tier-limit denial."
+
+  /frameworks/subscribe/{frameworkId}:
+    parameters:
+      - $ref: "#/components/parameters/FrameworkIdQuery"
+    delete:
+      operationId: cancelSubscription
+      tags: [frameworks]
+      summary: Cancel a framework subscription
+      description: >
+        Marks the tenant's subscription to the given framework as `cancelled`.
+        The license row is preserved (not deleted) so historical references
+        remain valid.
+      responses:
+        "200":
+          description: Subscription cancelled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "Cancelling a subscription that doesn't exist returns 400, not 404."
+
+  # ============================================================
+  # Tenant frameworks (custom policies) — Enterprise-tier CRUD over a
+  # tenant's own frameworks, controls, and control-measurement mappings.
+  # web-ui consumer: src/services/frameworks-api.ts. Mutations are gated by
+  # the `custom_policies` feature flag (403 when unentitled) and the
+  # `compliance.update` permission; reads stay open.
+  # ============================================================
+  /frameworks/tenant:
+    get:
+      operationId: listTenantFrameworks
+      tags: [custom-policies]
+      summary: List the tenant's custom frameworks
+      description: Returns every framework the tenant has authored.
+      responses:
+        "200":
+          description: The tenant's frameworks.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantFrameworkListResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    post:
+      operationId: createTenantFramework
+      tags: [custom-policies]
+      summary: Create a custom framework
+      description: >
+        Creates a tenant-authored framework. Gated by the `custom_policies`
+        feature flag (403 when unentitled). Returns the created framework under
+        `framework`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantFrameworkInput"
+      responses:
+        "201":
+          description: Framework created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantFrameworkResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /frameworks/tenant/{id}:
+    parameters:
+      - $ref: "#/components/parameters/FrameworkId"
+    get:
+      operationId: getTenantFramework
+      tags: [custom-policies]
+      summary: Get one of the tenant's custom frameworks
+      description: Returns the tenant framework under `framework`.
+      responses:
+        "200":
+          description: The tenant framework.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantFrameworkResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    put:
+      operationId: updateTenantFramework
+      tags: [custom-policies]
+      summary: Update a custom framework
+      description: >
+        Updates a tenant-authored framework's name/version/description. Gated by
+        the `custom_policies` feature flag (403 when unentitled).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantFrameworkInput"
+      responses:
+        "200":
+          description: Framework updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantFrameworkResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    delete:
+      operationId: deleteTenantFramework
+      tags: [custom-policies]
+      summary: Delete a custom framework
+      description: >
+        Deletes a tenant-authored framework. Gated by the `custom_policies`
+        feature flag (403 when unentitled).
+      responses:
+        "200":
+          description: Framework deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /frameworks/tenant/{id}/controls:
+    parameters:
+      - $ref: "#/components/parameters/FrameworkId"
+    post:
+      operationId: createTenantControl
+      tags: [custom-policies]
+      summary: Add a control to a custom framework
+      description: >
+        Creates a control under the tenant framework. Gated by the
+        `custom_policies` feature flag (403 when unentitled). Returns the created
+        control under `control`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantFrameworkControlInput"
+      responses:
+        "201":
+          description: Control created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantFrameworkControlResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /frameworks/tenant/{id}/controls/{controlId}:
+    parameters:
+      - $ref: "#/components/parameters/FrameworkId"
+      - $ref: "#/components/parameters/ControlId"
+    put:
+      operationId: updateTenantControl
+      tags: [custom-policies]
+      summary: Update a custom-framework control
+      description: >
+        Updates a control on the tenant framework. Gated by the `custom_policies`
+        feature flag (403 when unentitled).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantFrameworkControlInput"
+      responses:
+        "200":
+          description: Control updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantFrameworkControlResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    delete:
+      operationId: deleteTenantControl
+      tags: [custom-policies]
+      summary: Delete a custom-framework control
+      description: >
+        Deletes a control from the tenant framework. Gated by the
+        `custom_policies` feature flag (403 when unentitled).
+      responses:
+        "200":
+          description: Control deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /frameworks/tenant/controls/{id}/measurements:
+    parameters:
+      - $ref: "#/components/parameters/ControlIdAsId"
+    get:
+      operationId: listTenantControlMeasurements
+      tags: [custom-policies]
+      summary: List a custom-framework control's measurement rules
+      responses:
+        "200":
+          description: Measurement rules for the control.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeasurementListResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    post:
+      operationId: addControlMeasurement
+      tags: [custom-policies]
+      summary: Add a measurement mapping to a custom-framework control
+      description: >
+        Maps a measurement type + rule predicate onto the control. Gated by the
+        `custom_policies` feature flag (403 when unentitled). The error envelope
+        carries an extra `details` string on the measurement-type / validation /
+        not-found / server paths.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ControlMeasurementInput"
+      responses:
+        "201":
+          description: Measurement mapping created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantControlMeasurementResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequestWithDetails"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "404":
+          $ref: "#/components/responses/LegacyNotFoundWithDetails"
+        "500":
+          $ref: "#/components/responses/LegacyServerErrorWithDetails"
+      x-quirks:
+        - "The bind-error 400 returns a plain `{ \"error\": ... }`; the measurement-type-not-found and validation-failed 400s add a `details` string. Both validate against LegacyErrorWithDetails (details optional)."
+
+  /frameworks/tenant/controls/{id}/measurements/{measurementId}:
+    parameters:
+      - $ref: "#/components/parameters/ControlIdAsId"
+      - $ref: "#/components/parameters/MeasurementId"
+    put:
+      operationId: updateControlMeasurement
+      tags: [custom-policies]
+      summary: Update a custom-framework control measurement
+      description: >
+        Updates a control's measurement mapping. Gated by the `custom_policies`
+        feature flag (403 when unentitled).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ControlMeasurementInput"
+      responses:
+        "200":
+          description: Measurement mapping updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantControlMeasurementResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    delete:
+      operationId: deleteControlMeasurement
+      tags: [custom-policies]
+      summary: Delete a custom-framework control measurement
+      description: >
+        Deletes a control's measurement mapping. Gated by the `custom_policies`
+        feature flag (403 when unentitled).
+      responses:
+        "200":
+          description: Measurement mapping deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  # ============================================================
+  # Framework evaluation (Risk & Compliance workspace)
+  # ============================================================
+  /compliance/score:
+    get:
+      operationId: getComplianceScore
+      tags: [evaluation]
+      summary: Get the tenant's aggregate compliance score
+      description: >
+        Returns the weighted compliance score across the tenant's frameworks,
+        optionally narrowed to a single framework via `framework_id`. Returned
+        bare (not wrapped).
+      parameters:
+        - name: framework_id
+          in: query
+          required: false
+          description: Optional framework UUID to score in isolation.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The aggregate compliance score.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ComplianceScoreResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /frameworks/status:
+    get:
+      operationId: getFrameworkStatus
+      tags: [evaluation]
+      summary: Get per-framework compliance status
+      description: >
+        Returns the compliance status of every active (licensed) framework for
+        the tenant plus an overall score. Returned bare (not wrapped).
+      responses:
+        "200":
+          description: Per-framework status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkStatusResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /frameworks/context:
+    get:
+      operationId: getFrameworkContext
+      tags: [evaluation]
+      summary: Get the consolidated framework-context payload
+      description: >
+        Returns licensed frameworks, the default framework id, per-framework
+        status, subscription info, and the user's framework preference in a
+        single call. Returned bare (not wrapped).
+      responses:
+        "200":
+          description: The consolidated framework context.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkContextResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /frameworks/batch-evaluate:
+    post:
+      operationId: batchEvaluateFrameworks
+      tags: [evaluation]
+      summary: Batch-evaluate multiple frameworks
+      description: >
+        Evaluates a set of frameworks in one request (for the workbench, where
+        several visualizers need the same frameworks' data). Pass
+        `include_details=true` to populate per-result findings + control
+        breakdown. Writes findings as a side effect (RBAC-gated). Returned bare.
+      parameters:
+        - name: include_details
+          in: query
+          required: false
+          description: When `true`, populates findings + control_breakdown on each result.
+          schema:
+            type: boolean
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchEvaluateRequest"
+      responses:
+        "200":
+          description: Batch evaluation results.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchEvaluateResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /evaluate/multiple:
+    post:
+      operationId: evaluateMultipleFrameworks
+      tags: [evaluation]
+      summary: Evaluate multiple frameworks
+      description: >
+        Evaluates the given frameworks against the tenant's inventory (optionally
+        filtered) and returns a per-framework result plus a count. Writes
+        findings as a side effect (RBAC-gated). `framework_ids` is required and
+        must be non-empty.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EvaluateMultipleRequest"
+      responses:
+        "200":
+          description: Per-framework evaluation results.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvaluateMultipleResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequestWithDetails"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "A bad UUID in framework_ids returns 400 with an extra `details` string; the missing/empty-list and bind 400s return a plain `{ \"error\": ... }`. Both validate against the details-optional LegacyErrorWithDetails."
+
+  # ============================================================
+  # Tickets (unified ticketing system; CLAUDE.md "Ticketing System")
+  # ============================================================
+  /tickets:
+    get:
+      operationId: listTickets
+      tags: [tickets]
+      summary: List the tenant's tickets
+      description: >
+        Returns a page of tickets for the tenant, filtered by any combination
+        of the query parameters. Page defaults to 1 and page_size to 20 (capped
+        at 100 in the service layer; values outside 1..100 collapse to 20).
+      parameters:
+        - $ref: "#/components/parameters/TicketCategoryFilter"
+        - $ref: "#/components/parameters/TicketStatusFilter"
+        - $ref: "#/components/parameters/TicketPriorityFilter"
+        - $ref: "#/components/parameters/TicketSeverityFilter"
+        - $ref: "#/components/parameters/TicketAssignedToFilter"
+        - $ref: "#/components/parameters/TicketAssetIdFilter"
+        - $ref: "#/components/parameters/TicketCertificateIdFilter"
+        - $ref: "#/components/parameters/TicketFindingIdFilter"
+        - $ref: "#/components/parameters/TicketSourceFilter"
+        - $ref: "#/components/parameters/TicketSearchFilter"
+        - $ref: "#/components/parameters/TicketOverdueFilter"
+        - $ref: "#/components/parameters/TicketPageParam"
+        - $ref: "#/components/parameters/TicketPageSizeParam"
+      responses:
+        "200":
+          description: A page of tickets.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketListResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "UUID-shaped filters (assigned_to, asset_id, certificate_id, finding_id) are silently dropped when the value fails uuid.Parse — the request still returns 200 with the filter ignored, not 400."
+        - "page_size outside the 1..100 range silently collapses to the default 20 — no warning, no error."
+        - "overdue is a boolean toggle: the service treats only the exact string `true` as on; any other value (including `1`, `True`, `yes`) is off."
+        - "The response carries `total` and echoes the requested `page` + `page_size` at the top level, not under a `pagination` envelope — this is a pre-ADR-0002 shape."
+    post:
+      operationId: createTicket
+      tags: [tickets]
+      summary: Create a ticket
+      description: >
+        Creates a new ticket in the unified `tickets` table. `category` defaults
+        to `general`, `priority` to `medium`, `source` to `manual`, `status` to
+        `open`, `external_sync_status` to `none`. Inventory-link UUID fields
+        (finding_id, asset_id, etc.) are silently dropped when malformed, same
+        as the list filters.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTicketRequest"
+      responses:
+        "201":
+          description: The ticket was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketCreatedResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "Title is required twice: by `binding:\"required\"` on the Go struct AND by an explicit `input.Title == \"\"` check. The struct binding catches a missing field; the explicit check catches an empty string slipping past JSON binding. Both fail with 400 + the same `error: \"Invalid request format\"` or `\"Title is required\"` shape, but the message differs."
+        - "Inventory-link UUID fields (finding_id, control_id, asset_id, certificate_id, crypto_implementation_id, assigned_to) are silently dropped when malformed — handler still returns 201 with the ticket created without the link."
+        - "Malformed due_date returns 500 (not 400), because the service-layer time.Parse error is collapsed to the generic `Failed to create ticket` 500. Clients should validate RFC3339 client-side."
+
+  /tickets/stats:
+    get:
+      operationId: getTicketStats
+      tags: [tickets]
+      summary: Aggregate ticket statistics
+      description: >
+        Returns counts grouped by status, by category, plus the overdue count
+        and total. Used by dashboards and the Risk & Compliance → Remediation
+        progress view alongside `/tickets/progress`.
+      responses:
+        "200":
+          description: Aggregate counts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketStatsResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /tickets/progress:
+    get:
+      operationId: getTicketProgress
+      tags: [tickets]
+      summary: Time-series remediation progress
+      description: >
+        Returns ticket activity over the requested window (default 30 days):
+        opened/resolved per day, the status summary, the average resolution
+        time in hours within the window, and a category × status breakdown.
+        When `category` is omitted, all categories are included.
+      parameters:
+        - name: days
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+          description: Trailing window size in days. Defaults to 30 when absent or non-positive.
+        - name: category
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional category filter (compliance, certificate, remediation, vulnerability, operational, general).
+      responses:
+        "200":
+          description: Time-series remediation progress.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketProgressResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "`days` is parsed permissively: non-numeric values fall back to 30, and zero/negative values also fall back to 30 (a second sanitization in the service layer)."
+        - "`summary` always includes an `overdue` key even though it's computed by a separate query — clients should not assume keys correspond 1:1 to ticket `status` enums."
+        - "`trend` is empty (not omitted) when no tickets fall in the window; serialized as `[]`. `avg_resolution_hours` is 0 when no tickets resolved in the window."
+
+  /tickets/{id}:
+    parameters:
+      - $ref: "#/components/parameters/TicketId"
+    get:
+      operationId: getTicket
+      tags: [tickets]
+      summary: Fetch a single ticket
+      responses:
+        "200":
+          description: The ticket.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    put:
+      operationId: updateTicket
+      tags: [tickets]
+      summary: Partial update of a ticket
+      description: >
+        All fields on the request body are optional; only present fields are
+        applied. Setting `status` to `resolved` or `closed` stamps
+        `resolved_at` server-side. An empty-string `due_date` clears the field;
+        a non-empty value must be RFC3339.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateTicketRequest"
+      responses:
+        "200":
+          description: The ticket was updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketUpdatedResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "Not-found is detected by `err.Error() == \"ticket not found\"` string matching — any service-layer rewording would silently degrade the 404 to a 500."
+        - "Invalid `due_date` (non-RFC3339, non-empty) returns 500 — the parse error is wrapped and bubbles up as a generic update failure. Same handling asymmetry as create."
+    delete:
+      operationId: deleteTicket
+      tags: [tickets]
+      summary: Delete a ticket (comments cascade)
+      responses:
+        "200":
+          description: The ticket was deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "Not-found is detected by `err.Error() == \"ticket not found\"` string matching, same as update."
+
+  /tickets/{id}/comments:
+    parameters:
+      - $ref: "#/components/parameters/TicketId"
+    get:
+      operationId: listTicketComments
+      tags: [tickets]
+      summary: List comments on a ticket
+      responses:
+        "200":
+          description: The ticket's comments, oldest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketCommentListResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    post:
+      operationId: addTicketComment
+      tags: [tickets]
+      summary: Add a comment to a ticket
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddTicketCommentRequest"
+      responses:
+        "201":
+          description: The comment was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketCommentCreatedResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "Comment-add 400 for a missing/empty `content` field returns `error: \"Content is required\"` — distinct wording from the generic create-ticket 400."
+
+  /alerts:
+    get:
+      operationId: listAlerts
+      tags: [alerts]
+      summary: List the tenant's stateful alerts
+      description: >
+        Returns the tenant's alerts filtered by any combination of status,
+        severity, and alert type. `limit` defaults to 200.
+      parameters:
+        - $ref: "#/components/parameters/AlertStatusFilter"
+        - $ref: "#/components/parameters/AlertSeverityFilter"
+        - $ref: "#/components/parameters/AlertTypeFilter"
+        - $ref: "#/components/parameters/AlertLimitParam"
+      responses:
+        "200":
+          description: The tenant's alerts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertListResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "A non-numeric `limit` is silently ignored (falls back to the 200 default) — the request still returns 200, not 400."
+
+  /alerts/stats:
+    get:
+      operationId: getAlertStats
+      tags: [alerts]
+      summary: Alert summary counts for the Alerts page cards
+      description: >
+        Returns severity/lifecycle counts (active, acknowledged, snoozed,
+        resolved, critical, high). The body is the bare stats object, not
+        wrapped in an envelope.
+      responses:
+        "200":
+          description: Aggregate alert counts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertStats"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /alerts/{id}:
+    parameters:
+      - $ref: "#/components/parameters/AlertId"
+    get:
+      operationId: getAlert
+      tags: [alerts]
+      summary: Fetch one alert with its full evidence chain
+      responses:
+        "200":
+          description: The alert plus its append-only evidence chain.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertDetailResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /alerts/{id}/acknowledge:
+    parameters:
+      - $ref: "#/components/parameters/AlertId"
+    post:
+      operationId: acknowledgeAlert
+      tags: [alerts]
+      summary: Acknowledge an alert
+      description: Marks the alert acknowledged by the calling user. Gated by `alerts.manage`.
+      responses:
+        "200":
+          description: The updated alert.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertMutationResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "409":
+          $ref: "#/components/responses/LegacyConflict"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /alerts/{id}/snooze:
+    parameters:
+      - $ref: "#/components/parameters/AlertId"
+    post:
+      operationId: snoozeAlert
+      tags: [alerts]
+      summary: Snooze an alert until a given time
+      description: Pauses the alert until `until`. Gated by `alerts.manage`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SnoozeAlertRequest"
+      responses:
+        "200":
+          description: The updated alert.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertMutationResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "409":
+          $ref: "#/components/responses/LegacyConflict"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "`until` is required (RFC3339); a missing or malformed value returns 400 with `error: \"until (RFC3339) is required\"`."
+
+  /alerts/{id}/unsnooze:
+    parameters:
+      - $ref: "#/components/parameters/AlertId"
+    post:
+      operationId: unsnoozeAlert
+      tags: [alerts]
+      summary: Return a snoozed alert to active
+      description: Wakes a snoozed alert. Gated by `alerts.manage`.
+      responses:
+        "200":
+          description: The updated alert.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertMutationResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "409":
+          $ref: "#/components/responses/LegacyConflict"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /alerts/{id}/resolve:
+    parameters:
+      - $ref: "#/components/parameters/AlertId"
+    post:
+      operationId: resolveAlert
+      tags: [alerts]
+      summary: Manually resolve an alert
+      description: >
+        Resolves the alert with an optional free-text note. The request body is
+        optional. Gated by `alerts.manage`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveAlertRequest"
+      responses:
+        "200":
+          description: The updated alert.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertMutationResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "409":
+          $ref: "#/components/responses/LegacyConflict"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /alerts/{id}/ticket:
+    parameters:
+      - $ref: "#/components/parameters/AlertId"
+    post:
+      operationId: createTicketFromAlert
+      tags: [alerts]
+      summary: Create a linked ticket carrying the alert's evidence timeline
+      description: >
+        Creates a unified ticket (category `operational`) linked to the alert,
+        carrying its evidence timeline. Gated by `alerts.manage`.
+      responses:
+        "201":
+          description: The created ticket.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertTicketResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "409":
+          $ref: "#/components/responses/LegacyConflict"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /alert-catalog:
+    get:
+      operationId: getAlertCatalog
+      tags: [alert-catalog]
+      summary: Tenant alert catalog (Settings → Alert Rules)
+      description: >
+        Returns the registry-defined alert types overlaid with the tenant's
+        enable/preference state and, for ladder types, the effective
+        escalation ladder (baseline rung + tenant preference rung + rungs
+        projected from the tenant's activated compliance policies). Reads are
+        open to any member.
+      responses:
+        "200":
+          description: The tenant-track alert catalog.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertCatalogListResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "Only registry entries whose `track` is `tenant` are returned — platform-track entries (service_down, tenant_health_degraded, …) never appear here."
+        - "`catalog` is always an array, never null — the handler initializes it to `[]CatalogEntry{}` before appending."
+        - "`ladder` is only populated for `severity_model: ladder` entries with a positive `baseline_days`; fixed-severity entries omit it."
+
+  /alert-catalog/{type}:
+    parameters:
+      - $ref: "#/components/parameters/AlertCatalogTypeParam"
+    put:
+      operationId: updateAlertCatalogEntry
+      tags: [alert-catalog]
+      summary: Update the tenant's enable/preference state for one alert type
+      description: >
+        Upserts the tenant's enable flag and optional preference rung for one
+        registry alert type. Gated by `alerts.manage`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAlertCatalogEntryRequest"
+      responses:
+        "200":
+          description: The setting was upserted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertCatalogUpdateResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "`enabled` is required; a missing value returns 400 with `error: \"enabled is required\"`."
+        - "`{type}` naming an alert type not in the registry returns 400 (not 404) with `error: \"unknown alert type: <type>\"`."
+        - "`preference_rung.days` outside 1..3650 returns 400 with `error: \"preference rung days must be 1–3650\"`."
+        - "Omitting `preference_rung` (or sending it as `null`/`{}`) clears the tenant's preference rung, falling the ladder back to the registry baseline."
+        - "Success returns `{ \"status\": \"updated\" }`, not the updated catalog entry — callers refetch `GET /alert-catalog` to see the new effective ladder."
+
+components:
+  parameters:
+    AlertId:
+      name: id
+      in: path
+      required: true
+      description: Alert UUID.
+      schema:
+        type: string
+        format: uuid
+    AlertStatusFilter:
+      name: status
+      in: query
+      required: false
+      description: Filter by lifecycle status (active, acknowledged, snoozed, resolved).
+      schema:
+        type: string
+    AlertSeverityFilter:
+      name: severity
+      in: query
+      required: false
+      description: Filter by severity (critical, high, medium, low).
+      schema:
+        type: string
+    AlertTypeFilter:
+      name: type
+      in: query
+      required: false
+      description: Filter by alert type (e.g. service_down, tenant_health_degraded, certificate_expiring).
+      schema:
+        type: string
+    AlertLimitParam:
+      name: limit
+      in: query
+      required: false
+      description: Maximum alerts to return. Defaults to 200; a non-numeric value is silently ignored.
+      schema:
+        type: integer
+        minimum: 1
+    AlertCatalogTypeParam:
+      name: type
+      in: path
+      required: true
+      description: >
+        Registry alert-type id (e.g. certificate_expiring, sensor_offline,
+        control_noncompliant) — not a UUID.
+      schema:
+        type: string
+    FrameworkId:
+      name: id
+      in: path
+      required: true
+      description: Platform framework UUID.
+      schema:
+        type: string
+        format: uuid
+    FrameworkIdQuery:
+      name: frameworkId
+      in: path
+      required: true
+      description: Platform framework UUID (subscribe path uses `frameworkId` as the param name).
+      schema:
+        type: string
+        format: uuid
+    ControlId:
+      name: controlId
+      in: path
+      required: true
+      description: Tenant-framework control UUID.
+      schema:
+        type: string
+        format: uuid
+    ControlIdAsId:
+      name: id
+      in: path
+      required: true
+      description: Tenant-framework control UUID (the measurement routes bind the control id to the `id` param).
+      schema:
+        type: string
+        format: uuid
+    MeasurementId:
+      name: measurementId
+      in: path
+      required: true
+      description: Control-measurement mapping UUID.
+      schema:
+        type: string
+        format: uuid
+
+    # --- Tickets ---
+    TicketId:
+      name: id
+      in: path
+      required: true
+      description: Ticket UUID.
+      schema:
+        type: string
+        format: uuid
+    TicketCategoryFilter:
+      name: category
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [compliance, certificate, remediation, vulnerability, operational, general]
+    TicketStatusFilter:
+      name: status
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [open, in_progress, resolved, closed]
+    TicketPriorityFilter:
+      name: priority
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [low, medium, high, critical]
+    TicketSeverityFilter:
+      name: severity
+      in: query
+      required: false
+      schema:
+        type: string
+    TicketAssignedToFilter:
+      name: assigned_to
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    TicketAssetIdFilter:
+      name: asset_id
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    TicketCertificateIdFilter:
+      name: certificate_id
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    TicketFindingIdFilter:
+      name: finding_id
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    TicketSourceFilter:
+      name: source
+      in: query
+      required: false
+      schema:
+        type: string
+    TicketSearchFilter:
+      name: search
+      in: query
+      required: false
+      description: ILIKE substring match against `title` and `description`.
+      schema:
+        type: string
+    TicketOverdueFilter:
+      name: overdue
+      in: query
+      required: false
+      description: When set to the literal string `true`, only overdue tickets are returned.
+      schema:
+        type: string
+        enum: ["true"]
+    TicketPageParam:
+      name: page
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+    TicketPageSizeParam:
+      name: page_size
+      in: query
+      required: false
+      description: 1..100; values outside this range silently fall back to the default 20.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+
+  responses:
+    # --- Current ("legacy") error envelope: { "error": "string" } ---
+    LegacyBadRequest:
+      description: Invalid request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyError"
+    LegacyUnauthorized:
+      description: Missing or invalid tenant/auth context.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyError"
+    LegacyNotFound:
+      description: Framework not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyError"
+    LegacyNotFoundWithDetails:
+      description: Resource not found, with an extra `details` string on the error envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyErrorWithDetails"
+    LegacyBadRequestWithDetails:
+      description: Invalid request, possibly with an extra `details` string on the error envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyErrorWithDetails"
+    LegacyForbidden:
+      description: The tenant is not entitled to this action (e.g. custom_policies feature flag off).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyError"
+    LegacyConflict:
+      description: The requested state transition is not valid for the resource's current state.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyError"
+    LegacyServerError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyError"
+    LegacyServerErrorWithDetails:
+      description: Unexpected server error, possibly with an extra `details` string on the error envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyErrorWithDetails"
+
+  schemas:
+    # ============================================================
+    # Remediation-plans domain
+    # ============================================================
+    RemediationPlan:
+      type: object
+      additionalProperties: false
+      description: >
+        A remediation plan (models.RemediationPlan). The listed required fields
+        are always present (including the computed item_count / resolved_count /
+        progress rollups); the rest are `omitempty` and appear only when set.
+      required:
+        - id
+        - tenant_id
+        - title
+        - plan_type
+        - status
+        - priority
+        - created_by
+        - created_at
+        - updated_at
+        - item_count
+        - resolved_count
+        - progress
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        description:
+          type: string
+        plan_type:
+          type: string
+        status:
+          type: string
+        priority:
+          type: string
+        owner_id:
+          type: string
+          format: uuid
+        target_date:
+          type: string
+          format: date-time
+        framework_id:
+          type: string
+          format: uuid
+        completed_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        item_count:
+          type: integer
+        resolved_count:
+          type: integer
+        progress:
+          type: integer
+    PlanProgress:
+      type: object
+      additionalProperties: false
+      description: >
+        A remediation plan's progress rollup (models.PlanProgress). Returned bare
+        by GET /plans/{id}/progress. The by_* breakdown maps are required but
+        nullable (they serialize as null when empty).
+      required:
+        - total_items
+        - by_workflow_status
+        - by_ticket_status
+        - by_severity
+        - percent_resolved
+        - all_resolved
+      properties:
+        total_items:
+          type: integer
+        by_workflow_status:
+          type: [object, "null"]
+          additionalProperties:
+            type: integer
+        by_ticket_status:
+          type: [object, "null"]
+          additionalProperties:
+            type: integer
+        by_severity:
+          type: [object, "null"]
+          additionalProperties:
+            type: integer
+        percent_resolved:
+          type: integer
+        all_resolved:
+          type: boolean
+    RemediationPlanListResponse:
+      type: object
+      additionalProperties: false
+      description: 'CURRENT envelope for GET /plans — `{ "plans": [...], "total": N, "page": P, "page_size": S }`. On an empty/nil result `plans` can serialize as JSON null, so it is typed as a nullable array.'
+      required:
+        - plans
+        - total
+        - page
+        - page_size
+      properties:
+        plans:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/RemediationPlan"
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+    RemediationPlanResponse:
+      type: object
+      additionalProperties: false
+      description: 'CURRENT envelope for GET /plans/{id} — `{ "plan": {...} }`.'
+      required:
+        - plan
+      properties:
+        plan:
+          $ref: "#/components/schemas/RemediationPlan"
+    RemediationPlanItem:
+      type: object
+      additionalProperties: false
+      description: >
+        A remediation plan item — a finding attached to a plan, with optional
+        joined finding/ticket detail (models.RemediationPlanItem). The listed
+        required fields are always present; the rest are `omitempty` and appear
+        only when the join populates them.
+      required:
+        - id
+        - plan_id
+        - finding_id
+        - added_at
+        - added_by
+      properties:
+        id:
+          type: string
+          format: uuid
+        plan_id:
+          type: string
+          format: uuid
+        finding_id:
+          type: string
+          format: uuid
+        ticket_id:
+          type: string
+          format: uuid
+        notes:
+          type: string
+        added_at:
+          type: string
+          format: date-time
+        added_by:
+          type: string
+          format: uuid
+        finding_severity:
+          type: string
+        finding_summary:
+          type: string
+        finding_workflow_status:
+          type: string
+        finding_asset_type:
+          type: string
+        finding_asset_id:
+          type: string
+          format: uuid
+        ticket_status:
+          type: string
+        ticket_title:
+          type: string
+    PlanItemsResponse:
+      type: object
+      additionalProperties: false
+      description: 'CURRENT envelope for GET /plans/{id}/items — `{ "items": [...] }`. On an empty/nil result `items` can serialize as JSON null, so it is typed as a nullable array.'
+      required:
+        - items
+      properties:
+        items:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/RemediationPlanItem"
+    # ============================================================
+    # Scenarios + overrides domain
+    # ============================================================
+    Scenario:
+      type: object
+      additionalProperties: false
+      description: >
+        A compliance what-if scenario (models.Scenario). `filters` is the saved
+        ScenarioFilters object, left permissive here. `framework` is an optional
+        joined object.
+      required:
+        - id
+        - tenant_id
+        - name
+        - framework_id
+        - framework_version
+        - filters
+        - created_by
+        - updated_by
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        framework_id:
+          type: string
+          format: uuid
+        framework_version:
+          type: string
+        filters:
+          type: object
+          additionalProperties: true
+        created_by:
+          type: string
+          format: uuid
+        updated_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        framework:
+          type: object
+          additionalProperties: true
+    Override:
+      type: object
+      additionalProperties: false
+      description: >
+        A compliance control override (models.Override). `scenario_id`,
+        `severity_from`, and `severity_to` are required but nullable (global
+        overrides and applicability-type overrides leave them null). `control`
+        and `scenario` are optional joined objects.
+      required:
+        - id
+        - tenant_id
+        - scenario_id
+        - control_id
+        - override_type
+        - severity_from
+        - severity_to
+        - rationale
+        - framework_type
+        - created_by
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        scenario_id:
+          type: [string, "null"]
+          format: uuid
+        control_id:
+          type: string
+          format: uuid
+        override_type:
+          type: string
+        severity_from:
+          type: [string, "null"]
+        severity_to:
+          type: [string, "null"]
+        rationale:
+          type: string
+        framework_type:
+          type: string
+          description: '"platform" or "tenant".'
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        control:
+          type: object
+          additionalProperties: true
+        scenario:
+          type: object
+          additionalProperties: true
+    ScenarioListResponse:
+      type: object
+      additionalProperties: false
+      description: 'CURRENT envelope for GET /scenarios — `{ "scenarios": [...] }`. On an empty/nil result `scenarios` can serialize as JSON null, so it is typed as a nullable array.'
+      required:
+        - scenarios
+      properties:
+        scenarios:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/Scenario"
+    ScenarioResponse:
+      type: object
+      additionalProperties: false
+      description: 'CURRENT envelope for GET /scenarios/{id} — `{ "scenario": {...} }`.'
+      required:
+        - scenario
+      properties:
+        scenario:
+          $ref: "#/components/schemas/Scenario"
+    OverrideListResponse:
+      type: object
+      additionalProperties: false
+      description: 'CURRENT envelope for GET /overrides — `{ "overrides": [...] }`. On an empty/nil result `overrides` can serialize as JSON null, so it is typed as a nullable array.'
+      required:
+        - overrides
+      properties:
+        overrides:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/Override"
+    # ============================================================
+    # Findings domain
+    # ============================================================
+    ComplianceFinding:
+      type: object
+      additionalProperties: false
+      description: >
+        A compliance finding (models.ComplianceFinding). The listed required
+        fields are always present; `evidence` is required but nullable (the
+        backing map serializes as null when empty). Every other field is
+        `omitempty` and appears only when set. `control` and `asset` are
+        optional joined objects, left unpinned in this slice.
+      required:
+        - id
+        - tenant_id
+        - control_id
+        - asset_id
+        - asset_type
+        - severity
+        - summary
+        - evidence
+        - first_seen
+        - last_seen
+        - detection_state
+        - workflow_status
+        - occurrence_count
+        - is_stale
+        - evaluation_version
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        control_id:
+          type: string
+          format: uuid
+        asset_id:
+          type: string
+          format: uuid
+        asset_type:
+          type: string
+        severity:
+          type: string
+        summary:
+          type: string
+        evidence:
+          type: [object, "null"]
+          additionalProperties: true
+        first_seen:
+          type: string
+          format: date-time
+        last_seen:
+          type: string
+          format: date-time
+        assigned_to:
+          type: string
+          format: uuid
+        assigned_at:
+          type: string
+          format: date-time
+        assigned_by:
+          type: string
+          format: uuid
+        remediation_notes:
+          type: string
+        detection_state:
+          type: string
+        workflow_status:
+          type: string
+        occurrence_count:
+          type: integer
+        resurfaced_at:
+          type: string
+          format: date-time
+        suppressed_until:
+          type: string
+          format: date-time
+        suppression_reason:
+          type: string
+        is_stale:
+          type: boolean
+        last_evaluated_at:
+          type: string
+          format: date-time
+        evaluation_version:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        ticket_count:
+          type: integer
+        control:
+          type: object
+          additionalProperties: true
+        asset:
+          type: object
+          additionalProperties: true
+    ComplianceFindingHistory:
+      type: object
+      additionalProperties: false
+      description: A single change-history entry for a finding (models.ComplianceFindingHistory).
+      required:
+        - id
+        - finding_id
+        - changed_at
+        - field_name
+      properties:
+        id:
+          type: string
+          format: uuid
+        finding_id:
+          type: string
+          format: uuid
+        changed_by:
+          type: string
+          format: uuid
+        changed_at:
+          type: string
+          format: date-time
+        field_name:
+          type: string
+        old_value:
+          type: string
+        new_value:
+          type: string
+        change_reason:
+          type: string
+    SeverityCounts:
+      type: object
+      additionalProperties: false
+      description: Per-severity finding tally within a control group (services.SeverityCounts).
+      required: [critical, high, med, low]
+      properties:
+        critical: { type: integer }
+        high: { type: integer }
+        med: { type: integer }
+        low: { type: integer }
+    FindingsByControlGroup:
+      type: object
+      additionalProperties: false
+      description: Active findings aggregated for one framework control (services.FindingsByControlGroup).
+      required:
+        - control_id
+        - control_name
+        - framework_id
+        - framework_name
+        - worst_severity
+        - finding_count
+        - affected_assets
+        - severity_counts
+      properties:
+        control_id: { type: string, format: uuid }
+        control_name: { type: string }
+        framework_id: { type: string, format: uuid }
+        framework_name: { type: string }
+        worst_severity:
+          type: string
+          enum: [Critical, High, Med, Low]
+          description: Worst severity present in the group.
+        finding_count: { type: integer }
+        affected_assets: { type: integer, description: COUNT(DISTINCT asset_id) in the group. }
+        severity_counts:
+          $ref: "#/components/schemas/SeverityCounts"
+    FindingsByControlResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /findings/by-control — `{ "groups": [...] }`, ranked.'
+      required: [groups]
+      properties:
+        groups:
+          type: array
+          items:
+            $ref: "#/components/schemas/FindingsByControlGroup"
+    FindingStatistics:
+      type: object
+      additionalProperties: false
+      description: 'Aggregate finding counts (services.FindingStatistics). Returned bare by GET /findings/statistics.'
+      required:
+        - total_findings
+        - active_findings
+        - inactive_findings
+        - archived_findings
+        - new_findings
+        - notified_findings
+        - resolved_findings
+        - suppressed_findings
+        - resurfaced_findings
+      properties:
+        total_findings:
+          type: integer
+        active_findings:
+          type: integer
+        inactive_findings:
+          type: integer
+        archived_findings:
+          type: integer
+        new_findings:
+          type: integer
+        notified_findings:
+          type: integer
+        resolved_findings:
+          type: integer
+        suppressed_findings:
+          type: integer
+        resurfaced_findings:
+          type: integer
+    FindingListResponse:
+      type: object
+      additionalProperties: false
+      description: 'CURRENT list envelope for GET /findings — `{ "findings": [...], "total": N, "page": P, "page_size": S }`. `total` is the unpaginated count. On an empty/nil result `findings` can serialize as JSON null, so it is typed as a nullable array. Each finding carries the joined `asset` object when the owning asset exists and is not deleted.'
+      required:
+        - findings
+        - total
+        - page
+        - page_size
+      properties:
+        findings:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/ComplianceFinding"
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+    FindingsByAssetResponse:
+      type: object
+      additionalProperties: false
+      description: 'CURRENT envelope for GET /assets/{assetId}/findings — `{ "findings": [...] }`. On an empty/nil result `findings` can serialize as JSON null, so it is typed as a nullable array.'
+      required:
+        - findings
+      properties:
+        findings:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/ComplianceFinding"
+    FindingHistoryResponse:
+      type: object
+      additionalProperties: false
+      description: 'CURRENT envelope for GET /findings/{id}/history — `{ "history": [...] }`. On an empty/nil result `history` can serialize as JSON null, so it is typed as a nullable array.'
+      required:
+        - history
+      properties:
+        history:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/ComplianceFindingHistory"
+    # ============================================================
+    # Framework domain (current shapes — what the service returns today)
+    # ============================================================
+    PublishedFramework:
+      type: object
+      additionalProperties: false
+      description: A platform framework whose status is `published` (tenant-visible).
+      required:
+        - id
+        - code
+        - name
+        - version
+        - description
+        - organization
+        - status
+        - is_platform_default
+        - created_by
+        - created_at
+        - updated_at
+        - controls_count
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+        name:
+          type: string
+        version:
+          type: string
+        description:
+          type: string
+        organization:
+          type: string
+        status:
+          type: string
+          enum: [draft, published, archived]
+        is_platform_default:
+          type: boolean
+        published_at:
+          type: [string, "null"]
+          format: date-time
+        published_by:
+          type: [string, "null"]
+          format: uuid
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        controls_count:
+          type: integer
+        controls:
+          description: >
+            The framework's controls (each with its measurements). Returned for
+            published frameworks to all tenants regardless of license; absent
+            only on list endpoints that don't load control detail.
+          type: array
+          items:
+            $ref: "#/components/schemas/PublishedFrameworkControl"
+        is_licensed:
+          type: boolean
+          description: Set when the handler resolves the with-license variant (tenant context present).
+
+    PublishedFrameworkControl:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - framework_id
+        - control_id
+        - title
+        - description
+        - baseline_severity
+        - crypto_relevant
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        framework_id:
+          type: string
+          format: uuid
+        family_id:
+          type: [string, "null"]
+          format: uuid
+        control_id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        baseline_severity:
+          type: string
+          enum: [Low, Med, High, Critical]
+        crypto_relevant:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        family:
+          $ref: "#/components/schemas/Family"
+        measurements:
+          type: array
+          items:
+            $ref: "#/components/schemas/ControlMeasurement"
+
+    Family:
+      type: object
+      additionalProperties: true
+      description: Control family grouping (shape is currently free-form; not pinned in this slice).
+
+    ControlMeasurement:
+      type: object
+      additionalProperties: false
+      description: A measurement rule mapped to a control. Predicate shape varies by rule_type.
+      required: [id, control_id, framework_type, measurement_type_id, rule_type, predicate, weight, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        control_id:
+          type: string
+          format: uuid
+        framework_type:
+          type: string
+        measurement_type_id:
+          type: string
+          format: uuid
+        rule_type:
+          type: string
+          enum: [threshold, presence, pattern, range]
+        predicate:
+          type: object
+          additionalProperties: true
+        severity_override:
+          type: string
+        weight:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        measurement_type:
+          $ref: "#/components/schemas/MeasurementType"
+
+    # ============================================================
+    # Tenant frameworks (custom policies)
+    # ============================================================
+    TenantFramework:
+      type: object
+      additionalProperties: false
+      description: A tenant-authored compliance framework (models.TenantFramework).
+      required:
+        - id
+        - tenant_id
+        - name
+        - version
+        - description
+        - created_by
+        - created_at
+        - updated_at
+        - controls_count
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        version:
+          type: string
+        description:
+          type: string
+        source_framework_id:
+          type: string
+          format: uuid
+          description: Set only when copied from a platform framework; omitted otherwise.
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        controls_count:
+          type: integer
+        controls:
+          description: Joined controls; omitted unless populated.
+          type: array
+          items:
+            $ref: "#/components/schemas/TenantFrameworkControl"
+
+    TenantFrameworkControl:
+      type: object
+      additionalProperties: false
+      description: A control within a tenant framework (models.TenantFrameworkControl).
+      required:
+        - id
+        - framework_id
+        - control_id
+        - title
+        - description
+        - baseline_severity
+        - crypto_relevant
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        framework_id:
+          type: string
+          format: uuid
+        family_id:
+          type: [string, "null"]
+          format: uuid
+        control_id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        baseline_severity:
+          type: string
+          enum: [Low, Med, High, Critical]
+        crypto_relevant:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        family:
+          $ref: "#/components/schemas/Family"
+        measurements:
+          type: array
+          items:
+            $ref: "#/components/schemas/TenantControlMeasurement"
+
+    TenantControlMeasurement:
+      type: object
+      additionalProperties: false
+      description: >
+        A control→measurement-type rule mapping (models.ControlMeasurement) as
+        returned by the tenant custom-policies endpoints.
+      required:
+        - id
+        - control_id
+        - framework_type
+        - measurement_type_id
+        - rule_type
+        - predicate
+        - weight
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        control_id:
+          type: string
+          format: uuid
+        framework_type:
+          type: string
+          enum: [platform, tenant]
+        measurement_type_id:
+          type: string
+          format: uuid
+        rule_type:
+          type: string
+          enum: [threshold, presence, pattern, range]
+        predicate:
+          type: object
+          additionalProperties: true
+          description: Rule-logic JSON.
+        severity_override:
+          type: string
+          enum: [Low, Med, High, Critical]
+          description: Optional per-mapping severity override; omitted when unset.
+        weight:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        measurement_type:
+          type: object
+          additionalProperties: true
+          description: Optional joined measurement-type detail; omitted unless populated.
+
+    TenantFrameworkInput:
+      type: object
+      additionalProperties: false
+      description: Request body for create/update of a tenant framework.
+      required: [name, version]
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+        description:
+          type: string
+
+    TenantFrameworkControlInput:
+      type: object
+      additionalProperties: false
+      description: Request body for create/update of a tenant-framework control.
+      required: [control_id, title, baseline_severity]
+      properties:
+        family_id:
+          type: [string, "null"]
+          format: uuid
+        control_id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        baseline_severity:
+          type: string
+          enum: [Low, Med, High, Critical]
+        crypto_relevant:
+          type: boolean
+
+    ControlMeasurementInput:
+      type: object
+      additionalProperties: false
+      description: Request body for create/update of a control-measurement mapping.
+      required: [measurement_type_id, rule_type, predicate]
+      properties:
+        measurement_type_id:
+          type: string
+          format: uuid
+        rule_type:
+          type: string
+          enum: [threshold, presence, pattern, range]
+        predicate:
+          type: object
+          additionalProperties: true
+        severity_override:
+          type: string
+          enum: [Low, Med, High, Critical]
+        weight:
+          type: integer
+          minimum: 1
+          maximum: 10
+
+    TenantFrameworkListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /frameworks/tenant — `{ "frameworks": [...] }`.'
+      required: [frameworks]
+      properties:
+        frameworks:
+          type: array
+          items:
+            $ref: "#/components/schemas/TenantFramework"
+
+    TenantFrameworkResponse:
+      type: object
+      additionalProperties: false
+      description: >
+        Envelope for GET/POST/PUT of a single tenant framework. `framework` is
+        always present; create/update also include a `message`.
+      required: [framework]
+      properties:
+        message:
+          type: string
+        framework:
+          $ref: "#/components/schemas/TenantFramework"
+
+    TenantFrameworkControlResponse:
+      type: object
+      additionalProperties: false
+      description: >
+        Envelope for control create/update — `control` is always present;
+        responses also include a `message`.
+      required: [control]
+      properties:
+        message:
+          type: string
+        control:
+          $ref: "#/components/schemas/TenantFrameworkControl"
+
+    TenantControlMeasurementResponse:
+      type: object
+      additionalProperties: false
+      description: >
+        Envelope for measurement create/update — `measurement` is always present;
+        responses also include a `message`.
+      required: [measurement]
+      properties:
+        message:
+          type: string
+        measurement:
+          $ref: "#/components/schemas/TenantControlMeasurement"
+
+    # ============================================================
+    # Framework evaluation (score / status / context / multi-evaluate)
+    # ============================================================
+    FrameworkScoreDetail:
+      type: object
+      additionalProperties: false
+      required: [id, name, code, version, score, type]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        code:
+          type: string
+        version:
+          type: string
+        score:
+          type: integer
+        type:
+          type: string
+          enum: [platform, tenant]
+    ComplianceScoreResponse:
+      type: object
+      additionalProperties: false
+      description: Aggregate compliance score (services.ComplianceScoreResponse), returned bare by GET /compliance/score.
+      required: [score, framework_count, frameworks]
+      properties:
+        score:
+          type: number
+        framework_count:
+          type: integer
+        frameworks:
+          type: array
+          items:
+            $ref: "#/components/schemas/FrameworkScoreDetail"
+
+    FrameworkStatusDetail:
+      type: object
+      additionalProperties: false
+      required: [id, name, code, version, compliance_percent, type, is_selected]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        code:
+          type: string
+        version:
+          type: string
+        compliance_percent:
+          type: integer
+        type:
+          type: string
+          enum: [platform, tenant]
+        is_selected:
+          type: boolean
+    FrameworkStatusResponse:
+      type: object
+      additionalProperties: false
+      description: Per-framework compliance status (services.FrameworkStatusResponse), returned bare by GET /frameworks/status.
+      required: [frameworks, overall_score]
+      properties:
+        frameworks:
+          type: array
+          items:
+            $ref: "#/components/schemas/FrameworkStatusDetail"
+        overall_score:
+          type: number
+        selected_framework:
+          description: The selected framework's status; omitted when none is selected.
+          $ref: "#/components/schemas/FrameworkStatusDetail"
+
+    FrameworkStatusItem:
+      type: object
+      additionalProperties: false
+      required: [id, name, code, version, compliance_percent, controls_total, controls_passing, controls_failing, is_default]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        code:
+          type: string
+        version:
+          type: string
+        compliance_percent:
+          type: integer
+        controls_total:
+          type: integer
+        controls_passing:
+          type: integer
+        controls_failing:
+          type: integer
+        is_default:
+          type: boolean
+    FrameworkContextStatus:
+      type: object
+      additionalProperties: false
+      required: [frameworks, overall_score]
+      properties:
+        frameworks:
+          type: array
+          items:
+            $ref: "#/components/schemas/FrameworkStatusItem"
+        overall_score:
+          type: number
+    FrameworkSubscriptionInfo:
+      type: object
+      additionalProperties: false
+      required: [tier, framework_limit, frameworks_used, can_add_more]
+      properties:
+        tier:
+          type: string
+        framework_limit:
+          type: integer
+        frameworks_used:
+          type: integer
+        can_add_more:
+          type: boolean
+    FrameworkContextResponse:
+      type: object
+      additionalProperties: false
+      description: >
+        Consolidated framework data for a tenant in one call
+        (services.FrameworkContextResponse), returned bare by GET
+        /frameworks/context. `default_framework_id`, `status`, and `subscription`
+        are present but nullable (non-omitempty pointers).
+      required: [licensed, default_framework_id, status, subscription, last_updated]
+      properties:
+        licensed:
+          type: array
+          items:
+            $ref: "#/components/schemas/LicensedFramework"
+        default_framework_id:
+          type: [string, "null"]
+        status:
+          anyOf:
+            - $ref: "#/components/schemas/FrameworkContextStatus"
+            - type: "null"
+        subscription:
+          anyOf:
+            - $ref: "#/components/schemas/FrameworkSubscriptionInfo"
+            - type: "null"
+        user_preference:
+          type: string
+          description: The user's framework preference; omitted when unset.
+        last_updated:
+          type: string
+
+    MultiFrameworkEvaluationResult:
+      type: object
+      additionalProperties: false
+      description: Evaluation result for one framework (services.MultiFrameworkEvaluationResult).
+      required: [framework_id, framework_name, framework_version, framework_type, score, summary, affected_entities, controls, last_evaluated]
+      properties:
+        framework_id:
+          type: string
+        framework_name:
+          type: string
+        framework_code:
+          type: string
+          description: Omitted when empty.
+        framework_version:
+          type: string
+        framework_type:
+          type: string
+          enum: [platform, tenant]
+        score:
+          type: integer
+        summary:
+          description: Per-framework summary; the deep summary tree is not pinned in this slice.
+          type: ["object", "null"]
+          additionalProperties: true
+        affected_entities:
+          type: object
+          description: entity_type -> list of entity IDs.
+          additionalProperties:
+            type: array
+            items:
+              type: string
+        controls:
+          type: object
+          additionalProperties: false
+          required: [total, passing, failing]
+          properties:
+            total:
+              type: integer
+            passing:
+              type: integer
+            failing:
+              type: integer
+        last_evaluated:
+          type: string
+    EvaluateMultipleResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for POST /evaluate/multiple — `{ "results": [...], "count": N }`.'
+      required: [results, count]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/MultiFrameworkEvaluationResult"
+        count:
+          type: integer
+    EvaluateMultipleRequest:
+      type: object
+      additionalProperties: true
+      description: Request body for POST /evaluate/multiple.
+      required: [framework_ids]
+      properties:
+        framework_ids:
+          type: array
+          items:
+            type: string
+        framework_versions:
+          type: object
+          additionalProperties:
+            type: string
+        filters:
+          type: object
+          additionalProperties: true
+          description: Scenario filter set; shape not pinned in this slice.
+        entity_type:
+          type: string
+
+    BatchFindingSummary:
+      type: object
+      additionalProperties: false
+      required: [id, control_id, asset_id, severity, summary]
+      properties:
+        id:
+          type: string
+        control_id:
+          type: string
+        asset_id:
+          type: string
+        severity:
+          type: string
+        summary:
+          type: string
+    BatchControlStatus:
+      type: object
+      additionalProperties: false
+      required: [id, name, status, severity, findings]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+        severity:
+          type: string
+        findings:
+          type: integer
+    BatchEvaluateResult:
+      type: object
+      additionalProperties: false
+      description: Batch evaluation result for one framework (services.BatchEvaluateResult).
+      required: [framework_id, framework_name, framework_code, framework_version, score, controls_total, controls_passing, controls_failing, affected_assets]
+      properties:
+        framework_id:
+          type: string
+        framework_name:
+          type: string
+        framework_code:
+          type: string
+        framework_version:
+          type: string
+        score:
+          type: integer
+        controls_total:
+          type: integer
+        controls_passing:
+          type: integer
+        controls_failing:
+          type: integer
+        affected_assets:
+          type: integer
+        findings:
+          type: array
+          description: Omitted unless include_details=true.
+          items:
+            $ref: "#/components/schemas/BatchFindingSummary"
+        control_breakdown:
+          type: array
+          description: Omitted unless include_details=true.
+          items:
+            $ref: "#/components/schemas/BatchControlStatus"
+    BatchEvaluateResponse:
+      type: object
+      additionalProperties: false
+      description: Response for POST /frameworks/batch-evaluate (services.BatchEvaluateResponse), returned bare.
+      required: [results, last_updated]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/BatchEvaluateResult"
+        last_updated:
+          type: string
+    BatchEvaluateRequest:
+      type: object
+      additionalProperties: true
+      description: Request body for POST /frameworks/batch-evaluate.
+      required: [framework_ids]
+      properties:
+        framework_ids:
+          type: array
+          items:
+            type: string
+        filters:
+          type: object
+          additionalProperties: true
+          description: Scenario filter set; shape not pinned in this slice.
+
+    LicensedFramework:
+      type: object
+      additionalProperties: false
+      description: A tenant_framework_licenses row, joined with its platform framework.
+      required:
+        - id
+        - tenant_id
+        - platform_framework_id
+        - is_default
+        - subscription_status
+        - provisioned_by
+        - purchased_at
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        platform_framework_id:
+          type: string
+        is_default:
+          type: boolean
+        subscription_status:
+          type: string
+          enum: [active, expired, cancelled]
+        subscription_started_at:
+          type: string
+          description: Optional. RFC3339 timestamp when the subscription started.
+        subscription_expires_at:
+          type: string
+          description: Optional. RFC3339 timestamp when the subscription expires (absent means perpetual).
+        provisioned_by:
+          type: string
+          enum: [admin, self_service, auto]
+        purchased_at:
+          type: string
+        purchase_price_cents:
+          type: integer
+        created_at:
+          type: string
+        updated_at:
+          type: string
+        platform_framework:
+          $ref: "#/components/schemas/PublishedFramework"
+
+    # ---- Platform-admin framework authoring (admin/* endpoints) ----
+    PlatformFrameworkInput:
+      type: object
+      additionalProperties: false
+      description: Create/update body for a platform framework.
+      required: [code, name, version]
+      properties:
+        code:
+          type: string
+        name:
+          type: string
+        version:
+          type: string
+        description:
+          type: string
+        organization:
+          type: string
+        is_platform_default:
+          type: boolean
+
+    PublishFrameworkInput:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [published, archived]
+
+    AdminFrameworkResponse:
+      type: object
+      additionalProperties: false
+      description: Single-framework mutation/get envelope for the admin endpoints.
+      required: [framework]
+      properties:
+        message:
+          type: string
+        framework:
+          $ref: "#/components/schemas/PublishedFramework"
+
+    AdminFrameworkListResponse:
+      type: object
+      additionalProperties: false
+      required: [frameworks]
+      properties:
+        frameworks:
+          type: array
+          items:
+            $ref: "#/components/schemas/PublishedFramework"
+
+    PlatformFrameworkControlInput:
+      type: object
+      additionalProperties: false
+      description: Create/update body for a platform framework control.
+      required: [control_id, title, baseline_severity]
+      properties:
+        family_id:
+          type: [string, "null"]
+          format: uuid
+        control_id:
+          type: string
+          description: Human control identifier, e.g. "PCI 3.6".
+        title:
+          type: string
+        description:
+          type: string
+        baseline_severity:
+          type: string
+          enum: [Low, Med, High, Critical]
+        crypto_relevant:
+          type: boolean
+
+    AdminControlResponse:
+      type: object
+      additionalProperties: false
+      description: Single-control mutation envelope for the admin control endpoints.
+      required: [control]
+      properties:
+        message:
+          type: string
+        control:
+          $ref: "#/components/schemas/PublishedFrameworkControl"
+
+    MeasurementType:
+      type: object
+      additionalProperties: false
+      description: A measurement a control rule can target (the rule-builder catalog).
+      required: [id, code, name, data_type, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        data_type:
+          type: string
+          enum: [integer, string, enum, date, boolean]
+        extraction_query:
+          type: string
+        units:
+          type: string
+        valid_range:
+          type: object
+          additionalProperties: true
+        allowed_rule_types:
+          type: array
+          items:
+            type: string
+        enum_values:
+          type: array
+          items: {}
+        valid_operators:
+          type: array
+          items:
+            type: string
+        predicate_schema:
+          type: object
+          additionalProperties: true
+        category:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    AdminMeasurementResponse:
+      type: object
+      additionalProperties: false
+      required: [measurement]
+      properties:
+        message:
+          type: string
+        measurement:
+          $ref: "#/components/schemas/ControlMeasurement"
+
+    MeasurementListResponse:
+      type: object
+      additionalProperties: false
+      required: [measurements]
+      properties:
+        measurements:
+          type: array
+          items:
+            $ref: "#/components/schemas/ControlMeasurement"
+
+    MeasurementTypeListResponse:
+      type: object
+      additionalProperties: false
+      required: [measurement_types]
+      properties:
+        measurement_types:
+          type: array
+          items:
+            $ref: "#/components/schemas/MeasurementType"
+
+    AvailableFramework:
+      type: object
+      additionalProperties: false
+      required: [platform_framework, is_licensed, is_platform_default]
+      properties:
+        platform_framework:
+          $ref: "#/components/schemas/PublishedFramework"
+        is_licensed:
+          type: boolean
+        is_platform_default:
+          type: boolean
+        preview_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
+          description: >
+            Materialized compliance score (0–100) for this framework against the
+            tenant's current inventory (ADR-0014 evaluation engine). Present for
+            every published framework — activated or not — so a card can show a
+            preview before the tenant activates. Absent/null until the engine has
+            produced a rollup for this tenant+framework.
+        controls_passing:
+          type: integer
+          nullable: true
+          description: Passing control count behind preview_score (null until scored).
+        controls_failing:
+          type: integer
+          nullable: true
+          description: Failing control count behind preview_score (null until scored).
+
+    DefaultFrameworkDescriptor:
+      type: object
+      additionalProperties: false
+      required: [framework_id, framework_type]
+      properties:
+        framework_id:
+          type: string
+          format: uuid
+        framework_type:
+          type: string
+          enum: [licensed, platform_default]
+        framework:
+          $ref: "#/components/schemas/PublishedFramework"
+        subscription_status:
+          type: string
+          enum: [active, expired, cancelled]
+
+    # ============================================================
+    # Response wrappers (current shapes)
+    # ============================================================
+    PublishedFrameworkListResponse:
+      type: object
+      additionalProperties: false
+      description: CURRENT list envelope for GET /frameworks/published.
+      required: [frameworks]
+      properties:
+        frameworks:
+          type: array
+          items:
+            $ref: "#/components/schemas/PublishedFramework"
+
+    PublishedFrameworkViewResponse:
+      type: object
+      additionalProperties: false
+      description: >
+        CURRENT envelope for GET /frameworks/published/{id}. Single object with
+        the framework (controls + measurements included for published
+        frameworks, regardless of license) and an informational `licensed` flag.
+        `message` is optional and no longer implies stripped controls.
+      required: [framework, licensed]
+      properties:
+        framework:
+          $ref: "#/components/schemas/PublishedFramework"
+        licensed:
+          type: boolean
+        message:
+          type: string
+
+    LicensedFrameworkListResponse:
+      type: object
+      additionalProperties: false
+      required: [licenses, count]
+      properties:
+        licenses:
+          type: array
+          items:
+            $ref: "#/components/schemas/LicensedFramework"
+        count:
+          type: integer
+
+    AvailableFrameworkListResponse:
+      type: object
+      additionalProperties: false
+      required: [frameworks, count]
+      properties:
+        frameworks:
+          type: array
+          items:
+            $ref: "#/components/schemas/AvailableFramework"
+        count:
+          type: integer
+
+    DefaultFrameworkResponse:
+      type: object
+      additionalProperties: false
+      required: [default_framework]
+      properties:
+        default_framework:
+          $ref: "#/components/schemas/DefaultFrameworkDescriptor"
+
+    MessageResponse:
+      type: object
+      additionalProperties: false
+      description: Generic mutation acknowledgement.
+      required: [message]
+      properties:
+        message:
+          type: string
+    ScenarioMutationResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for scenario create/update — `{ "message": "...", "scenario": {...} }`.'
+      required: [message, scenario]
+      properties:
+        message:
+          type: string
+        scenario:
+          $ref: "#/components/schemas/Scenario"
+    OverrideMutationResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for override create — `{ "message": "...", "override": {...} }`.'
+      required: [message, override]
+      properties:
+        message:
+          type: string
+        override:
+          $ref: "#/components/schemas/Override"
+    PlanMutationResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for plan create/update — `{ "message": "...", "plan": {...} }`.'
+      required: [message, plan]
+      properties:
+        message:
+          type: string
+        plan:
+          $ref: "#/components/schemas/RemediationPlan"
+    PlanItemMutationResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for add-plan-item — `{ "message": "...", "item": {...} }`.'
+      required: [message, item]
+      properties:
+        message:
+          type: string
+        item:
+          $ref: "#/components/schemas/RemediationPlanItem"
+    PlanItemsBulkResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for bulk add — `{ "message": "...", "added": N }`.'
+      required: [message, added]
+      properties:
+        message:
+          type: string
+        added:
+          type: integer
+    CreateScenarioRequest:
+      type: object
+      additionalProperties: true
+      description: Body for POST /scenarios.
+      required: [name, framework_id, framework_version]
+      properties:
+        name:
+          type: string
+        framework_id:
+          type: string
+          format: uuid
+        framework_version:
+          type: string
+        filters:
+          type: object
+          additionalProperties: true
+    UpdateScenarioRequest:
+      type: object
+      additionalProperties: true
+      description: Body for PUT /scenarios/{id}.
+      required: [name]
+      properties:
+        name:
+          type: string
+        filters:
+          type: object
+          additionalProperties: true
+    CreateOverrideRequest:
+      type: object
+      additionalProperties: true
+      description: Body for POST /overrides.
+      required: [control_id, override_type, rationale]
+      properties:
+        scenario_id:
+          type: string
+          format: uuid
+        control_id:
+          type: string
+          format: uuid
+        override_type:
+          type: string
+        severity_from:
+          type: string
+        severity_to:
+          type: string
+        rationale:
+          type: string
+        framework_type:
+          type: string
+          description: "platform or tenant (defaults to platform)."
+    CreatePlanRequest:
+      type: object
+      additionalProperties: true
+      description: Body for POST /plans.
+      required: [title]
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        plan_type:
+          type: string
+        priority:
+          type: string
+    UpdatePlanRequest:
+      type: object
+      additionalProperties: true
+      description: Body for PUT /plans/{id} (fields optional).
+    AddPlanItemRequest:
+      type: object
+      additionalProperties: true
+      description: Body for POST /plans/{id}/items.
+      required: [finding_id]
+      properties:
+        finding_id:
+          type: string
+          format: uuid
+        notes:
+          type: string
+    AddPlanItemsBulkRequest:
+      type: object
+      additionalProperties: true
+      description: Body for POST /plans/{id}/items/bulk.
+      required: [finding_ids]
+      properties:
+        finding_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+    LinkTicketRequest:
+      type: object
+      additionalProperties: true
+      description: Body for PUT /plans/{id}/items/{itemId}/ticket (models.LinkTicketInput).
+    EvidenceIdResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /findings/{id}/evidence-id.'
+      required: [evidence_id, evidence_ref, copyable]
+      properties:
+        evidence_id:
+          type: string
+        evidence_ref:
+          type: string
+        copyable:
+          type: boolean
+    FindingResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for PUT /findings/{id}/workflow-status — `{ "finding": {...} }`.'
+      required: [finding]
+      properties:
+        finding:
+          $ref: "#/components/schemas/ComplianceFinding"
+    AssignFindingRequest:
+      type: object
+      additionalProperties: true
+      description: Body for POST /findings/{id}/assign.
+      required: [assigned_to]
+      properties:
+        assigned_to:
+          type: string
+          format: uuid
+        notes:
+          type: string
+    UpdateWorkflowStatusRequest:
+      type: object
+      additionalProperties: true
+      description: Body for PUT /findings/{id}/workflow-status.
+      required: [workflow_status]
+      properties:
+        workflow_status:
+          type: string
+        suppression_reason:
+          type: string
+        suppressed_until:
+          type: string
+          format: date-time
+
+    # ============================================================
+    # Tickets domain (current shapes — what the service returns today)
+    # ============================================================
+    # ============================================================
+    # Stateful alerts domain
+    # ============================================================
+    Alert:
+      type: object
+      additionalProperties: false
+      description: >
+        A stateful alert (models.Alert) — a condition demanding attention with a
+        severity and a lifecycle (active → acknowledged → snoozed → resolved).
+        One open alert exists per (tenant, alert_type, subject); repeated raises
+        escalate it. The optional fields are omitted (not null) when unset,
+        because the Go model tags them `omitempty`.
+      required:
+        - id
+        - tenant_id
+        - alert_type
+        - source
+        - severity
+        - status
+        - title
+        - first_raised_at
+        - last_event_at
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        alert_type:
+          type: string
+          description: e.g. service_down, tenant_health_degraded, certificate_expiring, sensor_offline.
+        source:
+          type: string
+          description: Which detector/subsystem raised the alert.
+        subject_type:
+          type: string
+          description: The kind of subject the alert is about (e.g. sensor, service, certificate).
+        subject_id:
+          type: string
+          format: uuid
+        subject_label:
+          type: string
+          description: Human-readable label for the subject (shown in the UI).
+        severity:
+          type: string
+          description: critical / high / medium / low. Not pinned as an enum — legacy rows may carry other strings.
+        status:
+          type: string
+          description: active / acknowledged / snoozed / resolved. Not pinned as an enum for the same reason.
+        title:
+          type: string
+        message:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Free-form detector context (JSONB).
+        acknowledged_by:
+          type: string
+          format: uuid
+        acknowledged_at:
+          type: string
+          format: date-time
+        snoozed_by:
+          type: string
+          format: uuid
+        snoozed_until:
+          type: string
+          format: date-time
+        snooze_reason:
+          type: string
+        resolved_at:
+          type: string
+          format: date-time
+        resolved_by:
+          type: string
+          format: uuid
+        resolution:
+          type: string
+          description: How the alert resolved (e.g. auto, manual).
+        resolution_note:
+          type: string
+        resolution_observation:
+          type: object
+          additionalProperties: true
+          description: Free-form observation captured at resolution (JSONB).
+        ticket_id:
+          type: string
+          format: uuid
+          description: Set when a ticket has been created from this alert.
+        first_raised_at:
+          type: string
+          format: date-time
+        last_event_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    AlertEvent:
+      type: object
+      additionalProperties: false
+      description: >
+        One append-only entry in an alert's evidence chain (models.AlertEvent).
+        Rows are never updated or deleted — that is what makes the chain audit
+        evidence rather than workflow state.
+      required:
+        - id
+        - alert_id
+        - tenant_id
+        - event_type
+        - actor_type
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        alert_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        event_type:
+          type: string
+        actor_type:
+          type: string
+          description: system / user.
+        actor_id:
+          type: string
+          format: uuid
+        details:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+
+    AlertStats:
+      type: object
+      additionalProperties: false
+      description: >
+        Alert summary counts for the Alerts page cards (models.AlertStats). The
+        GET /alerts/stats body is this object directly, not wrapped.
+      required: [active, acknowledged, snoozed, resolved, critical, high]
+      properties:
+        active:
+          type: integer
+        acknowledged:
+          type: integer
+        snoozed:
+          type: integer
+        resolved:
+          type: integer
+        critical:
+          type: integer
+        high:
+          type: integer
+
+    AlertListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /alerts and GET /admin/alerts — `{ "alerts": [...] }`.'
+      required: [alerts]
+      properties:
+        alerts:
+          type: array
+          items:
+            $ref: "#/components/schemas/Alert"
+
+    AlertDetailResponse:
+      type: object
+      additionalProperties: false
+      description: Envelope for GET /alerts/{id} — the alert plus its evidence chain.
+      required: [alert, events]
+      properties:
+        alert:
+          $ref: "#/components/schemas/Alert"
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/AlertEvent"
+
+    AlertMutationResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for the lifecycle mutations (acknowledge/snooze/unsnooze/resolve) — `{ "alert": {...} }`.'
+      required: [alert]
+      properties:
+        alert:
+          $ref: "#/components/schemas/Alert"
+
+    AlertTicketResponse:
+      type: object
+      additionalProperties: false
+      description: Envelope for POST /alerts/{id}/ticket (201) — the ticket created from the alert.
+      required: [ticket]
+      properties:
+        ticket:
+          $ref: "#/components/schemas/Ticket"
+
+    SnoozeAlertRequest:
+      type: object
+      additionalProperties: false
+      description: Body for POST /alerts/{id}/snooze.
+      required: [until]
+      properties:
+        until:
+          type: string
+          format: date-time
+          description: RFC3339 timestamp to snooze the alert until. Required.
+        reason:
+          type: string
+
+    ResolveAlertRequest:
+      type: object
+      additionalProperties: false
+      description: Body for POST /alerts/{id}/resolve. Optional — an empty body resolves with no note.
+      properties:
+        note:
+          type: string
+
+    AlertCatalogRung:
+      type: object
+      additionalProperties: false
+      description: >
+        One trigger point on an escalating alert ladder (alertcatalog.Rung).
+        For the certificate-expiry ladder, `days` is "days remaining at which
+        this rung is crossed".
+      required: [days, severity, source]
+      properties:
+        days:
+          type: integer
+        severity:
+          type: string
+          description: critical / high / medium / low.
+        source:
+          type: string
+          description: >
+            Where the rung came from: `baseline` (product default),
+            `preference` (the tenant's replacement of the baseline), or
+            `policy:<framework name>` (projected from an activated compliance
+            policy's threshold measurement).
+
+    AlertCatalogPreferenceRung:
+      type: object
+      description: >
+        The tenant's replacement for a ladder type's baseline rung
+        (alertcatalog map[string]int on the wire — only the `days` key is
+        read; unrecognized keys are ignored, not rejected).
+      properties:
+        days:
+          type: integer
+          minimum: 1
+          maximum: 3650
+          description: A PUT with days outside 1..3650 is rejected with 400.
+      additionalProperties:
+        type: integer
+
+    AlertCatalogEntry:
+      type: object
+      additionalProperties: false
+      description: >
+        One row of the tenant alert catalog (services.CatalogEntry) — a
+        registry entry (alertcatalog.Entry) overlaid with the tenant's
+        enable/preference state and, for ladder types, the effective rung
+        ladder (baseline/preference + policy rungs projected from the
+        tenant's activated compliance frameworks). Fields tagged `omitempty`
+        on the Go struct are omitted (not null) when unset.
+      required:
+        - id
+        - track
+        - kind
+        - status
+        - source
+        - subject_type
+        - severity_model
+        - enabled_by_default
+        - description
+        - enabled
+      properties:
+        id:
+          type: string
+          description: Registry alert-type id (e.g. certificate_expiring, sensor_offline).
+        track:
+          type: string
+          description: >
+            tenant / platform. GET /alert-catalog only ever returns entries
+            whose track is `tenant`.
+        kind:
+          type: string
+          description: policy / operational.
+        status:
+          type: string
+          description: live / planned.
+        source:
+          type: string
+          description: Which service raises this alert type.
+        subject_type:
+          type: string
+        severity_model:
+          type: string
+          description: ladder / fixed.
+        default_severity:
+          type: string
+          description: Set for fixed-severity-model entries.
+        baseline_days:
+          type: integer
+          description: Set for ladder-severity-model entries with a baseline rung.
+        baseline_percent:
+          type: integer
+        baseline_severity:
+          type: string
+          description: Set for ladder-severity-model entries with a baseline rung.
+        auto_resolve:
+          type: string
+          description: Free-form note on the condition that auto-resolves an open alert of this type, when one exists.
+        enabled_by_default:
+          type: boolean
+        description:
+          type: string
+        enabled:
+          type: boolean
+          description: Effective tenant state — the registry default overlaid with the tenant's saved setting.
+        preference_rung:
+          $ref: "#/components/schemas/AlertCatalogPreferenceRung"
+        ladder:
+          type: array
+          description: >
+            Only present for ladder-severity-model entries with a positive
+            baseline_days; the effective ladder after applying the tenant's
+            preference rung and any policy rungs.
+          items:
+            $ref: "#/components/schemas/AlertCatalogRung"
+
+    AlertCatalogListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /alert-catalog — `{ "catalog": [...] }`. `catalog` is always an array, never null.'
+      required: [catalog]
+      properties:
+        catalog:
+          type: array
+          items:
+            $ref: "#/components/schemas/AlertCatalogEntry"
+
+    UpdateAlertCatalogEntryRequest:
+      type: object
+      additionalProperties: false
+      description: Body for PUT /alert-catalog/{type}.
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+        preference_rung:
+          description: Omit, or send null/`{}`, to clear the tenant's preference rung (the ladder falls back to the registry baseline).
+          anyOf:
+            - $ref: "#/components/schemas/AlertCatalogPreferenceRung"
+            - type: "null"
+
+    AlertCatalogUpdateResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for a successful PUT /alert-catalog/{type} — `{ "status": "updated" }`. Does not echo the updated entry; refetch GET /alert-catalog for the new effective ladder.'
+      required: [status]
+      properties:
+        status:
+          type: string
+
+    Ticket:
+      type: object
+      additionalProperties: false
+      description: >
+        A row in the unified `tickets` table. `category` partitions tickets
+        into the six product surfaces (compliance, certificate, remediation,
+        vulnerability, operational, general); the inventory-link UUID fields
+        are populated when the ticket attaches to an asset / certificate /
+        crypto config / finding / framework control.
+      required:
+        - id
+        - tenant_id
+        - category
+        - title
+        - status
+        - priority
+        - external_sync_status
+        - source
+        - created_by
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        category:
+          type: string
+          description: >
+            Stored free-form on the row; the product surface uses six values
+            (compliance, certificate, remediation, vulnerability, operational,
+            general). Not pinned as an enum here because legacy rows may carry
+            other strings.
+        title:
+          type: string
+        description:
+          type: [string, "null"]
+        status:
+          type: string
+          description: open / in_progress / resolved / closed; not pinned as an enum because legacy values may exist.
+        priority:
+          type: string
+          description: low / medium / high / critical; not pinned as an enum for the same reason.
+        severity:
+          type: [string, "null"]
+        due_date:
+          type: [string, "null"]
+          format: date-time
+        finding_id:
+          type: [string, "null"]
+          format: uuid
+        control_id:
+          type: [string, "null"]
+          format: uuid
+        asset_id:
+          type: [string, "null"]
+          format: uuid
+        certificate_id:
+          type: [string, "null"]
+          format: uuid
+        crypto_implementation_id:
+          type: [string, "null"]
+          format: uuid
+        external_ticket_system:
+          type: [string, "null"]
+          description: e.g. jira / servicenow / github / pagerduty when the ticket is mirrored externally.
+        external_ticket_id:
+          type: [string, "null"]
+        external_ticket_url:
+          type: [string, "null"]
+        external_sync_status:
+          type: string
+          description: Defaults to `none`; phase 2 will populate sync state.
+        source:
+          type: string
+          description: How the ticket was created (defaults to `manual`).
+        tags:
+          type: [array, "null"]
+          items:
+            type: string
+        assigned_to:
+          type: [string, "null"]
+          format: uuid
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        resolved_at:
+          type: [string, "null"]
+          format: date-time
+        resolution_notes:
+          type: [string, "null"]
+        alert_id:
+          description: 'Set when the ticket was created from an alert (#943) — links back to the alert whose evidence timeline seeded this ticket.'
+          type: string
+          format: uuid
+        comment_count:
+          type: integer
+          description: Computed/joined; absent (omitempty) when zero.
+
+    TicketComment:
+      type: object
+      additionalProperties: false
+      required: [id, ticket_id, content, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        ticket_id:
+          type: string
+          format: uuid
+        author_id:
+          description: 'Absent/null for system-authored comments (alert-event echoes, #943) — render as "System".'
+          type: string
+          format: uuid
+        content:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    TicketStats:
+      type: object
+      additionalProperties: false
+      required: [by_status, by_category, overdue, total]
+      properties:
+        by_status:
+          type: object
+          additionalProperties:
+            type: integer
+        by_category:
+          type: object
+          additionalProperties:
+            type: integer
+        overdue:
+          type: integer
+        total:
+          type: integer
+
+    TicketTrendPoint:
+      type: object
+      additionalProperties: false
+      required: [date, opened, resolved]
+      properties:
+        date:
+          type: string
+          description: ISO date (YYYY-MM-DD).
+        opened:
+          type: integer
+        resolved:
+          type: integer
+
+    TicketProgress:
+      type: object
+      additionalProperties: false
+      required: [period_days, summary, avg_resolution_hours, trend, by_category]
+      properties:
+        period_days:
+          type: integer
+        summary:
+          type: object
+          description: Status counts plus a synthetic `overdue` key.
+          additionalProperties:
+            type: integer
+        avg_resolution_hours:
+          type: number
+          description: Mean resolution time within the period, in hours. 0 when no tickets resolved.
+        trend:
+          type: array
+          items:
+            $ref: "#/components/schemas/TicketTrendPoint"
+        by_category:
+          type: object
+          description: category → (status → count) breakdown.
+          additionalProperties:
+            type: object
+            additionalProperties:
+              type: integer
+
+    # ============================================================
+    # Ticket request / response wrappers (current shapes)
+    # ============================================================
+    CreateTicketRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        Payload for POST /tickets. Only `title` is required. Defaults are
+        applied server-side: category=general, priority=medium, status=open,
+        source=manual, external_sync_status=none.
+      required: [title]
+      properties:
+        category:
+          type: string
+        title:
+          type: string
+        description:
+          type: [string, "null"]
+        priority:
+          type: string
+        severity:
+          type: [string, "null"]
+        due_date:
+          type: [string, "null"]
+          description: RFC3339 timestamp; malformed values fail at the service layer with a 500.
+        finding_id:
+          type: [string, "null"]
+        control_id:
+          type: [string, "null"]
+        asset_id:
+          type: [string, "null"]
+        certificate_id:
+          type: [string, "null"]
+        crypto_implementation_id:
+          type: [string, "null"]
+        external_ticket_system:
+          type: [string, "null"]
+        external_ticket_id:
+          type: [string, "null"]
+        external_ticket_url:
+          type: [string, "null"]
+        source:
+          type: [string, "null"]
+        tags:
+          type: [array, "null"]
+          items:
+            type: string
+        assigned_to:
+          type: [string, "null"]
+
+    UpdateTicketRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        Partial update of a ticket. Every field is optional and only present
+        fields are applied. An empty-string `due_date` or `assigned_to`
+        clears that column; a non-empty `due_date` must be RFC3339.
+      properties:
+        status:
+          type: [string, "null"]
+        priority:
+          type: [string, "null"]
+        severity:
+          type: [string, "null"]
+        category:
+          type: [string, "null"]
+        description:
+          type: [string, "null"]
+        due_date:
+          type: [string, "null"]
+        assigned_to:
+          type: [string, "null"]
+        resolution_notes:
+          type: [string, "null"]
+        tags:
+          type: [array, "null"]
+          items:
+            type: string
+        external_ticket_system:
+          type: [string, "null"]
+        external_ticket_id:
+          type: [string, "null"]
+        external_ticket_url:
+          type: [string, "null"]
+        external_sync_status:
+          type: [string, "null"]
+
+    AddTicketCommentRequest:
+      type: object
+      additionalProperties: false
+      required: [content]
+      properties:
+        content:
+          type: string
+
+    TicketListResponse:
+      type: object
+      additionalProperties: false
+      description: >
+        CURRENT list envelope for GET /tickets. `total` is the unpaginated
+        count; `page` and `page_size` echo the resolved values. Not yet the
+        ADR-0002 `data` + `pagination` shape.
+      required: [tickets, total, page, page_size]
+      properties:
+        tickets:
+          type: array
+          items:
+            $ref: "#/components/schemas/Ticket"
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+
+    TicketResponse:
+      type: object
+      additionalProperties: false
+      description: CURRENT envelope for GET /tickets/{id}.
+      required: [ticket]
+      properties:
+        ticket:
+          $ref: "#/components/schemas/Ticket"
+
+    TicketCreatedResponse:
+      type: object
+      additionalProperties: false
+      description: CURRENT envelope for POST /tickets (201).
+      required: [message, ticket]
+      properties:
+        message:
+          type: string
+        ticket:
+          $ref: "#/components/schemas/Ticket"
+
+    TicketUpdatedResponse:
+      type: object
+      additionalProperties: false
+      description: CURRENT envelope for PUT /tickets/{id} (200).
+      required: [message, ticket]
+      properties:
+        message:
+          type: string
+        ticket:
+          $ref: "#/components/schemas/Ticket"
+
+    TicketStatsResponse:
+      type: object
+      additionalProperties: false
+      description: CURRENT envelope for GET /tickets/stats.
+      required: [stats]
+      properties:
+        stats:
+          $ref: "#/components/schemas/TicketStats"
+
+    TicketProgressResponse:
+      type: object
+      additionalProperties: false
+      description: CURRENT envelope for GET /tickets/progress.
+      required: [progress]
+      properties:
+        progress:
+          $ref: "#/components/schemas/TicketProgress"
+
+    TicketCommentListResponse:
+      type: object
+      additionalProperties: false
+      description: CURRENT envelope for GET /tickets/{id}/comments.
+      required: [comments]
+      properties:
+        comments:
+          type: array
+          items:
+            $ref: "#/components/schemas/TicketComment"
+
+    TicketCommentCreatedResponse:
+      type: object
+      additionalProperties: false
+      description: CURRENT envelope for POST /tickets/{id}/comments (201).
+      required: [message, comment]
+      properties:
+        message:
+          type: string
+        comment:
+          $ref: "#/components/schemas/TicketComment"
+
+    SubscribeFrameworkRequest:
+      type: object
+      additionalProperties: true
+      description: >
+        Request body for POST /frameworks/subscribe. Maps to
+        models.ProvisionFrameworkInput; the handler overrides `provisioned_by`
+        and `expires_at` before persisting, so additional client-supplied keys
+        are silently dropped (additionalProperties is left open to mirror the
+        Go struct's binding-by-tag behavior).
+      required: [framework_id]
+      properties:
+        framework_id:
+          type: string
+          format: uuid
+        set_as_default:
+          type: boolean
+
+    SetDefaultFrameworkRequest:
+      type: object
+      additionalProperties: false
+      required: [framework_id]
+      properties:
+        framework_id:
+          type: string
+          format: uuid
+
+    LegacyError:
+      type: object
+      additionalProperties: false
+      description: >
+        CURRENT error shape returned by most compliance-engine endpoints: a
+        single human-readable string under `error`. Unstructured — cannot be
+        branched on safely. Superseded by the ADR-0002 `Error` envelope below
+        as endpoints are hardened.
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    LegacyErrorWithDetails:
+      type: object
+      additionalProperties: false
+      description: >
+        Variant returned by `GET /frameworks/default` when the tenant row is
+        missing. Carries an extra free-form `details` string alongside the
+        canonical `error` key. Documented separately to keep
+        additionalProperties:false honest.
+      required: [error]
+      properties:
+        error:
+          type: string
+        details:
+          type: string
+
+    # ============================================================
+    # ADR-0002 go-forward envelope (the documented standard).
+    # NOT yet applied to the v1 framework paths above. New and hardened
+    # endpoints conform to these. The generated client carries these types
+    # ahead of the backend so the frontend-v2 surface can target them.
+    # ============================================================
+    Error:
+      type: object
+      additionalProperties: false
+      description: ADR-0002 error envelope. Clients branch on `error.code`, never on `message`.
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Stable, machine-readable enum (e.g. framework_not_licensed).
+            message:
+              type: string
+              description: Human-readable, safe to surface in UI.
+            details:
+              type: array
+              items:
+                $ref: "#/components/schemas/ErrorDetail"
+            request_id:
+              type: string
+              description: For support correlation.
+
+    ErrorDetail:
+      type: object
+      additionalProperties: false
+      required: [field, issue]
+      properties:
+        field:
+          type: string
+        issue:
+          type: string
+
+    Pagination:
+      type: object
+      additionalProperties: false
+      description: ADR-0002 pagination block for collection envelopes.
+      required: [total, limit, offset]
+      properties:
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+        next_offset:
+          type: [integer, "null"]
+          description: Offset of the next page, or null when there are no more.

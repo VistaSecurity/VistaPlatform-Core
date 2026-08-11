@@ -1,0 +1,24 @@
+go 1.26.5
+
+use (
+	./device-agent
+	./sensor
+	./services/admin-service
+	./services/audit-service
+	./services/auth-service
+	./services/cbom-service
+	./services/cluster-sensor-service
+	./services/compliance-engine
+	./services/device-interrogation-service
+	./services/discovery-processor-service
+	./services/inventory-service
+	./services/mcp-service
+	./services/monitoring-service
+	./services/notification-service
+	./services/pcap-processor
+	./services/resource-tracker-service
+	./services/sensor-manager
+	./services/tenant-health-service
+	./shared
+	./shared/rbac
+)

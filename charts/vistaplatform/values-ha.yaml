@@ -1,0 +1,53 @@
+# values-ha.yaml — high-availability overlay for the VistaPlatform Helm chart.
+#
+# Apply alongside the base values.yaml and your customer values:
+#
+#   helm install vistaplatform oci://.../charts/vistaplatform \
+#     -f values-ha.yaml \
+#     -f values-customer.yaml
+#
+# What this profile does:
+#   - Doubles every stateless workload (16 backends + web-ui + admin-ui) and
+#     spreads replicas across worker nodes via podAntiAffinity. The cluster
+#     ingress controller (Traefik in kube-system / ALB on EKS) handles
+#     routing — there is no in-cluster gateway pod to scale.
+#   - Activates PodDisruptionBudgets (the chart auto-emits a PDB whenever a
+#     workload's replicas > 1), so node drains and rolling upgrades don't take
+#     a service down.
+#
+# What this profile does NOT do (v1 limitations):
+#   - Datastores (Postgres / Redis / InfluxDB / NATS) remain single-replica.
+#     True HA for those needs an operator (CloudNativePG, NATS clustering with
+#     3 replicas, etc.) or external managed services. Document this gap with
+#     the customer; it's the headline v1.1 follow-up.
+#   - sensor-manager + pcap-processor stay at replicas: 1. They share a
+#     ReadWriteOnce PVC for PCAP file handoff; scaling either to 2 fails to
+#     schedule. Loss of the worker hosting these pods makes PCAP upload
+#     temporarily unavailable; everything else stays up.
+#
+# Recommended cluster: 1 master + 2 workers, each worker with 6 vCPU / 16 GiB
+# RAM. Smaller workers will work but pods will run hot under load.
+
+enableSpreadAcrossNodes: true
+
+# Bumps every backend that doesn't override `replicas`. The two PVC-bound
+# services below explicitly stay at 1.
+defaultReplicas: 2
+
+backends:
+  sensor-manager:
+    replicas: 1   # PVC pcap-uploads is RWO; cannot scale beyond 1.
+  pcap-processor:
+    replicas: 1   # Same constraint, already locked in the base values.yaml.
+
+frontend:
+  webUi:
+    replicas: 2
+  adminUi:
+    replicas: 2
+
+# JetStream replication factor. Keep at 1 in v1 — true NATS HA needs 3
+# replicas and the StatefulSet wired for clustering, which is a separate
+# refactor. Listed here for visibility.
+appConfig:
+  natsStreamReplicas: "1"

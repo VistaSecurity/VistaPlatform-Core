@@ -1,0 +1,76 @@
+{{/*
+Postgres server cert + Traefik ServersTransport for backend mTLS.
+
+Postgres cert covers SANs for the Service DNS names + the StatefulSet pod
+DNS (postgres-0.postgres). Mounted into the postgres pod at
+/etc/postgres-tls; consumed by ssl_cert_file / ssl_key_file in
+postgresql.conf and ssl_ca_file for client cert validation.
+
+serviceMtls is ON by default as of #965. The backends-mtls ServersTransport
+below is wired into every generated IngressRoute in templates/ingress/
+(serversTransport: backends-mtls, emitted by scripts/generate-k8s-ingress.mjs)
+— the chart ships no in-cluster api-gateway pod, so cluster Traefik
+(kube-system) is the mTLS client for gateway→backend hops.
+*/}}
+{{- if .Values.serviceMtls.enabled }}
+{{- $cert := .Values.serviceMtls.certificate }}
+{{- if .Values.datastores.postgres.enabled }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: postgres-mtls
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  secretName: postgres-mtls
+  duration: {{ $cert.duration | quote }}
+  renewBefore: {{ $cert.renewBefore | quote }}
+  privateKey:
+    algorithm: {{ $cert.privateKey.algorithm }}
+    size: {{ $cert.privateKey.size }}
+    rotationPolicy: {{ $cert.privateKey.rotationPolicy }}
+  usages:
+    - server auth
+  commonName: postgres
+  dnsNames:
+    - postgres
+    - postgres.{{ .Release.Namespace }}
+    - postgres.{{ .Release.Namespace }}.svc
+    - postgres.{{ .Release.Namespace }}.svc.cluster.local
+    - postgres-0.postgres
+    - postgres-0.postgres.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    name: {{ .Release.Name }}-platform-ca-issuer
+    kind: Issuer
+{{- end }}
+{{- if eq (.Values.ingress.controller | default "traefik") "traefik" }}
+---
+# Traefik ServersTransport — apply mTLS when api-gateway calls backends.
+# Gated on ingress.controller=traefik: this is a Traefik-specific CRD. When
+# the operator brings their own ingress (controller=none), they configure
+# backend-mTLS through their own mechanism (e.g. nginx-ingress proxy_ssl_*
+# annotations, Istio DestinationRule trafficPolicy.tls, Gateway API
+# BackendTLSPolicy).
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: backends-mtls
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  # Backends share the SAN "<release>-backends" (see 10-service-certificates.yaml).
+  # Traefik LBs to pod IPs, so a per-service DNS SAN can't match; this shared
+  # serverName lets one transport verify every backend's server cert (still
+  # platform-CA-signed + SAN-checked — not insecureSkipVerify).
+  serverName: {{ .Release.Name }}-backends
+  insecureSkipVerify: false
+  rootCAsSecrets:
+    - {{ default "platform-ca-secret" .Values.serviceMtls.platformCa.externalCaSecretName }}
+  certificatesSecrets:
+    - api-gateway-client-mtls
+{{- end }}
+{{- end }}

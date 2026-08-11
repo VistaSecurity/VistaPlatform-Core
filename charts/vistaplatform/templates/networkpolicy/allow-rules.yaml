@@ -1,0 +1,252 @@
+{{- if .Values.networkPolicy.enabled }}
+{{/* Allow the cluster's ingress controller (kube-system on RKE2, or
+whichever namespace runs Traefik/nginx/ALB) to reach the frontends and
+backends directly. There is no in-cluster api-gateway pod anymore — cluster
+Traefik routes per-service via the IngressRoute CRDs in templates/ingress/.
+Override .Values.networkPolicy.ingressControllerNamespace for non-RKE2
+clusters. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-frontends
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [web-ui, admin-ui] }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressControllerNamespace }}
+      ports:
+        - { protocol: TCP, port: 80 }
+---
+{{/* Cluster ingress -> backends on :8080, plus backend-to-backend (e.g.
+compliance-engine -> inventory-service for live RuleEvaluator fallback). */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-backends
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [{{ keys .Values.backends | join "," }}] }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressControllerNamespace }}
+        # Backend-to-backend traffic.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: vistaplatform
+      ports:
+        # 8080 = plain HTTP API (mTLS off) / kubelet-probe + health listener (mTLS on).
+        - { protocol: TCP, port: 8080 }
+        {{- if .Values.serviceMtls.enabled }}
+        # 8443 = the mTLS API listener. Required for BOTH the gateway→backend
+        # ServersTransport path and backend↔backend S2S once serviceMtls is on —
+        # without it default-deny-ingress blocks all real API traffic (→ 503).
+        - { protocol: TCP, port: 8443 }
+        {{- end }}
+        {{- if .Values.agentMtls.enabled }}
+        # Agent/sensor mTLS passthrough listener (/). The cluster
+        # Traefik dials it directly (IngressRouteTCP, TLS passthrough); without
+        # this, default-deny-ingress silently blackholes the passthrough —
+        # agent connections hang at the TLS handshake.
+        - { protocol: TCP, port: {{ .Values.agentMtls.port }} }
+        {{- end }}
+---
+{{/* Backends and jobs that need Postgres.
+
+schema-migration and seed-data are Jobs (not long-running backends in
+.Values.backends), so they're added to the allow-from list explicitly.
+Prior to v0.1.1, schema-migration was missing entirely and the install
+deadlocked silently. v0.2.0 surfaced the same issue for seed-data on
+fresh installs once schema-migration unblocked the rest. The serviceRls
+rls-roles Job (#903) hit the identical deadlock — blocked by default-deny it
+could never reach Postgres to grant crypto_app LOGIN, so the whole serviceRls
+path failed closed (#916). It's appended only when serviceRls is enabled, so
+the off-toggle render is unchanged. */}}
+{{- $pgConsumers := list "schema-migration" "seed-data" }}
+{{- if .Values.serviceRls.enabled }}
+  {{- $pgConsumers = append $pgConsumers "rls-roles" }}
+{{- end }}
+{{- range $name, $svc := .Values.backends }}
+  {{- if (default (dict) $svc.needs).postgres }}
+    {{- $pgConsumers = append $pgConsumers $name }}
+  {{- end }}
+{{- end }}
+{{- if $pgConsumers }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-backends-to-postgres
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: postgres
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchExpressions:
+              - { key: app.kubernetes.io/component, operator: In, values: [{{ $pgConsumers | join "," }}] }
+      ports:
+        - { protocol: TCP, port: 5432 }
+{{- end }}
+---
+{{/* Backends that need Redis. */}}
+{{- $redisConsumers := list }}
+{{- range $name, $svc := .Values.backends }}
+  {{- if (default (dict) $svc.needs).redis }}
+    {{- $redisConsumers = append $redisConsumers $name }}
+  {{- end }}
+{{- end }}
+{{- if $redisConsumers }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-backends-to-redis
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: redis
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchExpressions:
+              - { key: app.kubernetes.io/component, operator: In, values: [{{ $redisConsumers | join "," }}] }
+      ports:
+        - { protocol: TCP, port: 6379 }
+{{- end }}
+---
+{{/* Backends that need NATS. */}}
+{{- $natsConsumers := list }}
+{{- range $name, $svc := .Values.backends }}
+  {{- if (default (dict) $svc.needs).nats }}
+    {{- $natsConsumers = append $natsConsumers $name }}
+  {{- end }}
+{{- end }}
+{{- if $natsConsumers }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-backends-to-nats
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: nats
+  policyTypes: [Ingress]
+  ingress:
+    # Client traffic (publish/subscribe) from every backend that uses NATS.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchExpressions:
+              - { key: app.kubernetes.io/component, operator: In, values: [{{ $natsConsumers | join "," }}] }
+      ports:
+        - { protocol: TCP, port: 4222 }
+    # NATS HTTP monitor port (8222) — only monitoring-service polls it, and
+    # only via the headless Service (the regular `nats` Service exposes 4222
+    # only). Scope the allow rule to monitoring-service to keep the operator
+    # plane separate from the data plane.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: monitoring-service
+      ports:
+        - { protocol: TCP, port: 8222 }
+{{- end }}
+---
+{{/* Backends that need InfluxDB (metrics writes + the monitoring-service
+health probe). Mirror the postgres/redis/nats pattern. */}}
+{{- $influxConsumers := list }}
+{{- range $name, $svc := .Values.backends }}
+  {{- if (default (dict) $svc.needs).influxdb }}
+    {{- $influxConsumers = append $influxConsumers $name }}
+  {{- end }}
+{{- end }}
+{{- if and $influxConsumers .Values.datastores.influxdb.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-backends-to-influxdb
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: influxdb
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchExpressions:
+              - { key: app.kubernetes.io/component, operator: In, values: [{{ $influxConsumers | join "," }}] }
+      ports:
+        - { protocol: TCP, port: 8086 }
+{{- end }}
+---
+{{/* The misnamed "allow-migration-job-to-postgres" policy was deleted in
+v0.1.1. It targeted the schema-migration POD itself with empty ingress (i.e.
+allowed nothing TO the migration pod), which was both useless and misnamed.
+The actual allow rule for schema-migration → postgres is folded into
+allow-backends-to-postgres above ($pgConsumers list-pre-pended with
+"schema-migration"). */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontends-from-gateway
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [web-ui, admin-ui] }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressControllerNamespace }}
+      ports:
+        # Cluster Traefik load-balances to pod IP : containerPort (endpoint LB),
+        # NOT the Service port 80 — so these MUST be the frontends' actual
+        # container ports, kept in sync with templates/frontend/{web-ui,admin-ui}.yaml.
+        # web-ui = 3001, admin-ui = 3007. (3003 was admin-ui's old Vite port; it
+        # moved to Caddy on 3007, which left admin-ui externally unreachable —
+        # TLS terminated at Traefik, then the backend dial was default-denied.)
+        - { protocol: TCP, port: 3001 }
+        - { protocol: TCP, port: 3007 }
+{{- end }}
