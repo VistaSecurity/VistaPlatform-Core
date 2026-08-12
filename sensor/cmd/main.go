@@ -35,7 +35,10 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
 )
 
-const Version = "1.0.0"
+// Version is stamped at build time via -ldflags "-X main.Version=<tag>"
+// (see the Makefile's AGENT_LDFLAGS and release-core.yml). An unstamped
+// build honestly reports "dev" rather than claiming to be a release.
+var Version = "dev"
 
 type Sensor struct {
 	config        *config.Config
@@ -151,6 +154,11 @@ func main() {
 			cfg = config.Load()
 		}
 	}
+
+	// The build-stamped binary version is the truth about what code is running;
+	// a version copied into a config file or env var goes stale on upgrade.
+	cfg.Version = Version
+
 	log.Printf("Configuration loaded:")
 	log.Printf("  Sensor ID: %s", cfg.SensorID)
 	log.Printf("  Control Plane URL: %s", cfg.ControlPlaneURL)
@@ -2126,6 +2134,9 @@ func startSensorWithConfig() {
 		fmt.Printf("⚠️  Warning: Failed to load config file (%v), using environment variables\n", err)
 		cfg = config.Load()
 	}
+
+	// Build-stamped binary version wins over anything in the config file.
+	cfg.Version = Version
 
 	// Set test mode from environment if set
 	if os.Getenv("TEST_MODE") == "true" {

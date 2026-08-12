@@ -57,7 +57,9 @@ info "Go $GO_VERSION"
 
 LDFLAGS=""
 if [[ -n "$VERSION_TAG" ]]; then
-  LDFLAGS="-ldflags=-X main.version=${VERSION_TAG}"
+  # NB: the symbol is main.Version (capital V) in both sensor and device-agent;
+  # a lowercase main.version silently stamps nothing.
+  LDFLAGS="-ldflags=-X main.Version=${VERSION_TAG}"
   info "Version tag: $VERSION_TAG"
 fi
 

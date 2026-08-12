@@ -343,7 +343,9 @@ func LoadFromFile(filePath string) (*Config, error) {
 		cfg.Platform = runtime.GOOS
 	}
 	if cfg.Version == "" {
-		cfg.Version = "1.0.0"
+		// Placeholder only — cmd/main.go overwrites this with the
+		// build-stamped main.Version after loading.
+		cfg.Version = "dev"
 	}
 	if cfg.Profile == "" {
 		cfg.Profile = "datacenter_host"
@@ -506,7 +508,7 @@ func Load() *Config {
 		Name:              sharedconfig.GetEnv("SENSOR_NAME", "crypto-sensor"),
 		Description:       sharedconfig.GetEnv("SENSOR_DESCRIPTION", "VistaPlatform Network Sensor"),
 		Platform:          sharedconfig.GetEnv("SENSOR_PLATFORM", "linux"),
-		Version:           sharedconfig.GetEnv("SENSOR_VERSION", "1.0.0"),
+		Version:           sharedconfig.GetEnv("SENSOR_VERSION", "dev"),
 		Profile:           sharedconfig.GetEnv("SENSOR_PROFILE", "datacenter_host"),
 		ControlPlaneURL:   sharedconfig.GetEnv("CONTROL_PLANE_URL", "http://localhost:8085"),
 		RegistrationKey:   sharedconfig.GetEnv("REGISTRATION_KEY", ""),

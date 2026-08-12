@@ -25,7 +25,10 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
 )
 
-const Version = "1.0.0"
+// Version is stamped at build time via -ldflags "-X main.Version=<tag>"
+// (see the Makefile's AGENT_LDFLAGS and release-core.yml). An unstamped
+// build honestly reports "dev" rather than claiming to be a release.
+var Version = "dev"
 
 type DeviceAgent struct {
 	config      *config.Config

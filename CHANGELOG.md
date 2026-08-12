@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-08-12
+
+### Fixed
+
+- **Agent binaries report their real release version.** Every sensor and
+  device-agent ever shipped claimed the hardcoded `1.0.0`, so the platform
+  could not answer "which of my agents predate a given fix" — acute after
+  v0.5.1's trust-anchor repair left older agents broken in the default
+  configuration. Release builds now stamp `main.Version` from the tag; an
+  unstamped local build reports `dev` rather than impersonating a release.
+  Two latent defects fixed en route: the sensor's registration payload sent a
+  config-file version instead of the binary's, and the Windows build script
+  stamped a misspelled symbol whose ldflags had never taken effect. In-cluster
+  platform agents now report the chart's `SERVICE_VERSION` instead of
+  `system`. Versions are recorded at registration; heartbeat refresh for
+  in-place upgrades is queued as follow-up.
+
 ## [0.5.2] - 2026-08-12
 
 Overnight hardening pass driven by running a real sensor against v0.5.1 and

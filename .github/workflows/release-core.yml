@@ -312,8 +312,10 @@ jobs:
         if: startsWith(matrix.runner, 'ubuntu') && startsWith(matrix.target, 'sensor-') && !contains(matrix.target, 'windows')
         run: sudo apt-get update && sudo apt-get install -y libpcap-dev
 
+      # AGENT_VERSION stamps main.Version via -ldflags so a shipped binary
+      # reports the release tag instead of the unstamped default "dev".
       - name: Build
-        run: make ${{ matrix.target }}
+        run: make ${{ matrix.target }} AGENT_VERSION=${{ needs.guard.outputs.version }}
 
       # Unquoted on purpose: the device-agent entry is a glob covering all five
       # of its platforms from one job.

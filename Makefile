@@ -522,12 +522,21 @@ SENSOR_DIR := $(ROOT_DIR)/sensor
 # fails with "undefined: logRing". Used by build-sensor + every cross-platform target.
 SENSOR_MAIN := ./cmd
 
+# Version stamped into the sensor and device-agent binaries (main.Version).
+# Release builds pass the tag (release-core.yml does `make <target>
+# AGENT_VERSION=vX.Y.Z`); a local build honestly reports "dev". Falls back to
+# $(VERSION) so `make sensor-upload-version VERSION=vX.Y.Z` stamps consistently.
+AGENT_VERSION ?= $(or $(VERSION),dev)
+# Strip a leading "v": the platform stores the bare version and the UI renders
+# it as v{version}, so stamping the tag verbatim would display as "vv0.6.0".
+AGENT_LDFLAGS := -ldflags "-X main.Version=$(patsubst v%,%,$(AGENT_VERSION))"
+
 .PHONY: build-sensor sensor-linux-amd64 sensor-windows-amd64 sensor-windows-386 sensor-darwin-amd64 sensor-linux-arm64 sensor-darwin-arm64 sensor-all-platforms build-windows
 
 build-sensor: ## Build cross-platform network sensor
 	@echo "Building network sensor..."
 	@mkdir -p $(BIN_DIR)
-	CGO_ENABLED=1 go build -C $(SENSOR_DIR) -o $(BIN_DIR)/crypto-sensor $(SENSOR_MAIN)
+	CGO_ENABLED=1 go build -C $(SENSOR_DIR) $(AGENT_LDFLAGS) -o $(BIN_DIR)/crypto-sensor $(SENSOR_MAIN)
 	@echo "Building cross-platform binaries (set CROSS=1 to enable)..."
 	@if [ "$(CROSS)" = "1" ]; then \
 		$(MAKE) sensor-all-platforms; \
@@ -546,7 +555,7 @@ build-windows: sensor-windows-amd64 device-agent-windows-amd64 ## Build sensor a
 build-device-agent: ## Build device-agent binary
 	@echo "Building device-agent..."
 	@mkdir -p $(BIN_DIR)
-	go build -C device-agent -o $(BIN_DIR)/device-agent ./cmd/main.go
+	go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent ./cmd/main.go
 	@echo "Building cross-platform binaries (set CROSS=1 to enable)..."
 	@if [ "$(CROSS)" = "1" ]; then \
 		$(MAKE) device-agent-all-platforms; \
@@ -558,42 +567,42 @@ device-agent-all-platforms: device-agent-linux-amd64 device-agent-linux-arm64 de
 device-agent-linux-amd64: ## Build device-agent for Linux x86_64
 	@echo "Building Linux x86_64 device-agent..."
 	@mkdir -p $(BIN_DIR) artifacts/device-agent/linux/amd64
-	GOOS=linux GOARCH=amd64 go build -C device-agent -o $(BIN_DIR)/device-agent-linux-amd64 ./cmd/main.go
+	GOOS=linux GOARCH=amd64 go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent-linux-amd64 ./cmd/main.go
 	cp $(BIN_DIR)/device-agent-linux-amd64 artifacts/device-agent/linux/amd64/device-agent
 	@echo "✅ Linux x86_64 device-agent built and placed in artifacts/"
 
 device-agent-linux-arm64: ## Build device-agent for Linux ARM64
 	@echo "Building Linux ARM64 device-agent..."
 	@mkdir -p $(BIN_DIR) artifacts/device-agent/linux/arm64
-	GOOS=linux GOARCH=arm64 go build -C device-agent -o $(BIN_DIR)/device-agent-linux-arm64 ./cmd/main.go
+	GOOS=linux GOARCH=arm64 go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent-linux-arm64 ./cmd/main.go
 	cp $(BIN_DIR)/device-agent-linux-arm64 artifacts/device-agent/linux/arm64/device-agent
 	@echo "✅ Linux ARM64 device-agent built and placed in artifacts/"
 
 device-agent-windows-amd64: ## Build device-agent for Windows x86_64
 	@echo "Building Windows x86_64 device-agent..."
 	@mkdir -p $(BIN_DIR) artifacts/device-agent/windows/amd64
-	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -C device-agent -o $(BIN_DIR)/device-agent-windows-amd64.exe ./cmd/main.go
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent-windows-amd64.exe ./cmd/main.go
 	cp $(BIN_DIR)/device-agent-windows-amd64.exe artifacts/device-agent/windows/amd64/device-agent.exe
 	@echo "✅ Windows x86_64 device-agent built and placed in artifacts/"
 
 device-agent-windows-386: ## Build device-agent for Windows x86 (32-bit)
 	@echo "Building Windows x86 (32-bit) device-agent..."
 	@mkdir -p $(BIN_DIR) artifacts/device-agent/windows/386
-	CGO_ENABLED=0 GOOS=windows GOARCH=386 go build -C device-agent -o $(BIN_DIR)/device-agent-windows-386.exe ./cmd/main.go
+	CGO_ENABLED=0 GOOS=windows GOARCH=386 go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent-windows-386.exe ./cmd/main.go
 	cp $(BIN_DIR)/device-agent-windows-386.exe artifacts/device-agent/windows/386/device-agent.exe
 	@echo "✅ Windows x86 device-agent built and placed in artifacts/"
 
 device-agent-darwin-amd64: ## Build device-agent for macOS x86_64
 	@echo "Building macOS x86_64 device-agent..."
 	@mkdir -p $(BIN_DIR) artifacts/device-agent/darwin/amd64
-	GOOS=darwin GOARCH=amd64 go build -C device-agent -o $(BIN_DIR)/device-agent-darwin-amd64 ./cmd/main.go
+	GOOS=darwin GOARCH=amd64 go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent-darwin-amd64 ./cmd/main.go
 	cp $(BIN_DIR)/device-agent-darwin-amd64 artifacts/device-agent/darwin/amd64/device-agent
 	@echo "✅ macOS x86_64 device-agent built and placed in artifacts/"
 
 device-agent-darwin-arm64: ## Build device-agent for macOS ARM64 (Apple Silicon)
 	@echo "Building macOS ARM64 device-agent..."
 	@mkdir -p $(BIN_DIR) artifacts/device-agent/darwin/arm64
-	GOOS=darwin GOARCH=arm64 go build -C device-agent -o $(BIN_DIR)/device-agent-darwin-arm64 ./cmd/main.go
+	GOOS=darwin GOARCH=arm64 go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent-darwin-arm64 ./cmd/main.go
 	cp $(BIN_DIR)/device-agent-darwin-arm64 artifacts/device-agent/darwin/arm64/device-agent
 	@echo "✅ macOS ARM64 device-agent built and placed in artifacts/"
 
@@ -605,7 +614,7 @@ device-agent-upload: device-agent-all-platforms ## Build and upload device-agent
 sensor-linux-amd64: ## Build sensor for Linux x86_64
 	@echo "Building Linux x86_64 sensor..."
 	@mkdir -p $(BIN_DIR) artifacts/sensor/linux/amd64
-	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -C $(SENSOR_DIR) -o $(BIN_DIR)/crypto-sensor-linux-amd64 $(SENSOR_MAIN)
+	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -C $(SENSOR_DIR) $(AGENT_LDFLAGS) -o $(BIN_DIR)/crypto-sensor-linux-amd64 $(SENSOR_MAIN)
 	cp $(BIN_DIR)/crypto-sensor-linux-amd64 artifacts/sensor/linux/amd64/crypto-sensor
 	cp scripts/install-sensor.sh artifacts/sensor/linux/amd64/
 	@echo "✅ Linux x86_64 sensor built and placed in artifacts/"
@@ -613,7 +622,7 @@ sensor-linux-amd64: ## Build sensor for Linux x86_64
 sensor-linux-arm64: ## Build sensor for Linux ARM64
 	@echo "Building Linux ARM64 sensor..."
 	@mkdir -p $(BIN_DIR) artifacts/sensor/linux/arm64
-	CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -C $(SENSOR_DIR) -o $(BIN_DIR)/crypto-sensor-linux-arm64 $(SENSOR_MAIN)
+	CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -C $(SENSOR_DIR) $(AGENT_LDFLAGS) -o $(BIN_DIR)/crypto-sensor-linux-arm64 $(SENSOR_MAIN)
 	cp $(BIN_DIR)/crypto-sensor-linux-arm64 artifacts/sensor/linux/arm64/crypto-sensor
 	cp scripts/install-sensor.sh artifacts/sensor/linux/arm64/
 	@echo "✅ Linux ARM64 sensor built and placed in artifacts/"
@@ -621,7 +630,7 @@ sensor-linux-arm64: ## Build sensor for Linux ARM64
 sensor-windows-amd64: ## Build sensor for Windows x86_64
 	@echo "Building Windows x86_64 sensor..."
 	@mkdir -p $(BIN_DIR) artifacts/sensor/windows/amd64
-	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -C $(SENSOR_DIR) -o $(BIN_DIR)/crypto-sensor-windows-amd64.exe $(SENSOR_MAIN)
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -C $(SENSOR_DIR) $(AGENT_LDFLAGS) -o $(BIN_DIR)/crypto-sensor-windows-amd64.exe $(SENSOR_MAIN)
 	cp $(BIN_DIR)/crypto-sensor-windows-amd64.exe artifacts/sensor/windows/amd64/crypto-sensor.exe
 	cp scripts/install-sensor.ps1 artifacts/sensor/windows/amd64/
 	@echo "✅ Windows x86_64 sensor built and placed in artifacts/"
@@ -629,7 +638,7 @@ sensor-windows-amd64: ## Build sensor for Windows x86_64
 sensor-windows-386: ## Build sensor for Windows x86 (32-bit)
 	@echo "Building Windows x86 (32-bit) sensor..."
 	@mkdir -p $(BIN_DIR) artifacts/sensor/windows/386
-	CGO_ENABLED=0 GOOS=windows GOARCH=386 go build -C $(SENSOR_DIR) -o $(BIN_DIR)/crypto-sensor-windows-386.exe $(SENSOR_MAIN)
+	CGO_ENABLED=0 GOOS=windows GOARCH=386 go build -C $(SENSOR_DIR) $(AGENT_LDFLAGS) -o $(BIN_DIR)/crypto-sensor-windows-386.exe $(SENSOR_MAIN)
 	cp $(BIN_DIR)/crypto-sensor-windows-386.exe artifacts/sensor/windows/386/crypto-sensor.exe
 	cp scripts/install-sensor.ps1 artifacts/sensor/windows/386/
 	@echo "✅ Windows x86 sensor built and placed in artifacts/"
@@ -637,7 +646,7 @@ sensor-windows-386: ## Build sensor for Windows x86 (32-bit)
 sensor-darwin-amd64: ## Build sensor for macOS x86_64
 	@echo "Building macOS x86_64 sensor..."
 	@mkdir -p $(BIN_DIR) artifacts/sensor/darwin/amd64
-	CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -C $(SENSOR_DIR) -o $(BIN_DIR)/crypto-sensor-darwin-amd64 $(SENSOR_MAIN)
+	CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -C $(SENSOR_DIR) $(AGENT_LDFLAGS) -o $(BIN_DIR)/crypto-sensor-darwin-amd64 $(SENSOR_MAIN)
 	cp $(BIN_DIR)/crypto-sensor-darwin-amd64 artifacts/sensor/darwin/amd64/crypto-sensor
 	cp scripts/install-sensor.sh artifacts/sensor/darwin/amd64/
 	@echo "✅ macOS x86_64 sensor built and placed in artifacts/"
@@ -645,7 +654,7 @@ sensor-darwin-amd64: ## Build sensor for macOS x86_64
 sensor-darwin-arm64: ## Build sensor for macOS ARM64 (Apple Silicon)
 	@echo "Building macOS ARM64 sensor..."
 	@mkdir -p $(BIN_DIR) artifacts/sensor/darwin/arm64
-	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -C $(SENSOR_DIR) -o $(BIN_DIR)/crypto-sensor-darwin-arm64 $(SENSOR_MAIN)
+	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -C $(SENSOR_DIR) $(AGENT_LDFLAGS) -o $(BIN_DIR)/crypto-sensor-darwin-arm64 $(SENSOR_MAIN)
 	cp $(BIN_DIR)/crypto-sensor-darwin-arm64 artifacts/sensor/darwin/arm64/crypto-sensor
 	cp scripts/install-sensor.sh artifacts/sensor/darwin/arm64/
 	@echo "✅ macOS ARM64 sensor built and placed in artifacts/"

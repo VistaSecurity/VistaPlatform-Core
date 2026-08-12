@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -154,7 +155,7 @@ func (s *AutoRegisterService) RegisterForTenant(tenantID uuid.UUID) error {
 		"csr":       csrPEM,
 		"name":      "Platform Discovery Sensor",
 		"platform":  "platform",
-		"version":   "system",
+		"version":   platformAgentVersion(),
 		"profile":   "discovery",
 		"tags":      []string{"system", "discovery", "platform"},
 	}
@@ -379,4 +380,17 @@ func (s *AutoRegisterService) createMTLSClient() (*http.Client, error) {
 	}
 
 	return client, nil
+}
+
+// platformAgentVersion is what the in-cluster platform agent reports as its
+// version at registration. The chart injects SERVICE_VERSION per pod (aligned
+// with the image tag via helm), which is the truth about the running code —
+// the old hardcoded "system" placeholder left the version column meaningless.
+func platformAgentVersion() string {
+	if v := os.Getenv("SERVICE_VERSION"); v != "" {
+		// The chart injects the release tag ("v0.6.0"); the platform stores the
+		// bare version and the UI renders it as v{version}, so strip the prefix.
+		return strings.TrimPrefix(v, "v")
+	}
+	return "dev"
 }

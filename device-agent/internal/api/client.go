@@ -88,10 +88,10 @@ func NewOutboundClient(cfg *config.Config) *OutboundClient {
 }
 
 // Register registers the agent with the platform using CSR-based flow.
-// version is reported to the platform (e.g. main.Version); empty defaults to "1.0.0".
+// version is reported to the platform (e.g. main.Version); empty defaults to "dev".
 func (c *OutboundClient) Register(version string) error {
 	if version == "" {
-		version = "1.0.0"
+		version = "dev"
 	}
 	// Generate agent ID (UUID) that will be used as certificate CN
 	agentID := uuid.New()
