@@ -1944,7 +1944,8 @@ export interface components {
             owner_email?: string | null;
             description?: string | null;
             is_active?: boolean | null;
-            auto_approve_discoveries?: boolean;
+            /** @description Omitted/null keeps the current value on update (create default false). */
+            auto_approve_discoveries?: boolean | null;
             tags?: {
                 [key: string]: unknown;
             };

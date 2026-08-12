@@ -26,6 +26,7 @@ import (
 	sharedmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware"
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	sharedrbac "github.com/vistasecurity/vistaplatform/shared/middleware/rbac"
+	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 	"github.com/vistasecurity/vistaplatform/shared/rbac"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 )
@@ -496,13 +497,18 @@ func agentHeartbeatHandler(db, bypassDB *sql.DB, redis *redis.Client) gin.Handle
 		}
 
 		// Body is optional and lenient: older agents send {status,timestamp}
-		// or nothing. A version, when present, refreshes the recorded one.
+		// or nothing. Anything present refreshes the recorded value; anything
+		// absent leaves it alone. ip_address and interfaces must be
+		// self-reported — the platform's view of the connection is a proxy or
+		// node address, never the agent's.
 		var beat struct {
-			Version string `json:"version"`
+			Version    string                           `json:"version"`
+			IPAddress  string                           `json:"ip_address"`
+			Interfaces []sharednetwork.InterfaceAddress `json:"interfaces"`
 		}
 		_ = c.ShouldBindJSON(&beat)
 
-		if err := agentService.UpdateHeartbeat(c.Request.Context(), agentID, beat.Version); err != nil {
+		if err := agentService.UpdateHeartbeatWithHost(c.Request.Context(), agentID, beat.Version, beat.IPAddress, beat.Interfaces); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 			return
 		}

@@ -389,9 +389,11 @@ without a trust anchor it fails certificate verification before a sensor can
 enroll. Agents resolve this the way SSH resolves an unknown host key — an
 explicit, one-time decision — and **never** by skipping verification.
 
-**Interactive install.** `crypto-sensor --interactive` (and
-`device-agent --interactive`) detect the untrusted certificate during the
-connectivity check, then show the CA the platform presents and ask:
+**Interactive install.** The interactive installer — which is what running
+`crypto-sensor` or `device-agent` with no arguments does on an unconfigured
+host, and what `--interactive` forces on a configured one — detects the
+untrusted certificate during the connectivity check, then shows the CA the
+platform presents and asks:
 
 ```
 ⚠️  The platform's certificate is not signed by any CA this host trusts.

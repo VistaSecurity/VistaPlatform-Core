@@ -30,7 +30,11 @@ func (*FortinetInterrogator) SupportedDeviceTypes() []string {
 
 // Interrogate implements DeviceInterrogator.
 func (*FortinetInterrogator) Interrogate(ctx context.Context, device DeviceInfo, creds Credentials) (*InterrogateResult, error) {
-	client := newFortinetClient(managementURL(device), creds.Username, creds.Password, creds.InsecureSkipVerify)
+	baseURL, err := managementURL(device)
+	if err != nil {
+		return nil, err
+	}
+	client := newFortinetClient(baseURL, creds.Username, creds.Password, creds.InsecureSkipVerify)
 	return client.interrogate(ctx)
 }
 
@@ -364,18 +368,5 @@ func fortinetHashAlg(input string) string {
 	return ""
 }
 
-// managementURL resolves the base URL for a device, defaulting to https on the
-// hostname/IP when no explicit management URL is set.
-func managementURL(device DeviceInfo) string {
-	if device.ManagementURL != "" {
-		return device.ManagementURL
-	}
-	host := device.Hostname
-	if host == "" {
-		host = device.IPAddress
-	}
-	if host == "" {
-		host = "localhost"
-	}
-	return "https://" + host
-}
+// managementURL and its helpers live in target.go — they are shared by every
+// vendor interrogator, not Fortinet-specific.

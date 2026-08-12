@@ -22,6 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
+	"github.com/sirupsen/logrus"
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/certificates"
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
 	sharedservices "github.com/vistasecurity/vistaplatform/shared/services"
@@ -84,8 +85,12 @@ type RegistrationRequest struct {
 	// registration so the platform's interface picker is populated immediately
 	// (without waiting for the first heartbeat). Optional for back-compat.
 	AvailableInterfaces []string `json:"available_interfaces"`
-	IPAddress           string   `json:"ip_address" binding:"required"`
-	Tags                []string `json:"tags"`
+	// IPAddress is the sensor's own view of its host address. Optional: a sensor
+	// that cannot determine its address must be able to say so. It previously
+	// sent the literal "127.0.0.1" to satisfy a required field, which recorded a
+	// confident falsehood; an empty value now records NULL instead.
+	IPAddress string   `json:"ip_address"`
+	Tags      []string `json:"tags"`
 	// ReportingInterval (seconds) is the sensor's configured data-send cadence,
 	// reported so the platform records its real value from the start. Optional
 	// for back-compat with older sensors.
@@ -155,7 +160,8 @@ func (h *Handler) CreatePendingSensor(c *gin.Context) {
 		return
 	}
 
-	// Validate IP address format
+	// Operator-supplied expected address — stays required. This is the value the
+	// enrolling sensor's self-report is cross-checked against.
 	if net.ParseIP(req.IPAddress) == nil {
 		c.JSON(400, gin.H{"error": "Invalid IP address format"})
 		return
@@ -241,8 +247,10 @@ func (h *Handler) RegisterSensor(c *gin.Context) {
 		return
 	}
 
-	// Validate IP address format
-	if net.ParseIP(req.IPAddress) == nil {
+	// Validate the sensor's self-reported address when it reports one. Empty is
+	// allowed — see RegistrationRequest.IPAddress — but a malformed value is a
+	// bug worth rejecting rather than storing.
+	if req.IPAddress != "" && net.ParseIP(req.IPAddress) == nil {
 		c.JSON(400, gin.H{"error": "Invalid IP address format"})
 		return
 	}
@@ -281,23 +289,36 @@ func (h *Handler) RegisterSensor(c *gin.Context) {
 		return
 	}
 
-	// IP validation (optional, disabled by default)
-	// Note: IP validation is easily circumvented in modern network environments (NAT, proxies, VPNs)
-	// It should be used as metadata only, not as a security control
-	if adminSettings.RequireIPValidation {
-		// Validate IP address matches the pending sensor
-		if pendingSensor.IPAddress != req.IPAddress {
+	// Cross-check the enrolling sensor's self-reported address against the one
+	// the operator expected when they created the key. This catches the honest
+	// mistakes it can catch — key redeemed on the wrong host, a stale key, a
+	// copy-paste slip — and is logged on every registration so the mismatch is
+	// visible even when enforcement is off.
+	//
+	// It is NOT an authentication control, and must not be mistaken for one:
+	// the reported address is supplied by the caller, so anyone redeeming a
+	// stolen key can simply claim the expected value. Authentication is the
+	// per-agent client certificate issued from the tenant's CA (see
+	// middleware.SensorAuth), which is cryptographic and revocable.
+	//
+	// The previous implementation also compared c.ClientIP(). That could never
+	// work: behind an ingress, NAT, or kube-proxy the connection source is a
+	// proxy or node address, never the sensor's. Its escape hatch was a stub
+	// (isIPInSameSubnet returned ip1 == ip2), so enabling enforcement rejected
+	// every registration in any Kubernetes install. Both are gone.
+	if req.IPAddress != "" && pendingSensor.IPAddress != req.IPAddress {
+		h.log.WithFields(logrus.Fields{
+			"sensor_name": req.Name,
+			"expected_ip": pendingSensor.IPAddress,
+			"reported_ip": req.IPAddress,
+			"enforced":    adminSettings.RequireIPValidation,
+		}).Warn("Enrolling sensor reports a different address than the operator expected")
+
+		if adminSettings.RequireIPValidation {
 			c.JSON(400, gin.H{"error": "IP address does not match the registered IP address"})
 			return
 		}
-		// Additional check: requesting IP should match (if not behind proxy)
-		clientIP := c.ClientIP()
-		if clientIP != req.IPAddress && !isIPInSameSubnet(clientIP, req.IPAddress) {
-			c.JSON(400, gin.H{"error": "Requesting IP address does not match the registered IP address"})
-			return
-		}
 	}
-	// If IP validation is disabled, IP address is stored as metadata only
 
 	// Determine sensor ID: use proposed ID from CSR if provided, otherwise generate new one
 	var sensorID uuid.UUID
@@ -657,12 +678,6 @@ func (h *Handler) UpdateAdminSettings(c *gin.Context) {
 }
 
 // Helper functions
-
-func isIPInSameSubnet(ip1, ip2 string) bool {
-	// Simple check - in production, implement proper subnet validation
-	// For now, just check if they're the same
-	return ip1 == ip2
-}
 
 func getProfileFeatures(profile string) map[string]bool {
 	features := map[string]bool{

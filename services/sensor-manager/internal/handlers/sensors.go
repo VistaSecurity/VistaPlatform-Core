@@ -151,10 +151,26 @@ func (h *Handler) GetPlatformSensorStats(c *gin.Context) {
 func (h *Handler) GetSensor(c *gin.Context) {
 	// The guard resolves the sensor with a tenant-scoped query, so it both
 	// authorizes access and gives us the row to return.
-	sensor, _, ok := h.requireSensorAccess(c)
+	sensor, tenantID, ok := h.requireSensorAccess(c)
 	if !ok {
 		return
 	}
+
+	// The host's full address inventory rides the single-sensor read (the fleet
+	// list neither needs nor fetches it). Supplementary detail: a failure here
+	// must not turn a working sensor page into an error. sensorService is nil in
+	// the v2-only construction (NewHandlerWithService), so it is checked rather
+	// than assumed.
+	if h.sensorService != nil {
+		addrs, err := h.sensorService.ListSensorAddresses(c.Request.Context(), tenantID, sensor.ID)
+		if err != nil {
+			h.log.WithError(err).WithField("sensor_id", sensor.ID).
+				Warn("Failed to load recorded host addresses")
+		} else {
+			sensor.Addresses = addrs
+		}
+	}
+
 	c.JSON(http.StatusOK, sensor)
 }
 

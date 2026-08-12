@@ -46,6 +46,37 @@ moved into the 4xxxx range.
 Compose is fine for looking around. It is not how you should run this for real:
 there is no HA, no rolling upgrade, and everything shares one host.
 
+### Signing in to the admin console
+
+Signing up at the tenant UI makes you an administrator of *an organization*. The
+**platform** admin console — tenants, plans, platform-wide settings — is a
+separate UI with separate accounts, at **http://localhost:3006** under compose
+(`tls.adminDnsName` on Kubernetes).
+
+Every install seeds two platform administrators, both with the same password:
+
+| Email | Role |
+|---|---|
+| `su_admin@vistaplatform.invalid` | super admin |
+| `admin@vistaplatform.invalid` | platform admin |
+
+Password: `PlatformAdm!n2026`
+
+**These are published defaults — every install on earth starts with them, and
+they are only good for one thing.** Both accounts are seeded "must change
+password": signing in with the default yields a session that can set a new
+password and nothing else. The services reject every other request until you
+rotate, and that is enforced server-side, not just by the UI.
+
+The `.invalid` domain is deliberate — [RFC 6761][rfc6761] reserves it so the
+address can never resolve to a real mailbox. That also means **password-reset
+mail to a seeded admin goes nowhere.** Rotate on first sign-in, then create your
+own platform admin under a real address (**Staff & Access → Staff**) and use that
+one day to day. Don't rename the seeded rows: the seed re-applies on every upgrade
+and will rename them back.
+
+[rfc6761]: https://www.rfc-editor.org/rfc/rfc6761#section-6.4
+
 ---
 
 ## Evaluate it

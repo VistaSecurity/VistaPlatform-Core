@@ -3,8 +3,9 @@ module github.com/vistasecurity/vistaplatform/device-agent
 go 1.26.5
 
 require (
-	github.com/vistasecurity/vistaplatform/shared v0.0.0
 	github.com/google/uuid v1.6.0
+	github.com/vistasecurity/vistaplatform/shared v0.0.0
+	golang.org/x/term v0.44.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

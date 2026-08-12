@@ -54,6 +54,12 @@ echo "▶ running DB-integration tests (TEST_DATABASE_URL set) ..."
 # reproduce the nightly locally.
 ( cd services/compliance-engine && go test "${GO_TEST_FLAGS:--v}" -count=1 -run Integration ./internal/services/ )
 ( cd shared && go test "${GO_TEST_FLAGS:--v}" -count=1 -run Integration ./services/ )
+# shared/database: real RLS enforcement under the non-owner app role, plus the
+# grant-order guard. The latter creates its OWN throwaway database and applies
+# schema.sql into it exactly ONCE — reusing this database would hide the very
+# bug it guards, since the harness (and auth-service's bare blanket GRANT) have
+# already patched the grants here. Ran nightly only until.
+( cd shared && go test "${GO_TEST_FLAGS:--v}" -count=1 -run Integration ./database/ )
 # cbom-service: the compliance-attestation builder reads RLS-policied
 # compliance_findings, so its correctness is only observable against a real
 # Postgres connected as the non-owner app role. Spelled `./...` rather than

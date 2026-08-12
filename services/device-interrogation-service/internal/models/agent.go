@@ -17,15 +17,19 @@ type Agent struct {
 	// RegistrationKey is the bootstrap secret. It is scanned internally during
 	// enrollment but never serialized to tenant clients (json:"-") — they already
 	// hold the key from registration, and the admin Fleet view omits it too.
-	RegistrationKey string     `json:"-" db:"registration_key"`
-	Name            *string    `json:"name" db:"name"`
-	Platform        string     `json:"platform" db:"platform"`
-	Profile         *string    `json:"profile" db:"profile"`
-	Version         string     `json:"version" db:"version"`
-	Status          string     `json:"status" db:"status"` // "active", "inactive", "error"
-	LastHeartbeat   *time.Time `json:"last_heartbeat" db:"last_heartbeat"`
-	CreatedAt       time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at" db:"updated_at"`
+	RegistrationKey string  `json:"-" db:"registration_key"`
+	Name            *string `json:"name" db:"name"`
+	Platform        string  `json:"platform" db:"platform"`
+	Profile         *string `json:"profile" db:"profile"`
+	Version         string  `json:"version" db:"version"`
+	Status          string  `json:"status" db:"status"` // "active", "inactive", "error"
+	// IPAddress is the agent host's primary address, self-reported on each
+	// heartbeat. Nil until an agent old enough to report one checks in — the
+	// platform cannot derive it, since NAT rewrites the connection source.
+	IPAddress     *string    `json:"ip_address" db:"ip_address"`
+	LastHeartbeat *time.Time `json:"last_heartbeat" db:"last_heartbeat"`
+	CreatedAt     time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at" db:"updated_at"`
 }
 
 // AdminAgent represents a registered device interrogation agent enriched with
@@ -42,6 +46,7 @@ type AdminAgent struct {
 	Profile       *string    `json:"profile" db:"profile"`
 	Version       string     `json:"version" db:"version"`
 	Status        string     `json:"status" db:"status"` // "active", "inactive", "error"
+	IPAddress     *string    `json:"ip_address" db:"ip_address"`
 	LastHeartbeat *time.Time `json:"last_heartbeat" db:"last_heartbeat"`
 	CreatedAt     time.Time  `json:"created_at" db:"created_at"`
 	UpdatedAt     time.Time  `json:"updated_at" db:"updated_at"`

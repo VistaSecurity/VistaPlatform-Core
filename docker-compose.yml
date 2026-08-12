@@ -259,6 +259,11 @@ services:
       - LOG_LEVEL=debug
       # Encryption master key for CA certificate private key encryption
       - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:-dev-master-key-change-in-production}
+      # Agent mTLS is fail-closed by default in the service. Compose dev has no
+      # agent CA and no TLS-passthrough listener, so opt out explicitly — without
+      # this a dev sensor 401s on every call with no obvious cause. Never false
+      # in a real deployment: it accepts any caller that knows an agent UUID.
+      - AGENT_MTLS_REQUIRED=false
       # mTLS Configuration
       - USE_MTLS=true
       - TLS_PORT=8443
@@ -477,6 +482,9 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
       - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:?Set ENCRYPTION_MASTER_KEY in .env}
+      # See sensor-manager: agent mTLS is fail-closed by default; compose dev
+      # has no agent CA, so opt out explicitly here too.
+      - AGENT_MTLS_REQUIRED=false
       # Bootstrap certificate paths for mTLS authentication
       - BOOTSTRAP_CERT_PATH=/app/bootstrap-certs/device-interrogation-service-cert.pem
       - BOOTSTRAP_KEY_PATH=/app/bootstrap-certs/device-interrogation-service-key.pem

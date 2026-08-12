@@ -53,3 +53,21 @@ registrationKey: "REG-0123456789abcdef0123456789abcdef"
 		t.Fatalf("ControlPlaneURL = %q, want environment bootstrap URL", cfg.ControlPlaneURL)
 	}
 }
+
+func TestLoadFromFileVerboseEnvOverridesAbsentKey(t *testing.T) {
+	t.Setenv("VERBOSE", "false")
+
+	configPath := filepath.Join(t.TempDir(), "sensor-config.yaml")
+	if err := os.WriteFile(configPath, []byte(`controlPlaneUrl: "https://platform.example"
+`), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadFromFile(configPath)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if cfg.Verbose == nil || *cfg.Verbose {
+		t.Fatalf("Verbose = %v, want explicit false from VERBOSE env", cfg.Verbose)
+	}
+}

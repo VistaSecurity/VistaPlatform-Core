@@ -1,4 +1,4 @@
--- Ensure su_admin@vistasecurity.io has ALL platform permissions
+-- Ensure su_admin@vistaplatform.invalid has ALL platform permissions
 -- This script ensures the super_admin role has all available permissions
 
 -- First, ensure all platform permissions exist
@@ -57,7 +57,7 @@ FROM platform_roles r, platform_permissions p
 WHERE r.name = 'super_admin'
 ON CONFLICT (role_id, permission_id) DO NOTHING;
 
--- Ensure su_admin@vistasecurity.io has super_admin role
+-- Ensure su_admin@vistaplatform.invalid has super_admin role
 UPDATE platform_users
 SET 
     role_id = (SELECT id FROM platform_roles WHERE name = 'super_admin' LIMIT 1),
@@ -65,7 +65,7 @@ SET
     email_verified = true,
     deleted_at = NULL,
     updated_at = NOW()
-WHERE email = 'su_admin@vistasecurity.io';
+WHERE email = 'su_admin@vistaplatform.invalid';
 
 -- Verify the setup
 SELECT 
@@ -78,5 +78,5 @@ FROM platform_users pu
 JOIN platform_roles pr ON pu.role_id = pr.id
 JOIN platform_role_permissions prp ON pr.id = prp.role_id
 JOIN platform_permissions pp ON prp.permission_id = pp.id
-WHERE pu.email = 'su_admin@vistasecurity.io'
+WHERE pu.email = 'su_admin@vistaplatform.invalid'
 GROUP BY pu.email, pr.name;

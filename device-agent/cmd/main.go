@@ -23,6 +23,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/config"
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/devices"
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
+	"golang.org/x/term"
 )
 
 // Version is stamped at build time via -ldflags "-X main.Version=<tag>"
@@ -45,11 +46,16 @@ type certificateRotator interface {
 
 func main() {
 	var (
-		version     = flag.Bool("version", false, "Show version information")
-		configFile  = flag.String("config", "", "Path to configuration file (optional)")
-		verbose     = flag.Bool("verbose", false, "Enable verbose logging")
+		version    = flag.Bool("version", false, "Show version information")
+		configFile = flag.String("config", "", "Path to configuration file (optional)")
+		// verbose and interactive default ON: running the binary with no flags
+		// is the install path, and an installer wants the dialogue and the
+		// detail. Both step aside for an existing configuration (see
+		// shouldRunInteractive) or an explicit -verbose=false /
+		// -interactive=false.
+		verbose     = flag.Bool("verbose", true, "Enable verbose logging (-verbose=false to quiet)")
 		register    = flag.Bool("register", false, "Register with control plane")
-		interactive = flag.Bool("interactive", false, "Run interactive configuration setup")
+		interactive = flag.Bool("interactive", true, "Run interactive configuration setup when no configuration exists (-interactive=false to skip)")
 		// caFingerprint makes the trust decision out of band, for unattended
 		// installs that cannot answer a prompt. The agent pins the platform CA
 		// only if it hashes to this value — which, unlike the interactive
@@ -78,11 +84,35 @@ func main() {
 	log.Printf("🚀 Starting VistaPlatform Device Agent v%s", Version)
 	log.Printf("Platform: %s/%s", runtime.GOOS, runtime.GOARCH)
 
-	// Interactive configuration mode
-	if *interactive {
-		if err := runInteractiveSetup(*caFingerprint); err != nil {
+	// Resolve the configuration file up front: an existing configuration is
+	// what turns the interactive installer off, so the decision needs to know
+	// about it before anything else happens.
+	configPath := *configFile
+	if configPath == "" {
+		configPath = findDefaultConfigFile()
+	}
+
+	// Interactive configuration mode. This is the default on a fresh host —
+	// running the binary with no arguments IS the install flow — and it starts
+	// the agent when it finishes, so setup and first run are one step (the
+	// sensor behaves identically).
+	// term.IsTerminal, not a ModeCharDevice check: /dev/null IS a character
+	// device, so the cheap check calls `agent < /dev/null` — how service
+	// managers commonly start it — an interactive terminal and hangs on the
+	// first prompt.
+	if shouldRunInteractive(*interactive, isFlagSet("interactive"), configPath, *register, term.IsTerminal(int(os.Stdin.Fd()))) {
+		cfg, setupPath, apiClient, err := runInteractiveSetup(*caFingerprint)
+		if err != nil {
 			log.Fatalf("❌ Interactive setup failed: %v", err)
 		}
+		if cfg == nil {
+			// Operator cancelled at a prompt; nothing to run.
+			return
+		}
+		fmt.Println()
+		fmt.Println("✅ Setup complete — starting the device agent. Press Ctrl+C to stop.")
+		fmt.Println()
+		runAgent(cfg, setupPath, apiClient)
 		return
 	}
 
@@ -90,7 +120,6 @@ func main() {
 	var cfg *config.Config
 	var err error
 
-	configPath := *configFile
 	if configPath != "" {
 		log.Printf("📁 Loading configuration from file: %s", configPath)
 		cfg, err = config.LoadFromFile(configPath)
@@ -101,6 +130,18 @@ func main() {
 		}
 	} else {
 		cfg = config.Load()
+	}
+
+	// Verbose logging is on by default; a `verbose:` key in the config file (or
+	// the VERBOSE env var) is how an operator turns it back down for a
+	// long-running install. An explicit -verbose on the command line still wins.
+	if cfg.Verbose != nil && !isFlagSet("verbose") {
+		if *cfg.Verbose {
+			log.SetFlags(log.LstdFlags | log.Lshortfile)
+		} else {
+			log.SetFlags(log.LstdFlags)
+			log.Println("Verbose logging disabled by configuration")
+		}
 	}
 
 	// Require valid UUID for agent_id when set (same idea as sensor)
@@ -180,6 +221,19 @@ func main() {
 		}
 	}
 
+	runAgent(cfg, configPath, apiClient)
+}
+
+// runAgent wires up the agent and runs it until the process is signalled. It is
+// the single run path: both the config-file start and the interactive installer
+// end here, so a freshly-configured agent behaves exactly like a restarted one.
+// apiClient may be nil, in which case one is built from cfg.
+func runAgent(cfg *config.Config, configPath string, apiClient *api.OutboundClient) {
+	if apiClient == nil {
+		apiClient = api.NewOutboundClient(cfg)
+		apiClient.SetAgentVersion(Version)
+	}
+
 	// Initialize audit logger
 	auditLogger, err := audit.NewAuditLogger(cfg.DataPath)
 	if err != nil {
@@ -213,6 +267,62 @@ func main() {
 	log.Println("🛑 Shutting down device agent...")
 	agent.Stop()
 	log.Println("✅ Device agent stopped")
+}
+
+// isFlagSet reports whether the named flag was given on the command line, as
+// opposed to sitting at its default. The interactive/verbose defaults are ON,
+// so "the operator asked for this" and "nobody said anything" have to be told
+// apart before an existing configuration is allowed to override them.
+func isFlagSet(name string) bool {
+	set := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}
+
+// findDefaultConfigFile returns the first readable config file in the standard
+// locations, or "" when the host has never been configured.
+func findDefaultConfigFile() string {
+	for _, path := range []string{
+		"agent-config.yaml",
+		filepath.Join(getDefaultDataPath(), "agent-config.yaml"),
+	} {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	return ""
+}
+
+// shouldRunInteractive decides whether to open the configuration dialogue.
+//
+// The dialogue is the default so a bare `./device-agent` on a fresh host walks
+// the installer through setup and then starts polling for jobs. It steps aside
+// for every signal that this is not a fresh interactive install:
+//
+//   - an explicit -interactive=false,
+//   - an existing config file (the documented way to override the default),
+//   - PLATFORM_URL in the environment (container/unattended deployment),
+//   - -register, which is the scripted enrollment path,
+//   - stdin that is not a terminal (tty=false), where a prompt would hang
+//     forever with nobody to answer it.
+//
+// An explicit -interactive beats all of them: an operator asking to reconfigure
+// a host that already has a config file gets the dialogue.
+func shouldRunInteractive(want, explicit bool, configPath string, register, tty bool) bool {
+	if !want {
+		return false
+	}
+	if explicit {
+		return true
+	}
+	if configPath != "" || os.Getenv("PLATFORM_URL") != "" || register {
+		return false
+	}
+	return tty
 }
 
 // Start starts the device agent
@@ -421,7 +531,12 @@ func saveConfigFile(configPath string, cfg *config.Config) error {
 	configContent.WriteString(fmt.Sprintf("registration_key: %s\n", cfg.RegistrationKey))
 	configContent.WriteString(fmt.Sprintf("poll_interval: %s\n", cfg.PollInterval))
 	configContent.WriteString(fmt.Sprintf("data_path: %q\n", cfg.DataPath))
-	configContent.WriteString(fmt.Sprintf("verbose: %t\n", cfg.Verbose))
+	// Only write `verbose:` when something actually set it. Writing the
+	// resolved value would silently pin the command-line default into the file
+	// and make it look like an operator choice.
+	if cfg.Verbose != nil {
+		configContent.WriteString(fmt.Sprintf("verbose: %t\n", *cfg.Verbose))
+	}
 
 	// Add security section with certificate paths
 	if cfg.Security.ClientCertPath != "" {
@@ -528,7 +643,13 @@ func testPlatformConnectivity(rawURL string) connectivityResult {
 // runInteractiveSetup runs an interactive configuration wizard. caFingerprint,
 // when supplied, pre-answers the platform-CA trust question so a scripted
 // install still gets a verified pin instead of a prompt it cannot answer.
-func runInteractiveSetup(caFingerprint string) error {
+//
+// It returns the registered configuration, the path it was saved to, and the
+// API client that performed the registration, so the caller can start the agent
+// immediately — installing and running are one step, as they are for the
+// sensor. A nil config with a nil error means the operator cancelled at a
+// prompt; there is nothing to run and that is not a failure.
+func runInteractiveSetup(caFingerprint string) (*config.Config, string, *api.OutboundClient, error) {
 	reader := bufio.NewReader(os.Stdin)
 
 	fmt.Println("🔧 VistaPlatform Device Agent - Interactive Configuration")
@@ -571,7 +692,7 @@ urlLoop:
 			break urlLoop
 		case "q", "quit":
 			fmt.Println("Setup cancelled.")
-			return nil
+			return nil, "", nil, nil
 		default:
 			fmt.Println()
 			// any other input (including just Enter) retries the URL
@@ -590,9 +711,9 @@ urlLoop:
 		if err != nil {
 			if errors.Is(err, certificates.ErrTrustDeclined) {
 				fmt.Println("Setup cancelled — no CA trusted.")
-				return nil
+				return nil, "", nil, nil
 			}
-			return fmt.Errorf("could not establish trust with the platform: %w", err)
+			return nil, "", nil, fmt.Errorf("could not establish trust with the platform: %w", err)
 		}
 		pinnedCA = anchor.PEM
 	}
@@ -608,7 +729,7 @@ urlLoop:
 	registrationKey = strings.TrimSpace(registrationKey)
 
 	if registrationKey == "" {
-		return fmt.Errorf("registration key is required")
+		return nil, "", nil, fmt.Errorf("registration key is required")
 	}
 
 	// Data Path
@@ -647,7 +768,7 @@ urlLoop:
 
 	if confirm != "" && confirm != "y" && confirm != "yes" {
 		fmt.Println("❌ Registration cancelled")
-		return nil
+		return nil, "", nil, nil
 	}
 
 	// Create configuration
@@ -656,8 +777,11 @@ urlLoop:
 		RegistrationKey: registrationKey,
 		DataPath:        dataPath,
 		PollInterval:    pollInterval,
-		Verbose:         false,
+		// Verbose is deliberately left unset (nil): the command-line default is
+		// on, and writing a value here would freeze that decision into the
+		// generated config where the operator did not ask for it.
 	}
+	cfg.HeartbeatInterval = config.DefaultHeartbeatInterval
 	// The operator-approved CA must be on the config BEFORE the client is
 	// constructed — that is what puts it in the transport's RootCAs, and
 	// registration is the first call that needs it.
@@ -671,7 +795,7 @@ urlLoop:
 
 	log.Println("📝 Registering with platform...")
 	if err := apiClient.Register(Version); err != nil {
-		return fmt.Errorf("registration failed: %w", err)
+		return nil, "", nil, fmt.Errorf("registration failed: %w", err)
 	}
 	log.Println("✅ Agent registered successfully")
 
@@ -693,12 +817,10 @@ urlLoop:
 	}
 
 	fmt.Println()
-	fmt.Println("✅ Setup complete!")
-	fmt.Println()
-	fmt.Println("To start the agent, run:")
-	fmt.Printf("  device-agent -config %s\n", configPath)
+	fmt.Printf("ℹ️  On the next start the agent reads %s automatically — run the\n", configPath)
+	fmt.Println("   binary with no arguments and it picks up where this left off.")
 
-	return nil
+	return cfg, configPath, apiClient, nil
 }
 
 // getDefaultDataPath returns platform-specific default data path

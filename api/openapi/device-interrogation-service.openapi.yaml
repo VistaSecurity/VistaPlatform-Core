@@ -1754,6 +1754,7 @@ components:
       - profile
       - version
       - status
+      - ip_address
       - last_heartbeat
       - created_at
       - updated_at
@@ -1781,6 +1782,14 @@ components:
         status:
           type: string
           description: 'Agent status: active, inactive, or error.'
+        ip_address:
+          type: string
+          nullable: true
+          description: |
+            The agent host's primary address, self-reported on each heartbeat —
+            the source address its kernel uses to reach the platform. Null until
+            an agent new enough to report one checks in. The platform cannot
+            derive this: NAT and ingress rewrite the connection source.
         last_heartbeat:
           type: string
           format: date-time
@@ -1990,6 +1999,7 @@ components:
       - profile
       - version
       - status
+      - ip_address
       - last_heartbeat
       - created_at
       - updated_at
@@ -2023,6 +2033,14 @@ components:
         status:
           type: string
           description: 'Agent status: active, inactive, or error.'
+        ip_address:
+          type: string
+          nullable: true
+          description: |
+            The agent host's primary address, self-reported on each heartbeat —
+            the source address its kernel uses to reach the platform. Null until
+            an agent new enough to report one checks in. The platform cannot
+            derive this: NAT and ingress rewrite the connection source.
         last_heartbeat:
           type: string
           format: date-time

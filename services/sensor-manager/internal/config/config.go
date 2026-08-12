@@ -37,8 +37,15 @@ type Config struct {
 	// closed: a verified per-tenant client cert is mandatory (see
 	// middleware.SensorAuth). A dedicated TLS listener on AgentTLSPort
 	// terminates the sensor's mTLS so the real client cert reaches the service
-	// (edge does TLS passthrough). Off by default; enabled via the chart's
-	// agentMtls toggle (requires UseMTLS for the service cert).
+	// (edge does TLS passthrough).
+	//
+	// Defaults to TRUE: absence of configuration must mean "authenticate
+	// agents", not "accept anyone". The previous false default made an
+	// unconfigured deployment silently accept any caller that knew a sensor
+	// UUID — and a UUID is not a secret, it appears in URLs, logs and API
+	// responses. Deployments that genuinely cannot run agent mTLS must now opt
+	// out explicitly by setting AGENT_MTLS_REQUIRED=false, which is visible in
+	// the pod spec instead of being inferred from an absent variable.
 	SensorMTLSRequired bool
 	AgentTLSPort       string
 }
@@ -77,7 +84,7 @@ func Load() *Config {
 		ClientKeyPath:      sharedconfig.GetEnv("CLIENT_KEY_PATH", "/app/certs/client-key.pem"),
 		PlatformCACertPath: sharedconfig.GetEnv("PLATFORM_CA_CERT_PATH", "/app/certs/platform-ca-cert.pem"),
 
-		SensorMTLSRequired: sharedconfig.GetEnvAsBool("AGENT_MTLS_REQUIRED", false),
+		SensorMTLSRequired: sharedconfig.GetEnvAsBool("AGENT_MTLS_REQUIRED", true),
 		AgentTLSPort:       sharedconfig.GetEnv("AGENT_TLS_PORT", "8444"),
 	}
 }

@@ -914,6 +914,8 @@ audit: ## Run consistency audit
 	node ./scripts/audit-schema-mirror.mjs --strict
 	@echo "Auditing legacy-table residue (no view/FK may reference a *_legacy relation)..."
 	node ./scripts/audit-legacy-residue.mjs --strict
+	@echo "Auditing schema grant order (blanket role GRANTs must follow every CREATE TABLE)..."
+	node ./scripts/audit-schema-grant-order.mjs --strict
 
 edition-boundary: ## Audit the open-core edition boundary (alias for the strict run in 'make audit')
 	node ./scripts/audit-edition-boundary.mjs --strict

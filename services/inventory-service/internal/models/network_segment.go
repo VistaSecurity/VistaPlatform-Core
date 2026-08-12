@@ -44,7 +44,7 @@ type NetworkSegmentInput struct {
 	OwnerEmail             *string                `json:"owner_email"`
 	Description            *string                `json:"description"`
 	IsActive               *bool                  `json:"is_active"`
-	AutoApproveDiscoveries bool                   `json:"auto_approve_discoveries"`
+	AutoApproveDiscoveries *bool                  `json:"auto_approve_discoveries"` // nil on update = keep current; nil on create = false. A plain bool here let any client that omitted the field silently wipe it.
 	Tags                   map[string]interface{} `json:"tags"`
 	Metadata               map[string]interface{} `json:"metadata"`
 }

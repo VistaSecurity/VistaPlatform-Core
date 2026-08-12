@@ -130,3 +130,75 @@ storage:
 		})
 	}
 }
+
+// TestShouldRunInteractive pins the install default and every reason to step
+// aside from it. The dialogue being ON by default is what makes a bare
+// `./sensor` on a fresh host walk the operator through setup, so a regression
+// here is either a silent non-starting install or a service-manager start that
+// hangs on a prompt nobody can answer.
+func TestShouldRunInteractive(t *testing.T) {
+	tests := []struct {
+		name       string
+		want       bool
+		explicit   bool
+		configPath string
+		register   bool
+		tty        bool
+		env        string
+		expect     bool
+	}{
+		{name: "fresh host, no arguments", want: true, tty: true, expect: true},
+		{name: "-interactive=false", want: false, tty: true, expect: false},
+		{name: "existing config file", want: true, tty: true, configPath: "/etc/sensor.yaml", expect: false},
+		{name: "explicit -interactive beats an existing config", want: true, explicit: true, configPath: "/etc/sensor.yaml", expect: true},
+		{name: "environment-configured deployment", want: true, tty: true, env: "https://platform.example", expect: false},
+		{name: "scripted -register", want: true, tty: true, register: true, expect: false},
+		{name: "piped stdin (systemd, docker without -it)", want: true, expect: false},
+		{name: "explicit -interactive still needs no terminal check", want: true, explicit: true, expect: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CONTROL_PLANE_URL", tt.env)
+			if got := shouldRunInteractive(tt.want, tt.explicit, tt.configPath, tt.register, tt.tty); got != tt.expect {
+				t.Errorf("shouldRunInteractive() = %v, want %v", got, tt.expect)
+			}
+		})
+	}
+}
+
+// TestVerboseConfigOverride pins the three-state verbose semantics: an absent
+// `verbose:` key must leave the command-line default (on) alone, and only an
+// explicit key may turn it down.
+func TestVerboseConfigOverride(t *testing.T) {
+	dir := t.TempDir()
+
+	write := func(name, body string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		return path
+	}
+
+	base := "controlPlaneUrl: https://platform.example\n"
+
+	silent := mustLoadConfig(t, write("silent.yaml", base))
+	if silent.Verbose != nil {
+		t.Errorf("absent verbose key parsed as %v; want nil so the default stands", *silent.Verbose)
+	}
+
+	off := mustLoadConfig(t, write("off.yaml", base+"verbose: false\n"))
+	if off.Verbose == nil || *off.Verbose {
+		t.Errorf("verbose: false parsed as %v; want an explicit false", off.Verbose)
+	}
+}
+
+func mustLoadConfig(t *testing.T, path string) *config.Config {
+	t.Helper()
+	cfg, err := config.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile(%s): %v", path, err)
+	}
+	return cfg
+}

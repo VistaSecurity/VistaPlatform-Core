@@ -381,7 +381,15 @@ func (s *SchedulerService) TriggerSchedule(ctx context.Context, tenantID, schedu
 		return nil, err
 	}
 
-	// Create a job based on the schedule target type
+	// Create a job based on the schedule target type.
+	//
+	// Neither the target address nor the credentials are set here, and that is
+	// deliberate: a schedule stores an operator-supplied parameter map and no
+	// credentials at all, so both are resolved from the device row at dispatch
+	// in AgentService.GetNextJob (enrichJobTarget / resolveJobCredentials) —
+	// the single choke point every creation path passes through, and the last
+	// place that can still see the device. Filling them in here as well would
+	// only freeze a snapshot taken when the schedule fired.
 	var jobRequest models.CreateDeviceJobRequest
 	jobRequest.TenantID = schedule.TenantID
 	jobRequest.Parameters = schedule.Parameters

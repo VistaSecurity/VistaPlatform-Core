@@ -1093,6 +1093,37 @@ components:
           - string
           - 'null'
           format: date-time
+        addresses:
+          type: array
+          description: |
+            Every IP the sensor host reported, with its prefix. Present on the
+            single-sensor read only (the list endpoint omits it). A capture host
+            is often multi-homed and watching several segments at once, which
+            `ip_address` — the primary, i.e. the address the host reaches the
+            platform from — cannot express on its own.
+          items:
+            $ref: '#/components/schemas/AgentAddress'
+    AgentAddress:
+      type: object
+      additionalProperties: false
+      description: One IP bound to one interface on an agent host.
+      required:
+      - interface_name
+      - address
+      - is_primary
+      properties:
+        interface_name:
+          type: string
+          description: Host interface the address is bound to (e.g. eth0, "Ethernet 2").
+        address:
+          type: string
+          description: The bare IP, without a prefix suffix.
+        prefix_length:
+          type: integer
+          description: Network prefix (24 for 192.0.2.173/24). Absent when the agent reported none.
+        is_primary:
+          type: boolean
+          description: True for the address the agent reaches the control plane from. At most one per agent.
     SensorListResponse:
       type: object
       additionalProperties: false

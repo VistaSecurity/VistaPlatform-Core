@@ -352,7 +352,7 @@ func TestRequireJWTAuth_PasswordChangeRequiredGate(t *testing.T) {
 		t.Helper()
 		claims := &models.JWTClaims{
 			UserID:                 uuid.New(),
-			Email:                  "su_admin@vistasecurity.io",
+			Email:                  "su_admin@vistaplatform.invalid",
 			Role:                   "super_admin",
 			Type:                   "access",
 			PasswordChangeRequired: true,

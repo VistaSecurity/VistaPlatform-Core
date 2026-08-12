@@ -8,7 +8,7 @@ SELECT name, display_name, is_system_role FROM platform_roles;
 -- Check if admin user exists
 SELECT 'Admin User Exists:' as check_type, COUNT(*) as count 
 FROM platform_users 
-WHERE email = 'su_admin@vistasecurity.io';
+WHERE email = 'su_admin@vistaplatform.invalid';
 
 -- Check admin user details
 SELECT 
@@ -29,7 +29,7 @@ SELECT
     LEFT(pu.password_hash, 50) as password_hash_preview
 FROM platform_users pu
 LEFT JOIN platform_roles pr ON pu.role_id = pr.id
-WHERE pu.email = 'su_admin@vistasecurity.io';
+WHERE pu.email = 'su_admin@vistaplatform.invalid';
 
 -- Check if the login query would work
 SELECT 
@@ -40,6 +40,6 @@ SELECT
     END as result
 FROM platform_users pu
 JOIN platform_roles pr ON pu.role_id = pr.id
-WHERE pu.email = 'su_admin@vistasecurity.io' 
+WHERE pu.email = 'su_admin@vistaplatform.invalid' 
   AND pu.is_active = true 
   AND pu.deleted_at IS NULL;

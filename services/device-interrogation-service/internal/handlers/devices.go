@@ -411,12 +411,9 @@ func (h *DeviceHandlers) InterrogateDevice(c *gin.Context) {
 		TenantID:    tenantID,
 		JobType:     models.JobTypeDeviceInterrogation,
 		DeviceID:    &deviceID,
-		AgentID:     nil, // Platform will handle this
+		AgentID:     nil, // Claimed by the platform worker or a tenant agent
 		Credentials: credentials,
-		Parameters: map[string]interface{}{
-			"device_type": device.DeviceType,
-			"device_id":   deviceID.String(),
-		},
+		Parameters:  buildJobParameters(device, nil),
 	}
 
 	deviceJob, err := h.jobQueue.CreateJob(c.Request.Context(), jobRequest)
@@ -477,6 +474,43 @@ func (h *DeviceHandlers) buildJobCredentials(ctx context.Context, tenantID uuid.
 // masterEncryptedFlagKey mirrors services.masterEncryptedFlag — the marker that
 // tells the hand-off sealer these fields are master-key ciphertext.
 const masterEncryptedFlagKey = "encrypted"
+
+// buildJobParameters builds the job payload an executor needs to reach the
+// device.
+//
+// The address fields are not decoration. The in-cluster PlatformAgentWorker
+// re-reads the device row by device_id, so `{device_id, device_type}` was a
+// complete payload for it — but a device-agent has no database, and gets only
+// what is in this map. Both consumers claim the same `agent_id IS NULL` queue,
+// so which one runs a given job is a race; the payload has to be sufficient for
+// the one that cannot look anything up. Registering a tenant's first agent is
+// what turns that latent gap into a failed scan.
+func buildJobParameters(device *models.Device, extra map[string]interface{}) map[string]interface{} {
+	params := map[string]interface{}{
+		"device_type": device.DeviceType,
+		"device_id":   device.ID.String(),
+	}
+	if device.Hostname != nil && *device.Hostname != "" {
+		params["hostname"] = *device.Hostname
+	}
+	if device.IPAddress != nil && *device.IPAddress != "" {
+		params["ip_address"] = *device.IPAddress
+	}
+	if device.ManagementURL != nil && *device.ManagementURL != "" {
+		params["management_url"] = *device.ManagementURL
+	}
+	// Vendor-specific addressing the agent would otherwise lose — the platform
+	// path reads this off device.Metadata directly.
+	if device.Metadata != nil {
+		if siteID, ok := device.Metadata["site_id"].(string); ok && siteID != "" {
+			params["site_id"] = siteID
+		}
+	}
+	for k, v := range extra {
+		params[k] = v
+	}
+	return params
+}
 
 // encryptCredentialsForJob decrypts credentials from platform_integrations and re-encrypts them with a job-specific key
 func (h *DeviceHandlers) encryptCredentialsForJob(ctx context.Context, tenantID uuid.UUID, credentialID *uuid.UUID, masterKey string) (map[string]interface{}, error) {
@@ -699,11 +733,7 @@ func (h *DeviceHandlers) BulkInterrogateDevices(c *gin.Context) {
 			JobType:     models.JobTypeDeviceInterrogation,
 			DeviceID:    &deviceID,
 			Credentials: credentials,
-			Parameters: map[string]interface{}{
-				"device_type": device.DeviceType,
-				"device_id":   deviceID.String(),
-				"bulk":        true,
-			},
+			Parameters:  buildJobParameters(device, map[string]interface{}{"bulk": true}),
 		}
 
 		deviceJob, err := h.jobQueue.CreateJob(c.Request.Context(), jobRequest)

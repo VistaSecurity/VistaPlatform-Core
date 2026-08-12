@@ -56,7 +56,12 @@ func (*F5Interrogator) Interrogate(ctx context.Context, device DeviceInfo, creds
 		return nil, fmt.Errorf("username and password required for F5 device")
 	}
 
-	client := newF5Client(managementURL(device), username, password, creds.Token, creds.InsecureSkipVerify)
+	baseURL, err := managementURL(device)
+	if err != nil {
+		return nil, err
+	}
+
+	client := newF5Client(baseURL, username, password, creds.Token, creds.InsecureSkipVerify)
 	result, err := client.interrogate(ctx)
 	if err != nil {
 		return nil, err

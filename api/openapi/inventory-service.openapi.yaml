@@ -3392,7 +3392,10 @@ components:
           - boolean
           - 'null'
         auto_approve_discoveries:
-          type: boolean
+          type:
+          - boolean
+          - 'null'
+          description: Omitted/null keeps the current value on update (create default false).
         tags:
           type: object
           additionalProperties: true

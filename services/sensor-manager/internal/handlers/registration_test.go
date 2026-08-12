@@ -286,18 +286,6 @@ func TestAdminSettings(t *testing.T) {
 }
 
 func TestHelperFunctions(t *testing.T) {
-	t.Run("isIPInSameSubnet", func(t *testing.T) {
-		// Test same IP
-		assert.True(t, isIPInSameSubnet("192.168.1.100", "192.168.1.100"))
-
-		// Test different IPs (current implementation only checks equality)
-		assert.False(t, isIPInSameSubnet("192.168.1.100", "192.168.1.200"))
-
-		// Test invalid IPs
-		assert.False(t, isIPInSameSubnet("invalid", "192.168.1.100"))
-		assert.False(t, isIPInSameSubnet("192.168.1.100", "invalid"))
-	})
-
 	t.Run("getProfileFeatures", func(t *testing.T) {
 		features := getProfileFeatures("datacenter_host")
 		assert.NotNil(t, features)

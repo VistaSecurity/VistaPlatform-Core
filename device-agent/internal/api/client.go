@@ -20,6 +20,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/models"
 	// Aliased: the device-agent has its own `certificates` package, above.
 	sharedcerts "github.com/vistasecurity/vistaplatform/shared/certificates"
+	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 )
 
 // OutboundClient handles outbound-only communication with the platform
@@ -335,13 +336,21 @@ func (c *OutboundClient) SendHeartbeat() error {
 
 	url := fmt.Sprintf("%s/api/v1/device-interrogation-service/agents/%s/heartbeat", c.baseURL, c.agentID.String())
 
+	// The agent's own address, and the rest of its bound addresses. Only the
+	// agent can know these: by the time a request reaches the platform, NAT and
+	// ingress have rewritten the connection source to a proxy or node address.
+	// Resolved once so the primary flagged in interfaces matches ip_address.
+	primaryIP := sharednetwork.PrimarySourceIPv4(c.baseURL)
+
 	reqBody := map[string]interface{}{
 		"status":    "active",
 		"timestamp": time.Now(),
 		// The binary's stamped version rides every heartbeat so an in-place
 		// binary swap is reflected without re-enrollment (registration-only
 		// recording left upgraded agents reporting their old version forever).
-		"version": c.agentVersion,
+		"version":    c.agentVersion,
+		"ip_address": primaryIP,
+		"interfaces": sharednetwork.HostAddresses(primaryIP),
 	}
 
 	jsonData, err := json.Marshal(reqBody)

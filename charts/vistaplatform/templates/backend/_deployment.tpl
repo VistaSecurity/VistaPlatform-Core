@@ -231,6 +231,17 @@ spec:
             - name: SERVICE_IMAGE_DIGEST
               value: {{ $imageDigest | quote }}
             {{- end }}
+            {{- if and (not $ctx.Values.agentMtls.enabled) (hasKey $ctx.Values.agentMtls.backends $name) }}
+            # Explicit opt-out. The services default AGENT_MTLS_REQUIRED to true,
+            # so silence here would fail closed — and with no passthrough listener
+            # the peer cert on this hop is the *mesh* cert (CN = a service
+            # identity), whose CN can never match the agent id, so every agent
+            # request would 401 (#922). Stating "false" keeps that a deliberate,
+            # inspectable choice rather than an accident of an absent variable:
+            # agents on this release authenticate by their id alone.
+            - name: AGENT_MTLS_REQUIRED
+              value: "false"
+            {{- end }}
             {{- if and $ctx.Values.agentMtls.enabled (hasKey $ctx.Values.agentMtls.backends $name) }}
             # Fail-closed agent/sensor mTLS enforcement (#581). Requires the
             # dedicated passthrough listener (port below) to receive the real

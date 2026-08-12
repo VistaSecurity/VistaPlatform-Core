@@ -60,15 +60,25 @@
 		}
 	}
 
-	# Static assets with long-lived cache
-	@static path *.js *.css *.png *.jpg *.jpeg *.gif *.ico *.svg
-	handle @static {
+	# Hashed build output only — Vite content-hashes everything under /assets,
+	# so immutable is safe there and ONLY there. Do not widen this matcher to
+	# bare extensions (*.js, *.css): unhashed public files (/theme-init.js,
+	# favicons) and index.html must revalidate, or a deployed upgrade keeps
+	# serving the previous bundle from browser cache indefinitely. That
+	# exact failure shipped: a stale cached index.html + immutable *.js kept
+	# an old UI (missing the segment auto-approve toggle) alive across
+	# deploys, and its saves silently wiped the flag.
+	@assets path /assets/*
+	handle @assets {
 		header Cache-Control "public, immutable, max-age=31536000"
 		file_server
 	}
 
-	# SPA fallback - serve files or fall back to index.html
+	# SPA fallback - serve files or fall back to index.html. no-cache means
+	# "revalidate before use" (ETag/304), not "never cache" — each navigation
+	# picks up a new index.html immediately after a deploy.
 	handle {
+		header Cache-Control "no-cache"
 		try_files {path} /index.html
 		file_server
 	}

@@ -480,6 +480,17 @@ DELETE FROM tenant_permissions WHERE name IN ('reports.create', 'reports.update'
 
 -- Re-home the seeded default-admin rows onto the current product domain.
 --
+-- The domain is `vistaplatform.invalid` deliberately: RFC 6761 reserves
+-- `.invalid` as permanently undelegatable, so these seeded addresses can never
+-- resolve to a real mailbox no matter who registers what. An earlier revision
+-- seeded them under a live company domain, which meant a stock install shipped
+-- two accounts whose addresses were deliverable to someone. Do NOT "fix" this
+-- to a real-looking domain -- the address is an identifier here, not a mailbox,
+-- and nothing about the seeded account should ever receive mail. (Consequence,
+-- documented in INSTALL.md: password-reset mail to a seeded admin bounces. The
+-- rotation flow below is the intended path, and an operator who wants a
+-- reachable admin creates their own user.)
+--
 -- Keyed on the stable seeded id so a cluster provisioned under an earlier
 -- domain is RENAMED in place on its next helm upgrade (preserving whatever
 -- password the admin already set) rather than gaining a second, duplicate
@@ -496,21 +507,21 @@ DELETE FROM tenant_permissions WHERE name IN ('reports.create', 'reports.update'
 -- applied WITHOUT ON_ERROR_STOP, so a collision would abort this statement
 -- silently and leave later email-keyed statements acting on the wrong row.
 UPDATE platform_users
-SET email = 'su_admin@vistasecurity.io', updated_at = NOW()
+SET email = 'su_admin@vistaplatform.invalid', updated_at = NOW()
 WHERE id = '00000000-0000-0000-0000-000000000001'
-  AND email <> 'su_admin@vistasecurity.io'
+  AND email <> 'su_admin@vistaplatform.invalid'
   AND NOT EXISTS (
     SELECT 1 FROM platform_users existing
-    WHERE existing.email = 'su_admin@vistasecurity.io'
+    WHERE existing.email = 'su_admin@vistaplatform.invalid'
   );
 
 UPDATE platform_users
-SET email = 'admin@vistasecurity.io', updated_at = NOW()
+SET email = 'admin@vistaplatform.invalid', updated_at = NOW()
 WHERE id = '550e8400-e29b-41d4-a716-446655440004'
-  AND email <> 'admin@vistasecurity.io'
+  AND email <> 'admin@vistaplatform.invalid'
   AND NOT EXISTS (
     SELECT 1 FROM platform_users existing
-    WHERE existing.email = 'admin@vistasecurity.io'
+    WHERE existing.email = 'admin@vistaplatform.invalid'
   );
 
 -- Create a default super admin platform user
@@ -521,7 +532,7 @@ WHERE id = '550e8400-e29b-41d4-a716-446655440004'
 INSERT INTO platform_users (id, email, password_hash, first_name, last_name, role_id, is_active, email_verified, force_password_change)
 SELECT
     '00000000-0000-0000-0000-000000000001',
-    'su_admin@vistasecurity.io',
+    'su_admin@vistaplatform.invalid',
     '$argon2id$v=19$m=65536,t=3,p=2$4RwIVrBNkLem0R8ROlv4Ow$GPQNlbYkh6VHvxmSREntWjyw/xIRCRSaNEVzli1M+cc',
     'Platform',
     'Administrator',
@@ -544,7 +555,7 @@ ON CONFLICT (email) DO UPDATE SET
 INSERT INTO platform_users (id, email, password_hash, first_name, last_name, role_id, is_active, email_verified, force_password_change)
 SELECT
     '550e8400-e29b-41d4-a716-446655440004',
-    'admin@vistasecurity.io',
+    'admin@vistaplatform.invalid',
     '$argon2id$v=19$m=65536,t=3,p=2$SXJIXrL7Gu9gg6XF1+TyJA$a6piiFbcgYGBpmWOlvW7Cgs0VKRaGIAQmS2aSqqwzKM',
     'Platform',
     'Admin',
@@ -1509,7 +1520,7 @@ BEGIN
     -- for created_by/published_by to match platform_frameworks schema.
     SELECT id INTO platform_admin_id
     FROM platform_users
-    WHERE email IN ('admin@vistasecurity.io', 'su_admin@vistasecurity.io')
+    WHERE email IN ('admin@vistaplatform.invalid', 'su_admin@vistaplatform.invalid')
       AND deleted_at IS NULL
     ORDER BY created_at ASC
     LIMIT 1;
@@ -2445,7 +2456,7 @@ BEGIN
         RAISE EXCEPTION 'super_admin role not found. Platform roles must be created first.';
     END IF;
 
-    SELECT id INTO admin_user_id FROM platform_users WHERE email = 'su_admin@vistasecurity.io' LIMIT 1;
+    SELECT id INTO admin_user_id FROM platform_users WHERE email = 'su_admin@vistaplatform.invalid' LIMIT 1;
     IF admin_user_id IS NULL THEN
         -- SECURITY: this is a fallback path (the canonical super_admin INSERT
         -- earlier in this file normally wins), but it must seed the SAME
@@ -2460,28 +2471,28 @@ BEGIN
         INSERT INTO platform_users (id, email, password_hash, first_name, last_name, role_id, is_active, email_verified, force_password_change)
         VALUES (
             '00000000-0000-0000-0000-000000000001',
-            'su_admin@vistasecurity.io',
+            'su_admin@vistaplatform.invalid',
             '$argon2id$v=19$m=65536,t=3,p=2$4RwIVrBNkLem0R8ROlv4Ow$GPQNlbYkh6VHvxmSREntWjyw/xIRCRSaNEVzli1M+cc',
             'Platform', 'Administrator', super_admin_role_id, true, true, true
         )
         RETURNING id INTO admin_user_id;
-        RAISE NOTICE '✅ Created su_admin@vistasecurity.io user with super_admin role';
+        RAISE NOTICE '✅ Created su_admin@vistaplatform.invalid user with super_admin role';
     ELSE
         UPDATE platform_users
         SET role_id = super_admin_role_id, is_active = true, email_verified = true, deleted_at = NULL, updated_at = NOW()
         WHERE id = admin_user_id AND (role_id IS NULL OR role_id != super_admin_role_id OR deleted_at IS NOT NULL OR NOT is_active OR NOT email_verified);
-        IF FOUND THEN RAISE NOTICE '✅ Updated su_admin@vistasecurity.io to super_admin role'; END IF;
+        IF FOUND THEN RAISE NOTICE '✅ Updated su_admin@vistaplatform.invalid to super_admin role'; END IF;
     END IF;
 
     SELECT COUNT(*) INTO permission_count
     FROM platform_users pu
     JOIN platform_roles pr ON pu.role_id = pr.id
     JOIN platform_role_permissions prp ON pr.id = prp.role_id
-    WHERE pu.email = 'su_admin@vistasecurity.io' AND pr.name = 'super_admin';
+    WHERE pu.email = 'su_admin@vistaplatform.invalid' AND pr.name = 'super_admin';
     IF permission_count = 0 THEN
         RAISE WARNING '⚠️  Admin user may not have all permissions - verify platform_role_permissions assignments';
     ELSE
-        RAISE NOTICE '✅ Verified su_admin@vistasecurity.io has super_admin role with % permissions', permission_count;
+        RAISE NOTICE '✅ Verified su_admin@vistaplatform.invalid has super_admin role with % permissions', permission_count;
     END IF;
 END $$;
 

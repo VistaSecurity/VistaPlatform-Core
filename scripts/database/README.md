@@ -84,7 +84,7 @@ scripts/database/
 Contains essential data required for the platform to function:
 
 - **Platform Roles** (`platform_roles`): `super_admin`, `platform_admin`, `support_agent`
-- **Platform Users** (`platform_users`): `su_admin@vistasecurity.io` (super_admin), `admin@vistasecurity.io` (platform_admin)
+- **Platform Users** (`platform_users`): `su_admin@vistaplatform.invalid` (super_admin), `admin@vistaplatform.invalid` (platform_admin)
 - **Subscription Tiers** (`subscription_tiers`): `free`, `professional`, `enterprise`
 - **Tenant Permissions** (`tenant_permissions`): All permission definitions
 - **Measurement Types** (`measurement_types`): TLS, certificate, encryption types

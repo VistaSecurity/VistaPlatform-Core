@@ -51,3 +51,21 @@ registration_key: REG-0123456789abcdef0123456789abcdef
 		t.Fatalf("PlatformURL = %q, want environment bootstrap URL", cfg.PlatformURL)
 	}
 }
+
+func TestLoadFromFileVerboseEnvOverridesAbsentKey(t *testing.T) {
+	t.Setenv("VERBOSE", "false")
+
+	configPath := filepath.Join(t.TempDir(), "agent-config.yaml")
+	if err := os.WriteFile(configPath, []byte(`platform_url: https://platform.example
+`), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadFromFile(configPath)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if cfg.Verbose == nil || *cfg.Verbose {
+		t.Fatalf("Verbose = %v, want explicit false from VERBOSE env", cfg.Verbose)
+	}
+}

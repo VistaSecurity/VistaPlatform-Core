@@ -11,6 +11,7 @@ package handlers
 // handlers with an in-memory stub — no database.
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
+	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 )
 
 // --- stub legacySensorService ----------------------------------------------
@@ -76,6 +78,12 @@ func (s *stubLegacySensorService) UpdateSensorHealth(string, *models.SensorHealt
 }
 func (s *stubLegacySensorService) UpdateSensorHealthWithIP(string, *models.SensorHealth, *string) error {
 	return nil
+}
+func (s *stubLegacySensorService) ReconcileSensorAddresses(context.Context, string, []sharednetwork.InterfaceAddress) error {
+	return nil
+}
+func (s *stubLegacySensorService) ListSensorAddresses(context.Context, uuid.UUID, uuid.UUID) ([]models.AgentAddress, error) {
+	return nil, nil
 }
 
 // newSensorConfigEngine mounts only the config + interfaces routes, with the

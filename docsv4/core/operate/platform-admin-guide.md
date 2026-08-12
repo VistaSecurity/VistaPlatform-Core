@@ -44,7 +44,16 @@ It documents the rebuilt administration console (admin-ui v2). The console has a
 
 ### First sign-in: mandatory password rotation
 
-A fresh deployment seeds default administrator accounts flagged **must change password**. Signing in with a seeded (or admin-issued temporary) password gives you a limited session that can do exactly one thing: set a new password. The console presents the change-password screen immediately, and the services reject every other request until the rotation completes — this is enforced server-side, not just by the UI. After you set a new password you continue straight into the console. Rotate the seeded credentials on day one and never share them; the same forced rotation applies whenever an administrator resets a colleague's password with "require password change on next login."
+A fresh deployment seeds two default administrator accounts, both flagged **must change password**:
+
+| Email | Role | Password |
+|---|---|---|
+| `su_admin@vistaplatform.invalid` | Super Administrator | `PlatformAdm!n2026` |
+| `admin@vistaplatform.invalid` | Platform Administrator | `PlatformAdm!n2026` |
+
+These are published defaults — every deployment starts with them. The `.invalid` domain is deliberate ([RFC 6761](https://www.rfc-editor.org/rfc/rfc6761#section-6.4) reserves it as permanently unresolvable), so the seeded addresses can never reach a real mailbox — which also means **password-reset email to a seeded account goes nowhere**. Rotate on first sign-in, then add your own administrator under a real address in **Staff & Access → Staff** and use that account day to day. Do not rename a seeded account: the seed re-applies on every upgrade and renames it back.
+
+Signing in with a seeded (or admin-issued temporary) password gives you a limited session that can do exactly one thing: set a new password. The console presents the change-password screen immediately, and the services reject every other request until the rotation completes — this is enforced server-side, not just by the UI. After you set a new password you continue straight into the console. Rotate the seeded credentials on day one and never share them; the same forced rotation applies whenever an administrator resets a colleague's password with "require password change on next login."
 
 ### Platform administrator roles
 

@@ -220,7 +220,7 @@ func (s *NetworkSpaceService) manageAutoApprovalRules(tenantID, userID uuid.UUID
 						(tenant_id, name, description, conditions, is_active, created_by, created_at, updated_at)
 						VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
 						RETURNING id`
-					err = tx.QueryRow(insertQuery, tenantID, ruleName, ruleDescription, conditionsJSON, space.IsActive, userID).Scan(&ruleID)
+					err = tx.QueryRow(insertQuery, tenantID, ruleName, ruleDescription, conditionsJSON, space.IsActive, nullableUserID(userID)).Scan(&ruleID)
 					if err != nil {
 						fmt.Printf("Warning: failed to create auto-approval rule for space %s: %v\n", space.ID, err)
 					}

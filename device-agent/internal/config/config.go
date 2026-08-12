@@ -19,14 +19,18 @@ const DefaultHeartbeatInterval = 60 * time.Second
 
 // Config holds all configuration for the device agent
 type Config struct {
-	PlatformURL       string         `yaml:"platform_url" env:"PLATFORM_URL"`
-	AgentID           string         `yaml:"agent_id" env:"AGENT_ID"`
-	RegistrationKey   string         `yaml:"registration_key" env:"REGISTRATION_KEY"`
-	PollInterval      time.Duration  `yaml:"poll_interval" env:"POLL_INTERVAL"`
-	HeartbeatInterval time.Duration  `yaml:"heartbeat_interval" env:"HEARTBEAT_INTERVAL"`
-	DataPath          string         `yaml:"data_path" env:"DATA_PATH"` // Path for storing data and certificates
-	Verbose           bool           `yaml:"verbose" env:"VERBOSE"`
-	Security          SecurityConfig `yaml:"security"`
+	PlatformURL       string        `yaml:"platform_url" env:"PLATFORM_URL"`
+	AgentID           string        `yaml:"agent_id" env:"AGENT_ID"`
+	RegistrationKey   string        `yaml:"registration_key" env:"REGISTRATION_KEY"`
+	PollInterval      time.Duration `yaml:"poll_interval" env:"POLL_INTERVAL"`
+	HeartbeatInterval time.Duration `yaml:"heartbeat_interval" env:"HEARTBEAT_INTERVAL"`
+	DataPath          string        `yaml:"data_path" env:"DATA_PATH"` // Path for storing data and certificates
+	// Verbose is the config-file override for log verbosity. Verbose logging is
+	// the command-line default, so this is three-state: nil means "the config
+	// says nothing, leave the default alone", and only an explicit `verbose:`
+	// key (or the VERBOSE env var) turns it off or pins it on.
+	Verbose  *bool          `yaml:"verbose" env:"VERBOSE"`
+	Security SecurityConfig `yaml:"security"`
 }
 
 // SecurityConfig represents security configuration
@@ -47,7 +51,7 @@ func Load() *Config {
 		AgentID:         sharedconfig.GetEnv("AGENT_ID", ""),
 		RegistrationKey: sharedconfig.GetEnv("REGISTRATION_KEY", ""),
 		DataPath:        sharedconfig.GetEnv("DATA_PATH", getDefaultDataPath()),
-		Verbose:         sharedconfig.GetEnvAsBool("VERBOSE", false),
+		Verbose:         boolEnvPtr("VERBOSE"),
 		Security: SecurityConfig{
 			ClientCert:   sharedconfig.GetEnv("CLIENT_CERT", ""),
 			ClientKey:    sharedconfig.GetEnv("CLIENT_KEY", ""),
@@ -67,6 +71,17 @@ func Load() *Config {
 	cfg.HeartbeatInterval = parseHeartbeatInterval(sharedconfig.GetEnv("HEARTBEAT_INTERVAL", ""))
 
 	return cfg
+}
+
+// boolEnvPtr returns a pointer to the parsed boolean env var, or nil when the
+// variable is unset — preserving the "said nothing" state that lets the
+// command-line default stand.
+func boolEnvPtr(key string) *bool {
+	if sharedconfig.GetEnv(key, "") == "" {
+		return nil
+	}
+	v := sharedconfig.GetEnvAsBool(key, false)
+	return &v
 }
 
 // parseHeartbeatInterval turns a duration string into a usable interval,
@@ -139,6 +154,9 @@ func LoadFromFile(path string) (*Config, error) {
 	}
 	if dataPath := os.Getenv("DATA_PATH"); dataPath != "" {
 		cfg.DataPath = dataPath
+	}
+	if v := boolEnvPtr("VERBOSE"); v != nil {
+		cfg.Verbose = v
 	}
 
 	// Load certificates from files if paths are set

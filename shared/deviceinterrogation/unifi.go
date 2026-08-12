@@ -60,7 +60,12 @@ func (*UnifiInterrogator) Interrogate(ctx context.Context, device DeviceInfo, cr
 		}
 	}
 
-	client := newUnifiClient(managementURL(device), username, password, siteID, creds.InsecureSkipVerify)
+	baseURL, err := managementURL(device)
+	if err != nil {
+		return nil, err
+	}
+
+	client := newUnifiClient(baseURL, username, password, siteID, creds.InsecureSkipVerify)
 
 	result, err := client.interrogate(ctx)
 	if err != nil {

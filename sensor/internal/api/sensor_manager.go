@@ -228,11 +228,11 @@ func (c *SensorManagerClient) Register() (*models.SensorConfig, error) {
 	return &config, nil
 }
 
+// getRegistrationIPAddress reports this host's address at enrollment; "" means
+// undetermined. See the OutboundClient equivalent for why loopback is not a
+// safe fallback.
 func (c *SensorManagerClient) getRegistrationIPAddress() string {
-	if ip := c.config.Network.IPAddress; ip != "" {
-		return ip
-	}
-	return "127.0.0.1"
+	return c.config.CurrentIPAddress()
 }
 
 // SubmitDiscoveries submits a batch of discoveries to the control plane

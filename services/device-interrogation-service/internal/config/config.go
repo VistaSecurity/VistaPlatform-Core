@@ -73,7 +73,10 @@ func Load() (*Config, error) {
 		ClientKeyPath:      sharedconfig.GetEnv("CLIENT_KEY_PATH", "/app/certs/client-key.pem"),
 		PlatformCACertPath: sharedconfig.GetEnv("PLATFORM_CA_CERT_PATH", "/app/certs/platform-ca-cert.pem"),
 
-		AgentMTLSRequired:      sharedconfig.GetEnvAsBool("AGENT_MTLS_REQUIRED", false),
+		// Defaults to TRUE — see the sensor-manager equivalent: an unconfigured
+		// deployment must authenticate agents rather than trust a bare agent
+		// UUID. Opting out is now an explicit AGENT_MTLS_REQUIRED=false.
+		AgentMTLSRequired:      sharedconfig.GetEnvAsBool("AGENT_MTLS_REQUIRED", true),
 		AgentMTLSAdvertisedURL: sharedconfig.GetEnv("AGENT_MTLS_ADVERTISED_URL", ""),
 		AgentTLSPort:           sharedconfig.GetEnv("AGENT_TLS_PORT", "8444"),
 	}

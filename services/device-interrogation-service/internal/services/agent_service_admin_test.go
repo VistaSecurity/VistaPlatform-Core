@@ -21,7 +21,7 @@ import (
 var adminAgentColumns = []string{
 	"id", "tenant_id", "tenant_name", "tenant_slug",
 	"name", "platform", "profile", "version", "status",
-	"last_heartbeat", "created_at", "updated_at",
+	"ip_address", "last_heartbeat", "created_at", "updated_at",
 }
 
 func TestListAllAgents_TenantScopeFilter(t *testing.T) {
@@ -41,7 +41,7 @@ func TestListAllAgents_TenantScopeFilter(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(adminAgentColumns).AddRow(
 			uuid.New().String(), tenantID.String(), "Acme", "acme",
 			nil, "linux", nil, "1.0.0", "active",
-			nil, now, now,
+			"192.0.2.200", nil, now, now,
 		))
 
 	svc := &AgentService{db: db, bypassDB: db}
@@ -72,7 +72,7 @@ func TestListAllAgents_Unscoped(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(adminAgentColumns).AddRow(
 			uuid.New().String(), uuid.New().String(), "Acme", "acme",
 			nil, "linux", nil, "1.0.0", "active",
-			nil, now, now,
+			"192.0.2.200", nil, now, now,
 		))
 
 	svc := &AgentService{db: db, bypassDB: db}

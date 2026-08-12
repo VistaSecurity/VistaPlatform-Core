@@ -21,9 +21,29 @@ export function jobMeta(status?: string | null): JobMeta {
   return { c: 'var(--warn)', l: s === 'pending' || s === 'queued' || !s ? 'Queued' : status!, icon: 'clock' };
 }
 
-export function sensorOnline(status?: string | null): boolean {
+// A subject is only "online" if its status says so AND it has actually checked
+// in recently. The heartbeat guard exists because the two runtimes maintain
+// their status columns differently: sensor-manager runs a reaper that flips a
+// silent sensor to 'offline', but nothing ever rewrites device_agents.status —
+// it is hard-coded 'active' at enrollment and never touched again, so a dead
+// discovery agent would otherwise render with a green dot forever.
+//
+// The window matches the dwell the discovery-agent offline ALERT uses, so the
+// fleet list can never disagree with the alert an operator just received.
+// Pass lastHeartbeat wherever it is available; omitting it keeps the old
+// status-only behaviour.
+const OFFLINE_AFTER_MS = 15 * 60 * 1000;
+
+export function sensorOnline(status?: string | null, lastHeartbeat?: string | null): boolean {
   const s = (status || '').toLowerCase();
-  return s === 'active' || s === 'online' || s === 'connected';
+  const statusSaysUp = s === 'active' || s === 'online' || s === 'connected';
+  if (!statusSaysUp) return false;
+
+  if (lastHeartbeat === undefined) return true;
+  if (!lastHeartbeat) return false;
+
+  const age = Date.now() - new Date(lastHeartbeat).getTime();
+  return Number.isFinite(age) && age < OFFLINE_AFTER_MS;
 }
 
 export function relTime(iso?: string | null): string {

@@ -13,6 +13,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/config"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 )
 
 // ErrInvalidDeviceAgentRegistrationKey means the key cannot be used for device agent bootstrap
@@ -242,7 +243,7 @@ func (s *AgentService) validateRegistrationKeyWithQuerier(ctx context.Context, q
 // ListAgents lists all agents for a tenant
 func (s *AgentService) ListAgents(ctx context.Context, tenantID uuid.UUID) ([]*models.Agent, error) {
 	query := `
-		SELECT id, tenant_id, name, platform, profile, version, status, last_heartbeat, created_at, updated_at
+		SELECT id, tenant_id, name, platform, profile, version, status, ip_address, last_heartbeat, created_at, updated_at
 		FROM device_agents
 		WHERE tenant_id = $1 AND deleted_at IS NULL
 		ORDER BY created_at DESC
@@ -263,7 +264,7 @@ func (s *AgentService) ListAgents(ctx context.Context, tenantID uuid.UUID) ([]*m
 			var tenantIDOut uuid.UUID
 			if scanErr := rows.Scan(
 				&agent.ID, &tenantIDOut, &agent.Name, &agent.Platform, &agent.Profile, &agent.Version,
-				&agent.Status, &agent.LastHeartbeat, &agent.CreatedAt, &agent.UpdatedAt,
+				&agent.Status, &agent.IPAddress, &agent.LastHeartbeat, &agent.CreatedAt, &agent.UpdatedAt,
 			); scanErr != nil {
 				return fmt.Errorf("failed to scan agent: %w", scanErr)
 			}
@@ -291,7 +292,7 @@ func (s *AgentService) ListAllAgents(ctx context.Context, tenantID string) ([]*m
 	query := `
 		SELECT a.id, a.tenant_id, t.name AS tenant_name, t.slug AS tenant_slug,
 		       a.name, a.platform, a.profile, a.version, a.status,
-		       a.last_heartbeat, a.created_at, a.updated_at
+		       a.ip_address, a.last_heartbeat, a.created_at, a.updated_at
 		FROM device_agents a
 		LEFT JOIN tenants t ON t.id = a.tenant_id
 		WHERE a.deleted_at IS NULL
@@ -318,7 +319,7 @@ func (s *AgentService) ListAllAgents(ctx context.Context, tenantID string) ([]*m
 		err := rows.Scan(
 			&agent.ID, &agent.TenantID, &tenantName, &tenantSlug,
 			&agent.Name, &agent.Platform, &agent.Profile, &agent.Version,
-			&agent.Status, &agent.LastHeartbeat, &agent.CreatedAt, &agent.UpdatedAt,
+			&agent.Status, &agent.IPAddress, &agent.LastHeartbeat, &agent.CreatedAt, &agent.UpdatedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan agent: %w", err)
@@ -346,6 +347,39 @@ func (s *AgentService) GetNextJob(ctx context.Context, agentID uuid.UUID) (*mode
 
 	// Convert DeviceJob to Job model for agent
 	job := deviceJob.ToJob()
+
+	// Fill in the device's address from the device row before the job leaves
+	// the platform. The in-cluster worker re-reads the device by device_id, so
+	// creation paths were free to omit the address and one (the scheduler,
+	// which forwards an operator-stored parameter map verbatim) still can. An
+	// agent has no database and only gets this payload, so the address has to
+	// be resolved here — the last point that can still see the device row.
+	if job.Type == string(models.JobTypeDeviceInterrogation) {
+		if err := s.enrichJobTarget(ctx, deviceJob.TenantID, job); err != nil {
+			// Fail loudly rather than dispatching a job the agent cannot
+			// execute. Without this the agent interrogates whatever an empty
+			// address resolves to and reports a misleading connection or auth
+			// error against its own host.
+			msg := fmt.Sprintf("cannot dispatch job to agent: %v", err)
+			if updErr := s.jobQueue.UpdateJobStatus(ctx, deviceJob.ID, models.JobStatusFailed, nil, &msg); updErr != nil {
+				return nil, fmt.Errorf("%s (and failed to record it: %w)", msg, updErr)
+			}
+			return nil, nil
+		}
+
+		// Same shape of gap, one field over: the scheduler creates jobs without
+		// credentials at all. The in-cluster worker re-reads them off the device
+		// row (DeviceInterrogationService.getDeviceCredentials), so a
+		// credential-less job runs fine there and the omission was invisible;
+		// an agent gets only this payload and would authenticate with nothing.
+		if err := s.resolveJobCredentials(ctx, deviceJob.TenantID, job); err != nil {
+			msg := fmt.Sprintf("cannot dispatch job to agent: %v", err)
+			if updErr := s.jobQueue.UpdateJobStatus(ctx, deviceJob.ID, models.JobStatusFailed, nil, &msg); updErr != nil {
+				return nil, fmt.Errorf("%s (and failed to record it: %w)", msg, updErr)
+			}
+			return nil, nil
+		}
+	}
 
 	// Seal the credentials for THIS agent before the job leaves the platform.
 	// The stored payload is in one of the platform's internal shapes, none of
@@ -375,6 +409,79 @@ func (s *AgentService) GetNextJob(ctx context.Context, agentID uuid.UUID) (*mode
 	}
 
 	return job, nil
+}
+
+// ErrJobHasNoTarget reports that a device-interrogation job carries no address
+// the agent could connect to.
+var ErrJobHasNoTarget = errors.New("device has no hostname, IP address, or management URL")
+
+// enrichJobTarget copies the device's addressing from the device row into the
+// job parameters, and reports ErrJobHasNoTarget when there is nothing to copy.
+//
+// Parameters already on the job win: a scheduled job may deliberately target a
+// specific address, and the job's own payload is the more specific intent.
+//
+// RLS: agent-outbound — keyed by agent id, tenant is the OUTPUT → bypass role,
+// same as sealJobCredentials. The read is constrained to the job's own tenant
+// so this path cannot hand one tenant's device address to another's agent
+//
+func (s *AgentService) enrichJobTarget(ctx context.Context, tenantID uuid.UUID, job *models.Job) error {
+	if job.Parameters == nil {
+		job.Parameters = map[string]interface{}{}
+	}
+	if job.DeviceID == nil {
+		// Nothing to look up — the payload is all there is.
+		if hasAnyTarget(job.Parameters) {
+			return nil
+		}
+		return ErrJobHasNoTarget
+	}
+
+	var hostname, ipAddress, managementURL sql.NullString
+	err := s.bypassDB.QueryRowContext(ctx,
+		`SELECT hostname, ip_address, management_url
+		   FROM devices
+		  WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+		*job.DeviceID, tenantID,
+	).Scan(&hostname, &ipAddress, &managementURL)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("device %s not found", *job.DeviceID)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to resolve device address: %w", err)
+	}
+
+	setIfAbsent(job.Parameters, "hostname", hostname)
+	setIfAbsent(job.Parameters, "ip_address", ipAddress)
+	setIfAbsent(job.Parameters, "management_url", managementURL)
+
+	if !hasAnyTarget(job.Parameters) {
+		return ErrJobHasNoTarget
+	}
+	return nil
+}
+
+// setIfAbsent writes a non-empty SQL string into params under key, leaving any
+// value already present untouched.
+func setIfAbsent(params map[string]interface{}, key string, v sql.NullString) {
+	if !v.Valid || v.String == "" {
+		return
+	}
+	if existing, ok := params[key].(string); ok && existing != "" {
+		return
+	}
+	params[key] = v.String
+}
+
+// hasAnyTarget reports whether the parameters carry an address the agent could
+// connect to.
+func hasAnyTarget(params map[string]interface{}) bool {
+	for _, key := range []string{"hostname", "ip_address", "management_url"} {
+		if s, ok := params[key].(string); ok && s != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // sealJobCredentials resolves the claiming agent's registration key and seals
@@ -464,17 +571,73 @@ func (s *AgentService) SubmitJobResult(ctx context.Context, agentID uuid.UUID, r
 // "not reported" and leaves the stored value untouched (older agents send no
 // version), so a pre-stamping binary can never blank a good value.
 func (s *AgentService) UpdateHeartbeat(ctx context.Context, agentID uuid.UUID, version string) error {
+	return s.UpdateHeartbeatWithHost(ctx, agentID, version, "", nil)
+}
+
+// UpdateHeartbeatWithHost additionally records what the agent reported about its
+// own network position: its primary address and full address inventory.
+//
+// Both follow heartbeat semantics — empty means "not reported" and leaves the
+// stored value alone, so an older agent that sends neither cannot blank what a
+// newer one recorded. The address must come from the agent because the platform
+// cannot observe it: NAT and ingress rewrite the connection source long before
+// the request arrives.
+func (s *AgentService) UpdateHeartbeatWithHost(ctx context.Context, agentID uuid.UUID, version, ipAddress string, addrs []sharednetwork.InterfaceAddress) error {
 	query := `
 		UPDATE device_agents
 		SET last_heartbeat = $1, updated_at = $1,
-		    version = COALESCE(NULLIF($3, ''), version)
+		    version = COALESCE(NULLIF($3, ''), version),
+		    ip_address = COALESCE(NULLIF($4, ''), ip_address)
 		WHERE id = $2
 	`
 
-	_, err := s.bypassDB.ExecContext(ctx, query, time.Now(), agentID, version)
+	_, err := s.bypassDB.ExecContext(ctx, query, time.Now(), agentID, version, ipAddress)
 	if err != nil {
 		return fmt.Errorf("failed to update heartbeat: %w", err)
 	}
 
-	return nil
+	if len(addrs) == 0 {
+		return nil
+	}
+
+	// agent_addresses is RLS-scoped via its owner, and this is an agent-facing
+	// call with no tenant in context, so the write runs on the bypass handle —
+	// the same pattern as the heartbeat UPDATE above.
+	tx, err := s.bypassDB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin address reconcile: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM agent_addresses WHERE device_agent_id = $1`, agentID); err != nil {
+		return fmt.Errorf("failed to clear agent addresses: %w", err)
+	}
+
+	// At most one primary reaches the database (a partial unique index enforces
+	// it), so keep the first rather than failing the whole set.
+	seenPrimary := false
+	for _, a := range addrs {
+		if a.Address == "" || a.InterfaceName == "" {
+			continue
+		}
+		isPrimary := a.IsPrimary && !seenPrimary
+		if isPrimary {
+			seenPrimary = true
+		}
+
+		var prefix interface{}
+		if a.PrefixLength > 0 {
+			prefix = a.PrefixLength
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO agent_addresses (device_agent_id, interface_name, address, prefix_length, is_primary)
+			VALUES ($1, $2, $3::inet, $4, $5)
+			ON CONFLICT DO NOTHING`,
+			agentID, a.InterfaceName, a.Address, prefix, isPrimary); err != nil {
+			return fmt.Errorf("failed to record agent address %s: %w", a.Address, err)
+		}
+	}
+
+	return tx.Commit()
 }

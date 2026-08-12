@@ -192,7 +192,7 @@ export function SensorDetailDrawer({ sensor: row, onClose }: { sensor: Sensor; o
   }, [isPlatform]);
 
   const [tab, setTab] = useState<TabKey>('overview');
-  const on = sensorOnline(sensor.status);
+  const on = sensorOnline(sensor.status, sensor.last_heartbeat);
 
   return (
     <DrawerShell onClose={onClose} width={560}>
@@ -243,7 +243,7 @@ export function SensorDetailDrawer({ sensor: row, onClose }: { sensor: Sensor; o
 
 // ==== Tab 1 — Overview =====================================================
 function OverviewTab({ sensor, isPlatform }: { sensor: Sensor; isPlatform: boolean }) {
-  const on = sensorOnline(sensor.status);
+  const on = sensorOnline(sensor.status, sensor.last_heartbeat);
   // Uptime from latest health (skip for platform sensors — no telemetry).
   const healthQ = useSensorHealth(sensor.id, !isPlatform);
   const uptime = healthQ.data ? fmtUptime(healthQ.data.uptime_seconds) : '—';
@@ -258,6 +258,23 @@ function OverviewTab({ sensor, isPlatform }: { sensor: Sensor; isPlatform: boole
       {!isPlatform && <MetaRow k="Reporting interval" v={fmtIntervalSecs(sensor.reporting_interval)} />}
       <MetaRow k="Version" v={sensor.version ? 'v' + sensor.version : null} mono />
       <MetaRow k="IP address" v={sensor.ip_address} mono />
+      {/* Only worth listing when the host has more than the primary — on a
+          single-homed box the list would just repeat the row above. */}
+      {(sensor.addresses?.length ?? 0) > 1 && (
+        <div style={{ padding: '8px 0', borderBottom: '1px solid var(--app-border)' }}>
+          <div style={{ fontSize: 11, color: 'var(--app-t3)', marginBottom: 5 }}>All addresses</div>
+          {sensor.addresses!.map((a) => (
+            <div key={`${a.interface_name}-${a.address}`} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, padding: '2px 0' }}>
+              <span className="mono" style={{ fontSize: 11.5, color: 'var(--app-t2)' }}>
+                {a.address}{a.prefix_length ? `/${a.prefix_length}` : ''}
+              </span>
+              <span style={{ fontSize: 11, color: 'var(--app-t3)', whiteSpace: 'nowrap' }}>
+                {a.interface_name}{a.is_primary ? ' · primary' : ''}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
       <MetaRow k="Deployment" v={sensor.air_gapped ? 'Air-gapped' : 'Connected'} />
       {!isPlatform && <MetaRow k="Uptime" v={uptime} />}
       <MetaRow k="Monitored interfaces" v={(sensor.network_interfaces ?? []).join(', ') || 'none'} mono />

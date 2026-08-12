@@ -1046,6 +1046,13 @@ export interface components {
             /** @description Agent status: active, inactive, or error. */
             status: string;
             /**
+             * @description The agent host's primary address, self-reported on each heartbeat —
+             *     the source address its kernel uses to reach the platform. Null until
+             *     an agent new enough to report one checks in. The platform cannot
+             *     derive this: NAT and ingress rewrite the connection source.
+             */
+            ip_address: string | null;
+            /**
              * Format: date-time
              * @description Last heartbeat timestamp; null if the agent has never checked in.
              */
@@ -1167,6 +1174,13 @@ export interface components {
             version: string;
             /** @description Agent status: active, inactive, or error. */
             status: string;
+            /**
+             * @description The agent host's primary address, self-reported on each heartbeat —
+             *     the source address its kernel uses to reach the platform. Null until
+             *     an agent new enough to report one checks in. The platform cannot
+             *     derive this: NAT and ingress rewrite the connection source.
+             */
+            ip_address: string | null;
             /**
              * Format: date-time
              * @description Last heartbeat timestamp; null if the agent has never checked in.

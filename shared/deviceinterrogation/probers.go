@@ -793,7 +793,10 @@ func (*HTTPInterrogator) SupportedDeviceTypes() []string {
 // interrogation: it pulls certificates from a (device-configurable) REST
 // endpoint and additionally probes the management TLS port for deep-scan data.
 func (*HTTPInterrogator) Interrogate(ctx context.Context, device DeviceInfo, creds Credentials) (*InterrogateResult, error) {
-	baseURL := managementURL(device)
+	baseURL, err := managementURL(device)
+	if err != nil {
+		return nil, err
+	}
 
 	cfg := httpxConfig{
 		baseURL:       baseURL,

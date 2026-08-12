@@ -247,11 +247,14 @@ func (c *OutboundClient) GetSensorID() string {
 	return c.sensorID
 }
 
+// getRegistrationIPAddress reports this host's address at enrollment. It returns
+// "" when the address cannot be determined — the platform records that as
+// "unknown". It used to return the literal "127.0.0.1" to satisfy a required
+// field, which stated something false about the host and, once the platform
+// began trusting the self-reported value, would have pinned the sensor to
+// loopback forever.
 func (c *OutboundClient) getRegistrationIPAddress() string {
-	if ip := c.config.Network.IPAddress; ip != "" {
-		return ip
-	}
-	return "127.0.0.1"
+	return c.config.CurrentIPAddress()
 }
 
 // Heartbeat sends a heartbeat and receives commands (outbound only)

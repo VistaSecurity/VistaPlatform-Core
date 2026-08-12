@@ -663,8 +663,27 @@ export interface components {
             updated_at: string;
             /** Format: date-time */
             deleted_at: string | null;
+            /**
+             * @description Every IP the sensor host reported, with its prefix. Present on the
+             *     single-sensor read only (the list endpoint omits it). A capture host
+             *     is often multi-homed and watching several segments at once, which
+             *     `ip_address` — the primary, i.e. the address the host reaches the
+             *     platform from — cannot express on its own.
+             */
+            addresses?: components["schemas"]["AgentAddress"][];
         } & {
             [key: string]: unknown;
+        };
+        /** @description One IP bound to one interface on an agent host. */
+        AgentAddress: {
+            /** @description Host interface the address is bound to (e.g. eth0, "Ethernet 2"). */
+            interface_name: string;
+            /** @description The bare IP, without a prefix suffix. */
+            address: string;
+            /** @description Network prefix (24 for 192.0.2.173/24). Absent when the agent reported none. */
+            prefix_length?: number;
+            /** @description True for the address the agent reaches the control plane from. At most one per agent. */
+            is_primary: boolean;
         };
         /**
          * @description CURRENT list envelope for GET /sensors: the collection is wrapped under

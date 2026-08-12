@@ -249,6 +249,11 @@ func (s *NetworkSegmentService) Create(tenantID uuid.UUID, input models.NetworkS
 		defaultActive := true
 		isActive = &defaultActive
 	}
+	autoApprove := input.AutoApproveDiscoveries
+	if autoApprove == nil {
+		defaultAutoApprove := false
+		autoApprove = &defaultAutoApprove
+	}
 	var id uuid.UUID
 	q := `INSERT INTO network_segments (tenant_id, name, segment_type, value, network_type, environment, location_id, business_unit, owner_email, description, is_active, auto_approve_discoveries, tags, metadata, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW()) RETURNING id`
@@ -256,7 +261,7 @@ func (s *NetworkSegmentService) Create(tenantID uuid.UUID, input models.NetworkS
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		return tx.QueryRow(q,
 			tenantID, input.Name, input.SegmentType, input.Value, input.NetworkType, input.Environment, input.LocationID,
-			input.BusinessUnit, input.OwnerEmail, input.Description, isActive, input.AutoApproveDiscoveries, tags, meta,
+			input.BusinessUnit, input.OwnerEmail, input.Description, isActive, autoApprove, tags, meta,
 		).Scan(&id)
 	})
 	if err != nil {
@@ -372,11 +377,19 @@ func (s *NetworkSegmentService) Update(tenantID, id uuid.UUID, input models.Netw
 		currentIsActive := seg.IsActive
 		isActive = &currentIsActive
 	}
+	autoApprove := input.AutoApproveDiscoveries
+	if autoApprove == nil {
+		// Keep the persisted value when omitted. This was a plain bool: any client
+		// that omitted the field (e.g. a stale cached UI bundle predating the
+		// toggle) zeroed auto-approve on every unrelated segment edit.
+		currentAutoApprove := seg.AutoApproveDiscoveries
+		autoApprove = &currentAutoApprove
+	}
 	// RLS-scoped write over network_segments.
 	err = database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		_, e := tx.Exec(`UPDATE network_segments SET name = $1, segment_type = $2, value = $3, network_type = $4, environment = $5, location_id = $6, business_unit = $7, owner_email = $8, description = $9, is_active = $10, auto_approve_discoveries = $11, tags = $12, metadata = $13, updated_at = NOW() WHERE id = $14 AND tenant_id = $15`,
 			input.Name, input.SegmentType, input.Value, input.NetworkType, input.Environment, input.LocationID,
-			input.BusinessUnit, input.OwnerEmail, input.Description, isActive, input.AutoApproveDiscoveries, tags, meta, id, tenantID)
+			input.BusinessUnit, input.OwnerEmail, input.Description, isActive, autoApprove, tags, meta, id, tenantID)
 		return e
 	})
 	if err != nil {
@@ -500,9 +513,21 @@ func (s *NetworkSegmentService) ReclassifyAllAssets(tenantID uuid.UUID) (int, er
 	return updated, nil
 }
 
+// nullableUserID maps uuid.Nil to SQL NULL for created_by-style columns. The zero UUID
+// is what HMAC service-auth requests carry (no real user row exists for it, so inserting
+// it verbatim would fail the users FK).
+func nullableUserID(userID uuid.UUID) interface{} {
+	if userID == uuid.Nil {
+		return nil
+	}
+	return userID
+}
+
 // ManageAutoApprovalRules creates or updates discovery_auto_approval_rules for segments with auto_approve_discoveries = true,
 // and disables rules for segments with auto_approve_discoveries = false. Uses network_segment_id in conditions.
-// userID is used as created_by for new rules; use uuid.Nil to only update/disable (e.g. from reclassify-all without user context).
+// userID is used as created_by for new rules; uuid.Nil (e.g. HMAC service-auth calls, where the
+// middleware has no real user) records created_by = NULL — the rule must still be created, because
+// the discovery-processor only auto-approves via rules, not the segment flag.
 func (s *NetworkSegmentService) ManageAutoApprovalRules(tenantID, userID uuid.UUID) error {
 	// RLS-scoped reads + writes over discovery_auto_approval_rules and network_segments —
 	// the existing-rules scan, segment list, and per-segment upsert/disable form one unit.
@@ -568,11 +593,11 @@ func (s *NetworkSegmentService) ManageAutoApprovalRules(tenantID, userID uuid.UU
 					if err != nil {
 						fmt.Printf("Warning: failed to update auto-approval rule for segment %s: %v\n", seg.ID, err)
 					}
-				} else if userID != uuid.Nil {
+				} else {
 					_, err = tx.Exec(`INSERT INTO discovery_auto_approval_rules
 						(tenant_id, name, description, conditions, is_active, created_by, created_at, updated_at)
 						VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
-						tenantID, ruleName, ruleDescription, conditionsJSON, seg.IsActive, userID)
+						tenantID, ruleName, ruleDescription, conditionsJSON, seg.IsActive, nullableUserID(userID))
 					if err != nil {
 						fmt.Printf("Warning: failed to create auto-approval rule for segment %s: %v\n", seg.ID, err)
 					}

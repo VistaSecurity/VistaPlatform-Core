@@ -2,6 +2,9 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,5 +124,71 @@ func TestCheckAndRotateAgentCertificate_DoesNotPersistFailedRotation(t *testing.
 	}
 	if savedCerts != 0 || savedConfig != 0 {
 		t.Fatalf("savedCerts=%d savedConfig=%d, want 0/0", savedCerts, savedConfig)
+	}
+}
+
+// TestShouldRunInteractive pins the install default and every reason to step
+// aside from it. The dialogue being ON by default is what makes a bare
+// `./device-agent` on a fresh host walk the operator through setup and then
+// start polling — the same install experience as the sensor.
+func TestShouldRunInteractive(t *testing.T) {
+	tests := []struct {
+		name       string
+		want       bool
+		explicit   bool
+		configPath string
+		register   bool
+		tty        bool
+		env        string
+		expect     bool
+	}{
+		{name: "fresh host, no arguments", want: true, tty: true, expect: true},
+		{name: "-interactive=false", want: false, tty: true, expect: false},
+		{name: "existing config file", want: true, tty: true, configPath: "/etc/agent.yaml", expect: false},
+		{name: "explicit -interactive beats an existing config", want: true, explicit: true, configPath: "/etc/agent.yaml", expect: true},
+		{name: "environment-configured deployment", want: true, tty: true, env: "https://platform.example", expect: false},
+		{name: "scripted -register", want: true, tty: true, register: true, expect: false},
+		{name: "piped stdin (systemd, docker without -it)", want: true, expect: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("PLATFORM_URL", tt.env)
+			if got := shouldRunInteractive(tt.want, tt.explicit, tt.configPath, tt.register, tt.tty); got != tt.expect {
+				t.Errorf("shouldRunInteractive() = %v, want %v", got, tt.expect)
+			}
+		})
+	}
+}
+
+// TestSaveConfigFileOmitsUnsetVerbose guards the three-state verbose value:
+// writing the resolved default into the generated config would freeze it there
+// and make a later default change invisible to already-installed agents.
+func TestSaveConfigFileOmitsUnsetVerbose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent-config.yaml")
+	cfg := &config.Config{PlatformURL: "https://platform.example", DataPath: t.TempDir()}
+
+	if err := saveConfigFile(path, cfg); err != nil {
+		t.Fatalf("saveConfigFile: %v", err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if strings.Contains(string(body), "verbose:") {
+		t.Errorf("generated config pinned a verbose value the operator never set:\n%s", body)
+	}
+
+	off := false
+	cfg.Verbose = &off
+	if err := saveConfigFile(path, cfg); err != nil {
+		t.Fatalf("saveConfigFile (explicit verbose): %v", err)
+	}
+	body, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !strings.Contains(string(body), "verbose: false") {
+		t.Errorf("explicit verbose: false was not persisted:\n%s", body)
 	}
 }

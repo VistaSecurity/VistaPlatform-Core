@@ -73,9 +73,11 @@
 		}
 	}
 
-	# Static assets with long-lived cache
-	@static path *.js *.css *.png *.jpg *.jpeg *.gif *.ico *.svg
-	handle @static {
+	# Hashed build output only — Vite content-hashes everything under /assets,
+	# so immutable is safe there and ONLY there. Unhashed public files
+	# (favicon.svg) fall through to the no-cache handler below and revalidate.
+	@assets path /assets/*
+	handle @assets {
 		header Cache-Control "public, immutable, max-age=31536000"
 		file_server
 	}

@@ -38,16 +38,34 @@ func (h *Handler) Heartbeat(c *gin.Context) {
 		return
 	}
 
-	// Extract IP address from request
-	clientIP := c.ClientIP()
+	// Take the host address from the sensor's own report, never from the
+	// connection. c.ClientIP() used to be passed here, which recorded whatever
+	// the last network hop happened to be — behind kube-proxy that is the node
+	// that received the packet, so every sensor's address showed as a cluster
+	// node IP and drifted between nodes from beat to beat. A sensor's address is
+	// knowable only at the sensor.
+	//
+	// nil when unreported, so the stored value (captured at registration) is
+	// preserved rather than blanked by an older sensor that omits the field.
+	var reportedIP *string
+	if health.IPAddress != "" {
+		reportedIP = &health.IPAddress
+	}
 
-	// Update sensor health in database with IP address
-	err = h.sensorService.UpdateSensorHealthWithIP(sensorID, &health, &clientIP)
+	err = h.sensorService.UpdateSensorHealthWithIP(sensorID, &health, reportedIP)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to update sensor health",
 		})
 		return
+	}
+
+	// The full address inventory is supplementary detail: a sensor that is
+	// otherwise healthy should not be told its heartbeat failed because the
+	// address reconcile did. Log and carry on.
+	if err := h.sensorService.ReconcileSensorAddresses(c.Request.Context(), sensorID, health.Interfaces); err != nil {
+		h.log.WithError(err).WithField("sensor_id", sensorID).
+			Warn("Failed to reconcile reported host addresses")
 	}
 
 	// Get pending commands for this sensor

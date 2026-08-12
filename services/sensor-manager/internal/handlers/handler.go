@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
 	"log"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/events"
+	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 
 	"github.com/gin-gonic/gin"
@@ -43,6 +45,8 @@ type legacySensorService interface {
 	UpdateSensor(sensor *models.Sensor) error
 	UpdateSensorHealth(sensorID string, health *models.SensorHealth) error
 	UpdateSensorHealthWithIP(sensorID string, health *models.SensorHealth, ipAddress *string) error
+	ReconcileSensorAddresses(ctx context.Context, sensorID string, addrs []sharednetwork.InterfaceAddress) error
+	ListSensorAddresses(ctx context.Context, tenantID, sensorID uuid.UUID) ([]models.AgentAddress, error)
 }
 
 // pcapStore is the slice of *services.PcapService the pcap handlers depend on.

@@ -129,9 +129,9 @@ func TestLogin_ForcePasswordChange_IssuesLimitedSession(t *testing.T) {
 		t.Fatalf("hash: %v", err)
 	}
 	userID := uuid.New()
-	expectLoginQueries(mock, userID, "su_admin@vistasecurity.io", hash, true)
+	expectLoginQueries(mock, userID, "su_admin@vistaplatform.invalid", hash, true)
 
-	code, resp := doLogin(t, newLoginRouter(db), "su_admin@vistasecurity.io", password)
+	code, resp := doLogin(t, newLoginRouter(db), "su_admin@vistaplatform.invalid", password)
 	if code != http.StatusOK {
 		t.Fatalf("login status = %d, want 200 (resp: %v)", code, resp)
 	}
@@ -215,7 +215,7 @@ func TestChangePassword_ClearsFlagAndRotatesSession(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT pu.password_hash, pu.email, pr.name")).
 		WithArgs(userID.String()).
 		WillReturnRows(sqlmock.NewRows([]string{"password_hash", "email", "name"}).
-			AddRow(currentHash, "su_admin@vistasecurity.io", "super_admin"))
+			AddRow(currentHash, "su_admin@vistaplatform.invalid", "super_admin"))
 	// UPDATE must clear force_password_change (literal in the SQL).
 	mock.ExpectExec(`UPDATE\s+platform_users\s+SET password_hash = \$1,\s+force_password_change = false`).
 		WillReturnResult(sqlmock.NewResult(0, 1))

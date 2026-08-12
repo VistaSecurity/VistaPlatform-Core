@@ -49,7 +49,7 @@ export function CommandCenterPage() {
   const counts = countsQ.data ?? {};
   const jobs = jobsQ.data?.jobs ?? [];
   const total = statsQ.data?.total_sensors ?? sensors.length;
-  const online = statsQ.data?.active_sensors ?? sensors.filter((s) => sensorOnline(s.status)).length;
+  const online = statsQ.data?.active_sensors ?? sensors.filter((s) => sensorOnline(s.status, s.last_heartbeat)).length;
   const offline = total - online;
   const running = jobStatsQ.data?.in_progress ?? 0;
   const failed = jobStatsQ.data?.failed ?? 0;
@@ -91,7 +91,7 @@ export function CommandCenterPage() {
             <MiniNote text="No sensors registered yet." />
           ) : (
             sensors.map((s, i) => {
-              const on = sensorOnline(s.status);
+              const on = sensorOnline(s.status, s.last_heartbeat);
               return (
                 <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '9px 0', borderTop: i ? '1px solid var(--app-border)' : 'none' }}>
                   <span style={{ width: 8, height: 8, borderRadius: 50, flex: 'none', background: on ? 'var(--ok)' : 'var(--danger)', boxShadow: on ? '0 0 6px var(--ok)' : 'none' }} />

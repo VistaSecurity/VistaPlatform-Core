@@ -83,8 +83,9 @@ func InterrogateDatabase(ctx context.Context, device DeviceInfo, creds Credentia
 		return nil, fmt.Errorf("database interrogation failed: %w", err)
 	}
 
-	// Set hostname/port from the device record.
-	finding.Hostname = dbHost(device)
+	// Set hostname/port from the device record. dbBuildConnStr above already
+	// resolved the same host successfully, so this cannot fail here.
+	finding.Hostname, _ = deviceHost(device)
 	finding.Port = port
 
 	finding.RiskScore = dbCalculateRiskScore(finding)
@@ -149,27 +150,18 @@ func (*DatabaseInterrogator) Interrogate(ctx context.Context, device DeviceInfo,
 	}, nil
 }
 
-// dbHost resolves the database host from a device record, mirroring the source
-// wrapper's preference order (hostname, then IP, then management URL).
-func dbHost(device DeviceInfo) string {
-	if device.Hostname != "" {
-		return device.Hostname
-	}
-	if device.IPAddress != "" {
-		return device.IPAddress
-	}
-	if device.ManagementURL != "" {
-		return device.ManagementURL
-	}
-	return "localhost"
-}
-
 // dbBuildConnStr constructs a DSN from plaintext credentials and the device
 // record. It returns the DSN and the engine's default port.
 func dbBuildConnStr(device DeviceInfo, creds Credentials) (string, int, error) {
 	username := creds.Username
 	password := creds.Password
-	host := dbHost(device)
+	// deviceHost errors rather than defaulting to localhost — a DSN built
+	// against the interrogating host is a scan of the wrong machine, not a
+	// degraded scan of the right one.
+	host, err := deviceHost(device)
+	if err != nil {
+		return "", 0, err
+	}
 
 	switch device.DeviceType {
 	case "postgresql":

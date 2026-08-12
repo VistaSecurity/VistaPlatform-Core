@@ -7,6 +7,208 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-08-12
+
+### Security
+
+- **Agent/sensor mTLS now fails closed by default.** `AGENT_MTLS_REQUIRED`
+  defaulted to `false`, so any deployment that did not explicitly enable it
+  accepted sensor and discovery-agent traffic with no authentication at all —
+  the agent UUID in the request path was the only credential. That UUID is what
+  the tenant binding keys off (`SELECT tenant_id FROM sensors WHERE id = $1`),
+  and UUIDs are not secrets: they appear in URLs, logs, API responses and
+  support tickets. Anyone who knew one could submit discoveries into that
+  tenant's inventory, correctly attributed. Both `sensor-manager` and
+  `device-interrogation-service` now default the flag to `true`, so absence of
+  configuration means "authenticate agents" rather than "accept anyone".
+
+  Turning enforcement off is now an explicit, inspectable choice. The chart
+  states `AGENT_MTLS_REQUIRED: "false"` on the agent-facing backends whenever
+  `agentMtls.enabled` is false, rather than leaving the variable absent — the
+  previous silence would now fail closed against the *mesh* certificate, whose
+  CN can never match an agent id, locking every agent out. Compose dev
+  opts out the same way. Chart behaviour is unchanged in both modes; what
+  changes is that an unconfigured or hand-rolled deployment is no longer
+  silently open.
+
+### Added
+
+- **Agents report every address they hold, not just one.** A capture host is
+  routinely multi-homed and may watch several segments at once, which a single
+  scalar address cannot describe. Sensors and discovery agents now report their
+  full address inventory — interface, address and prefix — on every heartbeat,
+  into a new `agent_addresses` table. `ip_address` remains the *primary*: the
+  address the agent's kernel uses to reach the platform. One table serves both
+  runtimes (paired nullable owner columns plus a CHECK, so real foreign keys and
+  "exactly one owner" both hold), because the fleet UI already merges them and
+  forking here is how the two drift apart. The sensor drawer lists every address
+  once a host has more than one, marking the primary.
+
+- **Discovery agents have an IP address at all.** `device_agents` had no such
+  column, so the operator was required to type an expected address at enrollment
+  that was then silently discarded, and the fleet list showed agents with no
+  address forever. Agents now self-report theirs like sensors do, and it is
+  surfaced in the fleet list and the platform-admin Fleet view.
+
+- **The default admin credentials are documented.** `INSTALL.md` and the
+  platform administrator guide now state both seeded accounts, the default
+  password, and the forced first-sign-in rotation. Previously the rotation was
+  described but the credentials themselves appeared in no customer-facing
+  document, leaving a fresh install with no published way in.
+
+### Changed
+
+- **Running a sensor or discovery agent with no arguments is the install
+  path.** Both binaries now open the configuration dialogue (with verbose
+  logging on) on a fresh host, and the discovery agent starts when setup
+  finishes instead of printing a command to run by hand. The dialogue steps
+  aside for an existing config file, `CONTROL_PLANE_URL` / `PLATFORM_URL` in
+  the environment, `-register`, a non-terminal stdin, or an explicit
+  `-interactive=false`. Verbose is three-state: an absent `verbose:` key
+  leaves the default alone, so only an operator's explicit choice quiets it.
+  `term.IsTerminal` replaces a `ModeCharDevice` check that treated
+  `/dev/null` as a terminal and hung the first prompt under a service
+  manager.
+
+- **Sensor enrollment cross-checks the expected IP honestly.** The operator's
+  expected address is still collected and is now compared against the enrolling
+  sensor's self-report, logged on every registration and rejected when
+  `RequireIPValidation` is on. The comparison against `c.ClientIP()` is gone: it
+  could never work behind an ingress or NAT, and its escape hatch was a stub
+  (`isIPInSameSubnet` returned `ip1 == ip2`), so enabling enforcement rejected
+  every registration in any Kubernetes install. This is a mistake-catcher, not
+  an authentication control — authentication is the per-agent client
+  certificate.
+
+- **Seeded platform-admin accounts moved off the company domain.** The two
+  default administrators are now `su_admin@vistaplatform.invalid` and
+  `admin@vistaplatform.invalid` (were `…@vistasecurity.io`). Every install
+  shipped two accounts whose addresses were deliverable to a real mailbox;
+  `.invalid` is reserved by RFC 6761 and can never resolve, which is the
+  correct shape for an identifier that is not meant to receive mail. Existing
+  deployments **rename in place** on the next upgrade — the seed keys on the
+  stable account ids, so a rotated password and the rest of the account survive
+  and no duplicate row is created. Consequence: password-reset mail to a seeded
+  admin does not arrive; rotate at first sign-in and create your own
+  administrator under a real address (**Staff & Access → Staff**).
+
+- **Every tenant-isolation RLS policy now states `WITH CHECK` explicitly.**
+  `invitations` and `legal_acceptances` were the last two declared with the
+  older `DO $$ … EXCEPTION WHEN duplicate_object` form at their own tables, and
+  that form emits `USING` only. **This is a legibility fix, not a security
+  fix** — Postgres reuses the `USING` expression as the new-row check when
+  `WITH CHECK` is omitted, so those two policies were already rejecting
+  cross-tenant writes, verified against a real Postgres. The inconsistency was
+  worth closing anyway: it is the sole reason an internal audit reported a
+  cross-tenant write hole that did not exist, and nobody auditing a policy
+  should need to know the fallback rule to know what it enforces. The
+  `DO/EXCEPTION` form also cannot *update* an existing policy — it hits the
+  duplicate and silently keeps the old definition — which is why both sat
+  unchanged across several releases. `TestIntegration_RLS_EveryTenantPolicyHasWithCheck`
+  reads `pg_policy` and fails if any `*_tenant_isolation` policy omits the
+  clause, so a third cannot appear silently.
+
+### Fixed
+
+- **Platform SSO providers can once again exist per purpose.** `schema.sql`
+  DROPped `unique_platform_provider_type UNIQUE (provider_type)` early in the
+  file and re-ADDed it 5,000 lines later in the constraint section, so the ADD
+  always won and the provider_type-only uniqueness survived every apply. That
+  made's one-row-per-`(provider_type, purpose)` model unrepresentable — a
+  tenant-signup Google app and an admin-login Google app could not coexist.
+  The retired constraint is gone and `uq_platform_sso_provider_type_purpose`
+  is the only uniqueness on the table.
+
+- **Nine tables were unreachable on every fresh install.** `schema.sql` granted
+  the application role its privileges with `GRANT … ON ALL TABLES IN SCHEMA
+  public`, from a block sitting in the middle of the file. Postgres expands
+  `ON ALL TABLES` once, against the tables that exist at that instant — it is
+  not a standing rule — so the nine tables created further down the file
+  (`alerts`, `alert_events`, `alert_framework_score_snapshots`,
+  `legal_acceptances`, `legal_documents`, `notification_digest_queue`,
+  `platform_in_app_notifications`, `platform_maintenance_windows`,
+  `tenant_alert_settings`) received no privileges at all. `ALTER DEFAULT
+  PRIVILEGES` did not cover them either: it applies only to objects created by
+  `crypto_user`, and only after it runs.
+
+  Because `serviceRls` defaults to on, services connect as the NOBYPASSRLS
+  `crypto_app` role, and the chart's `schema-migration` Job applies the file
+  exactly once on install. A brand-new install therefore answered `permission
+  denied for table …` across Remediation → Alerts, the notification digest
+  queue, the platform-admin operator inbox, and the Terms/Privacy acceptance
+  write on the signup path. Applying the schema a second time masked the fault
+  entirely — by then the tables existed when the grant ran — which is why it
+  went unnoticed. The same ordering also cost `crypto_bypass` its deliberate
+  cross-tenant read on `mv_location_finding_summary`.
+
+  The blanket grants now form the last block of the file, after every
+  `CREATE TABLE`, with the deliberate matview narrowings following them so they
+  still take effect. Two guards keep the shape from regressing:
+  `scripts/audit-schema-grant-order.mjs` (in `make audit`, so it runs in the
+  pre-commit hook) fails if any relation-creating statement lands after the
+  grants, and `TestIntegration_Schema_SingleApplyGrantsEveryRelation` applies
+  the schema **once** into a throwaway database and asserts every table, view
+  and sequence is reachable.
+
+- **Scheduled device interrogations reach an agent with credentials.** A
+  schedule creates its job without any, which the in-cluster worker never
+  noticed because it re-reads and decrypts credentials from the device row and
+  ignores the job payload. A device agent has no database, so the same job
+  would have authenticated with nothing. Credentials are now resolved from the
+  device at dispatch, alongside the address, and a device with none fails the
+  job with a clear reason instead of being handed over unrunnable.
+
+- **A sensor's recorded IP address is now the sensor's, not the last network
+  hop's.** Every heartbeat overwrote `sensors.ip_address` with `c.ClientIP()`,
+  so on any clustered install the stored address was whichever Kubernetes node
+  happened to receive the packet — kube-proxy SNATs to the receiving node under
+  `externalTrafficPolicy: Cluster`, long before Traefik sees the connection, and
+  `X-Forwarded-For` carries that same wrong value. A sensor on `192.0.2.173`
+  displayed as `192.0.2.10`, and the value drifted between nodes beat to
+  beat. Registration had always been correct; the first heartbeat destroyed it.
+  The address is now self-reported in the heartbeat body, which is the only
+  place it is knowable. Sensors that do not report one leave the stored value
+  untouched rather than blanking it.
+
+- **The sensor picks its address by route, not by scanning interfaces.**
+  Detection returned the first non-loopback IPv4 in OS-defined order, which on a
+  multi-homed host — routinely a Windows box with Hyper-V, WSL, or VPN adapters
+  — is often a virtual adapter rather than the NIC carrying platform traffic. It
+  now asks the routing table which local address would reach the control plane
+  (a UDP connect that sends no packets), falling back to the old scan. An
+  operator-pinned `SENSOR_IP_ADDRESS` is still honoured verbatim; an unpinned
+  address is re-derived each heartbeat, so a host that changes network corrects
+  itself instead of reporting where it was at startup.
+
+- **A sensor that cannot determine its address says so instead of claiming
+  loopback.** Registration substituted the literal `127.0.0.1` to satisfy a
+  required field. The field is now optional and an unknown address is recorded
+  as NULL — a confident falsehood would have pinned the sensor to loopback
+  permanently once the platform began trusting the self-reported value.
+
+- **Dead discovery agents no longer show as online.** `device_agents.status` is
+  hard-coded `'active'` at enrollment and nothing ever rewrites it — unlike
+  sensors, which have a reaper — so the fleet list rendered a green dot for an
+  agent that had not checked in for days. Liveness now also requires a recent
+  heartbeat, using the same dwell as the `discovery_agent_offline` alert so the
+  list cannot contradict an alert an operator just received.
+
+- **Stale browser caches can no longer pin users to an old web-ui build.** The
+  web-ui Caddyfile served `index.html` with no `Cache-Control`, while `*.js`
+  was `immutable, max-age=1y` — so after an upgrade, browsers that had
+  heuristically cached `index.html` kept loading the previous bundle from
+  cache indefinitely, silently running an old UI against the new API. Now only
+  the content-hashed `/assets/*` output is immutable; `index.html` and
+  unhashed public files (`/theme-init.js`, favicons) revalidate on every
+  navigation. The admin-ui matcher was tightened the same way.
+- **Editing a network segment from a client that omits
+  `auto_approve_discoveries` no longer silently disables auto-approval.** The
+  update API bound the field as a plain `bool`, so any request without it
+  wrote `false` — the stale-bundle failure above did exactly that on every
+  unrelated segment edit, wiping the toggle and leaving all discoveries stuck
+  pending. The field is now optional with keep-current-on-omit update
+  semantics (matching `is_active`), pinned by DB-integration tests.
+
 ## [0.5.5] - 2026-08-12
 
 ### Changed

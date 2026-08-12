@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 )
 
 // ServiceHints holds identified service name/version and confidence for inventory enrichment.
@@ -100,8 +101,19 @@ type SensorHealth struct {
 	// ReportingInterval (seconds) is the sensor's current data-send cadence,
 	// reported every heartbeat so the platform's stored value tracks reality
 	// (including after an operator-initiated change is applied).
-	ReportingInterval int       `json:"reporting_interval,omitempty"`
-	Timestamp         time.Time `json:"timestamp"`
+	ReportingInterval int `json:"reporting_interval,omitempty"`
+	// IPAddress is this host's own address — the source address the kernel uses
+	// to reach the control plane. Only the sensor can know it: by the time a
+	// request reaches the platform, NAT/ingress/kube-proxy have rewritten the
+	// connection source to a proxy or node address. Empty is allowed and leaves
+	// the platform's stored value untouched.
+	IPAddress string `json:"ip_address,omitempty"`
+	// Interfaces is every IP bound on this host, with prefixes. A capture host is
+	// often multi-homed and watching several segments at once, which a single
+	// scalar address cannot express. Empty leaves the platform's recorded set
+	// untouched.
+	Interfaces []sharednetwork.InterfaceAddress `json:"interfaces,omitempty"`
+	Timestamp  time.Time                        `json:"timestamp"`
 }
 
 // InterfaceStatEntry holds per-interface packet capture statistics

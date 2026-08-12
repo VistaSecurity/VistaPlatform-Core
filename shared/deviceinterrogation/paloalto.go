@@ -47,7 +47,12 @@ func (*PaloAltoInterrogator) Interrogate(ctx context.Context, device DeviceInfo,
 		return nil, fmt.Errorf("username and password required for Palo Alto device")
 	}
 
-	client := newPanClient(managementURL(device), username, password, creds.InsecureSkipVerify)
+	baseURL, err := managementURL(device)
+	if err != nil {
+		return nil, err
+	}
+
+	client := newPanClient(baseURL, username, password, creds.InsecureSkipVerify)
 
 	result, err := client.interrogate(ctx)
 	if err != nil {

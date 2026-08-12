@@ -32,7 +32,21 @@ curl -O https://platform.example.com/api/v1/device-interrogation-service/downloa
 # Make executable
 chmod +x device-agent
 
-# Create configuration file
+# Run it — with no arguments the agent walks you through setup and then starts
+./device-agent
+```
+
+Running the binary with no arguments opens the interactive installer: it asks
+for the platform URL (and tests reachability), the registration key, the data
+path and the poll interval, enrolls the agent, writes
+`<data_path>/agent-config.yaml`, and then **starts polling for jobs**
+immediately. Verbose logging is on by default. On every later start the agent
+finds that config file and runs straight away — no flags, no second command.
+
+To configure a host without answering prompts, write the config file yourself
+and the installer stays out of the way:
+
+```bash
 cat > device-agent.yaml <<EOF
 platform_url: https://platform.example.com
 registration_key: YOUR_REGISTRATION_KEY
@@ -40,7 +54,6 @@ poll_interval: 30s
 verbose: true
 EOF
 
-# Run the agent
 ./device-agent --config device-agent.yaml
 ```
 
@@ -62,7 +75,13 @@ chmod +x device-agent
 # Download the binary
 Invoke-WebRequest -Uri "https://platform.example.com/api/v1/device-interrogation-service/downloads/agent/windows/amd64" -OutFile "device-agent.exe"
 
-# Create configuration file
+# Run it — with no arguments the agent walks you through setup and then starts
+.\device-agent.exe
+```
+
+As on Linux, a config file suppresses the installer:
+
+```powershell
 @"
 platform_url: https://platform.example.com
 registration_key: YOUR_REGISTRATION_KEY
@@ -70,7 +89,6 @@ poll_interval: 30s
 verbose: true
 "@ | Out-File -FilePath device-agent.yaml -Encoding utf8
 
-# Run the agent
 .\device-agent.exe --config device-agent.yaml
 ```
 
@@ -98,7 +116,9 @@ The agent can be configured via environment variables or a YAML file:
 - `REGISTRATION_KEY`: Agent registration key (required)
 - `AGENT_ID`: Agent ID (set after first registration)
 - `POLL_INTERVAL`: Job polling interval (default: 30s)
-- `VERBOSE`: Enable verbose logging (default: false)
+- `VERBOSE`: Enable verbose logging. Verbose is **on by default**; set
+  `VERBOSE=false` (or `verbose: false` in the config file, or `-verbose=false`
+  on the command line) to quiet a long-running install.
 
 ### Configuration File
 
@@ -136,13 +156,18 @@ Set `platform_url` (or `PLATFORM_URL`) to the **API gateway** base URL (for exam
 
 ### First-time enrollment
 
-1. Add `registration_key` to your YAML file or environment.
-2. **Option A — explicit register flag:**  
+1. **Option A — just run the binary (default):**  
+   `device-agent` with no arguments prompts for the registration key, enrolls,
+   saves the config, and starts the agent in one step. Nothing to prepare
+   beforehand.
+2. Or, to prepare the config yourself, add `registration_key` to your YAML file
+   or environment and pick one of the following.
+3. **Option B — explicit register flag:**  
    `device-agent -register -config device-agent.yaml`  
    Then run the agent normally: `device-agent -config device-agent.yaml`.
-3. **Option B — auto-enroll on start (sensor-style):**  
+4. **Option C — auto-enroll on start (sensor-style):**  
    If `registration_key` is set and `agent_id` is empty, the agent registers once on startup, saves certificates under `<data_path>/certs`, and updates the config file with `agent_id`. If you did not pass `-config`, it writes `<data_path>/agent-config.yaml` by default.
-4. After a successful enrollment, the server marks the key as used. Keep `agent_id` and the saved certificate paths for subsequent runs.
+5. After a successful enrollment, the server marks the key as used. Keep `agent_id` and the saved certificate paths for subsequent runs.
 
 Job polling, results, and heartbeat use **agent mTLS** (client certificate) when certificates are present; they do not use tenant user JWT cookies.
 
@@ -153,10 +178,11 @@ trust, enrollment fails certificate verification before it can start —
 registration is itself an HTTPS call. The agent resolves this with an explicit
 one-time trust decision rather than by skipping verification.
 
-- **Interactive:** `device-agent --interactive` shows the CA the platform
-  presents, with its SHA-256 fingerprint, and asks whether to trust it.
-  Accepting pins it to the agent's config; every later connection is verified
-  against it.
+- **Interactive:** the default install path — plain `device-agent`, or
+  `device-agent --interactive` to force the dialogue on a host that already has
+  a config file — shows the CA the platform presents, with its SHA-256
+  fingerprint, and asks whether to trust it. Accepting pins it to the agent's
+  config; every later connection is verified against it.
 - **Unattended:** pass `--ca-fingerprint <sha256>`. The agent pins the CA only
   if it hashes to that value and aborts on a mismatch. With neither a
   fingerprint nor an operator to ask, it refuses rather than pinning an

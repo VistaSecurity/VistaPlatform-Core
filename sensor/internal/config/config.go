@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
+	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 	"gopkg.in/yaml.v3"
 )
 
@@ -51,6 +51,13 @@ type Config struct {
 
 	// Test mode configuration
 	TestMode bool `json:"test_mode"`
+
+	// Verbose is the config-file override for log verbosity. Verbose logging is
+	// the command-line default, so this is a three-state value: nil means "the
+	// config says nothing, leave the default alone", and only an explicit
+	// `verbose:` key in the YAML (or the VERBOSE env var) turns it off or
+	// pins it on.
+	Verbose *bool `json:"verbose"`
 }
 
 // StorageConfig represents storage configuration
@@ -142,6 +149,31 @@ type NetworkConfig struct {
 	VLANs      []string `json:"vlans"`
 	Gateways   []string `json:"gateways"`
 	IPAddress  string   `json:"ip_address"`
+
+	// ipAddressPinned records that IPAddress came from an operator (config file
+	// or SENSOR_IP_ADDRESS) rather than from detection. A pinned address is
+	// reported verbatim and never re-derived; an unpinned one is re-detected on
+	// each heartbeat so a host that changes network (DHCP lease, VPN, failover)
+	// corrects itself instead of reporting the address it had at startup.
+	ipAddressPinned bool
+}
+
+// CurrentIPAddress returns the host address to report to the platform right now.
+//
+// An operator-pinned address is returned verbatim — if someone configured it,
+// they mean it. Otherwise the address is re-derived on each call so a host that
+// changed network since startup (DHCP lease, VPN, NIC failover) reports where it
+// actually is rather than where it was. Returns "" when nothing can be
+// determined; callers must send that as "unreported" rather than substituting a
+// placeholder.
+func (c *Config) CurrentIPAddress() string {
+	if c.Network.ipAddressPinned {
+		return c.Network.IPAddress
+	}
+	if ip := DetectPrimaryIPv4(c.ControlPlaneURL); ip != "" {
+		return ip
+	}
+	return c.Network.IPAddress
 }
 
 // SecurityConfig represents security configuration
@@ -212,6 +244,9 @@ type ConfigFile struct {
 		UseTLS           bool   `yaml:"useTLS"`
 	} `yaml:"security"`
 	TestMode bool `yaml:"testMode"`
+	// Verbose is a pointer so an absent `verbose:` key is distinguishable from
+	// an explicit `verbose: false` — see Config.Verbose.
+	Verbose *bool `yaml:"verbose"`
 }
 
 // LoadFromFile loads configuration from a YAML file and merges with environment variables
@@ -298,6 +333,7 @@ func LoadFromFile(filePath string) (*Config, error) {
 			UseTLS:           cfgFile.Security.UseTLS,
 		},
 		TestMode: cfgFile.TestMode,
+		Verbose:  cfgFile.Verbose,
 	}
 
 	// Apply defaults for missing values
@@ -479,6 +515,7 @@ func mergeEnvVars(cfg *Config) {
 	}
 	if ipAddr := sharedconfig.GetEnv("SENSOR_IP_ADDRESS", ""); ipAddr != "" {
 		cfg.Network.IPAddress = ipAddr
+		cfg.Network.ipAddressPinned = true
 	}
 	if testMode := getBoolEnv("TEST_MODE", false); testMode {
 		if !cfg.TestMode {
@@ -486,9 +523,15 @@ func mergeEnvVars(cfg *Config) {
 		}
 		cfg.TestMode = testMode
 	}
+	if v := boolEnvPtr("VERBOSE"); v != nil {
+		cfg.Verbose = v
+	}
 
 	if cfg.Network.IPAddress == "" {
-		cfg.Network.IPAddress = detectPrimaryIPv4()
+		cfg.Network.IPAddress = DetectPrimaryIPv4(cfg.ControlPlaneURL)
+	} else {
+		// Set from the config file (the env case is flagged above).
+		cfg.Network.ipAddressPinned = true
 	}
 }
 
@@ -570,9 +613,22 @@ func Load() *Config {
 			"air_gapped_export":    getBoolEnv("FEATURE_AIR_GAPPED_EXPORT", false),
 		},
 		TestMode: getBoolEnv("TEST_MODE", false),
+		Verbose:  boolEnvPtr("VERBOSE"),
 	}
 
 	return cfg
+}
+
+// boolEnvPtr returns a pointer to the parsed boolean env var, or nil when the
+// variable is unset — preserving the "said nothing" state that lets the
+// command-line default stand.
+func boolEnvPtr(key string) *bool {
+	raw := sharedconfig.GetEnv(key, "")
+	if raw == "" {
+		return nil
+	}
+	v := strings.ToLower(raw) == "true" || raw == "1"
+	return &v
 }
 
 // Helper functions for environment variable parsing
@@ -613,21 +669,12 @@ func getDurationEnv(key string, defaultValue time.Duration) time.Duration {
 	return defaultValue
 }
 
-func detectPrimaryIPv4() string {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return ""
-	}
-
-	for _, addr := range addrs {
-		if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() {
-			if ipv4 := ipNet.IP.To4(); ipv4 != nil {
-				return ipv4.String()
-			}
-		}
-	}
-
-	return ""
+// DetectPrimaryIPv4 returns this host's own IPv4 address as the platform should
+// record it: the source address the kernel would use to reach controlPlaneURL.
+// Delegates to shared/network so the sensor and the device agent cannot drift
+// apart on what "this host's address" means.
+func DetectPrimaryIPv4(controlPlaneURL string) string {
+	return sharednetwork.PrimarySourceIPv4(controlPlaneURL)
 }
 
 func getStringSliceEnv(key string, defaultValue []string) []string {

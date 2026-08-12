@@ -33,6 +33,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor/internal/storage"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/testmode"
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
+	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 )
 
 // Version is stamped at build time via -ldflags "-X main.Version=<tag>"
@@ -66,11 +67,16 @@ type Sensor struct {
 func main() {
 	// Command line flags
 	var (
-		version     = flag.Bool("version", false, "Show version information")
-		configFile  = flag.String("config", "", "Path to configuration file (optional)")
-		verbose     = flag.Bool("verbose", false, "Enable verbose logging")
+		version    = flag.Bool("version", false, "Show version information")
+		configFile = flag.String("config", "", "Path to configuration file (optional)")
+		// verbose and interactive default ON: running the binary with no flags
+		// is the install path, and an installer wants the dialogue and the
+		// detail. Both step aside for an existing configuration (see
+		// shouldRunInteractive) or an explicit -verbose=false /
+		// -interactive=false.
+		verbose     = flag.Bool("verbose", true, "Enable verbose logging (-verbose=false to quiet)")
 		register    = flag.Bool("register", false, "Register with control plane")
-		interactive = flag.Bool("interactive", false, "Run in interactive configuration mode")
+		interactive = flag.Bool("interactive", true, "Run interactive configuration mode when no configuration exists (-interactive=false to skip)")
 		testMode    = flag.Bool("test", false, "Run in test mode (logs to file instead of control plane)")
 		// caFingerprint makes the trust decision out of band, for unattended
 		// installs that cannot answer a prompt. The sensor pins the platform CA
@@ -90,9 +96,18 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Run interactive configuration mode
-	if *interactive {
-		runInteractiveMode(*caFingerprint)
+	// Resolve the configuration file up front: an existing configuration is
+	// what turns the interactive installer off, so the decision needs to know
+	// about it before anything else happens.
+	if *configFile == "" {
+		*configFile = findDefaultConfigFile()
+	}
+
+	// Run interactive configuration mode. This is the default on a fresh host —
+	// running the binary with no arguments IS the install flow — and it starts
+	// the sensor when it finishes, so setup and first run are one step.
+	if shouldRunInteractive(*interactive, isFlagSet("interactive"), *configFile, *register, term.IsTerminal(int(os.Stdin.Fd()))) {
+		runInteractiveMode(*caFingerprint, *verbose)
 		return
 	}
 
@@ -126,38 +141,27 @@ func main() {
 			log.Printf("✅ Configuration loaded from file")
 		}
 	} else {
-		// Try default config file locations
-		defaultPaths := []string{
-			"config.yaml",
-			filepath.Join(getDefaultDataPath(), "sensor-config.yaml"),
-		}
-
-		loaded := false
-		for _, path := range defaultPaths {
-			if _, err := os.Stat(path); err == nil {
-				log.Printf("📁 Found config file: %s", path)
-				cfg, err = config.LoadFromFile(path)
-				if err == nil {
-					log.Printf("✅ Configuration loaded from file: %s", path)
-					*configFile = path // Store the path for later updates
-					loaded = true
-					break
-				} else {
-					log.Printf("⚠️  Failed to load config file %s: %v", path, err)
-				}
-			}
-		}
-
-		if !loaded {
-			log.Printf("⚠️  No valid config file found, falling back to environment variables and defaults")
-			// Fall back to environment variables
-			cfg = config.Load()
-		}
+		log.Printf("⚠️  No valid config file found, falling back to environment variables and defaults")
+		// Fall back to environment variables
+		cfg = config.Load()
 	}
 
 	// The build-stamped binary version is the truth about what code is running;
 	// a version copied into a config file or env var goes stale on upgrade.
 	cfg.Version = Version
+
+	// Verbose logging is on by default; a `verbose:` key in the config file (or
+	// the VERBOSE env var) is how an operator turns it back down for a
+	// long-running install. An explicit -verbose on the command line still wins.
+	if cfg.Verbose != nil && !isFlagSet("verbose") {
+		*verbose = *cfg.Verbose
+		if *verbose {
+			log.SetFlags(log.LstdFlags | log.Lshortfile)
+		} else {
+			log.SetFlags(log.LstdFlags)
+			log.Println("Verbose logging disabled by configuration")
+		}
+	}
 
 	log.Printf("Configuration loaded:")
 	log.Printf("  Sensor ID: %s", cfg.SensorID)
@@ -800,6 +804,9 @@ func (s *Sensor) sendHeartbeat() {
 		metrics[k] = v
 	}
 
+	// Resolved once so the flagged primary in Interfaces matches IPAddress exactly.
+	primaryIP := s.config.CurrentIPAddress()
+
 	health := &models.SensorHealth{
 		SensorID:            s.config.SensorID,
 		Status:              status,
@@ -815,7 +822,14 @@ func (s *Sensor) sendHeartbeat() {
 		InterfaceStats:      ifaceStats,
 		AvailableInterfaces: api.AvailableInterfaceNames(),
 		ReportingInterval:   int(s.config.ReportingInterval.Seconds()), // report current cadence so the platform tracks it
-		Timestamp:           time.Now(),
+		// Self-reported: the platform cannot observe this address through NAT
+		// and ingress, so it has to come from here. Empty leaves the stored
+		// value untouched. Interfaces carries the rest of the host's addresses,
+		// with the primary flagged, so a multi-homed capture host's real
+		// coverage is visible rather than reduced to one address.
+		IPAddress:  primaryIP,
+		Interfaces: sharednetwork.HostAddresses(primaryIP),
+		Timestamp:  time.Now(),
 	}
 
 	if s.config.TestMode {
@@ -1495,10 +1509,66 @@ func maskString(s string) string {
 	return s[:2] + "***" + s[len(s)-2:]
 }
 
+// isFlagSet reports whether the named flag was given on the command line, as
+// opposed to sitting at its default. The interactive/verbose defaults are ON,
+// so "the operator asked for this" and "nobody said anything" have to be told
+// apart before an existing configuration is allowed to override them.
+func isFlagSet(name string) bool {
+	set := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}
+
+// findDefaultConfigFile returns the first readable config file in the standard
+// locations, or "" when the host has never been configured.
+func findDefaultConfigFile() string {
+	for _, path := range []string{
+		"config.yaml",
+		filepath.Join(getDefaultDataPath(), "sensor-config.yaml"),
+	} {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	return ""
+}
+
+// shouldRunInteractive decides whether to open the configuration dialogue.
+//
+// The dialogue is the default so a bare `./sensor` on a fresh host walks the
+// installer through setup and then starts capturing. It steps aside for every
+// signal that this is not a fresh interactive install:
+//
+//   - an explicit -interactive=false,
+//   - an existing config file (the documented way to override the default),
+//   - CONTROL_PLANE_URL in the environment (container/unattended deployment),
+//   - -register, which is the scripted enrollment path,
+//   - stdin that is not a terminal (tty=false), where a prompt would hang
+//     forever with nobody to answer it.
+//
+// An explicit -interactive beats all of them: an operator asking to reconfigure
+// a host that already has a config file gets the dialogue.
+func shouldRunInteractive(want, explicit bool, configPath string, register, tty bool) bool {
+	if !want {
+		return false
+	}
+	if explicit {
+		return true
+	}
+	if configPath != "" || os.Getenv("CONTROL_PLANE_URL") != "" || register {
+		return false
+	}
+	return tty
+}
+
 // runInteractiveMode runs the interactive configuration setup. caFingerprint,
 // when supplied, pre-answers the control-plane CA trust question so a scripted
 // install still gets a verified pin instead of a prompt it cannot answer.
-func runInteractiveMode(caFingerprint string) {
+func runInteractiveMode(caFingerprint string, verbose bool) {
 	fmt.Println("🔧 VistaPlatform Network Sensor - Interactive Configuration")
 	fmt.Println("=============================================================")
 	fmt.Println()
@@ -1685,7 +1755,7 @@ urlLoop:
 	fmt.Println()
 
 	// Start the sensor with the configured settings
-	startSensorWithConfig()
+	startSensorWithConfig(verbose)
 }
 
 // generateSensorID generates a unique sensor ID
@@ -2121,7 +2191,7 @@ func selectInterfacesTUI(interfaces []NetworkInterface, defaultIdx int) ([]strin
 }
 
 // startSensorWithConfig starts the sensor with the configured environment variables
-func startSensorWithConfig() {
+func startSensorWithConfig(verbose bool) {
 	// Load configuration from the file that was just created
 	configPath := filepath.Join(os.Getenv("DATA_PATH"), "sensor-config.yaml")
 	if configPath == "" || os.Getenv("DATA_PATH") == "" {
@@ -2144,8 +2214,21 @@ func startSensorWithConfig() {
 		cfg.TestMode = true
 	}
 
-	// Initialize logging
-	log.SetFlags(log.LstdFlags)
+	// Same config-file override as the non-interactive path.
+	if cfg.Verbose != nil && !isFlagSet("verbose") {
+		verbose = *cfg.Verbose
+	}
+
+	// Initialize logging. Tee into the ring buffer so export_logs works on a
+	// sensor started straight out of the installer, exactly as it does for one
+	// started from a config file.
+	log.SetOutput(io.MultiWriter(os.Stderr, logRing))
+	if verbose {
+		log.SetFlags(log.LstdFlags | log.Lshortfile)
+		log.Println("Verbose logging enabled")
+	} else {
+		log.SetFlags(log.LstdFlags)
+	}
 	log.Printf("🚀 Starting VistaPlatform Network Sensor v%s", Version)
 	log.Printf("Platform: %s/%s", runtime.GOOS, runtime.GOARCH)
 	log.Printf("Configuration loaded from interactive setup")

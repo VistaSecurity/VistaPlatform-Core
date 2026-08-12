@@ -56,8 +56,8 @@ export function SensorsPage() {
   const [toDelete, setToDelete] = useState<{ id: string; name: string } | null>(null);
   const [selected, setSelected] = useState<SensorRow | null>(null);
 
-  // Merge the two fleets. Sensors keep their existing shape; device agents have
-  // no IP/segment/discovery-count and always render as the "Device agent" type.
+  // Merge the two fleets. Sensors keep their existing shape; device agents carry
+  // no segment or discovery-count and always render as the "Device agent" type.
   const rows: FleetRow[] = [
     ...(q.data ?? []).map((s): FleetRow => ({
       kind: 'sensor',
@@ -79,7 +79,9 @@ export function SensorsPage() {
       // a short id so the row is never blank.
       name: a.name || `agent-${a.id.slice(0, 8)}`,
       platform: a.platform,
-      ipAddress: null,
+      // Self-reported on each heartbeat, like a sensor's. Null until an agent
+      // new enough to report one has checked in.
+      ipAddress: a.ip_address ?? null,
       lastHeartbeat: a.last_heartbeat,
       status: a.status,
       typeLabel: 'Device agent',
@@ -115,7 +117,7 @@ export function SensorsPage() {
           rowKey={(r) => r.id}
           onRow={(r) => { if (r.kind === 'sensor' && r.sensor) setSelected(r.sensor); }}
           render={(r) => {
-            const on = sensorOnline(r.status);
+            const on = sensorOnline(r.status, r.lastHeartbeat);
             return (
               <>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 }}>

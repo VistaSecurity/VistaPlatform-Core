@@ -15,7 +15,7 @@ SELECT
     END as password_status
 FROM platform_users pu
 LEFT JOIN platform_roles pr ON pu.role_id = pr.id
-WHERE pu.email = 'su_admin@vistasecurity.io';
+WHERE pu.email = 'su_admin@vistaplatform.invalid';
 
 -- This is the exact query the login handler uses
 SELECT 
@@ -25,6 +25,6 @@ SELECT
     pr.name as role_name
 FROM platform_users pu
 JOIN platform_roles pr ON pu.role_id = pr.id
-WHERE pu.email = 'su_admin@vistasecurity.io' 
+WHERE pu.email = 'su_admin@vistaplatform.invalid' 
   AND pu.is_active = true 
   AND pu.deleted_at IS NULL;

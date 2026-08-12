@@ -186,6 +186,17 @@ function generateEnvironmentVariables(service, webUIPort = 3000, adminUIPort = 3
     );
   }
   
+  // Agent-facing services fail closed by default: with no AGENT_MTLS_REQUIRED
+  // set they demand a per-agent client certificate. Compose dev has no agent CA
+  // and no TLS-passthrough listener, so state the opt-out explicitly here rather
+  // than letting a dev sensor 401 with no obvious cause. Never set this false in
+  // a real deployment — it accepts any caller that knows an agent UUID.
+  if (['sensor-manager', 'device-interrogation-service'].includes(service.name)) {
+    baseEnv.push(
+      'AGENT_MTLS_REQUIRED=false'
+    );
+  }
+
   if (['inventory-service', 'sensor-manager', 'cbom-service'].includes(service.name)) {
     baseEnv.push(
       'INFLUXDB_URL=http://influxdb:8086',

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 )
 
 // Sensor represents a sensor in the system
@@ -45,6 +46,18 @@ type Sensor struct {
 	Location     *string                `json:"location,omitempty" db:"location"`
 	LegacyTags   map[string]interface{} `json:"legacy_tags,omitempty" db:"legacy_tags"`
 	Metadata     map[string]interface{} `json:"metadata,omitempty" db:"metadata"`
+	// Addresses is the host's full recorded address inventory, populated on the
+	// single-sensor read only (the fleet list does not need it). IPAddress
+	// remains the primary; this is every address the host reported.
+	Addresses []AgentAddress `json:"addresses,omitempty" db:"-"`
+}
+
+// AgentAddress is one IP recorded against an agent, as returned to the UI.
+type AgentAddress struct {
+	InterfaceName string `json:"interface_name"`
+	Address       string `json:"address"`
+	PrefixLength  *int   `json:"prefix_length,omitempty"`
+	IsPrimary     bool   `json:"is_primary"`
 }
 
 // AllowedReportingIntervals is the fixed menu of reporting-interval values
@@ -342,8 +355,23 @@ type SensorHealth struct {
 	// every heartbeat (json only — persisted onto sensors.version, not a
 	// sensor_health column). Empty means "not reported" and leaves the stored
 	// version untouched, so pre-stamping sensors cannot blank it.
-	Version   string    `json:"version,omitempty" db:"-"`
-	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	Version string `json:"version,omitempty" db:"-"`
+	// IPAddress is the sensor host's own address, as the sensor determines it —
+	// the source address its kernel uses to reach the control plane. It MUST be
+	// self-reported: the platform cannot observe it. Behind an ingress, NAT, or
+	// kube-proxy (which SNATs to the receiving node under
+	// externalTrafficPolicy: Cluster) the connection's source address is a
+	// proxy/node IP, and X-Forwarded-For carries that same wrong value. Reading
+	// it from the connection is what made every sensor report a Kubernetes node
+	// IP. Empty means "not reported" and leaves the stored address untouched,
+	// so an older sensor cannot blank the value captured at registration.
+	IPAddress string `json:"ip_address,omitempty" db:"-"`
+	// Interfaces is the host's full address inventory (every bound IP with its
+	// prefix), reconciled into agent_addresses on each heartbeat. A multi-homed
+	// capture host watches several segments at once, which IPAddress alone
+	// cannot express. Empty leaves the recorded set untouched.
+	Interfaces []sharednetwork.InterfaceAddress `json:"interfaces,omitempty" db:"-"`
+	CreatedAt  time.Time                        `json:"created_at" db:"created_at"`
 }
 
 // SensorCommands represents a collection of commands for a sensor
