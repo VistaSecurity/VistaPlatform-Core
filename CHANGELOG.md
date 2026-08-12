@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-08-12
+
+
 ## [0.5.4] - 2026-08-12
 
 Isolation and observability hardening on top of 0.5.3: plain views over
