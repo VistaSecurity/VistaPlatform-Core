@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.5] - 2026-08-12
 
+### Changed
+
+- **Release agent binaries carry their version in the filename** —
+  `crypto-sensor-<os>-<arch>-<version>` (extension preserved on Windows), so a
+  downloaded binary states its release on disk instead of only when executed.
+  The version rides at the end, so name-prefix download globs keep matching;
+  `SHA256SUMS` and its signature cover the versioned names. Local `make`
+  builds keep their bare names.
 
 ## [0.5.4] - 2026-08-12
 

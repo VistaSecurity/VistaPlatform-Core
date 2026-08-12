@@ -378,10 +378,32 @@ jobs:
           echo "staged $n binary artifact(s):"; find staged -type f | sed 's/^/  /'
           [ "$n" -ge 7 ] || { echo "::error::expected at least 7 binaries, found $n"; exit 1; }
 
+      # Stage under versioned filenames: crypto-sensor-linux-amd64 becomes
+      # crypto-sensor-linux-amd64-vX.Y.Z (extension preserved for .exe). A
+      # downloaded binary then states its release on disk — "which sensor is
+      # this file" was unanswerable once it left the release page, and the
+      # in-binary stamp only helps for binaries you can run where you are.
+      # The version rides at the END so existing name-prefix globs
+      # (-p 'crypto-sensor-linux-amd64*') keep matching. This rename is the
+      # single naming choke point: SHA256SUMS is generated after it, so the
+      # sums, the signature, and the release all carry the versioned names.
       - name: Checksums
         run: |
           set -euo pipefail
-          mkdir -p dist && find staged -type f -exec cp {} dist/ \;
+          V="${{ needs.guard.outputs.version }}"
+          mkdir -p dist
+          find staged -type f | while read -r f; do
+            b=$(basename "$f")
+            case "$b" in
+              *.exe) out="${b%.exe}-${V}.exe" ;;
+              *)     out="${b}-${V}" ;;
+            esac
+            cp "$f" "dist/$out"
+          done
+          # Assert the rename matched: an inert rename would silently ship the
+          # old bare names again.
+          n=$(find dist -type f ! -name "*-${V}*" | wc -l)
+          [ "$n" -eq 0 ] || { echo "::error::$n staged file(s) missed the version stamp"; find dist -type f ! -name "*-${V}*"; exit 1; }
           cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
 
       - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159  # v3.9.2

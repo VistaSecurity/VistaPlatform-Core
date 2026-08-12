@@ -97,7 +97,9 @@ The registration modal does not serve the binary itself — get it one of two wa
 
 - **GitHub Release** (recommended): every Vista Platform release publishes
   pre-built binaries for Linux (x86_64, ARM64), Windows (x86_64, 386), and
-  macOS (x86_64, Apple Silicon) — named `crypto-sensor-<os>-<arch>` — as assets
+  macOS (x86_64, Apple Silicon) — named `crypto-sensor-<os>-<arch>-<version>`
+  (e.g. `crypto-sensor-linux-amd64-v0.5.5`), so a downloaded binary states its
+  release on disk — as assets
   on the matching GitHub Release, alongside a signed `SHA256SUMS`.
 - **Build from source**: `make build-sensor` (current platform) or
   `make sensor-all-platforms` (all supported targets).
@@ -160,8 +162,8 @@ Installing a sensor needs two things together: the platform-specific
 
 #### Getting the Sensor Binary
 - **From a GitHub Release** (recommended): download the
-  `crypto-sensor-<os>-<arch>` asset matching your platform — e.g.
-  `crypto-sensor-linux-amd64` — from the release matching your installed
+  `crypto-sensor-<os>-<arch>-<version>` asset matching your platform — e.g.
+  `crypto-sensor-linux-amd64-v0.5.5` — from the release matching your installed
   version, and verify it against that release's signed `SHA256SUMS` (see
   "Verifying the binary" below).
 - **Build it yourself**: `make build-sensor` from a checkout of this
@@ -580,7 +582,7 @@ HTTP. See [`artifacts/README.md`](../../../artifacts/README.md).
 - **Cause**: The GitHub Release for the installed version doesn't cover your
   OS/architecture, or you're looking for a download endpoint that no longer
   exists on the platform
-- **Solution**: Check the Release's assets for `crypto-sensor-<os>-<arch>`, or
+- **Solution**: Check the Release's assets for `crypto-sensor-<os>-<arch>-<version>`, or
   build it yourself with `make sensor-<platform>` / `make sensor-all-platforms`
 
 ## Configuration
