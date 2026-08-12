@@ -336,6 +336,10 @@ For platform administrators who need to build and upload device-agent binaries:
 # Build binaries for all supported platforms
 make device-agent-all-platforms
 
+# Stamp a release version into the binaries (reported at registration and
+# shown in the UI). Without AGENT_VERSION the binary reports "dev".
+make device-agent-all-platforms AGENT_VERSION=v0.5.1
+
 # This creates binaries in artifacts/device-agent/{os}/{arch}/device-agent
 # Supported platforms:
 # - linux/amd64

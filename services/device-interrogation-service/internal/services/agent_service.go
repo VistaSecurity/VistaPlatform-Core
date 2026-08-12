@@ -459,14 +459,19 @@ func (s *AgentService) SubmitJobResult(ctx context.Context, agentID uuid.UUID, r
 //
 // RLS: agent-outbound ingestion — keyed by agent id, the tenant is the OUTPUT,
 // so this runs on the bypass role (mirrors sensor-manager heartbeat handling).
-func (s *AgentService) UpdateHeartbeat(ctx context.Context, agentID uuid.UUID) error {
+// UpdateHeartbeat stamps liveness and, when the agent reports one, refreshes
+// its recorded binary version. version follows heartbeat semantics: empty means
+// "not reported" and leaves the stored value untouched (older agents send no
+// version), so a pre-stamping binary can never blank a good value.
+func (s *AgentService) UpdateHeartbeat(ctx context.Context, agentID uuid.UUID, version string) error {
 	query := `
 		UPDATE device_agents
-		SET last_heartbeat = $1, updated_at = $1
+		SET last_heartbeat = $1, updated_at = $1,
+		    version = COALESCE(NULLIF($3, ''), version)
 		WHERE id = $2
 	`
 
-	_, err := s.bypassDB.ExecContext(ctx, query, time.Now(), agentID)
+	_, err := s.bypassDB.ExecContext(ctx, query, time.Now(), agentID, version)
 	if err != nil {
 		return fmt.Errorf("failed to update heartbeat: %w", err)
 	}

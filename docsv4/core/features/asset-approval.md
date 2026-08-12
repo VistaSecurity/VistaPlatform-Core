@@ -11,6 +11,22 @@ When assets are discovered (via discovery jobs or sensors), they can be:
 4. **Approved** to move to `monitoring` status
 5. **Denied** to suppress from rediscovery
 
+## Certificates and crypto configurations are deferred until approval
+
+While an asset is `pending_approval`, its discovered certificates and crypto
+configurations are **not** written to the inventory tables. The raw findings are
+held with the pending asset and **materialized when the asset is approved** —
+only then do rows appear in the Certificate, Keys, and Configuration lenses and
+become visible to compliance evaluation and risk scoring. Denying the asset
+discards them.
+
+This is deliberate: unapproved discoveries must not leak data into the
+tenant's inventory. The practical consequence is that on a fresh deployment
+with auto-approval off (the default), sensors can be discovering plenty while
+Inventory shows nothing — the work is waiting in **Discovery → Approvals**.
+The Inventory page shows a pending-approval banner with the count and a link
+to the queue whenever assets are waiting.
+
 ## Workflow
 
 ### 1. Asset Discovery
@@ -66,7 +82,8 @@ When importing discovery results:
 
 Review assets awaiting approval:
 
-**UI:** Assets → Discovery Approvals
+**UI:** Discovery → Approvals (also reachable from the Inventory page's
+pending-approval banner)
 
 **API:** `GET /api/v1/inventory-service/assets?status=pending_approval`
 
@@ -104,6 +121,8 @@ Approve assets to add to monitoring:
 
 **Result:**
 - Assets move from `pending_approval` to `monitoring` status
+- Deferred certificates and crypto configurations are materialized into the
+  inventory (Certificate / Keys / Configuration lenses populate)
 - Assets are included in compliance checks
 - Assets are monitored for changes
 
@@ -159,8 +178,11 @@ Discovery Jobs:
 
 **Auto-Approval:**
 - Sensor and cloud discoveries can be auto-approved based on network space rules
-- Network spaces can be configured with "Auto-approve sensor discoveries" option (applies to both sensor and cloud discoveries)
-- Auto-approved assets skip the pending approval step
+- Configured per network segment: **Settings → Infrastructure** → edit a
+  segment → "Auto-approve discoveries" (applies to both sensor and cloud
+  discoveries; **off by default**, so a fresh tenant reviews everything)
+- Auto-approved assets skip the pending approval step (their certificates and
+  crypto configurations materialize immediately)
 - Auto-approved assets show "Auto" badge in the approvals page
 
 **Status Values:**
@@ -196,16 +218,15 @@ Deny multiple assets at once:
 
 **API:** `POST /api/v1/inventory-service/assets/deny`
 
-## Approval Badge
+## Pending-Approval Banner
 
-The UI displays a badge showing the count of pending approval assets:
+The Inventory page shows a banner whenever the tenant has assets awaiting
+approval:
 
-**UI:** Assets page header shows "Pending Approval (N)" badge
-
-**API:** Pending count is included in asset facets:
-```
-GET /api/v1/inventory-service/assets/facets
-```
+**UI:** Inventory (any lens) → "N discovered assets awaiting approval" banner
+with a **Review** button that opens Discovery → Approvals. The infrastructure
+lens empty state also points at the queue when Inventory is empty but assets
+are pending.
 
 ## Suppression from Rediscovery
 

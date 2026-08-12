@@ -278,6 +278,33 @@ When troubleshooting cloud discovery issues:
 
 The `discovery_approval_queue` table is no longer used for cloud discoveries. If you see references to this table in troubleshooting steps for cloud discoveries, those steps are outdated. Cloud discoveries now follow the same path as sensor discoveries through `sensor_discoveries` and `discovery-processor-service`.
 
+## Misdiagnosis Trap: "Empty Inventory + zero certificates" (August 2026)
+
+**Symptom:** Sensors are discovering (external connections appear, batches are
+processed), but Inventory is empty and `certificates` /
+`crypto_implementations` are at zero rows.
+
+**This is the designed approval workflow, not a broken pipeline.** New assets
+land with `asset_status='pending_approval'`, and their certificates and crypto
+configurations are deliberately **deferred** (held with the pending asset)
+until the asset is approved in **Discovery → Approvals** — only approval
+materializes them into the inventory tables. Auto-approval is per network
+segment (Settings → Infrastructure) and is off by default.
+
+Two changes shipped in v0.5.2 to make this self-evident (#1274):
+
+- The discovery-processor batch log no longer prints `0 asset findings` for
+  external-only batches; batch summaries now report internal findings split by
+  monitoring/pending and note the deferral.
+- The Inventory page shows a pending-approval banner (count + link to the
+  Approvals queue) whenever assets are waiting.
+
+The same verification pass found and fixed a real defect: the
+`valid_certificate_role` CHECK on `crypto_implementation_certificates`
+rejected the `leaf` role the code writes, so the primary certificate was never
+linked into the junction (chain certs were) and expiring-certificate risk
+queries missed sensor-discovered leaf certificates. Fixed in the same release.
+
 ## Related Code References
 
 - Route registration: `services/inventory-service/cmd/main.go:85-88`

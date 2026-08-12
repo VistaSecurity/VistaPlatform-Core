@@ -495,7 +495,14 @@ func agentHeartbeatHandler(db, bypassDB *sql.DB, redis *redis.Client) gin.Handle
 			return
 		}
 
-		if err := agentService.UpdateHeartbeat(c.Request.Context(), agentID); err != nil {
+		// Body is optional and lenient: older agents send {status,timestamp}
+		// or nothing. A version, when present, refreshes the recorded one.
+		var beat struct {
+			Version string `json:"version"`
+		}
+		_ = c.ShouldBindJSON(&beat)
+
+		if err := agentService.UpdateHeartbeat(c.Request.Context(), agentID, beat.Version); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 			return
 		}

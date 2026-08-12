@@ -7,8 +7,11 @@ import (
 	"net/http"
 	"time"
 
+	"encoding/json"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
+	"io"
+	"strings"
 )
 
 // SystemSensorHealthService monitors and updates the health status of platform system sensors
@@ -91,48 +94,76 @@ func (s *SystemSensorHealthService) updateSystemSensorHealth(ctx context.Context
 	}
 
 	// Check cluster-sensor-service health
-	clusterStatus := s.checkServiceHealth(s.clusterSensorServiceURL + "/health")
+	clusterStatus, clusterVersion := s.checkServiceHealth(s.clusterSensorServiceURL + "/health")
 
 	// Check device-interrogation-service health
-	deviceInterrogationStatus := s.checkServiceHealth(s.deviceInterrogationServiceURL + "/health")
+	deviceInterrogationStatus, deviceInterrogationVersion := s.checkServiceHealth(s.deviceInterrogationServiceURL + "/health")
 
 	// Update Platform Discovery Sensor records for all tenants
-	s.updateSensorStatus(ctx, "discovery", clusterStatus)
+	s.updateSensorStatus(ctx, "discovery", clusterStatus, clusterVersion)
 
 	// Update Platform Device Interrogation Agent records for all tenants
-	s.updateSensorStatus(ctx, "device_interrogation", deviceInterrogationStatus)
+	s.updateSensorStatus(ctx, "device_interrogation", deviceInterrogationStatus, deviceInterrogationVersion)
 }
 
-// checkServiceHealth performs a health check against a service endpoint
-func (s *SystemSensorHealthService) checkServiceHealth(url string) string {
+// checkServiceHealth performs a health check against a service endpoint.
+// The second return is the checked service's own release version as reported
+// by its /health body — this sweep is the platform agents' heartbeat, and the
+// version must come from the service being swept, not from sensor-manager,
+// or a partially-rolled upgrade would stamp rows with the wrong release.
+// Empty when the body carries none (older service, parse failure).
+func (s *SystemSensorHealthService) checkServiceHealth(url string) (string, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return "error"
+		return "error", ""
 	}
 
 	serviceauth.SignRequestFromEnv(req)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return "offline"
+		return "offline", ""
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusOK {
-		return "active"
+	if resp.StatusCode != http.StatusOK {
+		return "error", ""
 	}
-	return "error"
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	return "active", parseHealthVersion(body)
 }
 
-// updateSensorStatus updates the status and last_heartbeat for system sensors
-func (s *SystemSensorHealthService) updateSensorStatus(ctx context.Context, profile, status string) {
+// parseHealthVersion extracts the service's release version from a /health
+// response body ({"version":{"service":"vX.Y.Z"}}), normalized to the bare
+// form the sensors.version column stores (leading "v" stripped, as the UI
+// renders "v"+version). Anything unparsable is "" — the caller's COALESCE
+// treats that as "not reported" rather than blanking the stored value.
+func parseHealthVersion(body []byte) string {
+	var h struct {
+		Version struct {
+			Service string `json:"service"`
+		} `json:"version"`
+	}
+	if err := json.Unmarshal(body, &h); err != nil {
+		return ""
+	}
+	return strings.TrimPrefix(h.Version.Service, "v")
+}
+
+// updateSensorStatus updates status, last_heartbeat and — when the swept
+// service reported one — the recorded version for system sensors. The seeded
+// rows carry the placeholder version 'system'; this sweep is what converges
+// them to the running release, including across in-place upgrades, without
+// any re-registration.
+func (s *SystemSensorHealthService) updateSensorStatus(ctx context.Context, profile, status, version string) {
 	query := `
 		UPDATE sensors
 		SET status = $1,
 		    last_heartbeat = NOW(),
+		    version = COALESCE(NULLIF($3, ''), version),
 		    updated_at = NOW()
 		WHERE platform = 'platform'
 		  AND profile = $2
@@ -146,7 +177,7 @@ func (s *SystemSensorHealthService) updateSensorStatus(ctx context.Context, prof
 	if s.bypassDB == nil {
 		return
 	}
-	result, err := s.bypassDB.ExecContext(ctx, query, status, profile)
+	result, err := s.bypassDB.ExecContext(ctx, query, status, profile, version)
 	if err != nil {
 		log.Printf("⚠️  Failed to update system sensor status (profile=%s): %v", profile, err)
 		return

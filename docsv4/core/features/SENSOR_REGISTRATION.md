@@ -250,7 +250,7 @@ Content-Type: application/json
   "registration_key": "REG-...",
   "name": "sensor-dc01",
   "platform": "linux",
-  "version": "1.0.0",
+  "version": "0.5.1",
   "profile": "datacenter_host",
   "network_interfaces": ["eth0"],
   "ip_address": "192.168.1.100",
@@ -259,6 +259,12 @@ Content-Type: application/json
   "sensor_id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
+
+> `version` is the sensor binary's build-stamped release version (set via
+> `-ldflags "-X main.Version=..."` by the release workflow and the Makefile's
+> `AGENT_VERSION`). A binary built from source without stamping reports `dev`.
+> The platform records it per sensor and the UI shows it in
+> Discovery → Sensors & Agents.
 
 **Response (CSR-Based Flow):**
 ```json

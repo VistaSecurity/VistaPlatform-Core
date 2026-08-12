@@ -23,17 +23,22 @@ func NewOperationalService(db *database.DB) *OperationalService {
 }
 
 // GetLocationSummaries returns all rows from mv_location_finding_summary for the tenant (all locations × environments).
+// Reads go through mv_location_finding_summary_tenant: the underlying matview is
+// cross-tenant and crypto_app's direct SELECT on it is revoked; the wrapper
+// scopes by app.tenant_id, which WithTenantTx sets.
 func (s *OperationalService) GetLocationSummaries(tenantID uuid.UUID) ([]models.LocationFindingSummaryRow, error) {
 	var rows []models.LocationFindingSummaryRow
-	err := s.db.Select(&rows, `
+	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+		return tx.Select(&rows, `
 		SELECT location_id, tenant_id, location_name, location_type, full_path, environment,
 			asset_count, crypto_config_count, certificate_count,
 			critical_findings, high_findings, medium_findings, low_findings,
 			expiring_certs_30d, expired_certs
-		FROM mv_location_finding_summary
+		FROM mv_location_finding_summary_tenant
 		WHERE tenant_id = $1
 		ORDER BY location_name, environment
 	`, tenantID)
+	})
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -46,15 +51,17 @@ func (s *OperationalService) GetLocationSummaries(tenantID uuid.UUID) ([]models.
 // GetLocationEnvironments returns environment-level stats for a single location (from mv_location_finding_summary).
 func (s *OperationalService) GetLocationEnvironments(tenantID, locationID uuid.UUID) ([]models.EnvironmentSummary, error) {
 	var rows []models.LocationFindingSummaryRow
-	err := s.db.Select(&rows, `
+	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+		return tx.Select(&rows, `
 		SELECT location_id, tenant_id, location_name, location_type, full_path, environment,
 			asset_count, crypto_config_count, certificate_count,
 			critical_findings, high_findings, medium_findings, low_findings,
 			expiring_certs_30d, expired_certs
-		FROM mv_location_finding_summary
+		FROM mv_location_finding_summary_tenant
 		WHERE tenant_id = $1 AND location_id = $2
 		ORDER BY environment
 	`, tenantID, locationID)
+	})
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -176,7 +183,7 @@ func (s *OperationalService) GetRemediationQueue(tenantID uuid.UUID, filters mod
 	}
 	offset := (filters.Page - 1) * filters.PageSize
 
-	baseQuery := `FROM mv_remediation_queue WHERE tenant_id = $1`
+	baseQuery := `FROM mv_remediation_queue_tenant WHERE tenant_id = $1`
 	args := []interface{}{tenantID}
 	n := 2
 	if filters.Severity != nil && *filters.Severity != "" {
@@ -195,21 +202,20 @@ func (s *OperationalService) GetRemediationQueue(tenantID uuid.UUID, filters mod
 		n++
 	}
 
-	var total int
-	countQuery := `SELECT COUNT(*) ` + baseQuery
-	err := s.db.QueryRow(countQuery, args...).Scan(&total)
-	if err != nil {
-		return nil, 0, err
-	}
-
 	selQuery := `SELECT tenant_id, finding_type, severity, asset_id, asset_hostname, asset_ip, asset_port,
 		location_name, location_full_path, environment, service_name, certificate_id, crypto_implementation_id, detail_text, created_at ` +
-		baseQuery + ` ORDER BY CASE severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END, created_at DESC`
-	args = append(args, filters.PageSize, offset)
-	selQuery += fmt.Sprintf(` LIMIT $%d OFFSET $%d`, n, n+1)
+		baseQuery + ` ORDER BY CASE severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END, created_at DESC` +
+		fmt.Sprintf(` LIMIT $%d OFFSET $%d`, n, n+1)
 
+	// mv_remediation_queue_tenant scopes by app.tenant_id — count + page in one tenant tx.
+	var total int
 	var rows []models.RemediationQueueRow
-	err = s.db.Select(&rows, selQuery, args...)
+	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+		if e := tx.QueryRow(`SELECT COUNT(*) `+baseQuery, args...).Scan(&total); e != nil {
+			return e
+		}
+		return tx.Select(&rows, selQuery, append(args, filters.PageSize, offset)...)
+	})
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, total, nil
@@ -227,7 +233,9 @@ func (s *OperationalService) GetRemediationQueueStats(tenantID uuid.UUID) (bySev
 		Severity    string `db:"severity"`
 		FindingType string `db:"finding_type"`
 	}
-	err = s.db.Select(&rows, `SELECT severity, finding_type FROM mv_remediation_queue WHERE tenant_id = $1`, tenantID)
+	err = database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+		return tx.Select(&rows, `SELECT severity, finding_type FROM mv_remediation_queue_tenant WHERE tenant_id = $1`, tenantID)
+	})
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return bySeverity, byFindingType, 0, nil

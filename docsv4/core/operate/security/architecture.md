@@ -53,7 +53,7 @@ POST /api/v1/sensors/register
   "registration_key": "REG-550e8400-20260420-A7B3C9",
   "name": "sensor-dc01",
   "platform": "linux",
-  "version": "1.0.0",
+  "version": "0.5.1",
   "profile": "datacenter_host"
 }
 

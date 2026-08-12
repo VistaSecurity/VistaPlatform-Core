@@ -630,7 +630,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	staleDetector := jobs.NewStaleAssetDetector(db, lifecycleService)
+	staleDetector := jobs.NewStaleAssetDetector(db, bypassDB, lifecycleService)
 	if natsClient != nil {
 		staleDetector.SetNATSClient(natsClient)
 		log.Println("NATS client wired to StaleAssetDetector for audit job event publishing")

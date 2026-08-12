@@ -17,7 +17,7 @@ An infrastructure asset represents a discoverable network endpoint — a server,
 | **Device42** | Device (`/api/1.0/devices/`) |
 | **SolarWinds** | Node (`Orion.Nodes`) |
 | **Oomnitza** | Asset (`/api/v3/assets`) |
-| **Unified View** | `v_infrastructure_assets`, `v_ci_inventory` (category: `infrastructure_asset`) |
+| **Unified View** | `v_ci_inventory` (category: `infrastructure_asset`) |
 
 **Sub-type mapping (ServiceNow):**
 
@@ -78,7 +78,7 @@ A specific cryptographic protocol/cipher configuration observed on an infrastruc
 | **Device42** | Custom field on Device |
 | **SolarWinds** | Custom property on Node |
 | **Oomnitza** | Asset with crypto config custom fields |
-| **Unified View** | `v_crypto_configurations`, `v_ci_inventory` (category: `crypto_configuration`) |
+| **Unified View** | `v_ci_inventory` (category: `crypto_configuration`) |
 
 > **Note:** ServiceNow requires creating the custom table `u_crypto_configuration` in your instance. The platform provides guidance on the schema for this table.
 
@@ -232,7 +232,9 @@ Both the old and new terms are supported in the API:
 - **v1 API** uses the original terms (`assets`, `crypto-implementations`)
 - **v2 API** uses the CMDB-aligned terms (`infrastructure-assets`, `crypto-configurations`)
 
-Database views provide the mapping:
-- `v_infrastructure_assets` → alias for `network_assets`
-- `v_crypto_configurations` → alias for `crypto_implementations`
+A database view provides the mapping:
 - `v_ci_inventory` → unified view of all CI types for CMDB export
+
+(The former per-type alias views `v_infrastructure_assets` and
+`v_crypto_configurations` were retired — nothing read them; CMDB export goes
+through `v_ci_inventory`.)

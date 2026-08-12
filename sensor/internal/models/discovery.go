@@ -77,8 +77,14 @@ type DiscoveryBatch struct {
 
 // SensorHealth represents sensor health status
 type SensorHealth struct {
-	SensorID        string                 `json:"sensor_id"`
-	Status          string                 `json:"status"`
+	SensorID string `json:"sensor_id"`
+	Status   string `json:"status"`
+	// Version is the sensor binary's stamped release version, reported on every
+	// heartbeat so the platform's recorded version tracks in-place upgrades —
+	// registration-only recording left a swapped binary reporting its old
+	// version forever. Empty is allowed (older sensors) and leaves the stored
+	// value untouched.
+	Version         string                 `json:"version,omitempty"`
 	LastHeartbeat   time.Time              `json:"last_heartbeat"`
 	Uptime          int64                  `json:"uptime"`
 	MemoryUsage     int64                  `json:"memory_usage"`

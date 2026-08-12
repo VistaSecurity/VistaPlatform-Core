@@ -803,6 +803,7 @@ func (s *Sensor) sendHeartbeat() {
 	health := &models.SensorHealth{
 		SensorID:            s.config.SensorID,
 		Status:              status,
+		Version:             Version,
 		LastHeartbeat:       time.Now(),
 		Uptime:              uptime,
 		MemoryUsage:         memoryUsage,

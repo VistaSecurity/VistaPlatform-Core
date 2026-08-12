@@ -165,6 +165,38 @@ sudo update-alternatives --set go /usr/local/go/bin/go
 2. Reduce concurrent connections
 3. Restart Postgres: `docker compose restart postgres`
 
+## Subscription Tier / Limit Issues
+
+### "Sensor limit exceeded: 0/0" registering the first sensor
+
+**Symptom**: Sensor registration returns HTTP 402 with `Sensor limit exceeded:
+0/0`, on a tenant that has no sensors. Adding an asset fails the same way.
+
+**Cause**: The tenant has no subscription tier. Every capacity limit then falls
+back to the platform default, which is deliberately conservative — 0 sensors, 0
+assets. It is a misconfiguration wearing a quota error's clothes: since v0.5.1
+the message says so explicitly, but a tenant that signed up on v0.5.0 or earlier
+reports the bare `0/0`.
+
+**Fix**: Upgrade to v0.5.1 or later — the seed applied on every `helm upgrade`
+puts tier-less tenants on the `community` tier (unlimited capacity, no paid
+capability), and new signups are placed there at creation. To confirm, or to
+repair without upgrading:
+
+```sql
+SELECT t.name, COALESCE(st.name, '(no tier)') AS tier
+FROM tenants t LEFT JOIN subscription_tiers st ON st.id = t.subscription_tier_id;
+```
+
+A platform admin can also assign a tier per tenant from the admin UI under
+**Tenants**.
+
+**Related setting**: `DEFAULT_SIGNUP_TIER` on auth-service selects which tier new
+tenants land on. It defaults to `community` and should stay there for any
+self-hosted install; set it only if you are running a multi-tenant service that
+wants signups on a trial tier. In the Helm chart, set it via
+`backends.auth-service.extraEnv`.
+
 ## Cloud Discovery Processing Issues
 
 ### Cloud Discoveries Not Appearing in Discovery Approvals

@@ -891,6 +891,14 @@ $$;
 -- FUNCTION: refresh_operational_views()
 CREATE OR REPLACE FUNCTION public.refresh_operational_views() RETURNS void
     LANGUAGE plpgsql
+    -- SECURITY DEFINER: REFRESH MATERIALIZED VIEW requires OWNERSHIP of the
+    -- matview, and since the Phase 4 role split the caller (inventory-service's
+    -- pool) is the non-owner crypto_app role — a plain-invoker call fails with
+    -- "must be owner of materialized view" and the operational views silently
+    -- go stale. Run as the definer (crypto_user, the owner) instead.
+    -- search_path is pinned per SECURITY DEFINER best practice.
+    SECURITY DEFINER
+    SET search_path = public, pg_catalog, pg_temp
     AS $$
 BEGIN
     REFRESH MATERIALIZED VIEW CONCURRENTLY mv_location_finding_summary;
@@ -900,8 +908,11 @@ $$;
 
 
 -- FUNCTION: refresh_tenant_cost_summary()
+-- SECURITY DEFINER for the same ownership reason as refresh_operational_views.
 CREATE OR REPLACE FUNCTION public.refresh_tenant_cost_summary() RETURNS void
     LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = public, pg_catalog, pg_temp
     AS $$
 BEGIN
     REFRESH MATERIALIZED VIEW CONCURRENTLY tenant_cost_summary;
@@ -22109,3 +22120,75 @@ DO $$ BEGIN
         ADD CONSTRAINT ssh_keys_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id) REFERENCES public.network_assets_partitioned(tenant_id, id) ON DELETE SET NULL (asset_id);
   END IF;
 END $$;
+
+
+-- ============================================================================
+-- VIEW ISOLATION HARDENING (close the security_invoker gap left by Phase 4)
+-- ============================================================================
+-- A plain view executes with its OWNER's privileges, and the owner
+-- (crypto_user) both owns the base tables and is exempt from their RLS —
+-- so every view below was a cross-tenant read path for the NOBYPASSRLS
+-- crypto_app role. Only the three partition-wrapper views (network_assets,
+-- sensor_discoveries, crypto_implementations, flipped above) had
+-- security_invoker. Flip every remaining view whose base tables carry a
+-- tenant_isolation policy, so RLS applies to the querying role exactly as it
+-- would on the tables themselves. Deliberately NOT flipped: v_tenants,
+-- platform_administrators, platform_metrics_aggregations and
+-- audit.partition_info (no RLS base tables — platform/catalog data), and the
+-- materialized views (security_invoker does not exist for matviews; they are
+-- handled by REVOKE + tenant-scoped wrapper views below).
+--
+-- This block must stay AFTER every CREATE OR REPLACE VIEW / matview
+-- DROP+CREATE above so a re-apply always leaves the flag set.
+-- Idempotent: ALTER VIEW ... SET is a plain reloption write.
+ALTER VIEW public.active_resource_alerts        SET (security_invoker = true);
+ALTER VIEW public.aws_daily_cost_summary        SET (security_invoker = true);
+ALTER VIEW public.aws_daily_service_cost_summary SET (security_invoker = true);
+ALTER VIEW public.aws_tenant_monthly_cost_summary SET (security_invoker = true);
+ALTER VIEW public.current_resource_usage_summary SET (security_invoker = true);
+ALTER VIEW public.health_metrics_aggregated_view SET (security_invoker = true);
+ALTER VIEW public.platform_integrations_summary SET (security_invoker = true);
+ALTER VIEW public.tenant_health_summary_view    SET (security_invoker = true);
+ALTER VIEW public.user_tenant_permissions       SET (security_invoker = true);
+ALTER VIEW public.v_ci_inventory                SET (security_invoker = true);
+
+
+-- Materialized views hold cross-tenant data by construction (populated by the
+-- owner at REFRESH time; RLS and security_invoker are structurally
+-- inapplicable). Give the app role a tenant-scoped face instead:
+--
+--   1. A wrapper view per consumed matview, executing as the owner
+--      (deliberately NOT security_invoker — it must read the matview after
+--      the REVOKE below) with the same fail-closed predicate the
+--      tenant_isolation policies use: no app.tenant_id context => zero rows.
+--   2. REVOKE direct matview access from crypto_app. crypto_bypass keeps it
+--      (BYPASSRLS is the deliberate cross-tenant lane).
+--
+-- Created here, after the matview DROP ... CASCADE + re-CREATE above, because
+-- that CASCADE takes the wrappers with it on every re-apply.
+CREATE OR REPLACE VIEW public.mv_location_finding_summary_tenant AS
+  SELECT * FROM public.mv_location_finding_summary
+  WHERE tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid;
+
+CREATE OR REPLACE VIEW public.mv_remediation_queue_tenant AS
+  SELECT * FROM public.mv_remediation_queue
+  WHERE tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid;
+
+-- The blanket GRANT ... ON ALL TABLES above (and the crypto_user default
+-- privileges, which cover the matviews re-created later in this file) hand
+-- crypto_app full SELECT on the matviews on every apply — so these REVOKEs
+-- must also run on every apply, after everything is (re)created.
+REVOKE ALL ON public.mv_location_finding_summary FROM crypto_app;
+REVOKE ALL ON public.mv_remediation_queue        FROM crypto_app;
+REVOKE ALL ON public.tenant_cost_summary         FROM crypto_app;
+
+GRANT SELECT ON public.mv_location_finding_summary_tenant TO crypto_app, crypto_bypass;
+GRANT SELECT ON public.mv_remediation_queue_tenant        TO crypto_app, crypto_bypass;
+
+-- The refresh functions are SECURITY DEFINER (REFRESH requires matview
+-- ownership — see their definitions). Same hygiene as the other definer
+-- functions: not executable by PUBLIC, only by the app roles.
+REVOKE EXECUTE ON FUNCTION public.refresh_operational_views()  FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.refresh_tenant_cost_summary() FROM PUBLIC;
+GRANT  EXECUTE ON FUNCTION public.refresh_operational_views()  TO crypto_app, crypto_bypass;
+GRANT  EXECUTE ON FUNCTION public.refresh_tenant_cost_summary() TO crypto_app, crypto_bypass;

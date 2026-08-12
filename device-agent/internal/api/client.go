@@ -28,7 +28,15 @@ type OutboundClient struct {
 	httpClient *http.Client
 	agentID    uuid.UUID
 	baseURL    string
+	// agentVersion is the running binary's stamped version (main.Version),
+	// reported on registration and on every heartbeat. Set via SetAgentVersion
+	// at startup; empty is sent as-is and the platform treats it as
+	// "not reported" rather than blanking the stored value.
+	agentVersion string
 }
+
+// SetAgentVersion records the running binary's version for liveness reporting.
+func (c *OutboundClient) SetAgentVersion(v string) { c.agentVersion = v }
 
 // NewOutboundClient creates a new outbound API client
 func NewOutboundClient(cfg *config.Config) *OutboundClient {
@@ -93,6 +101,7 @@ func (c *OutboundClient) Register(version string) error {
 	if version == "" {
 		version = "dev"
 	}
+	c.agentVersion = version
 	// Generate agent ID (UUID) that will be used as certificate CN
 	agentID := uuid.New()
 	if c.config.AgentID != "" {
@@ -329,6 +338,10 @@ func (c *OutboundClient) SendHeartbeat() error {
 	reqBody := map[string]interface{}{
 		"status":    "active",
 		"timestamp": time.Now(),
+		// The binary's stamped version rides every heartbeat so an in-place
+		// binary swap is reflected without re-enrollment (registration-only
+		// recording left upgraded agents reporting their old version forever).
+		"version": c.agentVersion,
 	}
 
 	jsonData, err := json.Marshal(reqBody)

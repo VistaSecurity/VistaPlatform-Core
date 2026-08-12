@@ -103,6 +103,7 @@ func (s *SensorService) UpdateSensorHealthWithIP(sensorID string, health *models
 		    ip_address = COALESCE($4, ip_address),
 		    available_interfaces = CASE WHEN $5::text[] IS NOT NULL THEN $5::text[] ELSE available_interfaces END,
 		    reporting_interval = COALESCE($6, reporting_interval),
+		    version = COALESCE(NULLIF($7, ''), version),
 		    updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL`
 
@@ -118,7 +119,7 @@ func (s *SensorService) UpdateSensorHealthWithIP(sensorID string, health *models
 		return err
 	}
 	err = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		_, e := tx.ExecContext(ctx, query, sensorID, now, health.Status, ipAddress, availableIfaces, reportingIntervalArg)
+		_, e := tx.ExecContext(ctx, query, sensorID, now, health.Status, ipAddress, availableIfaces, reportingIntervalArg, health.Version)
 		return e
 	})
 	if err != nil {

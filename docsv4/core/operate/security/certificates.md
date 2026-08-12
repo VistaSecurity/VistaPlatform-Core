@@ -94,7 +94,7 @@ curl -X POST http://localhost:8080/api/v1/sensor-manager/sensors/register \
     "registration_key": "REG-...",
     "name": "sensor-dc01",
     "platform": "linux",
-    "version": "1.0.0",
+    "version": "0.5.1",
     "profile": "datacenter_host",
     "network_interfaces": ["eth0"],
     "ip_address": "192.168.1.100",

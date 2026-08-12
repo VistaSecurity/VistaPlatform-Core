@@ -32,7 +32,9 @@ func newDetector(t *testing.T) (*StaleAssetDetector, *database.DB, *sql.DB) {
 	raw := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, raw)
 	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
-	return NewStaleAssetDetector(db, services.NewAssetLifecycleService(db)), db, raw
+	// raw (the owner connection) stands in for the BYPASSRLS crypto_bypass pool:
+	// the only property the cross-tenant enumerator depends on is RLS exemption.
+	return NewStaleAssetDetector(db, raw, services.NewAssetLifecycleService(db)), db, raw
 }
 
 // insertMonitoredAsset adds one monitored asset last seen `daysAgo` days back,
@@ -118,4 +120,61 @@ func TestIntegration_StaleDetector_RespectsExplicitOptOut(t *testing.T) {
 	if got := staleStatus(t, db, asset); got != nil {
 		t.Errorf("asset was aged despite auto_archive_enabled=false (stale_status=%q)", *got)
 	}
+}
+
+// TestIntegration_StaleAssetDetector_EnumeratorNeedsBypassRole pins the RLS
+// wiring of the cross-tenant enumerator.
+//
+// `network_assets` is a security_invoker VIEW over the RLS-protected
+// network_assets_partitioned, so RLS applies to the caller exactly as it would
+// on a table. Point the enumerator at the RLS-scoped crypto_app handle and it
+// returns zero tenants — the detector then no-ops while logging success, so
+// nothing ever ages or archives.
+//
+// The rest of this file drives the detector on the owner connection, which
+// cannot observe that difference at all. This case connects as the non-owner
+// role on purpose, and asserts BOTH directions so it cannot quietly stop
+// guarding.
+func TestIntegration_StaleAssetDetector_EnumeratorNeedsBypassRole(t *testing.T) {
+	owner := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, owner)
+	appDB := testdb.ConnectAsAppRole(t, owner)
+
+	ownerDB := &database.DB{DB: sqlx.NewDb(owner, "postgres")}
+	tenant := testdb.NewTenant(t, owner)
+	insertMonitoredAsset(t, ownerDB, tenant, 45)
+
+	lifecycle := services.NewAssetLifecycleService(ownerDB)
+
+	t.Run("bypass handle sees the tenant", func(t *testing.T) {
+		d := NewStaleAssetDetector(ownerDB, owner, lifecycle)
+		got, err := d.tenantsToProcess()
+		if err != nil {
+			t.Fatalf("tenantsToProcess: %v", err)
+		}
+		if !containsTenant(got, tenant) {
+			t.Fatalf("tenant %s missing from %v — the enumerator found nothing to process", tenant, got)
+		}
+	})
+
+	t.Run("RLS-scoped handle sees nothing", func(t *testing.T) {
+		d := NewStaleAssetDetector(ownerDB, appDB, lifecycle)
+		got, err := d.tenantsToProcess()
+		if err != nil {
+			t.Fatalf("tenantsToProcess: %v", err)
+		}
+		if containsTenant(got, tenant) {
+			t.Fatalf("tenant %s was visible on the %s handle; this test can no longer "+
+				"detect the regression it exists to catch", tenant, testdb.RLSAppRole)
+		}
+	})
+}
+
+func containsTenant(ids []uuid.UUID, want uuid.UUID) bool {
+	for _, id := range ids {
+		if id == want {
+			return true
+		}
+	}
+	return false
 }

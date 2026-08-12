@@ -946,10 +946,11 @@ func findingLabel(f IngestFinding) string {
 // to refresh mv_location_finding_summary and mv_remediation_queue (migration 011).
 // Returns nil if successful; error if the function does not exist or refresh fails.
 func (s *AssetService) RefreshOperationalViews() error {
-	// RLS bypass: cross-tenant operation — refreshes the platform-wide
-	// materialized views (mv_location_finding_summary, mv_remediation_queue) for
-	// every tenant at once; not scopeable to a single app.tenant_id. Runs on the
-	// owner role (Phase 4 bypassDB).
+	// Cross-tenant by design: refreshes the platform-wide materialized views
+	// (mv_location_finding_summary, mv_remediation_queue) for every tenant at
+	// once. REFRESH requires matview OWNERSHIP, which neither crypto_app nor
+	// crypto_bypass has — the function is SECURITY DEFINER (runs as the owner),
+	// so it works from this plain-pool handle.
 	_, err := s.db.Exec("SELECT refresh_operational_views()")
 	return err
 }

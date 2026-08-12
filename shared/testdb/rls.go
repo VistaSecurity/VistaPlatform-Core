@@ -73,6 +73,17 @@ func EnsureRLSAppRole(t *testing.T, db *sql.DB) {
 		`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ` + RLSAppRole,
 		`GRANT EXECUTE ON FUNCTION public.set_tenant_context(uuid) TO ` + RLSAppRole,
 		`GRANT EXECUTE ON FUNCTION public.clear_tenant_context() TO ` + RLSAppRole,
+		// Mirror schema.sql's view-isolation hardening: the blanket grant above
+		// re-opens the cross-tenant materialized views, and production revokes
+		// them from the app role again (they're reachable only through the
+		// *_tenant wrapper views). Without this, tests would pass against
+		// privileges production doesn't have.
+		`DO $$ BEGIN IF to_regclass('public.mv_location_finding_summary') IS NOT NULL THEN
+		   REVOKE ALL ON public.mv_location_finding_summary FROM ` + RLSAppRole + `; END IF; END $$;`,
+		`DO $$ BEGIN IF to_regclass('public.mv_remediation_queue') IS NOT NULL THEN
+		   REVOKE ALL ON public.mv_remediation_queue FROM ` + RLSAppRole + `; END IF; END $$;`,
+		`DO $$ BEGIN IF to_regclass('public.tenant_cost_summary') IS NOT NULL THEN
+		   REVOKE ALL ON public.tenant_cost_summary FROM ` + RLSAppRole + `; END IF; END $$;`,
 	}
 	// Serialized under the schema advisory lock: concurrent GRANTs on the same
 	// objects from parallel test binaries fail "tuple concurrently updated".

@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"database/sql"
 	"log"
 	"os"
 	"time"
@@ -16,7 +17,10 @@ import (
 
 // StaleAssetDetector periodically detects and updates stale assets
 type StaleAssetDetector struct {
-	db               *database.DB
+	db *database.DB
+	// bypassDB is the BYPASSRLS (crypto_bypass) handle. Only the cross-tenant
+	// enumerator uses it; the per-tenant work stays on the RLS-scoped handle.
+	bypassDB         *sql.DB
 	lifecycleService *services.AssetLifecycleService
 	logger           *log.Logger
 	interval         time.Duration
@@ -27,6 +31,7 @@ type StaleAssetDetector struct {
 // NewStaleAssetDetector creates a new stale asset detector job
 func NewStaleAssetDetector(
 	db *database.DB,
+	bypassDB *sql.DB,
 	lifecycleService *services.AssetLifecycleService,
 ) *StaleAssetDetector {
 	interval := 24 * time.Hour // Default: run daily
@@ -43,6 +48,7 @@ func NewStaleAssetDetector(
 
 	return &StaleAssetDetector{
 		db:               db,
+		bypassDB:         bypassDB,
 		lifecycleService: lifecycleService,
 		logger:           log.New(log.Writer(), "[StaleAssetDetector] ", log.LstdFlags),
 		interval:         interval,
@@ -209,11 +215,19 @@ func (j *StaleAssetDetector) detectStaleAssets(ctx context.Context) {
 // skipped; a tenant that never touched the setting now gets the default it was
 // always told it had.
 //
-// RLS bypass: cross-tenant enumerator, runs on the owner role (Phase 4
-// bypassDB). The per-tenant work goes through AssetLifecycleService, which sets
-// app.tenant_id per tenant.
+// RLS: cross-tenant — runs on the bypass role. The per-tenant work below goes
+// through AssetLifecycleService, which sets app.tenant_id per tenant.
+//
+// `network_assets` is a security_invoker VIEW over the RLS-protected
+// network_assets_partitioned, so RLS applies to the caller here just as it would
+// on a table — the view is not an escape hatch. On the RLS-scoped handle with no
+// app.tenant_id this enumerator returns ZERO tenants and the whole detector
+// no-ops: nothing ages, nothing archives, and the run logs success.
 func (j *StaleAssetDetector) tenantsToProcess() ([]uuid.UUID, error) {
-	rows, err := j.db.Query(`SELECT DISTINCT tenant_id FROM network_assets WHERE deleted_at IS NULL`)
+	if j.bypassDB == nil {
+		return nil, nil
+	}
+	rows, err := j.bypassDB.Query(`SELECT DISTINCT tenant_id FROM network_assets WHERE deleted_at IS NULL`)
 	if err != nil {
 		return nil, err
 	}

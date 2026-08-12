@@ -337,8 +337,13 @@ type SensorHealth struct {
 	// ReportingInterval (seconds) is the sensor's current data-send cadence,
 	// reported on every heartbeat so the platform's stored value tracks what the
 	// sensor is actually doing (including after an operator change is applied).
-	ReportingInterval *int      `json:"reporting_interval,omitempty"`
-	CreatedAt         time.Time `json:"created_at" db:"created_at"`
+	ReportingInterval *int `json:"reporting_interval,omitempty"`
+	// Version is the sensor binary's self-reported release version, sent on
+	// every heartbeat (json only — persisted onto sensors.version, not a
+	// sensor_health column). Empty means "not reported" and leaves the stored
+	// version untouched, so pre-stamping sensors cannot blank it.
+	Version   string    `json:"version,omitempty" db:"-"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
 }
 
 // SensorCommands represents a collection of commands for a sensor

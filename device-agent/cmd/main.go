@@ -127,6 +127,7 @@ func main() {
 
 	// Create API client (outbound-only)
 	apiClient := api.NewOutboundClient(cfg)
+	apiClient.SetAgentVersion(Version)
 
 	// Register with platform if requested
 	if *register {
@@ -666,6 +667,7 @@ urlLoop:
 
 	// Create API client and register
 	apiClient := api.NewOutboundClient(cfg)
+	apiClient.SetAgentVersion(Version)
 
 	log.Println("📝 Registering with platform...")
 	if err := apiClient.Register(Version); err != nil {

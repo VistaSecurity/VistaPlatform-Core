@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-08-12
+
+Isolation and observability hardening on top of 0.5.3: plain views over
+RLS-protected tables no longer execute as their owner (closing a cross-tenant
+read bypass for the app role), materialized-view refresh works again under the
+role split, and agent versions now track reality on every heartbeat instead of
+freezing at registration.
+
+
+### Security
+
+- **Views over RLS tables no longer bypass tenant isolation.** A plain view
+  executes with its owner's privileges, and the owner is exempt from RLS — so
+  ten views over RLS-policied tables (`v_ci_inventory`,
+  `tenant_health_summary_view`, `user_tenant_permissions`,
+  `active_resource_alerts`, the AWS cost summaries, and others) were
+  cross-tenant read paths for the tenant-confined `crypto_app` role. All now
+  carry `security_invoker = true`, so the caller's RLS context applies through
+  them exactly as on the tables. The three cross-tenant materialized views
+  (which can carry neither RLS nor `security_invoker`) are revoked from
+  `crypto_app` outright; tenant reads go through new fail-closed wrapper views
+  (`mv_location_finding_summary_tenant`, `mv_remediation_queue_tenant`) that
+  scope by `app.tenant_id`. Integration tests pin the full view list and prove
+  both isolation directions as the app role.
+
+### Fixed
+
+- **Materialized-view refresh works again under the RLS role split.**
+  `REFRESH MATERIALIZED VIEW` requires ownership, which the app role doesn't
+  have, so every `refresh_operational_views()` /
+  `refresh_tenant_cost_summary()` call since v0.5.0 failed "must be owner" —
+  logged as non-fatal and swallowed, leaving the remediation queue and
+  location summaries permanently stale. Both functions are now
+  `SECURITY DEFINER` (run as the owner), with EXECUTE locked to the app roles.
+- **Enterprise CMDB sync reads run tenant-scoped.** `fetchCIsForSync` now sets
+  tenant context (required now that `v_ci_inventory` enforces RLS), and the
+  `apply-rds-migrations.sh` RLS verification checks the real partitioned
+  tables instead of view names `pg_tables` can never match (it warned on
+  every run) — plus asserts the partition-wrapper views are `security_invoker`.
+
+- **Agent versions refresh on heartbeat, not only at registration.** A sensor
+  or device agent whose binary was swapped in place kept its old recorded
+  version forever; the version now rides every heartbeat and the platform
+  updates its record when it changes (an agent reporting nothing leaves the
+  stored value untouched, so older binaries cannot blank it). The in-cluster
+  platform agents converge the same way: the system-sensor health sweep stamps
+  each swept service's own `/health`-reported release version, so the seeded
+  `system` placeholder resolves to the running release on the first sweep
+  after an upgrade — no re-registration required.
+
 ## [0.5.3] - 2026-08-12
 
 ### Fixed
@@ -33,6 +83,17 @@ workflow tells the truth in its logs and its UI, and a cluster of RLS
 stragglers is closed. Also the first release whose favicons match the brand.
 
 ### Fixed
+
+- **Changing app config with `helm upgrade` now actually reaches running
+  pods.** Backend pod templates (and web-ui, whose subPath-mounted
+  `config.json` never refreshes in place) hash the rendered app ConfigMap into
+  a `checksum/config` annotation, so Helm rolls the Deployments on any
+  effective config change instead of reporting success while pods keep the old
+  values in memory (stale `COOKIE_DOMAIN` after a `tls.dnsName` change broke
+  admin login and mis-reported the platform-CA fingerprint). A no-op upgrade
+  still restarts nothing. Consequence: a config-only upgrade rolls every
+  backend — on single-node clusters see the CPU-surge caveat in the deployment
+  guide.
 
 - **The legacy-table residue from the partition conversion is retired.** The
   drained `network_assets_legacy` / `crypto_implementations_legacy` /
@@ -61,6 +122,34 @@ stragglers is closed. Also the first release whose favicons match the brand.
   `ip_address::text`, which renders the netmask (`10.0.0.5/32`) and therefore
   never equaled a bare IP: external connections from an inventoried source IP
   now link to the asset, and bulk-import dedup by IP actually dedups.
+
+- **Sensor-discovered leaf certificates are linked to their crypto
+  configuration.** `LinkCertificateToImplementation` writes the primary
+  certificate into `crypto_implementation_certificates` with role `leaf`, which
+  the table's `valid_certificate_role` CHECK rejected — the insert failed
+  (warning-only) on every discovery path, so chain certificates linked while
+  the leaf never did, and the expiring-certificate risk queries that join
+  through that junction missed every sensor-discovered leaf certificate. The
+  CHECK now accepts `leaf`/`primary`, and the schema-reapply integration test
+  pins it. Found by verifying deferred-finding materialization end-to-end on a
+  live install.
+
+- **The discovery batch log tells the truth about pending assets.** The
+  processor printed a hardcoded `0 asset findings` for external-only batches,
+  which read as "the pipeline produced nothing" while other batches were
+  creating assets whose certificates and crypto configurations are
+  deliberately deferred until approval. Batch summaries now report internal
+  findings split by monitoring/pending (noting the deferral) and say
+  "external-only" when that is what the batch was.
+
+- **The approval queue is discoverable from Inventory.** New discoveries land
+  in `pending_approval` and are excluded from every Inventory lens until
+  approved — previously nothing said so, and a fresh tenant saw sensors
+  reporting into an empty Inventory. Inventory now shows a pending-approval
+  banner (count + link to Discovery → Approvals), the infrastructure lens
+  empty state names the queue, and the Approvals page explains that accepting
+  materializes the deferred certificates/crypto and where per-segment
+  auto-approval lives (Settings → Infrastructure).
 
 ## [0.5.1] - 2026-08-11
 
@@ -91,10 +180,25 @@ reads that would have shown either problem returned 500 or silently empty.
 - **Queries that ran on the RLS-scoped pool with no tenant context work again
   after `serviceRls` defaulted on.** Sensor discovery-by-id returned 500, platform
   sensor roll-ups were empty, the offline reaper never marked sensors offline,
-  certificate-expiry alerts never fired, and usage counters read 0 so capacity
-  caps never tripped. Cross-tenant lookups now use the bypass handle; tenant-
-  scoped counts use `WithTenantTx`. `countAssets` is wrapped the same way as the
-  other counters (it was missed in the original sweep).
+  certificate-expiry alerts never fired, the stale-asset detector processed zero
+  tenants so nothing ever aged or archived, trial locks never engaged, agent
+  registration-key reuse was only detected within a single tenant, and usage
+  counters read 0 so capacity caps never tripped. Cross-tenant lookups now use
+  the bypass handle; tenant-scoped counts use `WithTenantTx`. `countAssets` is
+  wrapped the same way as the other counters (it was missed in the original
+  sweep). None of these raised an error — Postgres filters rows rather than
+  failing, so each surfaced as a wrong answer.
+
+  The second pass caught `countAssets` and the stale-asset enumerator because
+  both read `network_assets`, a `security_invoker` **view** over an RLS-protected
+  partitioned table: RLS applies to the caller there just as on a table, but the
+  view does not appear in the obvious `pg_class.relrowsecurity` inventory. The
+  same is true of `sensor_discoveries` and `crypto_implementations`.
+
+  Regression tests connect as the non-owner `crypto_app` role
+  (`testdb.ConnectAsAppRole`); an owner-connection test cannot detect this class
+  at all, which is why the suite stayed green throughout. Each new guard was
+  mutation-tested against the reverted fix.
 
 ## [0.5.0] - 2026-08-11
 
