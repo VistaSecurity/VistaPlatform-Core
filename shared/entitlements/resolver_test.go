@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/shared/entitlements"
@@ -76,6 +77,90 @@ func setupResolver(t *testing.T, tier string) (*entitlements.PostgresResolver, *
 	r := entitlements.NewPostgresResolver(db)
 	tenant := makeTenant(t, db, tier)
 	return r, db, tenant
+}
+
+func TestResolve_ScopesTenantEntitlementLookup(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	tenantID := uuid.New()
+	itemID := uuid.New()
+	r := entitlements.NewPostgresResolver(db)
+
+	mock.ExpectQuery(`SELECT 1 FROM tenants WHERE id = \$1`).
+		WithArgs(tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(1))
+	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT set_tenant_context\(\$1\)`).
+		WithArgs(tenantID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`WITH item AS \(`).
+		WithArgs(tenantID, "ot_active_probing").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "key", "kind", "category", "unit", "value", "source",
+			"overage_price_cents", "overage_unit_size", "expires_at",
+		}).AddRow(
+			itemID, "ot_active_probing", "boolean", "feature", nil,
+			[]byte(`{"enabled":true}`), string(entitlements.SourceOverride),
+			nil, nil, nil,
+		))
+	mock.ExpectCommit()
+
+	got, err := r.Resolve(context.Background(), tenantID, "ot_active_probing")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.Source != entitlements.SourceOverride {
+		t.Fatalf("Source = %s, want override", got.Source)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestResolveMany_ScopesTenantEntitlementLookup(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	tenantID := uuid.New()
+	itemID := uuid.New()
+	r := entitlements.NewPostgresResolver(db)
+
+	mock.ExpectQuery(`SELECT 1 FROM tenants WHERE id = \$1`).
+		WithArgs(tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(1))
+	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT set_tenant_context\(\$1\)`).
+		WithArgs(tenantID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`WITH items AS \(`).
+		WithArgs(tenantID, sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "key", "kind", "category", "unit", "value", "source",
+			"overage_price_cents", "overage_unit_size", "expires_at",
+		}).AddRow(
+			itemID, "custom_policies", "boolean", "feature", nil,
+			[]byte(`{"enabled":true}`), string(entitlements.SourceOverride),
+			nil, nil, nil,
+		))
+	mock.ExpectCommit()
+
+	got, err := r.ResolveMany(context.Background(), tenantID, []string{"custom_policies"})
+	if err != nil {
+		t.Fatalf("ResolveMany: %v", err)
+	}
+	if got["custom_policies"].Source != entitlements.SourceOverride {
+		t.Fatalf("Source = %s, want override", got["custom_policies"].Source)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
 }
 
 // makeTierGrantingBoolean creates a throwaway subscription tier that grants

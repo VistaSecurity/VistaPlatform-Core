@@ -50,13 +50,23 @@ spec:
       {{- include "vistaplatform.selectorLabels" (dict "ctx" $ctx "component" $name) | nindent 6 }}
   template:
     metadata:
-      {{- if $ctx.Values.serviceMtls.enabled }}
       annotations:
+        # envFrom ConfigMap values are injected at pod START only. Without this
+        # checksum, a helm upgrade that changes any app-config value
+        # (COOKIE_DOMAIN, WEB_UI_BASE_URL, ...) updates the ConfigMap while
+        # running pods keep the old values in memory — no error anywhere (this
+        # silently broke admin login once). Hashing the rendered ConfigMap into
+        # the pod template makes Helm itself roll the Deployments whenever the
+        # effective config changes, whether or not Reloader is installed.
+        checksum/config: {{ include (print $ctx.Template.BasePath "/configmap-app.yaml") $ctx | sha256sum }}
+        {{- if $ctx.Values.serviceMtls.enabled }}
         # Stakater Reloader restarts this Deployment when its mTLS cert Secret
         # is rotated by cert-manager, so the pod picks up the new cert without
-        # manual intervention. Requires Reloader installed in the cluster.
+        # manual intervention (rotation happens out-of-band where Helm cannot
+        # see it — the checksum above does not cover it). Requires Reloader
+        # installed in the cluster.
         secret.reloader.stakater.com/reload: {{ $name }}-mtls
-      {{- end }}
+        {{- end }}
       labels:
         {{- include "vistaplatform.labels" $ctx | nindent 8 }}
         app.kubernetes.io/component: {{ $name }}

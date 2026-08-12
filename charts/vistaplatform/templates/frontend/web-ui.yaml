@@ -1,23 +1,7 @@
-{{- $derivedScheme := ternary "http" "https" (eq .Values.tls.mode "none") -}}
-{{- $tlsScheme := default $derivedScheme .Values.tls.externalScheme -}}
-{{- $apiUrl := printf "%s://%s" $tlsScheme (include "vistaplatform.publicHost" .) -}}
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: web-ui-runtime-config
-  labels:
-    {{- include "vistaplatform.labels" . | nindent 4 }}
-    app.kubernetes.io/component: web-ui
-data:
-  config.json: |
-    {
-      "apiGatewayUrl": "{{ $apiUrl }}",
-      "reportsApiUrl": "{{ $apiUrl }}",
-      "inventoryUrl": "{{ $apiUrl }}",
-      "ssoAllowedIdpHosts": {{ dig "sso" "allowedIdpHosts" (list) .Values.frontend | toJson }},
-      "ssoAllowedIdpSuffixes": {{ dig "sso" "allowedIdpSuffixes" (list) .Values.frontend | toJson }}
-    }
----
+{{- /*
+The web-ui-runtime-config ConfigMap lives in web-ui-runtime-config.yaml so it
+can be hashed into the checksum/config annotation below.
+*/ -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -32,6 +16,12 @@ spec:
       {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "web-ui") | nindent 6 }}
   template:
     metadata:
+      annotations:
+        # config.json is mounted via subPath, which never refreshes in a
+        # running pod. Hashing the rendered ConfigMap here makes Helm roll
+        # web-ui whenever the runtime config changes (e.g. tls.dnsName), so
+        # browsers never load a stale apiGatewayUrl.
+        checksum/config: {{ include (print $.Template.BasePath "/frontend/web-ui-runtime-config.yaml") . | sha256sum }}
       labels:
         {{- include "vistaplatform.labels" . | nindent 8 }}
         app.kubernetes.io/component: web-ui

@@ -25,8 +25,11 @@ var (
 	platformStorageService storage.ArtifactStorageService
 )
 
-// InitializePlatformBrandingService sets up the storage service for platform branding
-func InitializePlatformBrandingService(db *sql.DB, encryptionMasterKey string, log *logrus.Logger) error {
+// InitializePlatformBrandingService sets up the storage service for platform branding.
+// The storage config is global, but the referenced platform_integrations row is
+// RLS-protected and selected by id from that config, so credential lookup uses
+// the bypass handle.
+func InitializePlatformBrandingService(db, bypassDB *sql.DB, encryptionMasterKey string, log *logrus.Logger) error {
 	platformBrandingLogger = log
 
 	// Create encryption service
@@ -37,7 +40,7 @@ func InitializePlatformBrandingService(db *sql.DB, encryptionMasterKey string, l
 
 	// Create config and integration providers
 	configProvider := storage.NewDatabaseConfigProvider(db)
-	integrationProvider := storage.NewDatabaseIntegrationProvider(db, encSvc)
+	integrationProvider := storage.NewDatabaseIntegrationProvider(bypassDB, encSvc)
 
 	// Create S3 storage service
 	platformStorageService = storage.NewS3StorageService(configProvider, integrationProvider, log)

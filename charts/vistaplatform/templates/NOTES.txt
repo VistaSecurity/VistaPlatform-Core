@@ -136,6 +136,13 @@ UPGRADE NOTES
     forward verbatim, which silently pins new pods to old image bytes — the
     chart bumps, the running code does not, and helm reports success.
 
+  - Changing any value that lands in the app ConfigMap (tls.dnsName,
+    appConfig.*, ...) rolls every backend Deployment: the pod templates hash
+    the rendered ConfigMap (checksum/config), because env vars are injected at
+    pod start only and running pods would otherwise silently keep the old
+    config. On a single-node cluster, mind the rolling-upgrade CPU-surge
+    caveat in the deployment guide before making config-only upgrades.
+
   - For other edge-case upgrade scenarios (env-shape migrations, RWO PVC
     deadlocks), see "Upgrade" in the deployment guide:
     docsv4/core/operate/deployment/rke2-v1/deployment-guide.md

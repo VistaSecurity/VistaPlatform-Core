@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"log"
 	"net/http"
 	"os"
@@ -36,6 +37,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/cbom-service/internal/middleware"
 	"github.com/vistasecurity/vistaplatform/cbom-service/internal/scopes"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
+	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
@@ -56,7 +58,7 @@ import (
 // still works in dev / brand-new installs that haven't configured S3.
 //
 // Mirrors the pattern in services/auth-service/internal/api/storage_service.go.
-func initCBOMArtifactStorage(db *database.DB) sharedstorage.ArtifactStorageService {
+func initCBOMArtifactStorage(db *database.DB, bypassDB *sql.DB) sharedstorage.ArtifactStorageService {
 	masterKey := os.Getenv("ENCRYPTION_MASTER_KEY")
 	if masterKey == "" {
 		log.Printf("[cbom-storage] ENCRYPTION_MASTER_KEY not set — CBOM artifacts will be stored inline in Postgres until an admin configures S3")
@@ -71,7 +73,7 @@ func initCBOMArtifactStorage(db *database.DB) sharedstorage.ArtifactStorageServi
 	logger.SetLevel(logrus.InfoLevel)
 	sqlDB := db.SQLDB()
 	configProvider := sharedstorage.NewDatabaseConfigProvider(sqlDB)
-	integrationProvider := sharedstorage.NewDatabaseIntegrationProvider(sqlDB, encSvc)
+	integrationProvider := sharedstorage.NewDatabaseIntegrationProvider(bypassDB, encSvc)
 	svc := sharedstorage.NewS3StorageService(configProvider, integrationProvider, logger)
 
 	// Retry the initial config load briefly. At pod startup the DB pool may not
@@ -115,6 +117,12 @@ func main() {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	defer func() { _ = db.Close() }()
+
+	bypassDB, err := shareddatabase.ConnectBypass()
+	if err != nil {
+		log.Fatalf("Failed to open bypass database connection: %v", err)
+	}
+	defer func() { _ = bypassDB.Close() }()
 
 	if os.Getenv("GIN_MODE") == "" {
 		gin.SetMode(gin.ReleaseMode)
@@ -170,7 +178,7 @@ func main() {
 	scopeHandler := scopes.NewHandler(scopeRepo)
 
 	// Phase 2 + Phase 4: CBOM Artifact persistence + signing + attestation.
-	cbomArtifactStorage := initCBOMArtifactStorage(db)
+	cbomArtifactStorage := initCBOMArtifactStorage(db, bypassDB)
 	cbomRepo := cbom.NewRepository(db)
 	cbomBuilder := cbom.NewBuilder(cbomReportHandler)
 	// Signing + attestation are Enterprise (cmd/edition.go). In Core both

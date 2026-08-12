@@ -1,16 +1,31 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Vista">
-  <!-- Mirrors the in-app brand mark (app-shell.tsx): a Shield on the Vista gold
-       gradient (token vista-gold-gradient), dark-on-gold per the gold-button /
-       avatar treatment (#1a1300). Shield path = lucide-react Shield (v0.460). -->
+  <!-- Tenant console mark: a Shield on the Vista blue gradient, white on blue.
+       Mirrors the in-app brand mark (app-shell.tsx). Shield path = lucide-react
+       Shield (v0.460).
+
+       The hexes below mirror the accent-gradient and accent-fg custom properties
+       in frontend-v2/src/styles/tokens.css. They are duplicated rather than
+       referenced because a favicon is fetched standalone by the browser: it gets
+       no app stylesheet, so a var() reference would resolve to nothing and the
+       mark would render invisible. Retuning the brand means editing here too;
+       the token file is the source of truth and this is a copy that cannot read
+       it.
+
+       Note this does not follow the data-brand preset switch (gold is still
+       selectable) - it tracks the ACTIVE brand, vista-blue.
+
+       Keep CSS custom-property names out of this comment in their literal form:
+       a double hyphen is not legal inside an XML comment and makes the file
+       malformed, which renders as no icon at all. -->
   <defs>
-    <linearGradient id="vista-gold" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#ffe08a"/>
-      <stop offset="0.55" stop-color="#d8a000"/>
-      <stop offset="1" stop-color="#b07e00"/>
+    <linearGradient id="vista-blue" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6f9bff"/>
+      <stop offset="0.55" stop-color="#3772fe"/>
+      <stop offset="1" stop-color="#2554d8"/>
     </linearGradient>
   </defs>
-  <rect width="32" height="32" rx="7" fill="url(#vista-gold)"/>
+  <rect width="32" height="32" rx="7" fill="url(#vista-blue)"/>
   <g transform="translate(6 6) scale(0.8333)">
-    <path fill="#1a1300" d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>
+    <path fill="#ffffff" d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>
   </g>
 </svg>

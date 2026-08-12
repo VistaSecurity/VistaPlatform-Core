@@ -52,7 +52,10 @@ type DatabaseIntegrationProvider struct {
 	encryption *encryption.Service
 }
 
-// NewDatabaseIntegrationProvider creates a new database-backed integration provider
+// NewDatabaseIntegrationProvider creates a new database-backed integration
+// provider. Pass the BYPASSRLS handle: platform_integrations is RLS-protected,
+// but storage config references integrations by id without carrying a tenant
+// context.
 func NewDatabaseIntegrationProvider(db *sql.DB, encryptionService *encryption.Service) *DatabaseIntegrationProvider {
 	return &DatabaseIntegrationProvider{
 		db:         db,

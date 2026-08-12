@@ -18,6 +18,7 @@
 -- will now halt the migration instead of being silently swallowed.
 -- =================================================================
 
+
 -- SCHEMA: analytics
 CREATE SCHEMA IF NOT EXISTS analytics;
 
@@ -47,15 +48,18 @@ DO $$ BEGIN CREATE TYPE public.asset_type AS ENUM (
     'server', 'endpoint', 'service', 'appliance'
 ); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+
 -- TYPE: device_job_status
 DO $$ BEGIN CREATE TYPE public.device_job_status AS ENUM (
     'pending', 'assigned', 'in_progress', 'completed', 'failed', 'cancelled'
 ); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+
 -- TYPE: device_job_type
 DO $$ BEGIN CREATE TYPE public.device_job_type AS ENUM (
     'device_interrogation', 'cloud_discovery'
 ); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 
 -- TYPE: discovery_method
 DO $$ BEGIN CREATE TYPE public.discovery_method AS ENUM (
@@ -63,15 +67,18 @@ DO $$ BEGIN CREATE TYPE public.discovery_method AS ENUM (
     'device_interrogation', 'cloud_api', 'source_code_scan', 'host_scan'
 ); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+
 -- TYPE: environment_type
 DO $$ BEGIN CREATE TYPE public.environment_type AS ENUM (
     'production', 'staging', 'development', 'test'
 ); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+
 -- TYPE: file_format
 DO $$ BEGIN CREATE TYPE public.file_format AS ENUM (
     'PDF', 'Excel', 'CSV', 'JSON'
 ); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 
 -- TYPE: location_type
 DO $$ BEGIN CREATE TYPE public.location_type AS ENUM (
@@ -79,35 +86,42 @@ DO $$ BEGIN CREATE TYPE public.location_type AS ENUM (
     'office', 'site', 'colo', 'building', 'floor', 'rack'
 ); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+
 -- TYPE: protocol_type
 DO $$ BEGIN CREATE TYPE public.protocol_type AS ENUM (
     'TLS', 'SSH', 'IPSec', 'VPN', 'Database', 'API', 'SMB', 'Kerberos'
 ); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 
 -- TYPE: report_status
 DO $$ BEGIN CREATE TYPE public.report_status AS ENUM (
     'pending', 'generating', 'completed', 'failed', 'expired'
 ); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+
 -- TYPE: report_type
 DO $$ BEGIN CREATE TYPE public.report_type AS ENUM (
     'compliance', 'inventory', 'risk', 'certificate'
 ); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 
 -- TYPE: sensor_status
 DO $$ BEGIN CREATE TYPE public.sensor_status AS ENUM (
     'active', 'inactive', 'error', 'maintenance'
 ); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+
 -- TYPE: sensor_type
 DO $$ BEGIN CREATE TYPE public.sensor_type AS ENUM (
     'network', 'endpoint', 'cloud', 'api'
 ); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+
 -- TYPE: subscription_tier
 DO $$ BEGIN CREATE TYPE public.subscription_tier AS ENUM (
     'basic', 'professional', 'enterprise'
 ); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 
 -- TYPE: user_role
 DO $$ BEGIN CREATE TYPE public.user_role AS ENUM (
@@ -138,6 +152,7 @@ BEGIN
     start_date := make_date(p_year, p_month, 1);
     end_date := start_date + interval '1 month';
 
+
     -- Check if partition already exists
     IF NOT EXISTS (
         SELECT 1 FROM pg_class c
@@ -153,6 +168,7 @@ BEGIN
         EXECUTE create_stmt;
         RETURN partition_name;
     END IF;
+
 
     RETURN NULL;
 END;
@@ -203,11 +219,13 @@ BEGIN
     -- is_local=true limits the effect to this transaction.
     PERFORM set_config('app.tenant_id', NEW.id::text, true);
 
+
     -- Get Best Practices framework ID
     SELECT id INTO best_practices_framework_id
     FROM platform_frameworks
     WHERE is_platform_default = true AND status = 'published'
     LIMIT 1;
+
 
     -- Only proceed if Best Practices framework exists
     IF best_practices_framework_id IS NOT NULL THEN
@@ -216,11 +234,13 @@ BEGIN
         FROM tenant_framework_licenses
         WHERE tenant_id = NEW.id;
 
+
         -- Check if tenant already has a default framework
         SELECT COUNT(*) INTO default_count
         FROM tenant_framework_licenses
         WHERE tenant_id = NEW.id
           AND is_default = true;
+
 
         -- Create Best Practices license (default if no other licenses OR no default exists)
         INSERT INTO tenant_framework_licenses (
@@ -238,6 +258,7 @@ BEGIN
             END,
             updated_at = NOW();
     END IF;
+
 
     RETURN NEW;
 END;
@@ -272,14 +293,17 @@ BEGIN
     -- is_local=true limits the effect to this transaction.
     PERFORM set_config('app.tenant_id', NEW.id::text, true);
 
+
     -- Tier check: only auto-license Enterprise tenants.
     SELECT name INTO tier_name
     FROM subscription_tiers
     WHERE id = NEW.subscription_tier_id;
 
+
     IF tier_name IS NULL OR tier_name <> 'enterprise' THEN
         RETURN NEW;
     END IF;
+
 
     -- Look up the IEC 62351-3 framework by its stable code. The seed
     -- file UPSERTs this on every install, but during a fresh-install
@@ -293,9 +317,11 @@ BEGIN
     ORDER BY version DESC NULLS LAST
     LIMIT 1;
 
+
     IF iec62351_framework_id IS NULL THEN
         RETURN NEW;
     END IF;
+
 
     -- Idempotent: ON CONFLICT skips when the license already exists.
     INSERT INTO tenant_framework_licenses (
@@ -306,6 +332,7 @@ BEGIN
         false, NOW(), NOW(), NOW()
     )
     ON CONFLICT (tenant_id, platform_framework_id) DO NOTHING;
+
 
     RETURN NEW;
 END;
@@ -332,6 +359,7 @@ BEGIN
         GREATEST(0, 100 - ABS(p_network_util - 55) * 1.8) * 0.15
     );
 
+
     -- Performance Metrics (25% weight)
     performance_score := (
         GREATEST(0, 100 - (p_response_time - 200) / 3) * 0.3 +
@@ -339,6 +367,7 @@ BEGIN
         LEAST(100, p_throughput / 10) * 0.2 +
         GREATEST(0, (p_uptime - 99) / 0.9 * 100) * 0.2
     );
+
 
     -- Security Posture (20% weight)
     security_score := (
@@ -351,6 +380,7 @@ BEGIN
         END * 0.2
     );
 
+
     -- Business Activity (15% weight)
     business_score := (
         LEAST(100, p_active_users / 10) * 0.3 +
@@ -359,12 +389,14 @@ BEGIN
         50 * 0.15 -- Placeholder for feature usage
     );
 
+
     -- Cost Optimization (15% weight)
     cost_score := (
         GREATEST(0, 100 - (p_cost_per_user - 10) * 5) * 0.4 +
         p_cost_efficiency * 0.4 +
         50 * 0.2 -- Placeholder for resource cost optimization
     );
+
 
     -- Calculate weighted overall score
     overall_score := (
@@ -374,6 +406,7 @@ BEGIN
         business_score * 0.15 +
         cost_score * 0.15
     );
+
 
     RETURN GREATEST(0, LEAST(100, overall_score));
 END;
@@ -393,6 +426,7 @@ BEGIN
     FROM resource_tracking_config
     WHERE config_key = 'cost_rates';
 
+
     -- Calculate total cost for the period
     SELECT COALESCE(SUM(
         (api_calls * (cost_rates->>'api_call_cost')::DECIMAL) +
@@ -404,6 +438,7 @@ BEGIN
     FROM tenant_resource_usage
     WHERE tenant_id = p_tenant_id
     AND timestamp BETWEEN p_period_start AND p_period_end;
+
 
     RETURN total_cost;
 END;
@@ -431,12 +466,15 @@ BEGIN
     DELETE FROM aws_cost_data
     WHERE cost_date < CURRENT_DATE - (retention_days || ' days')::INTERVAL;
 
+
     GET DIAGNOSTICS deleted_count = ROW_COUNT;
+
 
     -- Delete old sync job records (keep last 90 days)
     DELETE FROM aws_cost_sync_jobs
     WHERE created_at < NOW() - INTERVAL '90 days'
     AND status IN ('completed', 'failed');
+
 
     RETURN deleted_count;
 END;
@@ -451,6 +489,7 @@ BEGIN
     -- Delete resource usage data older than 90 days
     DELETE FROM tenant_resource_usage
     WHERE timestamp < NOW() - INTERVAL '90 days';
+
 
     -- Delete resolved alerts older than 30 days
     DELETE FROM resource_alerts
@@ -497,6 +536,7 @@ BEGIN
     )
     ON CONFLICT DO NOTHING;
 
+
     -- Insert Platform Device Interrogation Agent for the new tenant
     INSERT INTO sensors (
         id, tenant_id, name, description, platform, version, profile,
@@ -518,6 +558,7 @@ BEGIN
         NOW()
     )
     ON CONFLICT DO NOTHING;
+
 
     RETURN NEW;
 END;
@@ -595,6 +636,7 @@ BEGIN
     FROM platform_settings
     WHERE setting_key = key_name;
 
+
     RETURN COALESCE(result, default_value);
 END;
 $$;
@@ -611,9 +653,11 @@ BEGIN
     FROM platform_settings
     WHERE setting_key = key_name;
 
+
     IF result IS NULL THEN
         RETURN default_value;
     END IF;
+
 
     RETURN (result::text)::boolean;
 END;
@@ -655,36 +699,44 @@ BEGIN
     FROM platform_settings
     WHERE setting_key = 'email_config';
 
+
     -- Get tenant admin settings
     SELECT config INTO tenant_config
     FROM tenant_admin_settings
     WHERE tenant_id = tenant_uuid;
+
 
     -- If no tenant settings, return platform default
     IF tenant_config IS NULL THEN
         RETURN platform_config;
     END IF;
 
+
     -- Extract email_config from tenant settings
     tenant_email_config := tenant_config->'email_config';
+
 
     -- If no email_config in tenant settings, return platform default
     IF tenant_email_config IS NULL THEN
         RETURN platform_config;
     END IF;
 
+
     -- Check if tenant wants to use platform default
     use_platform_default := COALESCE((tenant_email_config->>'use_platform_default')::boolean, true);
+
 
     IF use_platform_default THEN
         RETURN platform_config;
     END IF;
+
 
     -- Check if tenant has SMTP host configured (indicates custom SMTP)
     IF tenant_email_config->>'smtp_host' IS NOT NULL AND tenant_email_config->>'smtp_host' != '' THEN
         -- Return tenant config (password will be decrypted in application code)
         RETURN tenant_email_config;
     END IF;
+
 
     -- Fall back to platform default
     RETURN platform_config;
@@ -728,6 +780,7 @@ BEGIN
       AND utr.is_active = true
     ORDER BY utr.assigned_at DESC
     LIMIT 1;
+
 
     -- Return default role if none found
     RETURN COALESCE(role_name, 'viewer');
@@ -792,6 +845,7 @@ BEGIN
         );
     END IF;
 
+
     -- Insert history record
     INSERT INTO subscription_tier_history (tier_id, change_type, changes_json, changed_at)
     VALUES (
@@ -800,6 +854,7 @@ BEGIN
         changes_json_val,
         NOW()
     );
+
 
     RETURN COALESCE(NEW, OLD);
 END;
@@ -826,6 +881,7 @@ BEGIN
           AND pu.deleted_at IS NULL
           AND pp.name = p_permission_name
     ) INTO has_permission;
+
 
     RETURN has_permission;
 END;
@@ -904,17 +960,6 @@ END;
 $$;
 
 
--- FUNCTION: update_crypto_configurations_updated_at()
-CREATE OR REPLACE FUNCTION public.update_crypto_configurations_updated_at() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    NEW.updated_at = NOW();
-    RETURN NEW;
-END;
-$$;
-
-
 -- FUNCTION: update_device_jobs_updated_at()
 CREATE OR REPLACE FUNCTION public.update_device_jobs_updated_at() RETURNS trigger
     LANGUAGE plpgsql
@@ -950,11 +995,13 @@ DECLARE
 BEGIN
     v_tenant_id := COALESCE(NEW.tenant_id, OLD.tenant_id);
 
+
     -- Skip if tenant no longer exists (e.g. during a cascade purge delete).
     -- Attempting to upsert tenant_usage for a deleted tenant violates the FK.
     IF NOT EXISTS (SELECT 1 FROM tenants WHERE id = v_tenant_id) THEN
         RETURN COALESCE(NEW, OLD);
     END IF;
+
 
     -- Update user count in current period usage
     INSERT INTO tenant_usage (tenant_id, users_count, billing_period_start, billing_period_end)
@@ -968,6 +1015,7 @@ BEGIN
     DO UPDATE SET
         users_count = EXCLUDED.users_count,
         last_calculated_at = NOW();
+
 
     RETURN COALESCE(NEW, OLD);
 END;
@@ -1007,12 +1055,14 @@ BEGIN
           AND tp.name = p_permission_name
     ) INTO has_permission;
 
+
     RETURN has_permission;
 END;
 $$;
 
 
 SET default_tablespace = '';
+
 
 -- TABLE: activity_logs
 CREATE TABLE IF NOT EXISTS audit.activity_logs (
@@ -1049,6 +1099,7 @@ PARTITION BY RANGE (occurred_at);
 
 
 SET default_table_access_method = heap;
+
 
 -- TABLE: activity_logs_y2026m04
 CREATE TABLE IF NOT EXISTS audit.activity_logs_y2026m04 (
@@ -2254,8 +2305,6 @@ CREATE TABLE IF NOT EXISTS public.compliance_overrides (
 );
 
 
-
-
 -- TABLE: compliance_reports
 CREATE TABLE IF NOT EXISTS public.compliance_reports (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
@@ -2422,29 +2471,6 @@ CREATE TABLE IF NOT EXISTS public.crypto_code_findings (
 );
 
 
--- TABLE: crypto_configurations
-CREATE TABLE IF NOT EXISTS public.crypto_configurations (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    tenant_id uuid NOT NULL,
-    asset_id uuid NOT NULL,
-    device_id uuid,
-    protocol character varying(50) NOT NULL,
-    configured_cipher_suites text[],
-    configured_protocol_versions text[],
-    algorithm_preferences jsonb DEFAULT '{}'::jsonb,
-    source character varying(50) NOT NULL,
-    discovery_method character varying(50) NOT NULL,
-    confidence_score numeric(3,2) DEFAULT 1.0,
-    discovered_at timestamp with time zone DEFAULT now(),
-    last_verified_at timestamp with time zone DEFAULT now(),
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    deleted_at timestamp with time zone,
-    CONSTRAINT valid_confidence CHECK (((confidence_score >= 0.0) AND (confidence_score <= 1.0))),
-    CONSTRAINT valid_source CHECK (((source)::text = ANY ((ARRAY['device_config'::character varying, 'server_config'::character varying, 'handshake_negotiation'::character varying, 'observed'::character varying, 'manual'::character varying])::text[])))
-);
-
-
 -- TABLE: crypto_implementation_algorithms
 CREATE TABLE IF NOT EXISTS public.crypto_implementation_algorithms (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
@@ -2465,7 +2491,7 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementation_certificates (
     certificate_role character varying(50) DEFAULT 'additional'::character varying,
     certificate_order integer DEFAULT 0,
     created_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT valid_certificate_role CHECK (((certificate_role)::text = ANY ((ARRAY['additional'::character varying, 'intermediate'::character varying, 'root'::character varying])::text[])))
+    CONSTRAINT valid_certificate_role CHECK (((certificate_role)::text = ANY ((ARRAY['leaf'::character varying, 'primary'::character varying, 'additional'::character varying, 'intermediate'::character varying, 'root'::character varying])::text[])))
 );
 
 
@@ -2540,46 +2566,6 @@ CREATE OR REPLACE VIEW public.crypto_implementations AS
     crypto_implementations_partitioned.updated_at,
     crypto_implementations_partitioned.deleted_at
    FROM public.crypto_implementations_partitioned;
-
-
--- TABLE: crypto_implementations_legacy
-CREATE TABLE IF NOT EXISTS public.crypto_implementations_legacy (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    tenant_id uuid NOT NULL,
-    asset_id uuid NOT NULL,
-    protocol public.protocol_type NOT NULL,
-    protocol_version character varying(100),
-    cipher_suite character varying(255),
-    key_exchange_algorithm character varying(100),
-    signature_algorithm character varying(100),
-    symmetric_encryption character varying(100),
-    hash_algorithm character varying(100),
-    key_size integer,
-    certificate_id uuid,
-    discovery_method public.discovery_method NOT NULL,
-    confidence_score numeric(3,2) DEFAULT 1.0,
-    source_sensor_id uuid,
-    raw_data jsonb,
-    risk_score integer DEFAULT 0,
-    compliance_status jsonb DEFAULT '{}'::jsonb,
-    pfs_support boolean,
-    tls_compression_enabled boolean,
-    certificate_chain_valid boolean,
-    execution_environment character varying(50),
-    implementation_platform character varying(50),
-    certification_level text[],
-    data_completeness character varying(20) DEFAULT 'complete'::character varying,
-    components_inferred boolean DEFAULT false,
-    first_discovered_at timestamp with time zone DEFAULT now(),
-    last_verified_at timestamp with time zone DEFAULT now(),
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    deleted_at timestamp with time zone,
-    CONSTRAINT valid_confidence CHECK (((confidence_score >= 0.0) AND (confidence_score <= 1.0))),
-    CONSTRAINT valid_crypto_data_completeness CHECK (((data_completeness)::text = ANY ((ARRAY['complete'::character varying, 'partial'::character varying, 'inferred'::character varying])::text[]))),
-    CONSTRAINT valid_key_size CHECK (((key_size IS NULL) OR (key_size > 0))),
-    CONSTRAINT valid_risk_score CHECK (((risk_score >= 0) AND (risk_score <= 100)))
-);
 
 
 -- TABLE: crypto_implementations_part_0
@@ -3728,171 +3714,6 @@ CREATE TABLE IF NOT EXISTS public.monitoring_notification_channels (
 );
 
 
--- TABLE: network_assets_legacy
-CREATE TABLE IF NOT EXISTS public.network_assets_legacy (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    tenant_id uuid NOT NULL,
-    hostname character varying(255),
-    ip_address inet,
-    port integer,
-    asset_type public.asset_type NOT NULL,
-    operating_system character varying(100),
-    environment public.environment_type,
-    business_unit character varying(100),
-    owner_email character varying(255),
-    description text,
-    tags jsonb DEFAULT '{}'::jsonb,
-    metadata jsonb DEFAULT '{}'::jsonb,
-    first_discovered_at timestamp with time zone DEFAULT now(),
-    last_seen_at timestamp with time zone DEFAULT now(),
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    deleted_at timestamp with time zone,
-    risk_score integer DEFAULT 0,
-    risk_level character varying(20) DEFAULT 'Informational'::character varying,
-    location_id uuid,
-    network_segment_id uuid,
-    service_name character varying(100),
-    service_version character varying(100),
-    service_confidence character varying(20) DEFAULT 'none'::character varying,
-    service_identification_method character varying(50),
-    fqdns text[],
-    mac_addresses text[],
-    serial_number text,
-    cloud_provider text,
-    cloud_account_id text,
-    cloud_instance_id text,
-    site text,
-    region text,
-    zone text,
-    discovery_method text,
-    confidence_score integer,
-    stale_status character varying(50) DEFAULT NULL::character varying,
-    asset_status character varying(50) DEFAULT 'monitoring'::character varying,
-    device_id uuid,
-    asset_ownership character varying(50) DEFAULT 'unknown'::character varying,
-    CONSTRAINT asset_identifier CHECK (((hostname IS NOT NULL) OR (ip_address IS NOT NULL))),
-    CONSTRAINT network_assets_asset_ownership_check CHECK (((asset_ownership)::text = ANY ((ARRAY['internal'::character varying, 'third_party'::character varying, 'unknown'::character varying])::text[]))),
-    CONSTRAINT network_assets_asset_status_check CHECK (((asset_status)::text = ANY ((ARRAY['pending_approval'::character varying, 'monitoring'::character varying, 'denied'::character varying])::text[]))),
-    CONSTRAINT network_assets_service_confidence_check CHECK (((service_confidence)::text = ANY ((ARRAY['high'::character varying, 'medium'::character varying, 'low'::character varying, 'none'::character varying])::text[]))),
-    CONSTRAINT network_assets_service_identification_method_check CHECK (((service_identification_method IS NULL) OR ((service_identification_method)::text = ANY ((ARRAY['banner'::character varying, 'ja3s'::character varying, 'port_heuristic'::character varying, 'http_header'::character varying, 'manual'::character varying])::text[])))),
-    CONSTRAINT network_assets_stale_status_check CHECK (((stale_status)::text = ANY ((ARRAY['warning'::character varying, 'archived'::character varying])::text[]))),
-    CONSTRAINT valid_asset_risk_level CHECK (((risk_level)::text = ANY ((ARRAY['Critical'::character varying, 'High'::character varying, 'Medium'::character varying, 'Low'::character varying, 'Informational'::character varying])::text[]))),
-    CONSTRAINT valid_asset_risk_score CHECK (((risk_score >= 0) AND (risk_score <= 100))),
-    CONSTRAINT valid_owner_email CHECK (((owner_email IS NULL) OR ((owner_email)::text ~ '^[^@]+@[^@]+\.[^@]+$'::text))),
-    CONSTRAINT valid_port CHECK (((port IS NULL) OR ((port >= 1) AND (port <= 65535))))
-);
-
-
--- MATERIALIZED VIEW: mv_location_finding_summary
-CREATE MATERIALIZED VIEW IF NOT EXISTS public.mv_location_finding_summary AS
- SELECT l.id AS location_id,
-    l.tenant_id,
-    l.name AS location_name,
-    (l.location_type)::text AS location_type,
-    l.full_path,
-    COALESCE((a.environment)::text, 'unknown'::text) AS environment,
-    count(DISTINCT a.id) AS asset_count,
-    count(DISTINCT ci.id) AS crypto_config_count,
-    count(DISTINCT c.id) AS certificate_count,
-    count(DISTINCT a.id) FILTER (WHERE ((a.risk_level)::text = 'Critical'::text)) AS critical_findings,
-    count(DISTINCT a.id) FILTER (WHERE ((a.risk_level)::text = 'High'::text)) AS high_findings,
-    count(DISTINCT a.id) FILTER (WHERE ((a.risk_level)::text = 'Medium'::text)) AS medium_findings,
-    count(DISTINCT a.id) FILTER (WHERE ((a.risk_level)::text = 'Low'::text)) AS low_findings,
-    count(DISTINCT c.id) FILTER (WHERE ((c.not_after IS NOT NULL) AND (c.not_after > now()) AND (c.not_after <= (now() + '30 days'::interval)))) AS expiring_certs_30d,
-    count(DISTINCT c.id) FILTER (WHERE ((c.not_after IS NOT NULL) AND (c.not_after < now()))) AS expired_certs
-   FROM (((public.locations l
-     LEFT JOIN public.network_assets_legacy a ON (((a.location_id = l.id) AND (a.deleted_at IS NULL))))
-     LEFT JOIN public.crypto_implementations_legacy ci ON (((ci.asset_id = a.id) AND (ci.deleted_at IS NULL))))
-     LEFT JOIN public.certificates c ON ((c.id = ci.certificate_id)))
-  GROUP BY l.id, l.tenant_id, l.name, l.location_type, l.full_path, a.environment
-  WITH NO DATA;
-
-
--- MATERIALIZED VIEW: mv_remediation_queue
-CREATE MATERIALIZED VIEW IF NOT EXISTS public.mv_remediation_queue AS
- SELECT a.tenant_id,
-    'expiring_cert'::character varying(50) AS finding_type,
-        CASE
-            WHEN (c.not_after <= now()) THEN 'critical'::text
-            ELSE 'high'::text
-        END AS severity,
-    a.id AS asset_id,
-    a.hostname AS asset_hostname,
-    (a.ip_address)::text AS asset_ip,
-    a.port AS asset_port,
-    l.name AS location_name,
-    l.full_path AS location_full_path,
-    (a.environment)::text AS environment,
-    a.service_name,
-    c.id AS certificate_id,
-    ci.id AS crypto_implementation_id,
-    ((('Certificate '::text || (COALESCE(c.common_name, (c.subject_dn)::character varying))::text) || ' expires '::text) || (c.not_after)::text) AS detail_text,
-    ci.created_at
-   FROM (((public.network_assets_legacy a
-     JOIN public.crypto_implementations_legacy ci ON (((ci.asset_id = a.id) AND (ci.deleted_at IS NULL))))
-     JOIN public.certificates c ON (((c.id = ci.certificate_id) AND (c.not_after IS NOT NULL) AND ((c.not_after <= now()) OR (c.not_after <= (now() + '30 days'::interval))))))
-     LEFT JOIN public.locations l ON ((l.id = a.location_id)))
-  WHERE (a.deleted_at IS NULL)
-UNION ALL
- SELECT a.tenant_id,
-    'weak_cipher'::character varying(50) AS finding_type,
-        -- Canonical risk bands (services/inventory-service/internal/models/risk_bands.go):
-        -- Critical >= 90, High >= 70, Medium >= 40, Low >= 1, Informational 0.
-        -- CVSS v3.1/v4.0 qualitative ratings x10. This ladder previously ran
-        -- >= 80 high / >= 60 medium, so an implementation scoring 60-69 was
-        -- surfaced here as "medium" while every other surface called it Medium
-        -- at >= 40 and High at >= 70 — the same drift risk_bands.go exists to
-        -- prevent. Labels are lowercase because the consumer
-        -- (OperationalService.GetRemediationQueue) filters and orders on them.
-        CASE
-            WHEN (ci.risk_score >= 90) THEN 'critical'::text
-            WHEN (ci.risk_score >= 70) THEN 'high'::text
-            WHEN (ci.risk_score >= 40) THEN 'medium'::text
-            WHEN (ci.risk_score >= 1) THEN 'low'::text
-            ELSE 'informational'::text
-        END AS severity,
-    a.id AS asset_id,
-    a.hostname AS asset_hostname,
-    (a.ip_address)::text AS asset_ip,
-    a.port AS asset_port,
-    l.name AS location_name,
-    l.full_path AS location_full_path,
-    (a.environment)::text AS environment,
-    a.service_name,
-    NULL::uuid AS certificate_id,
-    ci.id AS crypto_implementation_id,
-    ((('Risk score '::text || (ci.risk_score)::text) || ': '::text) || (COALESCE(ci.cipher_suite, ((ci.protocol)::text)::character varying))::text) AS detail_text,
-    ci.created_at
-   FROM ((public.network_assets_legacy a
-     -- >= 40 is the canonical Medium floor (risk_bands.go). It was >= 60, which
-     -- silently hid the bottom half of the Medium band from the queue.
-     JOIN public.crypto_implementations_legacy ci ON (((ci.asset_id = a.id) AND (ci.deleted_at IS NULL) AND (ci.risk_score >= 40))))
-     LEFT JOIN public.locations l ON ((l.id = a.location_id)))
-  WHERE (a.deleted_at IS NULL)
-UNION ALL
- SELECT a.tenant_id,
-    'deprecated_protocol'::character varying(50) AS finding_type,
-    'medium'::text AS severity,
-    a.id AS asset_id,
-    a.hostname AS asset_hostname,
-    (a.ip_address)::text AS asset_ip,
-    a.port AS asset_port,
-    l.name AS location_name,
-    l.full_path AS location_full_path,
-    (a.environment)::text AS environment,
-    a.service_name,
-    NULL::uuid AS certificate_id,
-    ci.id AS crypto_implementation_id,
-    ('Protocol '::text || (COALESCE(ci.protocol_version, ((ci.protocol)::text)::character varying))::text) AS detail_text,
-    ci.created_at
-   FROM ((public.network_assets_legacy a
-     JOIN public.crypto_implementations_legacy ci ON (((ci.asset_id = a.id) AND (ci.deleted_at IS NULL))))
-     LEFT JOIN public.locations l ON ((l.id = a.location_id)))
-  WHERE ((a.deleted_at IS NULL) AND (((ci.protocol_version)::text = ANY ((ARRAY['TLS 1.0'::character varying, 'TLS 1.1'::character varying, 'SSL 3.0'::character varying])::text[])) OR ((ci.protocol_version)::text ~~ '1.0'::text) OR ((ci.protocol_version)::text ~~ '1.1'::text)))
-  WITH NO DATA;
-
-
 -- TABLE: network_assets_partitioned
 CREATE TABLE IF NOT EXISTS public.network_assets_partitioned (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
@@ -3988,6 +3809,115 @@ CREATE OR REPLACE VIEW public.network_assets AS
     network_assets_partitioned.asset_status,
     network_assets_partitioned.asset_ownership
    FROM public.network_assets_partitioned;
+
+
+-- MATERIALIZED VIEW: mv_location_finding_summary
+CREATE MATERIALIZED VIEW IF NOT EXISTS public.mv_location_finding_summary AS
+ SELECT l.id AS location_id,
+    l.tenant_id,
+    l.name AS location_name,
+    (l.location_type)::text AS location_type,
+    l.full_path,
+    COALESCE((a.environment)::text, 'unknown'::text) AS environment,
+    count(DISTINCT a.id) AS asset_count,
+    count(DISTINCT ci.id) AS crypto_config_count,
+    count(DISTINCT c.id) AS certificate_count,
+    count(DISTINCT a.id) FILTER (WHERE ((a.risk_level)::text = 'Critical'::text)) AS critical_findings,
+    count(DISTINCT a.id) FILTER (WHERE ((a.risk_level)::text = 'High'::text)) AS high_findings,
+    count(DISTINCT a.id) FILTER (WHERE ((a.risk_level)::text = 'Medium'::text)) AS medium_findings,
+    count(DISTINCT a.id) FILTER (WHERE ((a.risk_level)::text = 'Low'::text)) AS low_findings,
+    count(DISTINCT c.id) FILTER (WHERE ((c.not_after IS NOT NULL) AND (c.not_after > now()) AND (c.not_after <= (now() + '30 days'::interval)))) AS expiring_certs_30d,
+    count(DISTINCT c.id) FILTER (WHERE ((c.not_after IS NOT NULL) AND (c.not_after < now()))) AS expired_certs
+   FROM (((public.locations l
+     LEFT JOIN public.network_assets_partitioned a ON (((a.location_id = l.id) AND (a.deleted_at IS NULL))))
+     LEFT JOIN public.crypto_implementations_partitioned ci ON (((ci.asset_id = a.id) AND (ci.deleted_at IS NULL))))
+     LEFT JOIN public.certificates c ON ((c.id = ci.certificate_id)))
+  GROUP BY l.id, l.tenant_id, l.name, l.location_type, l.full_path, a.environment
+  WITH NO DATA;
+
+
+-- MATERIALIZED VIEW: mv_remediation_queue
+CREATE MATERIALIZED VIEW IF NOT EXISTS public.mv_remediation_queue AS
+ SELECT a.tenant_id,
+    'expiring_cert'::character varying(50) AS finding_type,
+        CASE
+            WHEN (c.not_after <= now()) THEN 'critical'::text
+            ELSE 'high'::text
+        END AS severity,
+    a.id AS asset_id,
+    a.hostname AS asset_hostname,
+    (a.ip_address)::text AS asset_ip,
+    a.port AS asset_port,
+    l.name AS location_name,
+    l.full_path AS location_full_path,
+    (a.environment)::text AS environment,
+    a.service_name,
+    c.id AS certificate_id,
+    ci.id AS crypto_implementation_id,
+    ((('Certificate '::text || (COALESCE(c.common_name, (c.subject_dn)::character varying))::text) || ' expires '::text) || (c.not_after)::text) AS detail_text,
+    ci.created_at
+   FROM (((public.network_assets_partitioned a
+     JOIN public.crypto_implementations_partitioned ci ON (((ci.asset_id = a.id) AND (ci.deleted_at IS NULL))))
+     JOIN public.certificates c ON (((c.id = ci.certificate_id) AND (c.not_after IS NOT NULL) AND ((c.not_after <= now()) OR (c.not_after <= (now() + '30 days'::interval))))))
+     LEFT JOIN public.locations l ON ((l.id = a.location_id)))
+  WHERE (a.deleted_at IS NULL)
+UNION ALL
+ SELECT a.tenant_id,
+    'weak_cipher'::character varying(50) AS finding_type,
+        -- Canonical risk bands (services/inventory-service/internal/models/risk_bands.go):
+        -- Critical >= 90, High >= 70, Medium >= 40, Low >= 1, Informational 0.
+        -- CVSS v3.1/v4.0 qualitative ratings x10. This ladder previously ran
+        -- >= 80 high / >= 60 medium, so an implementation scoring 60-69 was
+        -- surfaced here as "medium" while every other surface called it Medium
+        -- at >= 40 and High at >= 70 — the same drift risk_bands.go exists to
+        -- prevent. Labels are lowercase because the consumer
+        -- (OperationalService.GetRemediationQueue) filters and orders on them.
+        CASE
+            WHEN (ci.risk_score >= 90) THEN 'critical'::text
+            WHEN (ci.risk_score >= 70) THEN 'high'::text
+            WHEN (ci.risk_score >= 40) THEN 'medium'::text
+            WHEN (ci.risk_score >= 1) THEN 'low'::text
+            ELSE 'informational'::text
+        END AS severity,
+    a.id AS asset_id,
+    a.hostname AS asset_hostname,
+    (a.ip_address)::text AS asset_ip,
+    a.port AS asset_port,
+    l.name AS location_name,
+    l.full_path AS location_full_path,
+    (a.environment)::text AS environment,
+    a.service_name,
+    NULL::uuid AS certificate_id,
+    ci.id AS crypto_implementation_id,
+    ((('Risk score '::text || (ci.risk_score)::text) || ': '::text) || (COALESCE(ci.cipher_suite, ((ci.protocol)::text)::character varying))::text) AS detail_text,
+    ci.created_at
+   FROM ((public.network_assets_partitioned a
+     -- >= 40 is the canonical Medium floor (risk_bands.go). It was >= 60, which
+     -- silently hid the bottom half of the Medium band from the queue.
+     JOIN public.crypto_implementations_partitioned ci ON (((ci.asset_id = a.id) AND (ci.deleted_at IS NULL) AND (ci.risk_score >= 40))))
+     LEFT JOIN public.locations l ON ((l.id = a.location_id)))
+  WHERE (a.deleted_at IS NULL)
+UNION ALL
+ SELECT a.tenant_id,
+    'deprecated_protocol'::character varying(50) AS finding_type,
+    'medium'::text AS severity,
+    a.id AS asset_id,
+    a.hostname AS asset_hostname,
+    (a.ip_address)::text AS asset_ip,
+    a.port AS asset_port,
+    l.name AS location_name,
+    l.full_path AS location_full_path,
+    (a.environment)::text AS environment,
+    a.service_name,
+    NULL::uuid AS certificate_id,
+    ci.id AS crypto_implementation_id,
+    ('Protocol '::text || (COALESCE(ci.protocol_version, ((ci.protocol)::text)::character varying))::text) AS detail_text,
+    ci.created_at
+   FROM ((public.network_assets_partitioned a
+     JOIN public.crypto_implementations_partitioned ci ON (((ci.asset_id = a.id) AND (ci.deleted_at IS NULL))))
+     LEFT JOIN public.locations l ON ((l.id = a.location_id)))
+  WHERE ((a.deleted_at IS NULL) AND (((ci.protocol_version)::text = ANY ((ARRAY['TLS 1.0'::character varying, 'TLS 1.1'::character varying, 'SSL 3.0'::character varying])::text[])) OR ((ci.protocol_version)::text ~~ '1.0'::text) OR ((ci.protocol_version)::text ~~ '1.1'::text)))
+  WITH NO DATA;
 
 
 -- TABLE: network_assets_part_0
@@ -5363,29 +5293,6 @@ CREATE OR REPLACE VIEW public.sensor_discoveries AS
    FROM public.sensor_discoveries_partitioned;
 
 
--- TABLE: sensor_discoveries_legacy
-CREATE TABLE IF NOT EXISTS public.sensor_discoveries_legacy (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    sensor_id uuid NOT NULL,
-    tenant_id uuid NOT NULL,
-    batch_id character varying(255) NOT NULL,
-    protocol character varying(50) NOT NULL,
-    dest_ip inet NOT NULL,
-    port integer NOT NULL,
-    confidence numeric(3,2) DEFAULT 0.0 NOT NULL,
-    metadata jsonb,
-    "timestamp" timestamp with time zone DEFAULT now(),
-    created_at timestamp with time zone DEFAULT now(),
-    processed_at timestamp with time zone,
-    approval_status character varying(20) DEFAULT 'pending'::character varying,
-    auto_approval_rule_id uuid,
-    asset_id uuid,
-    hostname character varying(255),
-    source_ip inet,
-    CONSTRAINT sensor_discoveries_approval_status_check CHECK (((approval_status)::text = ANY ((ARRAY['pending'::character varying, 'auto_approved'::character varying, 'approved'::character varying, 'rejected'::character varying])::text[])))
-);
-
-
 -- TABLE: sensor_discoveries_part_0
 CREATE TABLE IF NOT EXISTS public.sensor_discoveries_part_0 (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -6347,26 +6254,26 @@ CREATE TABLE IF NOT EXISTS public.user_workflow_progress (
 
 -- VIEW: v_ci_inventory
 CREATE OR REPLACE VIEW public.v_ci_inventory AS
- SELECT network_assets_legacy.id,
-    network_assets_legacy.tenant_id,
+ SELECT network_assets_partitioned.id,
+    network_assets_partitioned.tenant_id,
     'infrastructure_asset'::text AS ci_category,
-        CASE network_assets_legacy.asset_type
+        CASE network_assets_partitioned.asset_type
             WHEN 'server'::public.asset_type THEN 'cmdb_ci_server'::text
             WHEN 'endpoint'::public.asset_type THEN 'cmdb_ci_endpoint'::text
             WHEN 'service'::public.asset_type THEN 'cmdb_ci_service'::text
             WHEN 'appliance'::public.asset_type THEN 'cmdb_ci_appliance'::text
             ELSE 'cmdb_ci_hardware'::text
         END AS cmdb_ci_type,
-    COALESCE(network_assets_legacy.hostname, ((network_assets_legacy.ip_address)::text)::character varying) AS display_name,
-    network_assets_legacy.description,
-    network_assets_legacy.risk_score,
-    network_assets_legacy.risk_level,
-    network_assets_legacy.first_discovered_at,
-    network_assets_legacy.last_seen_at AS last_verified_at,
-    network_assets_legacy.created_at,
-    network_assets_legacy.updated_at,
-    network_assets_legacy.deleted_at
-   FROM public.network_assets_legacy
+    COALESCE(network_assets_partitioned.hostname, ((network_assets_partitioned.ip_address)::text)::character varying) AS display_name,
+    network_assets_partitioned.description,
+    network_assets_partitioned.risk_score,
+    network_assets_partitioned.risk_level,
+    network_assets_partitioned.first_discovered_at,
+    network_assets_partitioned.last_seen_at AS last_verified_at,
+    network_assets_partitioned.created_at,
+    network_assets_partitioned.updated_at,
+    network_assets_partitioned.deleted_at
+   FROM public.network_assets_partitioned
 UNION ALL
  SELECT certificates.id,
     certificates.tenant_id,
@@ -6398,88 +6305,31 @@ UNION ALL
     NULL::timestamp with time zone AS deleted_at
    FROM public.keys
 UNION ALL
- SELECT crypto_implementations_legacy.id,
-    crypto_implementations_legacy.tenant_id,
+ SELECT crypto_implementations_partitioned.id,
+    crypto_implementations_partitioned.tenant_id,
     'crypto_configuration'::text AS ci_category,
     'cmdb_ci_crypto_config'::text AS cmdb_ci_type,
-    COALESCE((((crypto_implementations_legacy.protocol)::text || ' '::text) || (COALESCE(crypto_implementations_legacy.protocol_version, ''::character varying))::text), 'Unknown protocol'::text) AS display_name,
-    ((('Crypto config: '::text || COALESCE((crypto_implementations_legacy.protocol)::text, ''::text)) || ' '::text) || (COALESCE(crypto_implementations_legacy.cipher_suite, ''::character varying))::text) AS description,
-    crypto_implementations_legacy.risk_score,
+    COALESCE((((crypto_implementations_partitioned.protocol)::text || ' '::text) || (COALESCE(crypto_implementations_partitioned.protocol_version, ''::character varying))::text), 'Unknown protocol'::text) AS display_name,
+    ((('Crypto config: '::text || COALESCE((crypto_implementations_partitioned.protocol)::text, ''::text)) || ' '::text) || (COALESCE(crypto_implementations_partitioned.cipher_suite, ''::character varying))::text) AS description,
+    crypto_implementations_partitioned.risk_score,
         -- Canonical risk bands (services/inventory-service/internal/models/risk_bands.go):
         -- Critical >= 90, High >= 70, Medium >= 40, Low >= 1, Informational 0.
         -- Was >= 80 / 60 / 40 / 20, which called a 60 "High" (canonical: Medium)
         -- and a 15 "Informational" (canonical: Low). Score 0 means NOT ASSESSED,
         -- so only 0 may band as Informational.
         CASE
-            WHEN (crypto_implementations_legacy.risk_score >= 90) THEN 'Critical'::text
-            WHEN (crypto_implementations_legacy.risk_score >= 70) THEN 'High'::text
-            WHEN (crypto_implementations_legacy.risk_score >= 40) THEN 'Medium'::text
-            WHEN (crypto_implementations_legacy.risk_score >= 1) THEN 'Low'::text
+            WHEN (crypto_implementations_partitioned.risk_score >= 90) THEN 'Critical'::text
+            WHEN (crypto_implementations_partitioned.risk_score >= 70) THEN 'High'::text
+            WHEN (crypto_implementations_partitioned.risk_score >= 40) THEN 'Medium'::text
+            WHEN (crypto_implementations_partitioned.risk_score >= 1) THEN 'Low'::text
             ELSE 'Informational'::text
         END AS risk_level,
-    crypto_implementations_legacy.first_discovered_at,
-    crypto_implementations_legacy.last_verified_at,
-    crypto_implementations_legacy.created_at,
-    crypto_implementations_legacy.updated_at,
-    crypto_implementations_legacy.deleted_at
-   FROM public.crypto_implementations_legacy;
-
-
--- VIEW: v_crypto_configurations
-CREATE OR REPLACE VIEW public.v_crypto_configurations AS
- SELECT ci.id,
-    ci.tenant_id,
-    ci.asset_id AS infrastructure_asset_id,
-    ci.protocol,
-    ci.protocol_version,
-    ci.cipher_suite,
-    ci.key_exchange_algorithm,
-    ci.signature_algorithm,
-    ci.symmetric_encryption,
-    ci.hash_algorithm,
-    ci.key_size,
-    ci.certificate_id,
-    ci.discovery_method,
-    ci.confidence_score,
-    ci.source_sensor_id,
-    ci.risk_score,
-    ci.compliance_status,
-    ci.pfs_support,
-    ci.tls_compression_enabled,
-    ci.certificate_chain_valid,
-    ci.data_completeness,
-    ci.components_inferred,
-    ci.first_discovered_at,
-    ci.last_verified_at,
-    ci.created_at,
-    ci.updated_at,
-    ci.deleted_at
-   FROM public.crypto_implementations_legacy ci;
-
-
--- VIEW: v_infrastructure_assets
-CREATE OR REPLACE VIEW public.v_infrastructure_assets AS
- SELECT network_assets_legacy.id,
-    network_assets_legacy.tenant_id,
-    network_assets_legacy.hostname,
-    network_assets_legacy.ip_address,
-    network_assets_legacy.port,
-    network_assets_legacy.asset_type AS ci_type,
-    network_assets_legacy.operating_system,
-    network_assets_legacy.environment,
-    network_assets_legacy.business_unit,
-    network_assets_legacy.owner_email,
-    network_assets_legacy.description,
-    network_assets_legacy.tags,
-    network_assets_legacy.metadata,
-    network_assets_legacy.first_discovered_at,
-    network_assets_legacy.last_seen_at,
-    network_assets_legacy.risk_score,
-    network_assets_legacy.risk_level,
-    network_assets_legacy.created_at,
-    network_assets_legacy.updated_at,
-    network_assets_legacy.deleted_at
-   FROM public.network_assets_legacy;
+    crypto_implementations_partitioned.first_discovered_at,
+    crypto_implementations_partitioned.last_verified_at,
+    crypto_implementations_partitioned.created_at,
+    crypto_implementations_partitioned.updated_at,
+    crypto_implementations_partitioned.deleted_at
+   FROM public.crypto_implementations_partitioned;
 
 
 -- VIEW: v_tenants
@@ -7724,8 +7574,6 @@ DO $$ BEGIN
 END $$;
 
 
-
-
 -- CONSTRAINT: compliance_reports compliance_reports_pkey
 DO $$ BEGIN
   IF to_regclass('public.compliance_reports') IS NOT NULL
@@ -7817,19 +7665,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: crypto_configurations crypto_configurations_pkey
-DO $$ BEGIN
-  IF to_regclass('public.crypto_configurations') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'crypto_configurations_pkey' AND conrelid = to_regclass('public.crypto_configurations')
-     ) THEN
-    ALTER TABLE ONLY public.crypto_configurations
-        ADD CONSTRAINT crypto_configurations_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: crypto_implementation_algorithms crypto_implementation_algorithms_pkey
 DO $$ BEGIN
   IF to_regclass('public.crypto_implementation_algorithms') IS NOT NULL
@@ -7852,19 +7687,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.crypto_implementation_certificates
         ADD CONSTRAINT crypto_implementation_certificates_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: crypto_implementations_legacy crypto_implementations_pkey
-DO $$ BEGIN
-  IF to_regclass('public.crypto_implementations_legacy') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'crypto_implementations_pkey' AND conrelid = to_regclass('public.crypto_implementations_legacy')
-     ) THEN
-    ALTER TABLE ONLY public.crypto_implementations_legacy
-        ADD CONSTRAINT crypto_implementations_pkey PRIMARY KEY (id);
   END IF;
 END $$;
 
@@ -8532,30 +8354,23 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: network_assets_legacy network_assets_pkey
-DO $$ BEGIN
-  IF to_regclass('public.network_assets_legacy') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'network_assets_pkey' AND conrelid = to_regclass('public.network_assets_legacy')
-     ) THEN
-    ALTER TABLE ONLY public.network_assets_legacy
-        ADD CONSTRAINT network_assets_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: network_assets_partitioned network_assets_partitioned_pkey
 -- HASH-partitioned on tenant_id, so the PK must include the partition column.
 -- Added late: the table shipped without a PK, which broke strict GROUP BY
 -- functional-dependency inference for any aggregate over the network_assets view.
+-- NOT `ALTER TABLE ONLY`: the partitions are attached by this point, and a
+-- parent-ONLY primary key on a partitioned table is created INVALID (no
+-- per-partition indexes, uniqueness unenforced) until every partition's index
+-- is attached — which nothing in this file did. The recursive form creates and
+-- attaches the partition indexes in one statement. Clusters that already have
+-- the invalid parent-only PK are repaired in POST-MIGRATIONS.
 DO $$ BEGIN
   IF to_regclass('public.network_assets_partitioned') IS NOT NULL
      AND NOT EXISTS (
        SELECT 1 FROM pg_constraint
        WHERE conname = 'network_assets_partitioned_pkey' AND conrelid = to_regclass('public.network_assets_partitioned')
      ) THEN
-    ALTER TABLE ONLY public.network_assets_partitioned
+    ALTER TABLE public.network_assets_partitioned
         ADD CONSTRAINT network_assets_partitioned_pkey PRIMARY KEY (tenant_id, id);
   END IF;
 END $$;
@@ -9350,19 +9165,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.sensor_commands
         ADD CONSTRAINT sensor_commands_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: sensor_discoveries_legacy sensor_discoveries_pkey
-DO $$ BEGIN
-  IF to_regclass('public.sensor_discoveries_legacy') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'sensor_discoveries_pkey' AND conrelid = to_regclass('public.sensor_discoveries_legacy')
-     ) THEN
-    ALTER TABLE ONLY public.sensor_discoveries_legacy
-        ADD CONSTRAINT sensor_discoveries_pkey PRIMARY KEY (id);
   END IF;
 END $$;
 
@@ -11551,8 +11353,6 @@ CREATE INDEX IF NOT EXISTS idx_compliance_overrides_tenant_id ON public.complian
 CREATE INDEX IF NOT EXISTS idx_compliance_overrides_type ON public.compliance_overrides USING btree (override_type);
 
 
-
-
 -- INDEX: idx_compliance_reports_created_at
 CREATE INDEX IF NOT EXISTS idx_compliance_reports_created_at ON public.compliance_reports USING btree (created_at);
 
@@ -11689,14 +11489,6 @@ CREATE INDEX IF NOT EXISTS idx_crypto_code_findings_tenant ON public.crypto_code
 CREATE INDEX IF NOT EXISTS idx_crypto_code_findings_type ON public.crypto_code_findings USING btree (finding_type) WHERE (deleted_at IS NULL);
 
 
--- INDEX: idx_crypto_configurations_device
-CREATE INDEX IF NOT EXISTS idx_crypto_configurations_device ON public.crypto_configurations USING btree (device_id) WHERE ((device_id IS NOT NULL) AND (deleted_at IS NULL));
-
-
--- INDEX: idx_crypto_configurations_tenant_asset
-CREATE INDEX IF NOT EXISTS idx_crypto_configurations_tenant_asset ON public.crypto_configurations USING btree (tenant_id, asset_id) WHERE (deleted_at IS NULL);
-
-
 -- INDEX: idx_crypto_impl_algorithms_algorithm_id
 CREATE INDEX IF NOT EXISTS idx_crypto_impl_algorithms_algorithm_id ON public.crypto_implementation_algorithms USING btree (algorithm_id);
 
@@ -11711,50 +11503,6 @@ CREATE INDEX IF NOT EXISTS idx_crypto_impl_certs_cert_id ON public.crypto_implem
 
 -- INDEX: idx_crypto_impl_certs_impl_id
 CREATE INDEX IF NOT EXISTS idx_crypto_impl_certs_impl_id ON public.crypto_implementation_certificates USING btree (crypto_implementation_id);
-
-
--- INDEX: idx_crypto_impl_hash_algorithm
-CREATE INDEX IF NOT EXISTS idx_crypto_impl_hash_algorithm ON public.crypto_implementations_legacy USING btree (hash_algorithm) WHERE ((hash_algorithm IS NOT NULL) AND (deleted_at IS NULL));
-
-
--- INDEX: idx_crypto_impl_key_size
-CREATE INDEX IF NOT EXISTS idx_crypto_impl_key_size ON public.crypto_implementations_legacy USING btree (key_size) WHERE ((key_size IS NOT NULL) AND (deleted_at IS NULL));
-
-
--- INDEX: idx_crypto_impl_protocol_version
-CREATE INDEX IF NOT EXISTS idx_crypto_impl_protocol_version ON public.crypto_implementations_legacy USING btree (protocol_version) WHERE ((protocol_version IS NOT NULL) AND (deleted_at IS NULL));
-
-
--- INDEX: idx_crypto_implementations_asset_id
-CREATE INDEX IF NOT EXISTS idx_crypto_implementations_asset_id ON public.crypto_implementations_legacy USING btree (asset_id) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_crypto_implementations_certificate_id
-CREATE INDEX IF NOT EXISTS idx_crypto_implementations_certificate_id ON public.crypto_implementations_legacy USING btree (certificate_id) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_crypto_implementations_cipher_suite
-CREATE INDEX IF NOT EXISTS idx_crypto_implementations_cipher_suite ON public.crypto_implementations_legacy USING btree (cipher_suite) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_crypto_implementations_discovery
-CREATE INDEX IF NOT EXISTS idx_crypto_implementations_discovery ON public.crypto_implementations_legacy USING btree (discovery_method, first_discovered_at) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_crypto_implementations_protocol
-CREATE INDEX IF NOT EXISTS idx_crypto_implementations_protocol ON public.crypto_implementations_legacy USING btree (protocol) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_crypto_implementations_raw_data
-CREATE INDEX IF NOT EXISTS idx_crypto_implementations_raw_data ON public.crypto_implementations_legacy USING gin (raw_data) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_crypto_implementations_tenant_id
-CREATE INDEX IF NOT EXISTS idx_crypto_implementations_tenant_id ON public.crypto_implementations_legacy USING btree (tenant_id) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_crypto_implementations_tenant_protocol
-CREATE INDEX IF NOT EXISTS idx_crypto_implementations_tenant_protocol ON public.crypto_implementations_legacy USING btree (tenant_id, protocol) WHERE (deleted_at IS NULL);
 
 
 -- INDEX: idx_crypto_libs_name_ver
@@ -12341,42 +12089,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_location_finding_summary_key ON public.
 CREATE INDEX IF NOT EXISTS idx_mv_remediation_queue_tenant_severity ON public.mv_remediation_queue USING btree (tenant_id, severity, created_at);
 
 
--- INDEX: idx_network_assets_device_id
-CREATE INDEX IF NOT EXISTS idx_network_assets_device_id ON public.network_assets_legacy USING btree (device_id);
-
-
--- INDEX: idx_network_assets_fqdns_gin
-CREATE INDEX IF NOT EXISTS idx_network_assets_fqdns_gin ON public.network_assets_legacy USING gin (fqdns);
-
-
--- INDEX: idx_network_assets_hostname
-CREATE INDEX IF NOT EXISTS idx_network_assets_hostname ON public.network_assets_legacy USING btree (hostname) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_network_assets_ip_port
-CREATE INDEX IF NOT EXISTS idx_network_assets_ip_port ON public.network_assets_legacy USING btree (ip_address, port) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_network_assets_last_seen
-CREATE INDEX IF NOT EXISTS idx_network_assets_last_seen ON public.network_assets_legacy USING btree (tenant_id, last_seen_at) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_network_assets_location_id
-CREATE INDEX IF NOT EXISTS idx_network_assets_location_id ON public.network_assets_legacy USING btree (location_id) WHERE (location_id IS NOT NULL);
-
-
--- INDEX: idx_network_assets_macs_gin
-CREATE INDEX IF NOT EXISTS idx_network_assets_macs_gin ON public.network_assets_legacy USING gin (mac_addresses);
-
-
--- INDEX: idx_network_assets_network_segment_id
-CREATE INDEX IF NOT EXISTS idx_network_assets_network_segment_id ON public.network_assets_legacy USING btree (network_segment_id) WHERE (network_segment_id IS NOT NULL);
-
-
--- INDEX: idx_network_assets_ownership
-CREATE INDEX IF NOT EXISTS idx_network_assets_ownership ON public.network_assets_legacy USING btree (tenant_id, asset_ownership) WHERE (deleted_at IS NULL);
-
-
 -- INDEX: idx_network_assets_partitioned_deleted_at
 CREATE INDEX IF NOT EXISTS idx_network_assets_partitioned_deleted_at ON ONLY public.network_assets_partitioned USING btree (deleted_at) WHERE (deleted_at IS NULL);
 
@@ -12391,34 +12103,6 @@ CREATE INDEX IF NOT EXISTS idx_network_assets_partitioned_ip_address ON ONLY pub
 
 -- INDEX: idx_network_assets_partitioned_tenant_id
 CREATE INDEX IF NOT EXISTS idx_network_assets_partitioned_tenant_id ON ONLY public.network_assets_partitioned USING btree (tenant_id);
-
-
--- INDEX: idx_network_assets_risk_level
-CREATE INDEX IF NOT EXISTS idx_network_assets_risk_level ON public.network_assets_legacy USING btree (risk_level) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_network_assets_risk_score
-CREATE INDEX IF NOT EXISTS idx_network_assets_risk_score ON public.network_assets_legacy USING btree (risk_score) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_network_assets_stale_status
-CREATE INDEX IF NOT EXISTS idx_network_assets_stale_status ON public.network_assets_legacy USING btree (tenant_id, stale_status, last_seen_at) WHERE ((deleted_at IS NULL) AND (stale_status IS NOT NULL));
-
-
--- INDEX: idx_network_assets_status
-CREATE INDEX IF NOT EXISTS idx_network_assets_status ON public.network_assets_legacy USING btree (tenant_id, asset_status) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_network_assets_tags
-CREATE INDEX IF NOT EXISTS idx_network_assets_tags ON public.network_assets_legacy USING gin (tags) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_network_assets_tenant_cloud_instance
-CREATE INDEX IF NOT EXISTS idx_network_assets_tenant_cloud_instance ON public.network_assets_legacy USING btree (tenant_id, cloud_instance_id) WHERE ((deleted_at IS NULL) AND (cloud_instance_id IS NOT NULL));
-
-
--- INDEX: idx_network_assets_tenant_id
-CREATE INDEX IF NOT EXISTS idx_network_assets_tenant_id ON public.network_assets_legacy USING btree (tenant_id) WHERE (deleted_at IS NULL);
 
 
 -- INDEX: idx_network_segments_active
@@ -12941,22 +12625,6 @@ CREATE INDEX IF NOT EXISTS idx_sensor_commands_sensor_id ON public.sensor_comman
 CREATE INDEX IF NOT EXISTS idx_sensor_commands_status ON public.sensor_commands USING btree (status);
 
 
--- INDEX: idx_sensor_discoveries_approval_status
-CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_approval_status ON public.sensor_discoveries_legacy USING btree (approval_status);
-
-
--- INDEX: idx_sensor_discoveries_asset_id
-CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_asset_id ON public.sensor_discoveries_legacy USING btree (asset_id);
-
-
--- INDEX: idx_sensor_discoveries_batch_id
-CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_batch_id ON public.sensor_discoveries_legacy USING btree (batch_id);
-
-
--- INDEX: idx_sensor_discoveries_dest_ip
-CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_dest_ip ON public.sensor_discoveries_legacy USING btree (dest_ip);
-
-
 -- INDEX: idx_sensor_discoveries_partitioned_batch_id
 CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_partitioned_batch_id ON ONLY public.sensor_discoveries_partitioned USING btree (batch_id);
 
@@ -12979,30 +12647,6 @@ CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_partitioned_tenant_id ON ONLY 
 
 -- INDEX: idx_sensor_discoveries_partitioned_timestamp
 CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_partitioned_timestamp ON ONLY public.sensor_discoveries_partitioned USING btree ("timestamp");
-
-
--- INDEX: idx_sensor_discoveries_protocol
-CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_protocol ON public.sensor_discoveries_legacy USING btree (protocol);
-
-
--- INDEX: idx_sensor_discoveries_sensor_id
-CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_sensor_id ON public.sensor_discoveries_legacy USING btree (sensor_id);
-
-
--- INDEX: idx_sensor_discoveries_source_ip
-CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_source_ip ON public.sensor_discoveries_legacy USING btree (tenant_id, source_ip) WHERE (source_ip IS NOT NULL);
-
-
--- INDEX: idx_sensor_discoveries_tenant_id
-CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_tenant_id ON public.sensor_discoveries_legacy USING btree (tenant_id);
-
-
--- INDEX: idx_sensor_discoveries_timestamp
-CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_timestamp ON public.sensor_discoveries_legacy USING btree ("timestamp");
-
-
--- INDEX: idx_sensor_discoveries_unprocessed
-CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_unprocessed ON public.sensor_discoveries_legacy USING btree (batch_id) WHERE (processed_at IS NULL);
 
 
 -- INDEX: idx_sensor_health_metrics_recorded_at
@@ -14589,14 +14233,6 @@ CREATE OR REPLACE TRIGGER update_control_measurements_updated_at BEFORE UPDATE O
 CREATE OR REPLACE TRIGGER update_crypto_applications_updated_at BEFORE UPDATE ON public.crypto_applications FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
 
--- TRIGGER: crypto_configurations update_crypto_configurations_updated_at
-CREATE OR REPLACE TRIGGER update_crypto_configurations_updated_at BEFORE UPDATE ON public.crypto_configurations FOR EACH ROW EXECUTE FUNCTION public.update_crypto_configurations_updated_at();
-
-
--- TRIGGER: crypto_implementations_legacy update_crypto_implementations_updated_at
-CREATE OR REPLACE TRIGGER update_crypto_implementations_updated_at BEFORE UPDATE ON public.crypto_implementations_legacy FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
-
-
 -- TRIGGER: discovery_alert_configs update_discovery_alert_configs_updated_at
 CREATE OR REPLACE TRIGGER update_discovery_alert_configs_updated_at BEFORE UPDATE ON public.discovery_alert_configs FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
@@ -14631,10 +14267,6 @@ CREATE OR REPLACE TRIGGER update_measurement_templates_updated_at BEFORE UPDATE 
 
 -- TRIGGER: measurement_types update_measurement_types_updated_at
 CREATE OR REPLACE TRIGGER update_measurement_types_updated_at BEFORE UPDATE ON public.measurement_types FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
-
-
--- TRIGGER: network_assets_legacy update_network_assets_updated_at
-CREATE OR REPLACE TRIGGER update_network_assets_updated_at BEFORE UPDATE ON public.network_assets_legacy FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
 
 -- TRIGGER: pcap_upload_jobs update_pcap_upload_jobs_updated_at
@@ -15051,19 +14683,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.asset_history
         ADD CONSTRAINT asset_history_actor_user_id_fkey FOREIGN KEY (actor_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: asset_history asset_history_asset_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.asset_history') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'asset_history_asset_id_fkey' AND conrelid = to_regclass('public.asset_history')
-     ) THEN
-    ALTER TABLE ONLY public.asset_history
-        ADD CONSTRAINT asset_history_asset_id_fkey FOREIGN KEY (asset_id) REFERENCES public.network_assets_legacy(id) ON DELETE CASCADE;
   END IF;
 END $$;
 
@@ -15666,8 +15285,6 @@ DO $$ BEGIN
 END $$;
 
 
-
-
 -- FK CONSTRAINT: compliance_reports compliance_reports_tenant_id_fkey
 DO $$ BEGIN
   IF to_regclass('public.compliance_reports') IS NOT NULL
@@ -15755,19 +15372,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.crypto_applications
         ADD CONSTRAINT crypto_applications_algorithm_id_fkey FOREIGN KEY (algorithm_id) REFERENCES public.algorithms(id);
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: crypto_applications crypto_applications_asset_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.crypto_applications') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'crypto_applications_asset_id_fkey' AND conrelid = to_regclass('public.crypto_applications')
-     ) THEN
-    ALTER TABLE ONLY public.crypto_applications
-        ADD CONSTRAINT crypto_applications_asset_id_fkey FOREIGN KEY (asset_id) REFERENCES public.network_assets_legacy(id) ON DELETE SET NULL;
   END IF;
 END $$;
 
@@ -15863,45 +15467,6 @@ DO $$ BEGIN
 END $$;
 
 
--- FK CONSTRAINT: crypto_configurations crypto_configurations_asset_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.crypto_configurations') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'crypto_configurations_asset_id_fkey' AND conrelid = to_regclass('public.crypto_configurations')
-     ) THEN
-    ALTER TABLE ONLY public.crypto_configurations
-        ADD CONSTRAINT crypto_configurations_asset_id_fkey FOREIGN KEY (asset_id) REFERENCES public.network_assets_legacy(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: crypto_configurations crypto_configurations_device_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.crypto_configurations') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'crypto_configurations_device_id_fkey' AND conrelid = to_regclass('public.crypto_configurations')
-     ) THEN
-    ALTER TABLE ONLY public.crypto_configurations
-        ADD CONSTRAINT crypto_configurations_device_id_fkey FOREIGN KEY (device_id) REFERENCES public.devices(id);
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: crypto_configurations crypto_configurations_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.crypto_configurations') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'crypto_configurations_tenant_id_fkey' AND conrelid = to_regclass('public.crypto_configurations')
-     ) THEN
-    ALTER TABLE ONLY public.crypto_configurations
-        ADD CONSTRAINT crypto_configurations_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
 -- FK CONSTRAINT: crypto_implementation_algorithms crypto_implementation_algorithms_algorithm_id_fkey
 DO $$ BEGIN
   IF to_regclass('public.crypto_implementation_algorithms') IS NOT NULL
@@ -15944,45 +15509,6 @@ DO $$ BEGIN
 END $$;
 
 
--- FK CONSTRAINT: crypto_implementations_legacy crypto_implementations_asset_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.crypto_implementations_legacy') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'crypto_implementations_asset_id_fkey' AND conrelid = to_regclass('public.crypto_implementations_legacy')
-     ) THEN
-    ALTER TABLE ONLY public.crypto_implementations_legacy
-        ADD CONSTRAINT crypto_implementations_asset_id_fkey FOREIGN KEY (asset_id) REFERENCES public.network_assets_legacy(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: crypto_implementations_legacy crypto_implementations_certificate_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.crypto_implementations_legacy') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'crypto_implementations_certificate_id_fkey' AND conrelid = to_regclass('public.crypto_implementations_legacy')
-     ) THEN
-    ALTER TABLE ONLY public.crypto_implementations_legacy
-        ADD CONSTRAINT crypto_implementations_certificate_id_fkey FOREIGN KEY (certificate_id) REFERENCES public.certificates(id);
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: crypto_implementations_legacy crypto_implementations_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.crypto_implementations_legacy') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'crypto_implementations_tenant_id_fkey' AND conrelid = to_regclass('public.crypto_implementations_legacy')
-     ) THEN
-    ALTER TABLE ONLY public.crypto_implementations_legacy
-        ADD CONSTRAINT crypto_implementations_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
 -- FK CONSTRAINT: crypto_libraries crypto_libraries_tenant_id_fkey
 DO $$ BEGIN
   IF to_regclass('public.crypto_libraries') IS NOT NULL
@@ -15992,19 +15518,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.crypto_libraries
         ADD CONSTRAINT crypto_libraries_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: database_encryption_states database_encryption_states_asset_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.database_encryption_states') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'database_encryption_states_asset_id_fkey' AND conrelid = to_regclass('public.database_encryption_states')
-     ) THEN
-    ALTER TABLE ONLY public.database_encryption_states
-        ADD CONSTRAINT database_encryption_states_asset_id_fkey FOREIGN KEY (asset_id) REFERENCES public.network_assets_legacy(id) ON DELETE SET NULL;
   END IF;
 END $$;
 
@@ -16451,19 +15964,6 @@ DO $$ BEGIN
 END $$;
 
 
--- FK CONSTRAINT: external_connections external_connections_source_asset_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.external_connections') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'external_connections_source_asset_id_fkey' AND conrelid = to_regclass('public.external_connections')
-     ) THEN
-    ALTER TABLE ONLY public.external_connections
-        ADD CONSTRAINT external_connections_source_asset_id_fkey FOREIGN KEY (source_asset_id) REFERENCES public.network_assets_legacy(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
 -- FK CONSTRAINT: external_connections external_connections_tenant_id_fkey
 DO $$ BEGIN
   IF to_regclass('public.external_connections') IS NOT NULL
@@ -16814,58 +16314,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.monitoring_alert_history
         ADD CONSTRAINT monitoring_alert_history_threshold_id_fkey FOREIGN KEY (threshold_id) REFERENCES public.monitoring_alert_thresholds(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: network_assets_legacy network_assets_device_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.network_assets_legacy') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'network_assets_device_id_fkey' AND conrelid = to_regclass('public.network_assets_legacy')
-     ) THEN
-    ALTER TABLE ONLY public.network_assets_legacy
-        ADD CONSTRAINT network_assets_device_id_fkey FOREIGN KEY (device_id) REFERENCES public.devices(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: network_assets_legacy network_assets_location_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.network_assets_legacy') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'network_assets_location_id_fkey' AND conrelid = to_regclass('public.network_assets_legacy')
-     ) THEN
-    ALTER TABLE ONLY public.network_assets_legacy
-        ADD CONSTRAINT network_assets_location_id_fkey FOREIGN KEY (location_id) REFERENCES public.locations(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: network_assets_legacy network_assets_network_segment_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.network_assets_legacy') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'network_assets_network_segment_id_fkey' AND conrelid = to_regclass('public.network_assets_legacy')
-     ) THEN
-    ALTER TABLE ONLY public.network_assets_legacy
-        ADD CONSTRAINT network_assets_network_segment_id_fkey FOREIGN KEY (network_segment_id) REFERENCES public.network_segments(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: network_assets_legacy network_assets_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.network_assets_legacy') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'network_assets_tenant_id_fkey' AND conrelid = to_regclass('public.network_assets_legacy')
-     ) THEN
-    ALTER TABLE ONLY public.network_assets_legacy
-        ADD CONSTRAINT network_assets_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
   END IF;
 END $$;
 
@@ -17533,58 +16981,6 @@ DO $$ BEGIN
 END $$;
 
 
--- FK CONSTRAINT: sensor_discoveries_legacy sensor_discoveries_asset_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.sensor_discoveries_legacy') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'sensor_discoveries_asset_id_fkey' AND conrelid = to_regclass('public.sensor_discoveries_legacy')
-     ) THEN
-    ALTER TABLE ONLY public.sensor_discoveries_legacy
-        ADD CONSTRAINT sensor_discoveries_asset_id_fkey FOREIGN KEY (asset_id) REFERENCES public.network_assets_legacy(id);
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: sensor_discoveries_legacy sensor_discoveries_auto_approval_rule_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.sensor_discoveries_legacy') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'sensor_discoveries_auto_approval_rule_id_fkey' AND conrelid = to_regclass('public.sensor_discoveries_legacy')
-     ) THEN
-    ALTER TABLE ONLY public.sensor_discoveries_legacy
-        ADD CONSTRAINT sensor_discoveries_auto_approval_rule_id_fkey FOREIGN KEY (auto_approval_rule_id) REFERENCES public.discovery_auto_approval_rules(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: sensor_discoveries_legacy sensor_discoveries_sensor_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.sensor_discoveries_legacy') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'sensor_discoveries_sensor_id_fkey' AND conrelid = to_regclass('public.sensor_discoveries_legacy')
-     ) THEN
-    ALTER TABLE ONLY public.sensor_discoveries_legacy
-        ADD CONSTRAINT sensor_discoveries_sensor_id_fkey FOREIGN KEY (sensor_id) REFERENCES public.sensors(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: sensor_discoveries_legacy sensor_discoveries_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.sensor_discoveries_legacy') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'sensor_discoveries_tenant_id_fkey' AND conrelid = to_regclass('public.sensor_discoveries_legacy')
-     ) THEN
-    ALTER TABLE ONLY public.sensor_discoveries_legacy
-        ADD CONSTRAINT sensor_discoveries_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
 -- FK CONSTRAINT: sensor_health_metrics sensor_health_metrics_sensor_id_fkey
 DO $$ BEGIN
   IF to_regclass('public.sensor_health_metrics') IS NOT NULL
@@ -17633,19 +17029,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.ssh_keys
         ADD CONSTRAINT ssh_keys_algorithm_id_fkey FOREIGN KEY (algorithm_id) REFERENCES public.algorithms(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: ssh_keys ssh_keys_asset_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.ssh_keys') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'ssh_keys_asset_id_fkey' AND conrelid = to_regclass('public.ssh_keys')
-     ) THEN
-    ALTER TABLE ONLY public.ssh_keys
-        ADD CONSTRAINT ssh_keys_asset_id_fkey FOREIGN KEY (asset_id) REFERENCES public.network_assets_legacy(id) ON DELETE SET NULL;
   END IF;
 END $$;
 
@@ -18411,6 +17794,7 @@ END $$;
 -- ROW SECURITY: scheduled_compliance_reports
 ALTER TABLE audit.scheduled_compliance_reports ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: scheduled_compliance_reports scheduled_compliance_reports_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY scheduled_compliance_reports_tenant_isolation ON audit.scheduled_compliance_reports USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18420,6 +17804,7 @@ END $$;
 
 -- ROW SECURITY: scheduled_report_executions
 ALTER TABLE audit.scheduled_report_executions ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: scheduled_report_executions scheduled_report_executions_tenant_isolation
 DO $$ BEGIN
@@ -18431,6 +17816,7 @@ END $$;
 -- ROW SECURITY: agent_ca_certificates
 ALTER TABLE public.agent_ca_certificates ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: agent_ca_certificates agent_ca_certificates_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY agent_ca_certificates_tenant_isolation ON public.agent_ca_certificates USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18441,11 +17827,13 @@ END $$;
 -- ROW SECURITY: agent_certificates
 ALTER TABLE public.agent_certificates ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: agent_certificates agent_certificates_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY agent_certificates_tenant_isolation ON public.agent_certificates USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
+
 
 -- =================================================================
 -- Platform-Level SSO Providers (registration only, not tenant-scoped)
@@ -18476,6 +17864,7 @@ CREATE INDEX IF NOT EXISTS idx_platform_sso_providers_enabled ON platform_sso_pr
 -- ROW SECURITY: ai_analysis_results
 ALTER TABLE public.ai_analysis_results ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: ai_analysis_results ai_analysis_results_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY ai_analysis_results_tenant_isolation ON public.ai_analysis_results USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18485,6 +17874,7 @@ END $$;
 
 -- ROW SECURITY: api_format_preferences
 ALTER TABLE public.api_format_preferences ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: api_format_preferences api_format_preferences_tenant_isolation
 DO $$ BEGIN
@@ -18496,6 +17886,7 @@ END $$;
 -- ROW SECURITY: asset_history
 ALTER TABLE public.asset_history ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: asset_history asset_history_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY asset_history_tenant_isolation ON public.asset_history USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18505,6 +17896,7 @@ END $$;
 
 -- ROW SECURITY: asset_lifecycle_policies
 ALTER TABLE public.asset_lifecycle_policies ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: asset_lifecycle_policies asset_lifecycle_policies_tenant_isolation
 DO $$ BEGIN
@@ -18516,6 +17908,7 @@ END $$;
 -- ROW SECURITY: billing_coupon_redemptions
 ALTER TABLE public.billing_coupon_redemptions ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: billing_coupon_redemptions billing_coupon_redemptions_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY billing_coupon_redemptions_tenant_isolation ON public.billing_coupon_redemptions USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18525,6 +17918,7 @@ END $$;
 
 -- ROW SECURITY: billing_customers
 ALTER TABLE public.billing_customers ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: billing_customers billing_customers_tenant_isolation
 DO $$ BEGIN
@@ -18536,6 +17930,7 @@ END $$;
 -- ROW SECURITY: billing_dunning_attempts
 ALTER TABLE public.billing_dunning_attempts ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: billing_dunning_attempts billing_dunning_attempts_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY billing_dunning_attempts_tenant_isolation ON public.billing_dunning_attempts USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18545,6 +17940,7 @@ END $$;
 
 -- ROW SECURITY: billing_invoices
 ALTER TABLE public.billing_invoices ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: billing_invoices billing_invoices_tenant_isolation
 DO $$ BEGIN
@@ -18556,6 +17952,7 @@ END $$;
 -- ROW SECURITY: billing_subscriptions
 ALTER TABLE public.billing_subscriptions ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: billing_subscriptions billing_subscriptions_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY billing_subscriptions_tenant_isolation ON public.billing_subscriptions USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18565,6 +17962,7 @@ END $$;
 
 -- ROW SECURITY: billing_trial_tracking
 ALTER TABLE public.billing_trial_tracking ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: billing_trial_tracking billing_trial_tracking_tenant_isolation
 DO $$ BEGIN
@@ -18576,6 +17974,7 @@ END $$;
 -- ROW SECURITY: certificate_history
 ALTER TABLE public.certificate_history ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: certificate_history certificate_history_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY certificate_history_tenant_isolation ON public.certificate_history USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18585,6 +17984,7 @@ END $$;
 
 -- ROW SECURITY: certificates
 ALTER TABLE public.certificates ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: certificates certificates_tenant_isolation
 DO $$ BEGIN
@@ -18596,6 +17996,7 @@ END $$;
 -- ROW SECURITY: ci_relationships
 ALTER TABLE public.ci_relationships ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: ci_relationships ci_relationships_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY ci_relationships_tenant_isolation ON public.ci_relationships USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18605,6 +18006,7 @@ END $$;
 
 -- ROW SECURITY: cmdb_entity_mappings
 ALTER TABLE public.cmdb_entity_mappings ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: cmdb_entity_mappings cmdb_entity_mappings_tenant_isolation
 DO $$ BEGIN
@@ -18616,6 +18018,7 @@ END $$;
 -- ROW SECURITY: cmdb_sync_jobs
 ALTER TABLE public.cmdb_sync_jobs ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: cmdb_sync_jobs cmdb_sync_jobs_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY cmdb_sync_jobs_tenant_isolation ON public.cmdb_sync_jobs USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18625,6 +18028,7 @@ END $$;
 
 -- ROW SECURITY: cmdb_sync_profiles
 ALTER TABLE public.cmdb_sync_profiles ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: cmdb_sync_profiles cmdb_sync_profiles_tenant_isolation
 DO $$ BEGIN
@@ -18636,6 +18040,7 @@ END $$;
 -- ROW SECURITY: compliance_checks
 ALTER TABLE public.compliance_checks ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: compliance_checks compliance_checks_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY compliance_checks_tenant_isolation ON public.compliance_checks USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18645,6 +18050,7 @@ END $$;
 
 -- ROW SECURITY: compliance_findings
 ALTER TABLE public.compliance_findings ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: compliance_findings compliance_findings_tenant_isolation
 DO $$ BEGIN
@@ -18656,6 +18062,7 @@ END $$;
 -- ROW SECURITY: compliance_overrides
 ALTER TABLE public.compliance_overrides ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: compliance_overrides compliance_overrides_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY compliance_overrides_tenant_isolation ON public.compliance_overrides USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18665,6 +18072,7 @@ END $$;
 
 -- ROW SECURITY: compliance_reports
 ALTER TABLE public.compliance_reports ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: compliance_reports compliance_reports_tenant_isolation
 DO $$ BEGIN
@@ -18676,6 +18084,7 @@ END $$;
 -- ROW SECURITY: compliance_scenarios
 ALTER TABLE public.compliance_scenarios ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: compliance_scenarios compliance_scenarios_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY compliance_scenarios_tenant_isolation ON public.compliance_scenarios USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18686,8 +18095,10 @@ END $$;
 -- ROW SECURITY: crypto_applications
 ALTER TABLE public.crypto_applications ENABLE ROW LEVEL SECURITY;
 
+
 -- ROW SECURITY: crypto_code_findings
 ALTER TABLE public.crypto_code_findings ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: crypto_code_findings crypto_code_findings_tenant_isolation
 DO $$ BEGIN
@@ -18696,31 +18107,13 @@ EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 
--- ROW SECURITY: crypto_configurations
-ALTER TABLE public.crypto_configurations ENABLE ROW LEVEL SECURITY;
-
--- POLICY: crypto_configurations crypto_configurations_tenant_isolation
-DO $$ BEGIN
-  CREATE POLICY crypto_configurations_tenant_isolation ON public.crypto_configurations USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
-
--- ROW SECURITY: crypto_implementations_legacy
-ALTER TABLE public.crypto_implementations_legacy ENABLE ROW LEVEL SECURITY;
-
 -- ROW SECURITY: crypto_implementations_partitioned
 ALTER TABLE public.crypto_implementations_partitioned ENABLE ROW LEVEL SECURITY;
-
--- POLICY: crypto_implementations_legacy crypto_implementations_tenant_isolation
-DO $$ BEGIN
-  CREATE POLICY crypto_implementations_tenant_isolation ON public.crypto_implementations_legacy USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
 
 
 -- ROW SECURITY: crypto_libraries
 ALTER TABLE public.crypto_libraries ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: crypto_libraries crypto_libraries_tenant_isolation
 DO $$ BEGIN
@@ -18732,6 +18125,7 @@ END $$;
 -- ROW SECURITY: database_encryption_states
 ALTER TABLE public.database_encryption_states ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: database_encryption_states database_encryption_states_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY database_encryption_states_tenant_isolation ON public.database_encryption_states USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18741,6 +18135,7 @@ END $$;
 
 -- ROW SECURITY: device_agents
 ALTER TABLE public.device_agents ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: device_agents device_agents_tenant_isolation
 DO $$ BEGIN
@@ -18752,6 +18147,7 @@ END $$;
 -- ROW SECURITY: device_jobs
 ALTER TABLE public.device_jobs ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: device_jobs device_jobs_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY device_jobs_tenant_isolation ON public.device_jobs USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18761,6 +18157,7 @@ END $$;
 
 -- ROW SECURITY: devices
 ALTER TABLE public.devices ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: devices devices_tenant_isolation
 DO $$ BEGIN
@@ -18772,6 +18169,7 @@ END $$;
 -- ROW SECURITY: discovery_alert_configs
 ALTER TABLE public.discovery_alert_configs ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: discovery_alert_configs discovery_alert_configs_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY discovery_alert_configs_tenant_isolation ON public.discovery_alert_configs USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18781,6 +18179,7 @@ END $$;
 
 -- ROW SECURITY: discovery_alert_history
 ALTER TABLE public.discovery_alert_history ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: discovery_alert_history discovery_alert_history_tenant_isolation
 DO $$ BEGIN
@@ -18792,6 +18191,7 @@ END $$;
 -- ROW SECURITY: discovery_approval_queue
 ALTER TABLE public.discovery_approval_queue ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: discovery_approval_queue discovery_approval_queue_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY discovery_approval_queue_tenant_isolation ON public.discovery_approval_queue USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18801,6 +18201,7 @@ END $$;
 
 -- ROW SECURITY: discovery_auto_approval_rules
 ALTER TABLE public.discovery_auto_approval_rules ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: discovery_auto_approval_rules discovery_auto_approval_rules_tenant_isolation
 DO $$ BEGIN
@@ -18812,6 +18213,7 @@ END $$;
 -- ROW SECURITY: discovery_findings
 ALTER TABLE public.discovery_findings ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: discovery_findings discovery_findings_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY discovery_findings_tenant_isolation ON public.discovery_findings USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18821,6 +18223,7 @@ END $$;
 
 -- ROW SECURITY: discovery_jobs
 ALTER TABLE public.discovery_jobs ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: discovery_jobs discovery_jobs_tenant_isolation
 DO $$ BEGIN
@@ -18832,6 +18235,7 @@ END $$;
 -- ROW SECURITY: discovery_rate_limits
 ALTER TABLE public.discovery_rate_limits ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: discovery_rate_limits discovery_rate_limits_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY discovery_rate_limits_tenant_isolation ON public.discovery_rate_limits USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18841,6 +18245,7 @@ END $$;
 
 -- ROW SECURITY: discovery_targets
 ALTER TABLE public.discovery_targets ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: discovery_targets discovery_targets_tenant_isolation
 DO $$ BEGIN
@@ -18852,6 +18257,7 @@ END $$;
 -- ROW SECURITY: external_asset_mappings
 ALTER TABLE public.external_asset_mappings ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: external_asset_mappings external_asset_mappings_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY external_asset_mappings_tenant_isolation ON public.external_asset_mappings USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18861,6 +18267,7 @@ END $$;
 
 -- ROW SECURITY: external_connection_history
 ALTER TABLE public.external_connection_history ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: external_connection_history external_connection_history_tenant_isolation
 DO $$ BEGIN
@@ -18872,6 +18279,7 @@ END $$;
 -- ROW SECURITY: external_connections
 ALTER TABLE public.external_connections ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: external_connections external_connections_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY external_connections_tenant_isolation ON public.external_connections USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18881,6 +18289,7 @@ END $$;
 
 -- ROW SECURITY: feature_usage_events
 ALTER TABLE public.feature_usage_events ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: feature_usage_events feature_usage_events_tenant_isolation
 DO $$ BEGIN
@@ -18892,6 +18301,7 @@ END $$;
 -- ROW SECURITY: health_alerts
 ALTER TABLE public.health_alerts ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: health_alerts health_alerts_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY health_alerts_tenant_isolation ON public.health_alerts USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18901,6 +18311,7 @@ END $$;
 
 -- ROW SECURITY: health_insights
 ALTER TABLE public.health_insights ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: health_insights health_insights_tenant_isolation
 DO $$ BEGIN
@@ -18912,6 +18323,7 @@ END $$;
 -- ROW SECURITY: health_metrics
 ALTER TABLE public.health_metrics ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: health_metrics health_metrics_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY health_metrics_tenant_isolation ON public.health_metrics USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18921,6 +18333,7 @@ END $$;
 
 -- ROW SECURITY: in_app_notifications
 ALTER TABLE public.in_app_notifications ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: in_app_notifications in_app_notifications_platform_admin
 DO $$ BEGIN
@@ -18943,6 +18356,7 @@ END $$;
 -- ROW SECURITY: integrations
 ALTER TABLE public.integrations ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: integrations integrations_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY integrations_tenant_isolation ON public.integrations USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18952,6 +18366,7 @@ END $$;
 
 -- ROW SECURITY: interrogation_schedules
 ALTER TABLE public.interrogation_schedules ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: interrogation_schedules interrogation_schedules_tenant_isolation
 DO $$ BEGIN
@@ -18963,6 +18378,7 @@ END $$;
 -- ROW SECURITY: keys
 ALTER TABLE public.keys ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: keys keys_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY keys_tenant_isolation ON public.keys USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18972,6 +18388,7 @@ END $$;
 
 -- ROW SECURITY: kms_keys
 ALTER TABLE public.kms_keys ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: kms_keys kms_keys_tenant_isolation
 DO $$ BEGIN
@@ -18983,6 +18400,7 @@ END $$;
 -- ROW SECURITY: locations
 ALTER TABLE public.locations ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: locations locations_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY locations_tenant_isolation ON public.locations USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -18990,21 +18408,13 @@ EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 
--- ROW SECURITY: network_assets_legacy
-ALTER TABLE public.network_assets_legacy ENABLE ROW LEVEL SECURITY;
-
 -- ROW SECURITY: network_assets_partitioned
 ALTER TABLE public.network_assets_partitioned ENABLE ROW LEVEL SECURITY;
-
--- POLICY: network_assets_legacy network_assets_tenant_isolation
-DO $$ BEGIN
-  CREATE POLICY network_assets_tenant_isolation ON public.network_assets_legacy USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
 
 
 -- ROW SECURITY: network_segments
 ALTER TABLE public.network_segments ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: network_segments network_segments_tenant_isolation
 DO $$ BEGIN
@@ -19015,6 +18425,7 @@ END $$;
 
 -- ROW SECURITY: notification_delivery_queue
 ALTER TABLE public.notification_delivery_queue ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: notification_delivery_queue notification_delivery_queue_platform_admin
 DO $$ BEGIN
@@ -19037,6 +18448,7 @@ END $$;
 -- ROW SECURITY: notification_history
 ALTER TABLE public.notification_history ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: notification_history notification_history_platform_admin
 DO $$ BEGIN
   CREATE POLICY notification_history_platform_admin ON public.notification_history USING (((tenant_id IS NULL) OR (EXISTS ( SELECT 1
@@ -19058,8 +18470,10 @@ END $$;
 -- ROW SECURITY: pcap_upload_jobs
 ALTER TABLE public.pcap_upload_jobs ENABLE ROW LEVEL SECURITY;
 
+
 -- ROW SECURITY: pending_sensor_registrations
 ALTER TABLE public.pending_sensor_registrations ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: pending_sensor_registrations pending_sensor_registrations_tenant_isolation
 DO $$ BEGIN
@@ -19071,6 +18485,7 @@ END $$;
 -- ROW SECURITY: pending_sensors
 ALTER TABLE public.pending_sensors ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: pending_sensors pending_sensors_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY pending_sensors_tenant_isolation ON public.pending_sensors USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -19081,11 +18496,14 @@ END $$;
 -- ROW SECURITY: remediation_plan_items
 ALTER TABLE public.remediation_plan_items ENABLE ROW LEVEL SECURITY;
 
+
 -- ROW SECURITY: remediation_plans
 ALTER TABLE public.remediation_plans ENABLE ROW LEVEL SECURITY;
 
+
 -- ROW SECURITY: resource_alerts
 ALTER TABLE public.resource_alerts ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: resource_alerts resource_alerts_tenant_isolation
 DO $$ BEGIN
@@ -19097,6 +18515,7 @@ END $$;
 -- ROW SECURITY: resource_permissions
 ALTER TABLE public.resource_permissions ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: resource_permissions resource_permissions_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY resource_permissions_tenant_isolation ON public.resource_permissions USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -19106,6 +18525,7 @@ END $$;
 
 -- ROW SECURITY: schedule_history
 ALTER TABLE public.schedule_history ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: schedule_history schedule_history_tenant_isolation
 DO $$ BEGIN
@@ -19119,6 +18539,7 @@ END $$;
 -- ROW SECURITY: sensor_ca_certificates
 ALTER TABLE public.sensor_ca_certificates ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: sensor_ca_certificates sensor_ca_certificates_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY sensor_ca_certificates_tenant_isolation ON public.sensor_ca_certificates USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -19128,6 +18549,7 @@ END $$;
 
 -- ROW SECURITY: sensor_certificates
 ALTER TABLE public.sensor_certificates ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: sensor_certificates sensor_certificates_tenant_isolation
 DO $$ BEGIN
@@ -19139,6 +18561,7 @@ END $$;
 -- ROW SECURITY: sensor_commands
 ALTER TABLE public.sensor_commands ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: sensor_commands sensor_commands_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY sensor_commands_tenant_isolation ON public.sensor_commands USING ((EXISTS ( SELECT 1
@@ -19148,21 +18571,13 @@ EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 
--- ROW SECURITY: sensor_discoveries_legacy
-ALTER TABLE public.sensor_discoveries_legacy ENABLE ROW LEVEL SECURITY;
-
 -- ROW SECURITY: sensor_discoveries_partitioned
 ALTER TABLE public.sensor_discoveries_partitioned ENABLE ROW LEVEL SECURITY;
-
--- POLICY: sensor_discoveries_legacy sensor_discoveries_tenant_isolation
-DO $$ BEGIN
-  CREATE POLICY sensor_discoveries_tenant_isolation ON public.sensor_discoveries_legacy USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
 
 
 -- ROW SECURITY: sensor_health_metrics
 ALTER TABLE public.sensor_health_metrics ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: sensor_health_metrics sensor_health_metrics_tenant_isolation
 DO $$ BEGIN
@@ -19176,6 +18591,7 @@ END $$;
 -- ROW SECURITY: sensors
 ALTER TABLE public.sensors ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: sensors sensors_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY sensors_tenant_isolation ON public.sensors USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -19185,6 +18601,7 @@ END $$;
 
 -- ROW SECURITY: ssh_keys
 ALTER TABLE public.ssh_keys ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: ssh_keys ssh_keys_tenant_isolation
 DO $$ BEGIN
@@ -19196,6 +18613,7 @@ END $$;
 -- ROW SECURITY: sso_group_role_mappings
 ALTER TABLE public.sso_group_role_mappings ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: sso_group_role_mappings sso_group_role_mappings_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY sso_group_role_mappings_tenant_isolation ON public.sso_group_role_mappings USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -19205,6 +18623,7 @@ END $$;
 
 -- ROW SECURITY: sso_providers
 ALTER TABLE public.sso_providers ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: sso_providers sso_providers_tenant_isolation
 DO $$ BEGIN
@@ -19216,6 +18635,7 @@ END $$;
 -- ROW SECURITY: sync_outbox
 ALTER TABLE public.sync_outbox ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: sync_outbox sync_outbox_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY sync_outbox_tenant_isolation ON public.sync_outbox USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -19225,6 +18645,7 @@ END $$;
 
 -- ROW SECURITY: tenant_admin_settings_audit
 ALTER TABLE public.tenant_admin_settings_audit ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: tenant_admin_settings_audit tenant_admin_settings_audit_tenant_isolation
 DO $$ BEGIN
@@ -19236,6 +18657,7 @@ END $$;
 -- ROW SECURITY: tenant_cost_analysis
 ALTER TABLE public.tenant_cost_analysis ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: tenant_cost_analysis tenant_cost_analysis_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY tenant_cost_analysis_tenant_isolation ON public.tenant_cost_analysis USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -19245,6 +18667,7 @@ END $$;
 
 -- ROW SECURITY: tenant_framework_licenses
 ALTER TABLE public.tenant_framework_licenses ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: tenant_framework_licenses tenant_framework_licenses_tenant_isolation
 DO $$ BEGIN
@@ -19256,6 +18679,7 @@ END $$;
 -- ROW SECURITY: tenant_frameworks
 ALTER TABLE public.tenant_frameworks ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: tenant_frameworks tenant_frameworks_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY tenant_frameworks_tenant_isolation ON public.tenant_frameworks USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -19265,6 +18689,7 @@ END $$;
 
 -- ROW SECURITY: tenant_geographic_data
 ALTER TABLE public.tenant_geographic_data ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: tenant_geographic_data tenant_geographic_data_tenant_isolation
 DO $$ BEGIN
@@ -19276,6 +18701,7 @@ END $$;
 -- ROW SECURITY: tenant_health
 ALTER TABLE public.tenant_health ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: tenant_health tenant_health_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY tenant_health_tenant_isolation ON public.tenant_health USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -19286,6 +18712,7 @@ END $$;
 -- ROW SECURITY: tenant_notes
 ALTER TABLE public.tenant_notes ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: tenant_notes tenant_notes_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY tenant_notes_tenant_isolation ON public.tenant_notes USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -19295,6 +18722,7 @@ END $$;
 
 -- ROW SECURITY: tenant_notification_channels
 ALTER TABLE public.tenant_notification_channels ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: tenant_notification_channels tenant_notification_channels_platform_admin
 DO $$ BEGIN
@@ -19317,6 +18745,7 @@ END $$;
 -- ROW SECURITY: tenant_notification_rules
 ALTER TABLE public.tenant_notification_rules ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: tenant_notification_rules tenant_notification_rules_platform_admin
 DO $$ BEGIN
   CREATE POLICY tenant_notification_rules_platform_admin ON public.tenant_notification_rules USING ((EXISTS ( SELECT 1
@@ -19338,6 +18767,7 @@ END $$;
 -- ROW SECURITY: tenant_resource_usage
 ALTER TABLE public.tenant_resource_usage ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: tenant_resource_usage tenant_resource_usage_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY tenant_resource_usage_tenant_isolation ON public.tenant_resource_usage USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -19347,6 +18777,7 @@ END $$;
 
 -- ROW SECURITY: tenant_roles
 ALTER TABLE public.tenant_roles ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: tenant_roles tenant_roles_tenant_isolation
 DO $$ BEGIN
@@ -19358,6 +18789,7 @@ END $$;
 -- ROW SECURITY: tenant_usage
 ALTER TABLE public.tenant_usage ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: tenant_usage tenant_usage_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY tenant_usage_tenant_isolation ON public.tenant_usage USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -19368,6 +18800,7 @@ END $$;
 -- ROW SECURITY: tenant_usage_tracking
 ALTER TABLE public.tenant_usage_tracking ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: tenant_usage_tracking tenant_usage_tracking_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY tenant_usage_tracking_tenant_isolation ON public.tenant_usage_tracking USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -19377,6 +18810,7 @@ END $$;
 
 -- ROW SECURITY: tickets
 ALTER TABLE public.tickets ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: tickets tickets_tenant_isolation
 DO $$ BEGIN
@@ -19389,6 +18823,7 @@ END $$;
 -- ticket_comments has no tenant_id column of its own — see H1)
 ALTER TABLE public.ticket_comments ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: ticket_comments ticket_comments_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY ticket_comments_tenant_isolation ON public.ticket_comments USING ((EXISTS ( SELECT 1 FROM public.tickets t WHERE ((t.id = ticket_comments.ticket_id) AND (t.tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)))));
@@ -19398,6 +18833,7 @@ END $$;
 
 -- ROW SECURITY: user_framework_preferences
 ALTER TABLE public.user_framework_preferences ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: user_framework_preferences user_framework_preferences_tenant_isolation
 DO $$ BEGIN
@@ -19409,6 +18845,7 @@ END $$;
 -- ROW SECURITY: user_tenant_roles
 ALTER TABLE public.user_tenant_roles ENABLE ROW LEVEL SECURITY;
 
+
 -- POLICY: user_tenant_roles user_tenant_roles_tenant_isolation
 DO $$ BEGIN
   CREATE POLICY user_tenant_roles_tenant_isolation ON public.user_tenant_roles USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
@@ -19418,6 +18855,7 @@ END $$;
 
 -- ROW SECURITY: users
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
+
 
 -- POLICY: users users_tenant_isolation
 DO $$ BEGIN
@@ -19430,10 +18868,12 @@ END $$;
 -- above won't add columns to a table that already exists, so any new
 -- columns also need an ALTER ... ADD COLUMN IF NOT EXISTS line here.
 
+
 -- devices.tls_insecure_skip_verify — added 2026-05 (security hardening).
 -- Default false (verify); opt-in per device for self-signed network gear.
 ALTER TABLE IF EXISTS public.devices
     ADD COLUMN IF NOT EXISTS tls_insecure_skip_verify boolean NOT NULL DEFAULT false;
+
 
 -- external_connections.elevated_asset_id — added 2026-06 ( connection elevation).
 -- Non-null once a tenant promotes a 3rd-party connection to a managed/monitored
@@ -19441,6 +18881,7 @@ ALTER TABLE IF EXISTS public.devices
 -- (no FK: network_assets is hash-partitioned and soft-deleted).
 ALTER TABLE IF EXISTS public.external_connections
     ADD COLUMN IF NOT EXISTS elevated_asset_id uuid;
+
 
 --
 -- PostgreSQL database dump complete
@@ -19470,6 +18911,7 @@ ALTER TABLE IF EXISTS public.external_connections
 ALTER TABLE IF EXISTS public.tickets DROP CONSTRAINT IF EXISTS tickets_asset_id_fkey;
 ALTER TABLE IF EXISTS public.tickets DROP CONSTRAINT IF EXISTS tickets_crypto_implementation_id_fkey;
 
+
 -- implementation_keys.implementation_id FK targeted crypto_implementations_legacy(id),
 -- an empty residual table. Live implementations are in crypto_implementations_partitioned
 -- (exposed via the crypto_implementations view), so this FK could never be satisfied — it
@@ -19479,6 +18921,7 @@ ALTER TABLE IF EXISTS public.tickets DROP CONSTRAINT IF EXISTS tickets_crypto_im
 -- implementation id via an EXISTS subquery at write time, so DB-level enforcement is safe
 -- to remove. The key_id FK (→ keys.id, a real table) is correct and kept.
 ALTER TABLE IF EXISTS public.implementation_keys DROP CONSTRAINT IF EXISTS implementation_keys_implementation_id_fkey;
+
 
 -- The SAME stale-legacy-FK defect on the other three crypto_implementations
 -- junctions. All four were created together against crypto_implementations_legacy(id);
@@ -19505,6 +18948,7 @@ ALTER TABLE IF EXISTS public.crypto_implementation_algorithms DROP CONSTRAINT IF
 ALTER TABLE IF EXISTS public.crypto_implementation_certificates DROP CONSTRAINT IF EXISTS crypto_implementation_certificate_crypto_implementation_id_fkey;
 ALTER TABLE IF EXISTS public.implementation_libraries DROP CONSTRAINT IF EXISTS implementation_libraries_implementation_id_fkey;
 
+
 -- Plan Exceptions are non-billing (ADR-0004, Slice 4): the per-tenant
 -- override is a pure entitlement grant, never a charge. Drop the vestigial
 -- monthly_price_cents column on clusters that received it. Safe — nothing read
@@ -19519,6 +18963,7 @@ ALTER TABLE IF EXISTS public.tenant_entitlements DROP COLUMN IF EXISTS monthly_p
 -- attests to. Default scopes (All, Production, Non-Dev/Test) are seeded
 -- lazily on first cbom-service contact for a tenant.
 -- =========================================================================
+
 
 -- TABLE: scopes
 CREATE TABLE IF NOT EXISTS public.scopes (
@@ -19612,6 +19057,7 @@ BEGIN
 END;
 $$;
 
+
 DROP TRIGGER IF EXISTS scopes_audit_trigger ON public.scopes;
 CREATE OR REPLACE TRIGGER scopes_audit_trigger
     AFTER UPDATE ON public.scopes
@@ -19620,6 +19066,7 @@ CREATE OR REPLACE TRIGGER scopes_audit_trigger
         OR (OLD.predicate IS DISTINCT FROM NEW.predicate)
         OR (OLD.version IS DISTINCT FROM NEW.version)))
     EXECUTE FUNCTION public.log_scope_change();
+
 
 DROP TRIGGER IF EXISTS update_scopes_updated_at ON public.scopes;
 CREATE OR REPLACE TRIGGER update_scopes_updated_at
@@ -19674,6 +19121,7 @@ DROP TABLE IF EXISTS public.report_templates CASCADE;
 -- the same content_hash).
 -- =========================================================================
 
+
 CREATE TABLE IF NOT EXISTS public.cbom_artifacts (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
     tenant_id uuid NOT NULL,
@@ -19684,28 +19132,35 @@ CREATE TABLE IF NOT EXISTS public.cbom_artifacts (
     scope_version integer NOT NULL,
     scope_name_snapshot character varying(255) NOT NULL,
 
+
     -- Optional human-meaningful name (e.g. "Q2 2026 PCI Submission").
     -- Falls back to scope_name_snapshot + generated_at when not set.
     name character varying(255),
+
 
     -- Storage location. Exactly one of these is populated.
     storage_key text,
     inline_content text,
 
+
     content_hash character varying(64) NOT NULL,
     size_bytes bigint NOT NULL,
     component_count integer NOT NULL,
 
+
     -- CycloneDX spec version we emitted (currently 1.6).
     cyclonedx_spec_version character varying(10) DEFAULT '1.6' NOT NULL,
+
 
     -- When was the inventory data last refreshed (e.g. by the most-recent
     -- sensor sweep) at the moment of generation? Helps the customer judge
     -- "is this snapshot fresh enough for my audit?"
     input_data_freshness_at timestamp with time zone NOT NULL,
 
+
     generated_at timestamp with time zone DEFAULT now() NOT NULL,
     generated_by uuid NOT NULL,
+
 
     -- Phase 4 signing — populated when the tenant enables signing. Recompute
     -- HMAC-SHA256(content_hash || tenant_id || scope_id) over the secret
@@ -19713,20 +19168,25 @@ CREATE TABLE IF NOT EXISTS public.cbom_artifacts (
     signature_hmac character varying(128),
     signature_kid character varying(64),
 
+
     -- Provenance: who/what/when context that doesn't fit columns.
     -- e.g. { "generator_version": "2.2.0", "request_id": "...", "ip": "..." }
     provenance jsonb DEFAULT '{}'::jsonb NOT NULL,
+
 
     -- Phase 4 optional layers attached to the artifact, e.g. a
     -- compliance_attestation layer carrying the framework evaluation snapshot.
     -- Each layer is { "type": "...", "version": "...", "data": {...} }.
     layers jsonb DEFAULT '[]'::jsonb NOT NULL,
 
+
     -- Soft-delete preserves the row (so dangling references from comparison
     -- runs surface as "deleted by tenant X on …" rather than 404).
     deleted_at timestamp with time zone,
 
+
     created_at timestamp with time zone DEFAULT now(),
+
 
     CONSTRAINT cbom_artifacts_pkey PRIMARY KEY (id),
     CONSTRAINT cbom_artifacts_storage_or_inline CHECK (
@@ -19735,17 +19195,21 @@ CREATE TABLE IF NOT EXISTS public.cbom_artifacts (
     )
 );
 
+
 CREATE INDEX IF NOT EXISTS idx_cbom_artifacts_tenant_generated
     ON public.cbom_artifacts USING btree (tenant_id, generated_at DESC)
     WHERE (deleted_at IS NULL);
+
 
 CREATE INDEX IF NOT EXISTS idx_cbom_artifacts_scope
     ON public.cbom_artifacts USING btree (scope_id, generated_at DESC)
     WHERE (deleted_at IS NULL);
 
+
 CREATE INDEX IF NOT EXISTS idx_cbom_artifacts_content_hash
     ON public.cbom_artifacts USING btree (tenant_id, content_hash)
     WHERE (deleted_at IS NULL);
+
 
 ALTER TABLE public.cbom_artifacts ENABLE ROW LEVEL SECURITY;
 DO $$ BEGIN
@@ -19762,6 +19226,7 @@ END $$;
 -- deferred to a later phase; the schema is in place so the column shape is
 -- known and a future cron worker can come along and start consuming.
 -- =========================================================================
+
 
 CREATE TABLE IF NOT EXISTS public.cbom_subscriptions (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
@@ -19782,8 +19247,10 @@ CREATE TABLE IF NOT EXISTS public.cbom_subscriptions (
     CONSTRAINT cbom_subscriptions_pkey PRIMARY KEY (id)
 );
 
+
 CREATE INDEX IF NOT EXISTS idx_cbom_subscriptions_tenant
     ON public.cbom_subscriptions USING btree (tenant_id);
+
 
 ALTER TABLE public.cbom_subscriptions ENABLE ROW LEVEL SECURITY;
 DO $$ BEGIN
@@ -19830,6 +19297,7 @@ BEGIN
   END LOOP;
 END $$;
 
+
 -- Drop children before parents so FK constraint definitions are removed
 -- alongside their owning tables and CASCADE has nothing material to do.
 DROP TABLE IF EXISTS public.compliance_control_keywords CASCADE;
@@ -19837,6 +19305,7 @@ DROP TABLE IF EXISTS public.compliance_assessments CASCADE;
 DROP TABLE IF EXISTS public.compliance_controls CASCADE;
 DROP TABLE IF EXISTS public.compliance_frameworks CASCADE;
 DROP TABLE IF EXISTS public.compliance_families CASCADE;
+
 
 --
 -- Narrow framework_type enums on compliance_overrides and compliance_scenarios
@@ -19850,6 +19319,7 @@ ALTER TABLE IF EXISTS public.compliance_overrides
   ADD CONSTRAINT compliance_overrides_framework_type_check
     CHECK (framework_type IN ('platform', 'tenant'));
 
+
 ALTER TABLE IF EXISTS public.compliance_scenarios
   DROP CONSTRAINT IF EXISTS compliance_scenarios_framework_type_check;
 ALTER TABLE IF EXISTS public.compliance_scenarios
@@ -19857,6 +19327,7 @@ ALTER TABLE IF EXISTS public.compliance_scenarios
 ALTER TABLE IF EXISTS public.compliance_scenarios
   ADD CONSTRAINT compliance_scenarios_framework_type_check
     CHECK (framework_type IN ('platform', 'tenant'));
+
 
 --
 -- OT/ICS protocol_type enum extensions (PR 1 of phased OT discovery rollout)
@@ -19881,6 +19352,7 @@ ALTER TYPE public.protocol_type ADD VALUE IF NOT EXISTS 'BACnet';
 ALTER TYPE public.protocol_type ADD VALUE IF NOT EXISTS 'BACnet_SC';
 ALTER TYPE public.protocol_type ADD VALUE IF NOT EXISTS 'HART_IP';
 ALTER TYPE public.protocol_type ADD VALUE IF NOT EXISTS 'S7';
+
 
 --
 -- discovery_jobs.ot_probe_protocols (PR 3 of phased OT discovery rollout)
@@ -19915,6 +19387,7 @@ ALTER TABLE IF EXISTS public.discovery_jobs
 -- per-tier; tier_entitlements' overage_* columns remain as catalog
 -- metadata only, nothing bills from them.)
 -- =========================================================================
+
 
 CREATE TABLE IF NOT EXISTS public.billable_items (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -19955,6 +19428,7 @@ CREATE TABLE IF NOT EXISTS public.billable_items (
 CREATE INDEX IF NOT EXISTS idx_billable_items_category ON public.billable_items USING btree (category) WHERE (is_active = true);
 CREATE INDEX IF NOT EXISTS idx_billable_items_active_sort ON public.billable_items USING btree (sort_order) WHERE (is_active = true);
 
+
 DROP TRIGGER IF EXISTS update_billable_items_updated_at ON public.billable_items;
 CREATE OR REPLACE TRIGGER update_billable_items_updated_at
     BEFORE UPDATE ON public.billable_items
@@ -19978,6 +19452,7 @@ CREATE TABLE IF NOT EXISTS public.tier_entitlements (
     CONSTRAINT tier_entitlements_pkey PRIMARY KEY (tier_id, item_id)
 );
 
+
 -- FKs added in a DO block so re-running the schema doesn't fail with
 -- "constraint already exists" — see CLAUDE.md idempotency rules.
 DO $$ BEGIN
@@ -19992,6 +19467,7 @@ DO $$ BEGIN
       FOREIGN KEY (item_id) REFERENCES public.billable_items(id) ON DELETE RESTRICT;
   END IF;
 END $$;
+
 
 DROP TRIGGER IF EXISTS update_tier_entitlements_updated_at ON public.tier_entitlements;
 CREATE OR REPLACE TRIGGER update_tier_entitlements_updated_at
@@ -20027,6 +19503,7 @@ CREATE TABLE IF NOT EXISTS public.tenant_entitlements (
 CREATE INDEX IF NOT EXISTS idx_tenant_entitlements_tenant_item ON public.tenant_entitlements USING btree (tenant_id, item_id);
 CREATE INDEX IF NOT EXISTS idx_tenant_entitlements_expires ON public.tenant_entitlements USING btree (expires_at) WHERE (expires_at IS NOT NULL);
 
+
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'tenant_entitlements_item_id_fkey') THEN
     ALTER TABLE public.tenant_entitlements
@@ -20035,12 +19512,14 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+
 ALTER TABLE public.tenant_entitlements ENABLE ROW LEVEL SECURITY;
 DO $$ BEGIN
   CREATE POLICY tenant_entitlements_tenant_isolation ON public.tenant_entitlements
     USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
+
 
 DROP TRIGGER IF EXISTS update_tenant_entitlements_updated_at ON public.tenant_entitlements;
 CREATE OR REPLACE TRIGGER update_tenant_entitlements_updated_at
@@ -20066,6 +19545,7 @@ ALTER TABLE IF EXISTS public.subscription_tiers
 ALTER TABLE IF EXISTS public.subscription_tiers
     ADD COLUMN IF NOT EXISTS trial_days_soft integer;
 
+
 -- billing_method: how a plan is collected.
 --   'stripe'  : card-on-file via Stripe (requires stripe_price_id; the
 --               admin UI auto-provisions the Stripe Product/Price on save).
@@ -20080,6 +19560,7 @@ ALTER TABLE IF EXISTS public.subscription_tiers
     ADD COLUMN IF NOT EXISTS billing_method character varying(20) NOT NULL DEFAULT 'stripe'
         CHECK (billing_method IN ('stripe', 'invoice'));
 
+
 -- owner_tenant_id: scopes a custom plan to exactly one tenant.
 --   NULL          : a standard/global plan, offered on the public signup
 --                   page and to every tenant.
@@ -20090,6 +19571,7 @@ ALTER TABLE IF EXISTS public.subscription_tiers
 -- guards the inline FK against re-creation on schema re-runs.
 ALTER TABLE IF EXISTS public.subscription_tiers
     ADD COLUMN IF NOT EXISTS owner_tenant_id uuid REFERENCES public.tenants(id) ON DELETE CASCADE;
+
 
 CREATE INDEX IF NOT EXISTS idx_subscription_tiers_owner_tenant
     ON public.subscription_tiers (owner_tenant_id)
@@ -20128,6 +19610,7 @@ ALTER TABLE IF EXISTS public.billing_trial_tracking
 --     applications of schema.sql are a no-op.
 DROP TABLE IF EXISTS public.tenant_limit_overrides CASCADE;
 
+
 -- Remove SLA Management feature (operational SLA tracking).
 -- The admin-ui "SLA Management" page + admin-service /sla routes were removed:
 -- sla_definitions CRUD was wired, but sla_measurements never had a collector,
@@ -20136,6 +19619,7 @@ DROP TABLE IF EXISTS public.tenant_limit_overrides CASCADE;
 -- defensive. Re-runnable: a fresh install never created these tables.
 DROP TABLE IF EXISTS public.sla_measurements CASCADE;
 DROP TABLE IF EXISTS public.sla_definitions CASCADE;
+
 
 -- billing_subscriptions: enforce one current-subscription row per tenant per
 -- provider. HandleCreateSubscription upserts with ON CONFLICT (tenant_id,
@@ -20156,12 +19640,14 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+
 -- billing_events: the async WebhookWorker and WebhookProcessor both stamp
 -- updated_at when claiming/retrying/completing an event, and the worker's
 -- stuck-event sweep reads it. The column was missing, so every event errored
 -- ("column updated_at does not exist") and none could be marked completed.
 ALTER TABLE IF EXISTS public.billing_events
     ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone DEFAULT now();
+
 
 -- billing_invoices: WebhookProcessor mirrors Stripe invoices with
 -- ON CONFLICT (provider_id, external_invoice_id). Without this UNIQUE
@@ -20177,6 +19663,7 @@ DO $$ BEGIN
       ADD CONSTRAINT billing_invoices_provider_external_key UNIQUE (provider_id, external_invoice_id);
   END IF;
 END $$;
+
 
 -- network_segments.location_id is now OPTIONAL.
 -- A network segment is a *logical* object (CIDR / IP range / VPC / VPN range)
@@ -20210,6 +19697,7 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+
 -- sensor_commands: result capture + lifecycle timestamp.
 -- The command round-trip (deliver/acknowledge) writes updated_at and the
 -- sensor's execution result into response_data; both were missing from the
@@ -20218,16 +19706,19 @@ END $$;
 ALTER TABLE IF EXISTS public.sensor_commands ADD COLUMN IF NOT EXISTS response_data jsonb;
 ALTER TABLE IF EXISTS public.sensor_commands ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone DEFAULT now();
 
+
 -- sensors: air-gapped flag. An air-gapped sensor is not expected to check in,
 -- heartbeat, or stream discoveries; the platform still shows it registered and
 -- imports its findings out-of-band. Replaces the never-consumed "profile"
 -- selector. Idempotent.
 ALTER TABLE IF EXISTS public.sensors ADD COLUMN IF NOT EXISTS air_gapped boolean NOT NULL DEFAULT false;
 
+
 -- sensors: full host NIC inventory the sensor reports at registration + in
 -- heartbeats, so the UI can offer a real interface picker (vs. blind free-text).
 -- Distinct from network_interfaces (the subset actually being monitored).
 ALTER TABLE IF EXISTS public.sensors ADD COLUMN IF NOT EXISTS available_interfaces text[] DEFAULT ARRAY[]::text[];
+
 
 -- =========================================================================
 -- API TOKENS (tenant-scoped personal access tokens)
@@ -20258,6 +19749,7 @@ CREATE TABLE IF NOT EXISTS public.api_tokens (
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
+
 DO $$ BEGIN
   IF to_regclass('public.api_tokens') IS NOT NULL
      AND NOT EXISTS (
@@ -20268,8 +19760,10 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_tokens_token_hash ON public.api_tokens (token_hash);
 CREATE INDEX IF NOT EXISTS idx_api_tokens_tenant_user ON public.api_tokens (tenant_id, user_id);
+
 
 DO $$ BEGIN
   IF to_regclass('public.api_tokens') IS NOT NULL
@@ -20283,6 +19777,7 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+
 DO $$ BEGIN
   IF to_regclass('public.api_tokens') IS NOT NULL
      AND NOT EXISTS (
@@ -20295,13 +19790,16 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+
 ALTER TABLE public.api_tokens ENABLE ROW LEVEL SECURITY;
+
 
 DO $$ BEGIN
   CREATE POLICY api_tokens_tenant_isolation ON public.api_tokens
     USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
+
 
 -- Account-lockout columns for platform_users. The tenant `users` table
 -- already has failed_login_attempts + locked_until; platform admins now get the
@@ -20310,6 +19808,7 @@ ALTER TABLE public.platform_users
   ADD COLUMN IF NOT EXISTS failed_login_attempts integer DEFAULT 0;
 ALTER TABLE public.platform_users
   ADD COLUMN IF NOT EXISTS locked_until timestamp with time zone;
+
 
 -- OAuth 2.0 authorization codes. Short-lived (10 min) codes issued by
 -- the OAuth /authorize endpoint and exchanged once for a PAT at /token.
@@ -20330,6 +19829,7 @@ CREATE TABLE IF NOT EXISTS public.oauth_authorization_codes (
 );
 CREATE INDEX IF NOT EXISTS idx_oauth_codes_expires ON public.oauth_authorization_codes (expires_at);
 
+
 -- Sensor reporting interval (seconds) — the sensor's actual data-send cadence,
 -- reported up at registration/heartbeat and operator-changeable from the control
 -- plane via an update_config command (feature: sensor-reporting-interval).
@@ -20344,10 +19844,12 @@ ALTER TABLE public.sensors
 ALTER TABLE public.users
   ADD COLUMN IF NOT EXISTS onboarding_dismissed_at timestamp with time zone;
 
+
 -- Missing ON DELETE CASCADE FKs on partitioned tables and health tables.
 -- The _legacy variants already have these; the active _partitioned parents and
 -- the three health tables were skipped when partitioning was introduced, causing
 -- orphaned rows after PurgeTenant (which relies solely on CASCADE).
+
 
 DO $$ BEGIN
   IF to_regclass('public.network_assets_partitioned') IS NOT NULL
@@ -20364,6 +19866,7 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+
 DO $$ BEGIN
   IF to_regclass('public.crypto_implementations_partitioned') IS NOT NULL
      AND NOT EXISTS (
@@ -20378,6 +19881,7 @@ DO $$ BEGIN
       FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
   END IF;
 END $$;
+
 
 DO $$ BEGIN
   IF to_regclass('public.sensor_discoveries_partitioned') IS NOT NULL
@@ -20394,6 +19898,7 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+
 DO $$ BEGIN
   IF to_regclass('public.health_alerts') IS NOT NULL
      AND NOT EXISTS (
@@ -20408,6 +19913,7 @@ DO $$ BEGIN
       FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
   END IF;
 END $$;
+
 
 DO $$ BEGIN
   IF to_regclass('public.health_metrics') IS NOT NULL
@@ -20424,6 +19930,7 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+
 DO $$ BEGIN
   IF to_regclass('public.tenant_health') IS NOT NULL
      AND NOT EXISTS (
@@ -20438,6 +19945,7 @@ DO $$ BEGIN
       FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
   END IF;
 END $$;
+
 
 -- =====================================================================
 -- ADR-0014: Compliance Evaluation & Materialization Model
@@ -20458,19 +19966,24 @@ CREATE TABLE IF NOT EXISTS public.tenant_framework_scores (
     CONSTRAINT tenant_framework_scores_pkey PRIMARY KEY (tenant_id, platform_framework_id)
 );
 
+
 CREATE INDEX IF NOT EXISTS idx_tenant_framework_scores_tenant
   ON public.tenant_framework_scores (tenant_id);
 
+
 ALTER TABLE public.tenant_framework_scores ENABLE ROW LEVEL SECURITY;
+
 
 DO $$ BEGIN
   CREATE POLICY tenant_framework_scores_tenant_isolation ON public.tenant_framework_scores
     USING ((tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+
 -- Speeds the evaluation engine's active-finding reconcile load + posture reads.
 CREATE INDEX IF NOT EXISTS idx_compliance_findings_tenant_control_state
   ON public.compliance_findings (tenant_id, control_id, detection_state);
+
 
 -- cert_ownership: explicitly declared ownership for manually-uploaded certs.
 -- NULL = unset (ownership derived from asset link for discovered certs).
@@ -20480,11 +19993,13 @@ DO $$ BEGIN
     CHECK (cert_ownership IS NULL OR cert_ownership = ANY (ARRAY['internal', 'third_party']));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+
 -- expiry_alert_tier: tightest expiry-alert tier (in days; 0 = expired) already
 -- notified for this cert, so the scheduled certificate-expiry scan (ADR-0015 §6)
 -- escalates once per tier instead of re-notifying daily. NULL = not yet alerted /
 -- renewed beyond the widest tier.
 ALTER TABLE public.certificates ADD COLUMN IF NOT EXISTS expiry_alert_tier integer;
+
 
 -- Add 'authentication' to the activity_logs valid_event_category constraint.
 -- auth-service uses event_category='authentication' for login audit events; the
@@ -20505,6 +20020,7 @@ BEGIN
   JOIN pg_namespace n ON t.relnamespace = n.oid
   WHERE t.relname = 'activity_logs' AND n.nspname = 'audit' AND c.conname = 'valid_event_category';
 
+
   IF old_def IS NOT NULL AND old_def NOT LIKE '%authentication%' THEN
     ALTER TABLE audit.activity_logs DROP CONSTRAINT valid_event_category;
     ALTER TABLE audit.activity_logs ADD CONSTRAINT valid_event_category
@@ -20513,6 +20029,7 @@ BEGIN
         'report','certificate','data','config','job','authentication'
       ]::text[])));
   END IF;
+
 
   -- Patch each existing monthly partition that still carries the old constraint.
   FOR r IN
@@ -20536,12 +20053,14 @@ BEGIN
   END LOOP;
 END $$;
 
+
 --
 -- Drop the removed compliance_packages table (admin "Compliance Packages"
 -- feature removed — see). DROP... IF EXISTS is idempotent; CASCADE
 -- clears the table's own FKs (nothing references it).
 --
 DROP TABLE IF EXISTS public.compliance_packages CASCADE;
+
 
 --
 -- Active Scan (): per-asset crypto-scan freshness tracking.
@@ -20556,6 +20075,7 @@ ALTER TABLE IF EXISTS public.network_assets_partitioned
     ADD COLUMN IF NOT EXISTS last_scanned_at timestamp with time zone;
 ALTER TABLE IF EXISTS public.network_assets_partitioned
     ADD COLUMN IF NOT EXISTS last_scan_status text;
+
 
 CREATE OR REPLACE VIEW public.network_assets AS
  SELECT network_assets_partitioned.id,
@@ -20602,6 +20122,7 @@ CREATE OR REPLACE VIEW public.network_assets AS
     network_assets_partitioned.last_scan_status
    FROM public.network_assets_partitioned;
 
+
 -- =====================================================================
 -- ADR-0007: Posture & Findings Read Models — posture trend time-series.
 -- One row per tenant per day capturing the crypto-risk posture (the same
@@ -20628,11 +20149,14 @@ CREATE TABLE IF NOT EXISTS public.posture_daily_snapshots (
     CONSTRAINT posture_daily_snapshots_pkey PRIMARY KEY (tenant_id, snapshot_date)
 );
 
+
 -- The PK (tenant_id, snapshot_date) already serves the trend range read
 -- (WHERE tenant_id = $1 AND snapshot_date >= $2 ORDER BY snapshot_date); a
 -- btree scans backwards for DESC, so no separate index is needed.
 
+
 ALTER TABLE public.posture_daily_snapshots ENABLE ROW LEVEL SECURITY;
+
 
 DO $$ BEGIN
   CREATE POLICY posture_daily_snapshots_tenant_isolation ON public.posture_daily_snapshots
@@ -20651,6 +20175,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- is behavior-neutral (owner bypasses RLS).
 -- ============================================================================
 
+
 -- Drop the 6 buggy _platform_admin policies: they key on app.current_user_id
 -- (nothing sets it) and their ::uuid cast THROWS on an empty GUC once RLS
 -- evaluates them. Platform-admin cross-tenant access goes through the BYPASSRLS
@@ -20661,13 +20186,6 @@ DROP POLICY IF EXISTS notification_history_platform_admin ON public.notification
 DROP POLICY IF EXISTS tenant_notification_channels_platform_admin ON public.tenant_notification_channels;
 DROP POLICY IF EXISTS tenant_notification_rules_platform_admin ON public.tenant_notification_rules;
 
--- Drop 3 mis-named orphan policies the pg_dump body created on the *_legacy
--- tables (the partition bug: tenant policy landed on _legacy with the clean
--- name instead of on the _partitioned parent). The _legacy tables get a
--- correctly-named WITH CHECK policy from the canonical block below.
-DROP POLICY IF EXISTS network_assets_tenant_isolation ON public.network_assets_legacy;
-DROP POLICY IF EXISTS crypto_implementations_tenant_isolation ON public.crypto_implementations_legacy;
-DROP POLICY IF EXISTS sensor_discoveries_tenant_isolation ON public.sensor_discoveries_legacy;
 
 -- Canonical tenant isolation: direct tenant_id column. 124 tables.
 ALTER TABLE audit.activity_logs ENABLE ROW LEVEL SECURITY;
@@ -20880,16 +20398,6 @@ DROP POLICY IF EXISTS crypto_code_findings_tenant_isolation ON public.crypto_cod
 CREATE POLICY crypto_code_findings_tenant_isolation ON public.crypto_code_findings
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.crypto_configurations ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS crypto_configurations_tenant_isolation ON public.crypto_configurations;
-CREATE POLICY crypto_configurations_tenant_isolation ON public.crypto_configurations
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.crypto_implementations_legacy ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS crypto_implementations_legacy_tenant_isolation ON public.crypto_implementations_legacy;
-CREATE POLICY crypto_implementations_legacy_tenant_isolation ON public.crypto_implementations_legacy
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.crypto_implementations_partitioned ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS crypto_implementations_partitioned_tenant_isolation ON public.crypto_implementations_partitioned;
 CREATE POLICY crypto_implementations_partitioned_tenant_isolation ON public.crypto_implementations_partitioned
@@ -21030,11 +20538,6 @@ DROP POLICY IF EXISTS locations_tenant_isolation ON public.locations;
 CREATE POLICY locations_tenant_isolation ON public.locations
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.network_assets_legacy ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS network_assets_legacy_tenant_isolation ON public.network_assets_legacy;
-CREATE POLICY network_assets_legacy_tenant_isolation ON public.network_assets_legacy
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.network_assets_partitioned ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS network_assets_partitioned_tenant_isolation ON public.network_assets_partitioned;
 CREATE POLICY network_assets_partitioned_tenant_isolation ON public.network_assets_partitioned
@@ -21123,11 +20626,6 @@ CREATE POLICY sensor_ca_certificates_tenant_isolation ON public.sensor_ca_certif
 ALTER TABLE public.sensor_certificates ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS sensor_certificates_tenant_isolation ON public.sensor_certificates;
 CREATE POLICY sensor_certificates_tenant_isolation ON public.sensor_certificates
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.sensor_discoveries_legacy ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS sensor_discoveries_legacy_tenant_isolation ON public.sensor_discoveries_legacy;
-CREATE POLICY sensor_discoveries_legacy_tenant_isolation ON public.sensor_discoveries_legacy
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.sensor_discoveries_partitioned ENABLE ROW LEVEL SECURITY;
@@ -21281,6 +20779,7 @@ CREATE POLICY workflow_configurations_tenant_isolation ON public.workflow_config
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 
+
 -- Notification tables that also expose platform-broadcast rows (tenant_id IS NULL):
 -- USING lets a tenant SEE broadcasts; WITH CHECK is strict (a tenant may only
 -- write its own rows — broadcasts are inserted via the bypass role).
@@ -21294,6 +20793,7 @@ DROP POLICY IF EXISTS notification_history_tenant_isolation ON public.notificati
 CREATE POLICY notification_history_tenant_isolation ON public.notification_history
   USING (tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
 
 -- Parent-join tables (no own tenant_id) — isolate via the owning parent row.
 -- WITH CHECK uses the same EXISTS so an INSERT must reference a parent the
@@ -21324,6 +20824,7 @@ CREATE POLICY remediation_plan_items_tenant_isolation ON public.remediation_plan
   USING (EXISTS (SELECT 1 FROM public.remediation_plans rp WHERE rp.id = remediation_plan_items.plan_id AND rp.tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid))
   WITH CHECK (EXISTS (SELECT 1 FROM public.remediation_plans rp WHERE rp.id = remediation_plan_items.plan_id AND rp.tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid));
 
+
 -- =========================================================================
 -- SENSOR-DISCOVERY INGEST: primary key, batch claim, and poll indexes
 -- (Core audit, WP-E — SQL-1, SQL-2, SQL-6, DISC-8)
@@ -21346,6 +20847,7 @@ CREATE POLICY remediation_plan_items_tenant_isolation ON public.remediation_plan
 --     within a sensor, with only a bare sensor_id index to work from.
 -- =========================================================================
 
+
 -- SQL-1 — PRIMARY KEY (tenant_id, id). tenant_id must lead: a partitioned
 -- table's unique constraints have to contain the partition key. Guarded on
 -- contype = 'p' as well as the name, because adding a second primary key under
@@ -21367,6 +20869,7 @@ BEGIN
     END IF;
 END $$;
 
+
 -- SQL-2 — the poller's index. Partial, so it holds only the rows that are still
 -- work: on a healthy system that is near-empty and the poll is O(1) instead of
 -- O(all discoveries ever). Mirrors idx_sensor_discoveries_unprocessed, which
@@ -21375,10 +20878,12 @@ CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_part_unprocessed
     ON public.sensor_discoveries_partitioned USING btree (batch_id, tenant_id)
     WHERE (processed_at IS NULL);
 
+
 -- SQL-6 — sensor-manager ListSensorDiscoveries: WHERE sensor_id = $1 ORDER BY
 -- timestamp DESC LIMIT $2. The composite serves the filter and the sort.
 CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_part_sensor_timestamp
     ON public.sensor_discoveries_partitioned USING btree (sensor_id, "timestamp" DESC);
+
 
 -- DISC-8 — batch claim marker.
 --
@@ -21395,11 +20900,13 @@ CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_part_sensor_timestamp
 ALTER TABLE IF EXISTS public.sensor_discoveries_partitioned
     ADD COLUMN IF NOT EXISTS claimed_at timestamp with time zone;
 
+
 -- Candidate selection reads `claimed_at IS NULL OR claimed_at < now() - ...`
 -- alongside `processed_at IS NULL`; keep it in the same partial index shape.
 CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_part_claimed
     ON public.sensor_discoveries_partitioned USING btree (claimed_at)
     WHERE (processed_at IS NULL);
+
 
 -- The view is recreated here to expose claimed_at (appending trailing columns
 -- via CREATE OR REPLACE VIEW is permitted). The pg_dump body above DROPs the
@@ -21435,11 +20942,13 @@ CREATE OR REPLACE VIEW public.sensor_discoveries AS
 -- finding) and had nothing to work from but a sequential scan.
 -- =========================================================================
 
+
 -- asset_history had NO secondary index at all — every asset-timeline read
 -- scanned the whole tenant's history. The lead columns match the access
 -- pattern: one asset's history, newest first.
 CREATE INDEX IF NOT EXISTS idx_asset_history_tenant_asset_created
     ON public.asset_history USING btree (tenant_id, asset_id, created_at DESC);
+
 
 -- audit.audit_logs had only idx_audit_logs_created_at (global, not
 -- tenant-scoped), so a tenant's audit view scanned every tenant's rows and
@@ -21450,10 +20959,12 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_created
 CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id
     ON audit.audit_logs USING btree (user_id);
 
+
 -- discovery_findings is indexed on job_id/target_id/hostname/protocol but not
 -- on the column every RLS policy and tenant query filters on first.
 CREATE INDEX IF NOT EXISTS idx_discovery_findings_tenant_id
     ON public.discovery_findings USING btree (tenant_id);
+
 
 -- external_connections: the sensor_id and source_asset_id lookups (which
 -- sensor observed this / which asset originated this) had no index, unlike
@@ -21464,6 +20975,7 @@ CREATE INDEX IF NOT EXISTS idx_ext_conn_sensor_id
 CREATE INDEX IF NOT EXISTS idx_ext_conn_source_asset_id
     ON public.external_connections USING btree (source_asset_id)
     WHERE (source_asset_id IS NOT NULL);
+
 
 -- Login and invite flows look users up case-insensitively within a tenant.
 -- idx_users_email is on the raw column, so lower(email) could not use it.
@@ -21516,8 +21028,8 @@ CREATE MATERIALIZED VIEW public.mv_remediation_queue AS
     ci.id AS crypto_implementation_id,
     ((('Certificate '::text || (COALESCE(c.common_name, (c.subject_dn)::character varying))::text) || ' expires '::text) || (c.not_after)::text) AS detail_text,
     ci.created_at
-   FROM (((public.network_assets_legacy a
-     JOIN public.crypto_implementations_legacy ci ON (((ci.asset_id = a.id) AND (ci.deleted_at IS NULL))))
+   FROM (((public.network_assets_partitioned a
+     JOIN public.crypto_implementations_partitioned ci ON (((ci.asset_id = a.id) AND (ci.deleted_at IS NULL))))
      JOIN public.certificates c ON (((c.id = ci.certificate_id) AND (c.not_after IS NOT NULL) AND ((c.not_after <= now()) OR (c.not_after <= (now() + '30 days'::interval))))))
      LEFT JOIN public.locations l ON ((l.id = a.location_id)))
   WHERE (a.deleted_at IS NULL)
@@ -21547,10 +21059,10 @@ UNION ALL
     ci.id AS crypto_implementation_id,
     ((('Risk score '::text || (ci.risk_score)::text) || ': '::text) || (COALESCE(ci.cipher_suite, ((ci.protocol)::text)::character varying))::text) AS detail_text,
     ci.created_at
-   FROM ((public.network_assets_legacy a
+   FROM ((public.network_assets_partitioned a
      -- >= 40 is the canonical Medium floor (risk_bands.go). It was >= 60, which
      -- silently hid the bottom half of the Medium band from the queue.
-     JOIN public.crypto_implementations_legacy ci ON (((ci.asset_id = a.id) AND (ci.deleted_at IS NULL) AND (ci.risk_score >= 40))))
+     JOIN public.crypto_implementations_partitioned ci ON (((ci.asset_id = a.id) AND (ci.deleted_at IS NULL) AND (ci.risk_score >= 40))))
      LEFT JOIN public.locations l ON ((l.id = a.location_id)))
   WHERE (a.deleted_at IS NULL)
 UNION ALL
@@ -21569,10 +21081,11 @@ UNION ALL
     ci.id AS crypto_implementation_id,
     ('Protocol '::text || (COALESCE(ci.protocol_version, ((ci.protocol)::text)::character varying))::text) AS detail_text,
     ci.created_at
-   FROM ((public.network_assets_legacy a
-     JOIN public.crypto_implementations_legacy ci ON (((ci.asset_id = a.id) AND (ci.deleted_at IS NULL))))
+   FROM ((public.network_assets_partitioned a
+     JOIN public.crypto_implementations_partitioned ci ON (((ci.asset_id = a.id) AND (ci.deleted_at IS NULL))))
      LEFT JOIN public.locations l ON ((l.id = a.location_id)))
   WHERE ((a.deleted_at IS NULL) AND (((ci.protocol_version)::text = ANY ((ARRAY['TLS 1.0'::character varying, 'TLS 1.1'::character varying, 'SSL 3.0'::character varying])::text[])) OR ((ci.protocol_version)::text ~~ '1.0'::text) OR ((ci.protocol_version)::text ~~ '1.1'::text)));
+
 
 -- Recreated with the view (DROP took it).
 CREATE INDEX IF NOT EXISTS idx_mv_remediation_queue_tenant_severity
@@ -21584,7 +21097,6 @@ CREATE INDEX IF NOT EXISTS idx_mv_remediation_queue_tenant_severity
 ALTER VIEW public.network_assets SET (security_invoker = true);
 ALTER VIEW public.sensor_discoveries SET (security_invoker = true);
 ALTER VIEW public.crypto_implementations SET (security_invoker = true);
-
 
 
 -- ============================================================================
@@ -21610,6 +21122,7 @@ ALTER VIEW public.crypto_implementations SET (security_invoker = true);
 DO $$ BEGIN CREATE ROLE crypto_app NOLOGIN NOBYPASSRLS;    EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE ROLE crypto_bypass NOLOGIN BYPASSRLS;   EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+
 -- Schema + object access for both roles (current objects).
 GRANT USAGE ON SCHEMA public TO crypto_app, crypto_bypass;
 GRANT USAGE ON SCHEMA audit  TO crypto_app, crypto_bypass;
@@ -21619,6 +21132,7 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO crypto_app, crypto_bypa
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA audit  TO crypto_app, crypto_bypass;
 GRANT EXECUTE ON FUNCTION public.set_tenant_context(uuid) TO crypto_app, crypto_bypass;
 GRANT EXECUTE ON FUNCTION public.clear_tenant_context()   TO crypto_app, crypto_bypass;
+
 
 -- RBAC permission checks (/-class fail-closed fix): these read RLS-scoped
 -- user_tenant_roles / tenant_roles, so under the non-owner crypto_app role with no
@@ -21635,6 +21149,7 @@ GRANT  EXECUTE ON FUNCTION public.user_has_permission(uuid, uuid, character vary
 GRANT  EXECUTE ON FUNCTION public.get_user_permissions(uuid, uuid)                   TO crypto_app, crypto_bypass;
 GRANT  EXECUTE ON FUNCTION public.platform_user_has_permission(uuid, character varying) TO crypto_app, crypto_bypass;
 
+
 -- audit partition management: these are SECURITY DEFINER (run as the
 -- owner so the app role can materialize partitions without owning the table).
 -- Lock EXECUTE down to the app roles rather than the default PUBLIC, since a
@@ -21643,6 +21158,7 @@ REVOKE EXECUTE ON FUNCTION audit.create_activity_logs_partition(integer, integer
 REVOKE EXECUTE ON FUNCTION audit.ensure_future_partitions(integer)                FROM PUBLIC;
 GRANT  EXECUTE ON FUNCTION audit.create_activity_logs_partition(integer, integer) TO crypto_app, crypto_bypass;
 GRANT  EXECUTE ON FUNCTION audit.ensure_future_partitions(integer)                TO crypto_app, crypto_bypass;
+
 
 -- Future objects the owner creates in later migrations are reachable too.
 ALTER DEFAULT PRIVILEGES FOR ROLE crypto_user IN SCHEMA public
@@ -21688,6 +21204,7 @@ BEGIN
   END LOOP;
 END $$;
 
+
 -- ============================================================================
 -- EMAIL-VERIFICATION DEFAULT FLIP — one-shot grandfather
 -- =====================================================================
@@ -21725,10 +21242,12 @@ CREATE TABLE IF NOT EXISTS public.platform_in_app_notifications (
     CONSTRAINT valid_platform_notification_type CHECK (((type)::text = ANY ((ARRAY['alert'::character varying, 'discovery'::character varying, 'compliance'::character varying, 'system'::character varying, 'billing'::character varying, 'security'::character varying, 'audit'::character varying, 'other'::character varying])::text[])))
 );
 
+
 CREATE INDEX IF NOT EXISTS idx_platform_in_app_notifications_created_at
     ON public.platform_in_app_notifications (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_platform_in_app_notifications_unread
     ON public.platform_in_app_notifications (created_at DESC) WHERE read_at IS NULL;
+
 
 -- ============================================================================
 -- Stateful alerts + append-only evidence events ()
@@ -21772,6 +21291,7 @@ CREATE TABLE IF NOT EXISTS public.alerts (
     CONSTRAINT alerts_resolution_check CHECK ((resolution IS NULL OR (resolution)::text = ANY ((ARRAY['manual'::character varying, 'auto'::character varying])::text[])))
 );
 
+
 -- One OPEN alert per (tenant, type, subject): repeated raises escalate the
 -- existing alert instead of fragmenting into duplicates.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_open_dedup
@@ -21779,6 +21299,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_open_dedup
     WHERE ((status)::text <> 'resolved');
 CREATE INDEX IF NOT EXISTS idx_alerts_tenant_status ON public.alerts (tenant_id, status, last_event_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alerts_snoozed_until ON public.alerts (snoozed_until) WHERE ((status)::text = 'snoozed');
+
 
 CREATE TABLE IF NOT EXISTS public.alert_events (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
@@ -21793,6 +21314,7 @@ CREATE TABLE IF NOT EXISTS public.alert_events (
     CONSTRAINT alert_events_actor_check CHECK (((actor_type)::text = ANY ((ARRAY['system'::character varying, 'user'::character varying])::text[])))
 );
 
+
 DO $$ BEGIN
   IF to_regclass('public.alert_events') IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'alert_events_alert_fk' AND conrelid = to_regclass('public.alert_events')) THEN
@@ -21801,11 +21323,14 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+
 CREATE INDEX IF NOT EXISTS idx_alert_events_alert ON public.alert_events (alert_id, created_at);
+
 
 -- Ticket ↔ alert bridge: a ticket created from an alert records its origin.
 ALTER TABLE public.tickets ADD COLUMN IF NOT EXISTS alert_id uuid;
 CREATE INDEX IF NOT EXISTS idx_tickets_alert ON public.tickets (alert_id) WHERE (alert_id IS NOT NULL);
+
 
 ALTER TABLE public.alerts ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS alerts_tenant_isolation ON public.alerts;
@@ -21817,6 +21342,7 @@ DROP POLICY IF EXISTS alert_events_tenant_isolation ON public.alert_events;
 CREATE POLICY alert_events_tenant_isolation ON public.alert_events
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
 
 -- ============================================================================
 -- Tenant alert catalog settings (alert-type registry, §8.2)
@@ -21836,11 +21362,13 @@ CREATE TABLE IF NOT EXISTS public.tenant_alert_settings (
     PRIMARY KEY (tenant_id, alert_type)
 );
 
+
 ALTER TABLE public.tenant_alert_settings ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS tenant_alert_settings_tenant_isolation ON public.tenant_alert_settings;
 CREATE POLICY tenant_alert_settings_tenant_isolation ON public.tenant_alert_settings
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
 
 -- Detector-internal score history for the compliance_score_drop alert.
 -- tenant_framework_scores keeps only the current score; this lightweight trail
@@ -21855,6 +21383,7 @@ CREATE TABLE IF NOT EXISTS public.alert_framework_score_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_alert_framework_score_snapshots_lookup
     ON public.alert_framework_score_snapshots (tenant_id, platform_framework_id, captured_at);
+
 
 -- Digest/batched notification delivery. Rules with frequency 'digest_*'
 -- accumulate matched notifications here per (scope, channel); a flush worker
@@ -21882,6 +21411,7 @@ CREATE POLICY notification_digest_queue_tenant_isolation ON public.notification_
   USING (tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 
+
 -- Platform maintenance windows (storm control §10.3): while an active window is
 -- in effect, notification-service suppresses delivery. Platform-scoped (no
 -- tenant_id, no RLS — like platform_in_app_notifications); managed by platform
@@ -21897,9 +21427,11 @@ CREATE TABLE IF NOT EXISTS public.platform_maintenance_windows (
 CREATE INDEX IF NOT EXISTS idx_platform_maintenance_windows_active
     ON public.platform_maintenance_windows (starts_at, ends_at);
 
+
 -- Ticket comments may be system-authored (alert-event echoes onto linked
 -- tickets): author_id NULL means "System". Idempotent.
 ALTER TABLE public.ticket_comments ALTER COLUMN author_id DROP NOT NULL;
+
 
 -- Retire the `analyst` tenant role: it became functionally identical to
 -- `viewer` once the Phase 5 report-authoring permissions were removed, so the
@@ -21917,6 +21449,7 @@ BEGIN
        OR to_regclass('public.user_tenant_roles') IS NULL THEN
         RETURN;
     END IF;
+
 
     -- Repoint SSO group mappings / provider default roles at viewer so the
     -- role deletion below doesn't cascade-drop them (role_id FKs are
@@ -21938,6 +21471,7 @@ BEGIN
           AND a.name = 'analyst' AND a.is_system_role = true;
     END IF;
 
+
     -- Reassign analyst users to viewer unless they already hold viewer.
     UPDATE user_tenant_roles utr
     SET role_id = v.id
@@ -21950,11 +21484,13 @@ BEGIN
         WHERE u2.user_id = utr.user_id AND u2.tenant_id = utr.tenant_id AND u2.role_id = v.id
       );
 
+
     -- Users who already had viewer keep it; drop their analyst assignment.
     DELETE FROM user_tenant_roles utr
     USING tenant_roles a
     WHERE utr.role_id = a.id
       AND a.name = 'analyst' AND a.is_system_role = true;
+
 
     IF to_regclass('public.tenant_role_permissions') IS NOT NULL THEN
         DELETE FROM tenant_role_permissions trp
@@ -21963,9 +21499,11 @@ BEGIN
           AND a.name = 'analyst' AND a.is_system_role = true;
     END IF;
 
+
     DELETE FROM tenant_roles
     WHERE name = 'analyst' AND is_system_role = true;
 END $$;
+
 
 -- =========================================================================
 -- METERED/OVERAGE BILLING DEMOLITION (2026-07,//)
@@ -21996,6 +21534,7 @@ END $$;
 DROP TABLE IF EXISTS public.billing_overage_pricing CASCADE;
 DROP TABLE IF EXISTS public.tenant_usage_snapshots CASCADE;
 
+
 -- =========================================================================
 -- 12-MONTH CONTRACT MODEL (2026-07)
 --
@@ -22011,6 +21550,7 @@ DROP TABLE IF EXISTS public.tenant_usage_snapshots CASCADE;
 ALTER TABLE public.billing_subscriptions ADD COLUMN IF NOT EXISTS contract_start timestamp with time zone;
 ALTER TABLE public.billing_subscriptions ADD COLUMN IF NOT EXISTS contract_end timestamp with time zone;
 
+
 -- =========================================================================
 -- LEGAL DOCUMENTS & ACCEPTANCE TRACKING (Terms of Service / Privacy Policy)
 --
@@ -22025,6 +21565,7 @@ ALTER TABLE public.billing_subscriptions ADD COLUMN IF NOT EXISTS contract_end t
 -- document text is shown to every tenant and must be readable unauthenticated
 -- (signup page). legal_acceptances is tenant data and RLS-isolated like scopes.
 -- =========================================================================
+
 
 -- Platform-authored, versioned legal documents. Immutable per (doc_type, version).
 CREATE TABLE IF NOT EXISTS public.legal_documents (
@@ -22048,6 +21589,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_legal_documents_current
     ON public.legal_documents USING btree (doc_type) WHERE (is_current = true);
 CREATE INDEX IF NOT EXISTS idx_legal_documents_type_version
     ON public.legal_documents USING btree (doc_type, version DESC);
+
 
 -- Append-only acceptance ledger. One row per (user, document version) acceptance.
 CREATE TABLE IF NOT EXISTS public.legal_acceptances (
@@ -22078,6 +21620,7 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
+
 -- Runtime billing suspension paths write payment_status='suspended'. Keep the
 -- existing tenant CHECK constraint aligned on upgrades as well as fresh installs.
 DO $$
@@ -22093,6 +21636,7 @@ BEGIN
            ALTER TABLE public.tenants DROP CONSTRAINT valid_payment_status;
        END IF;
 
+
        IF NOT EXISTS (
            SELECT 1
            FROM pg_constraint
@@ -22105,6 +21649,7 @@ BEGIN
        END IF;
     END IF;
 END $$;
+
 
 -- cbom_artifacts.internal_content — the private, non-published view of a CBOM
 -- snapshot.
@@ -22128,6 +21673,7 @@ BEGIN
         ALTER TABLE public.cbom_artifacts ADD COLUMN IF NOT EXISTS internal_content text;
     END IF;
 END $$;
+
 
 -- cbom_artifacts.inline_content: jsonb -> text.
 --
@@ -22174,6 +21720,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS keys_tenant_public_fingerprint_uniq
     ON public.keys USING btree (tenant_id, public_fingerprint)
     WHERE (public_fingerprint IS NOT NULL);
 
+
 -- =========================================================================
 -- service_accounts.token_lookup — indexed lookup for ValidateToken (SEC-3).
 --
@@ -22203,9 +21750,11 @@ BEGIN
     END IF;
 END $$;
 
+
 CREATE INDEX IF NOT EXISTS idx_service_accounts_token_lookup
     ON public.service_accounts USING btree (token_lookup)
     WHERE (token_lookup IS NOT NULL);
+
 
 -- ============================================================================
 -- W2-2 CONVERGENCE: ALTER the tenant-isolation policies that the DO/EXCEPTION
@@ -22248,6 +21797,7 @@ BEGIN
     END IF;
 END $$;
 
+
 -- ============================================================================
 -- W2-2 SELF-CHECK: no tenant-isolation policy may survive on the old,
 -- unindexable `(tenant_id)::text = current_setting(...)` predicate.
@@ -22272,11 +21822,13 @@ BEGIN
      WHERE pg_get_expr(p.polqual, p.polrelid) LIKE '%tenant_id)::text = current_setting%'
         OR pg_get_expr(p.polwithcheck, p.polrelid) LIKE '%tenant_id)::text = current_setting%';
 
+
     IF stale IS NOT NULL THEN
         RAISE WARNING 'W2-2: % RLS policies still use the unindexable (tenant_id)::text predicate: %',
             array_length(string_to_array(stale, ', '), 1), stale;
     END IF;
 END $$;
+
 
 -- =========================================================================
 -- ARTIFACT-SERVICE REMOVAL (2026-08)
@@ -22303,6 +21855,7 @@ END $$;
 DROP TABLE IF EXISTS public.artifact_audit_log CASCADE;
 DROP TABLE IF EXISTS public.tenant_artifact_config CASCADE;
 DROP TABLE IF EXISTS public.artifacts CASCADE;
+
 
 -- =========================================================================
 -- UI PALETTE IDENTIFIER RENAME (2026-08)
@@ -22335,6 +21888,7 @@ WHERE jsonb_typeof(ui_config) = 'object'
   AND ui_config ? 'palette'
   AND ui_config ->> 'palette' NOT IN ('current', 'blue', 'purple', 'green', 'slate', 'vista');
 
+
 UPDATE platform_settings
 SET setting_value = jsonb_set(setting_value, '{palette}', '"vista"'),
     updated_at = now()
@@ -22342,3 +21896,216 @@ WHERE setting_key = 'ui_config'
   AND jsonb_typeof(setting_value) = 'object'
   AND setting_value ? 'palette'
   AND setting_value ->> 'palette' NOT IN ('current', 'blue', 'purple', 'green', 'slate', 'vista');
+
+-- =========================================================================
+-- Widen valid_certificate_role to accept the roles the code actually writes.
+-- LinkCertificateToImplementation inserts the LEAF certificate with role
+-- 'leaf' (and documents 'primary' as an alias); the original CHECK only
+-- allowed ('additional','intermediate','root'), so the leaf junction insert
+-- failed on EVERY discovery path — chain certs linked, the leaf never did,
+-- and the expiring-certificate risk queries (which join through this
+-- junction) silently missed every sensor-discovered leaf certificate.
+-- Widening pattern matches the framework_type narrowing above: drop + re-add
+-- is idempotent, and re-ADD revalidates existing rows (safe — this widens).
+-- =========================================================================
+ALTER TABLE IF EXISTS public.crypto_implementation_certificates
+  DROP CONSTRAINT IF EXISTS valid_certificate_role;
+ALTER TABLE IF EXISTS public.crypto_implementation_certificates
+  ADD CONSTRAINT valid_certificate_role
+    CHECK (certificate_role IN ('leaf', 'primary', 'additional', 'intermediate', 'root'));
+
+
+
+-- =========================================================================
+-- LEGACY-TABLE RESIDUE RETIREMENT
+-- The three tables converted to partitioning (network_assets,
+-- crypto_implementations, sensor_discoveries) left their drained originals
+-- behind as *_legacy, and those pinned a web of stale objects that caused
+-- four separate incidents: junction FKs that broke populated re-applies,
+-- an implementation_keys FK that blocked every key link, views that made
+-- Enterprise CMDB sync and the remediation queue silently empty, and FKs
+-- that forced external_connections.source_asset_id to stay NULL forever.
+--
+-- This block finishes the conversion on upgraded clusters. Fresh installs
+-- never create any of these objects (their DDL is gone from the body), so
+-- every statement here is a no-op there. Ordering matters: the dependent
+-- views/matviews were re-pointed at the *_partitioned tables earlier in
+-- this file (v_ci_inventory via CREATE OR REPLACE in the body,
+-- mv_remediation_queue via its DROP+CREATE above), so by the time these
+-- drops run nothing we keep still references the dead tables. CASCADE
+-- covers what pre-0.5.x clusters may still have pointed at them — the
+-- old-name single-column FKs (replaced by the composite FKs added in the
+-- body: external_connections, ssh_keys, database_encryption_states,
+-- crypto_applications, asset_history) and any stale view definitions.
+--
+-- mv_location_finding_summary: the body's CREATE ... IF NOT EXISTS is a
+-- no-op on a cluster that already has the old legacy-reading definition,
+-- so apply the corrected definition by DROP + CREATE, same pattern (and
+-- same reasoning) as mv_remediation_queue above. WITH DATA + index
+-- recreated so reads and REFRESH ... CONCURRENTLY keep working.
+DROP MATERIALIZED VIEW IF EXISTS public.mv_location_finding_summary CASCADE;
+CREATE MATERIALIZED VIEW public.mv_location_finding_summary AS
+ SELECT l.id AS location_id,
+    l.tenant_id,
+    l.name AS location_name,
+    (l.location_type)::text AS location_type,
+    l.full_path,
+    COALESCE((a.environment)::text, 'unknown'::text) AS environment,
+    count(DISTINCT a.id) AS asset_count,
+    count(DISTINCT ci.id) AS crypto_config_count,
+    count(DISTINCT c.id) AS certificate_count,
+    count(DISTINCT a.id) FILTER (WHERE ((a.risk_level)::text = 'Critical'::text)) AS critical_findings,
+    count(DISTINCT a.id) FILTER (WHERE ((a.risk_level)::text = 'High'::text)) AS high_findings,
+    count(DISTINCT a.id) FILTER (WHERE ((a.risk_level)::text = 'Medium'::text)) AS medium_findings,
+    count(DISTINCT a.id) FILTER (WHERE ((a.risk_level)::text = 'Low'::text)) AS low_findings,
+    count(DISTINCT c.id) FILTER (WHERE ((c.not_after IS NOT NULL) AND (c.not_after > now()) AND (c.not_after <= (now() + '30 days'::interval)))) AS expiring_certs_30d,
+    count(DISTINCT c.id) FILTER (WHERE ((c.not_after IS NOT NULL) AND (c.not_after < now()))) AS expired_certs
+   FROM (((public.locations l
+     LEFT JOIN public.network_assets_partitioned a ON (((a.location_id = l.id) AND (a.deleted_at IS NULL))))
+     LEFT JOIN public.crypto_implementations_partitioned ci ON (((ci.asset_id = a.id) AND (ci.deleted_at IS NULL))))
+     LEFT JOIN public.certificates c ON ((c.id = ci.certificate_id)))
+  GROUP BY l.id, l.tenant_id, l.name, l.location_type, l.full_path, a.environment
+  WITH DATA;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_location_finding_summary_key
+    ON public.mv_location_finding_summary USING btree (location_id, environment);
+
+-- crypto_configurations (the TABLE — distinct from the crypto-configurations
+-- API routes, which serve crypto_implementations): its only writer was the
+-- unrouted, never-constructed CryptoConfigurationService, deleted with this
+-- change. Nothing else read or wrote it.
+DROP TABLE IF EXISTS public.crypto_configurations CASCADE;
+DROP FUNCTION IF EXISTS public.update_crypto_configurations_updated_at();
+
+-- And the residual tables themselves. Empty by construction since the
+-- partition conversion drained them; nothing in Go reads or writes them.
+DROP TABLE IF EXISTS public.crypto_implementations_legacy CASCADE;
+DROP TABLE IF EXISTS public.sensor_discoveries_legacy CASCADE;
+DROP TABLE IF EXISTS public.network_assets_legacy CASCADE;
+
+
+-- PK repair for the partitioned tables the composite FKs depend on.
+--
+-- network_assets_partitioned: on every cluster installed before this change,
+-- the body's pkey DO block ran `ALTER TABLE ONLY` — which on a partitioned
+-- parent with attached partitions creates the PK INVALID (no per-partition
+-- indexes, so (tenant_id, id) uniqueness was never actually enforced) and it
+-- stays invalid because nothing attached partition indexes. An FK cannot
+-- reference an invalid PK. Repair: give each partition its own pkey and
+-- attach it; after the eighth attach Postgres marks the parent index valid.
+-- Fresh installs take the recursive ADD in the body and skip all of this.
+DO $$
+DECLARE
+    i int;
+BEGIN
+    IF to_regclass('public.network_assets_partitioned_pkey') IS NOT NULL
+       AND NOT (SELECT indisvalid FROM pg_index
+                WHERE indexrelid = to_regclass('public.network_assets_partitioned_pkey')) THEN
+        FOR i IN 0..7 LOOP
+            IF to_regclass(format('public.network_assets_part_%s', i)) IS NOT NULL THEN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = format('network_assets_part_%s_pkey', i)
+                      AND conrelid = to_regclass(format('public.network_assets_part_%s', i))
+                ) THEN
+                    EXECUTE format('ALTER TABLE ONLY public.network_assets_part_%s ADD CONSTRAINT network_assets_part_%s_pkey PRIMARY KEY (tenant_id, id)', i, i);
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_inherits
+                    WHERE inhrelid = to_regclass(format('public.network_assets_part_%s_pkey', i))
+                ) THEN
+                    EXECUTE format('ALTER INDEX public.network_assets_partitioned_pkey ATTACH PARTITION public.network_assets_part_%s_pkey', i);
+                END IF;
+            END IF;
+        END LOOP;
+    END IF;
+END $$;
+
+-- crypto_implementations_partitioned never got a PRIMARY KEY at all — same
+-- defect class SQL-1 fixed for sensor_discoveries_partitioned above. Guarded
+-- on contype = 'p' because adding a second PK under any name errors.
+DO $$
+BEGIN
+    IF to_regclass('public.crypto_implementations_partitioned') IS NOT NULL
+       AND NOT EXISTS (
+           SELECT 1 FROM pg_constraint
+           WHERE conrelid = to_regclass('public.crypto_implementations_partitioned')
+             AND (contype = 'p' OR conname = 'crypto_implementations_partitioned_pkey')
+       ) THEN
+        ALTER TABLE public.crypto_implementations_partitioned
+            ADD CONSTRAINT crypto_implementations_partitioned_pkey PRIMARY KEY (tenant_id, id);
+    END IF;
+END $$;
+
+-- The composite replacements for the legacy-targeting FKs dropped above.
+-- They live here, not in the pg_dump body, because the body adds the
+-- partitioned tables' PRIMARY KEYs with ALTER TABLE ONLY (parent-only,
+-- not yet usable as an FK target until every partition's index is
+-- attached), so an in-body FK referencing network_assets_partitioned
+-- fails with "no unique constraint matching given keys". By this point
+-- the PK is complete. (tenant_id, <asset col>) rather than the old
+-- single-column form because the partitioned tables' only unique key is
+-- (tenant_id, id) — with the welcome side effect that a cross-tenant
+-- asset reference is now unrepresentable at the database level.
+-- FK CONSTRAINT: asset_history asset_history_tenant_asset_fkey
+DO $$ BEGIN
+  IF to_regclass('public.asset_history') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'asset_history_tenant_asset_fkey' AND conrelid = to_regclass('public.asset_history')
+     ) THEN
+    ALTER TABLE ONLY public.asset_history
+        ADD CONSTRAINT asset_history_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id) REFERENCES public.network_assets_partitioned(tenant_id, id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+
+-- FK CONSTRAINT: crypto_applications crypto_applications_tenant_asset_fkey
+DO $$ BEGIN
+  IF to_regclass('public.crypto_applications') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'crypto_applications_tenant_asset_fkey' AND conrelid = to_regclass('public.crypto_applications')
+     ) THEN
+    ALTER TABLE ONLY public.crypto_applications
+        ADD CONSTRAINT crypto_applications_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id) REFERENCES public.network_assets_partitioned(tenant_id, id) ON DELETE SET NULL (asset_id);
+  END IF;
+END $$;
+
+
+-- FK CONSTRAINT: database_encryption_states database_encryption_states_tenant_asset_fkey
+DO $$ BEGIN
+  IF to_regclass('public.database_encryption_states') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'database_encryption_states_tenant_asset_fkey' AND conrelid = to_regclass('public.database_encryption_states')
+     ) THEN
+    ALTER TABLE ONLY public.database_encryption_states
+        ADD CONSTRAINT database_encryption_states_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id) REFERENCES public.network_assets_partitioned(tenant_id, id) ON DELETE SET NULL (asset_id);
+  END IF;
+END $$;
+
+
+-- FK CONSTRAINT: external_connections external_connections_tenant_source_asset_fkey
+DO $$ BEGIN
+  IF to_regclass('public.external_connections') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'external_connections_tenant_source_asset_fkey' AND conrelid = to_regclass('public.external_connections')
+     ) THEN
+    ALTER TABLE ONLY public.external_connections
+        ADD CONSTRAINT external_connections_tenant_source_asset_fkey FOREIGN KEY (tenant_id, source_asset_id) REFERENCES public.network_assets_partitioned(tenant_id, id) ON DELETE SET NULL (source_asset_id);
+  END IF;
+END $$;
+
+
+-- FK CONSTRAINT: ssh_keys ssh_keys_tenant_asset_fkey
+DO $$ BEGIN
+  IF to_regclass('public.ssh_keys') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'ssh_keys_tenant_asset_fkey' AND conrelid = to_regclass('public.ssh_keys')
+     ) THEN
+    ALTER TABLE ONLY public.ssh_keys
+        ADD CONSTRAINT ssh_keys_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id) REFERENCES public.network_assets_partitioned(tenant_id, id) ON DELETE SET NULL (asset_id);
+  END IF;
+END $$;

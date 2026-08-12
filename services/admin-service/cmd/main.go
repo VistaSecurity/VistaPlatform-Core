@@ -27,6 +27,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/api"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/database"
+	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
 // main initializes and starts the SaaS Admin Service.
@@ -43,18 +44,24 @@ func main() {
 	}
 	defer func() { _ = db.Close() }()
 
+	bypassDB, err := shareddatabase.ConnectBypass()
+	if err != nil {
+		log.Fatalf("Failed to open bypass database connection: %v", err)
+	}
+	defer func() { _ = bypassDB.Close() }()
+
 	// Enterprise builds verify the entitlement token and seed its grants here,
 	// once the pool is up and before serving. Nil in Core — an open-source
 	// build has no token concept, so there is nothing to check and nothing to
 	// fail. Never fatal: see ee/edition.Apply.
 	if hooks.ApplyEditionToken != nil {
-		hooks.ApplyEditionToken(db)
+		hooks.ApplyEditionToken(bypassDB)
 	}
 
 	// Initialize the HTTP server with all routes and middleware.
 	// `hooks` is the edition seam (see edition.go): zero in a Core build,
 	// populated by cmd/edition_ee.go under `-tags ee`.
-	server := api.NewServerWithEdition(cfg, db, hooks)
+	server := api.NewServerWithConnections(cfg, db, bypassDB, hooks)
 
 	// Start the server and listen for incoming requests
 	log.Printf("🚀 SaaS Admin Service (%s edition) starting on port %s", edition(), cfg.Port)

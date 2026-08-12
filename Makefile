@@ -903,6 +903,8 @@ audit: ## Run consistency audit
 	node ./scripts/audit-bootstrap-secrets.mjs --strict
 	@echo "Auditing chart schema mirror (chart copy must match scripts/database/schema.sql)..."
 	node ./scripts/audit-schema-mirror.mjs --strict
+	@echo "Auditing legacy-table residue (no view/FK may reference a *_legacy relation)..."
+	node ./scripts/audit-legacy-residue.mjs --strict
 
 edition-boundary: ## Audit the open-core edition boundary (alias for the strict run in 'make audit')
 	node ./scripts/audit-edition-boundary.mjs --strict
@@ -991,6 +993,11 @@ chart-agent-mtls-test: ## Render-test agent/sensor mTLS passthrough chart wiring
 	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
 	node ./scripts/test-chart-agent-mtls.mjs
 
+chart-config-checksum-test: ## Render-test config checksum rollout annotations
+	@command -v helm >/dev/null 2>&1 || { echo "❌ helm not found — install helm to run chart-config-checksum-test"; exit 1; }
+	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
+	node ./scripts/test-chart-config-checksum.mjs
+
 chart-content-bundle-test: ## Render-test Enterprise content bundle chart gating
 	@command -v helm >/dev/null 2>&1 || { echo "❌ helm not found — install helm to run chart-content-bundle-test"; exit 1; }
 	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
@@ -1076,7 +1083,7 @@ validate-registry: node_modules_check ## Validate registry-first compliance
 drift-check: validate-registry audit ## Check for configuration drift
 	@echo "Drift check complete!"
 
-standards-check: generate verify-generated audit enforce validate-dockerfiles validate-logging chart-default-host-test chart-lint chart-agent-mtls-test chart-content-bundle-test release-core-checkout-test verify-action-pins-test audit-guardrails-test rls-policy-rewrite-test admin-plane-audit-test lint-workflows ## Generate, verify and run all standards checks  ## Generate, verify and run all standards checks
+standards-check: generate verify-generated audit enforce validate-dockerfiles validate-logging chart-default-host-test chart-lint chart-agent-mtls-test chart-config-checksum-test chart-content-bundle-test release-core-checkout-test verify-action-pins-test audit-guardrails-test rls-policy-rewrite-test admin-plane-audit-test lint-workflows ## Generate, verify and run all standards checks  ## Generate, verify and run all standards checks
 
 registry-first: validate-registry generate verify-generated audit ## Complete registry-first workflow
 	@echo "✅ Registry-first workflow complete!"

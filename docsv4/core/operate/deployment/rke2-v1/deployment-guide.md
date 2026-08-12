@@ -1022,6 +1022,12 @@ deployments.
 > CPU requests before upgrading, or set `strategy: Recreate` on the backends so
 > pods replace in place without surging (brief per-service downtime). If an
 > upgrade does wedge, `helm rollback` restores the previous release.
+>
+> This applies to **config-only upgrades too**, not just version bumps: the pod
+> templates carry a `checksum/config` hash of the app ConfigMap, so changing any
+> value that lands there (`tls.dnsName`, `appConfig.*`, …) deliberately rolls
+> every backend — env vars are injected at pod start only, and without the roll
+> the running pods would silently keep the old config.
 
 ---
 

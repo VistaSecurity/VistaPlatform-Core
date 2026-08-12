@@ -120,7 +120,7 @@ func NewServerWithConnections(cfg *config.Config, db, bypassDB *sql.DB, hooks Ed
 		handlers.InitializeIntegrationService(db, bypassDB, cfg.EncryptionMasterKey, logger)
 
 		// Initialize platform branding service with S3 storage support
-		if err := handlers.InitializePlatformBrandingService(db, cfg.EncryptionMasterKey, logger); err != nil {
+		if err := handlers.InitializePlatformBrandingService(db, bypassDB, cfg.EncryptionMasterKey, logger); err != nil {
 			log.Printf("Warning: Failed to initialize platform branding storage: %v", err)
 		}
 	} else {

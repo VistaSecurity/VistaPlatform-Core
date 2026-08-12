@@ -39,7 +39,7 @@ assert.match(
 
 const runtimeTemplates = [
   'charts/vistaplatform/templates/configmap-app.yaml',
-  'charts/vistaplatform/templates/frontend/web-ui.yaml',
+  'charts/vistaplatform/templates/frontend/web-ui-runtime-config.yaml',
   'charts/vistaplatform/templates/ingress/selfsigned-cert.yaml',
   'charts/vistaplatform/templates/NOTES.txt',
 ];

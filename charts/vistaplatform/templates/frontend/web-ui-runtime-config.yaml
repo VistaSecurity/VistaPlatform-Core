@@ -1,0 +1,26 @@
+{{- /*
+web-ui runtime config, in its own file so the web-ui Deployment can hash it
+into a checksum/config pod annotation (including web-ui.yaml from itself would
+recurse). config.json is mounted via subPath, which NEVER refreshes in a
+running pod — without the checksum, changing tls.dnsName leaves running
+web-ui pods serving the old apiGatewayUrl with no error anywhere.
+*/ -}}
+{{- $derivedScheme := ternary "http" "https" (eq .Values.tls.mode "none") -}}
+{{- $tlsScheme := default $derivedScheme .Values.tls.externalScheme -}}
+{{- $apiUrl := printf "%s://%s" $tlsScheme (include "vistaplatform.publicHost" .) -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-ui-runtime-config
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web-ui
+data:
+  config.json: |
+    {
+      "apiGatewayUrl": "{{ $apiUrl }}",
+      "reportsApiUrl": "{{ $apiUrl }}",
+      "inventoryUrl": "{{ $apiUrl }}",
+      "ssoAllowedIdpHosts": {{ dig "sso" "allowedIdpHosts" (list) .Values.frontend | toJson }},
+      "ssoAllowedIdpSuffixes": {{ dig "sso" "allowedIdpSuffixes" (list) .Values.frontend | toJson }}
+    }

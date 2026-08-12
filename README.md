@@ -106,7 +106,7 @@ Or on a laptop, to look around:
 
 ```bash
 git clone https://github.com/VistaSecurity/VistaPlatform-Core.git
-cd VistaPlatform
+cd VistaPlatform-Core
 ./scripts/bootstrap-env.sh     # writes .env with freshly generated secrets
 docker compose up -d
 ```

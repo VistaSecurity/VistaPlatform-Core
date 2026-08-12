@@ -75,7 +75,7 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 	sharedRBACService := sharedrbac.NewRBACService(db)
 
 	// Initialize tenant storage service for S3 branding uploads
-	if err := InitializeTenantStorageService(db); err != nil {
+	if err := InitializeTenantStorageService(db, bypassDB); err != nil {
 		logrus.WithError(err).Warn("Failed to initialize tenant storage service, falling back to local storage")
 	}
 

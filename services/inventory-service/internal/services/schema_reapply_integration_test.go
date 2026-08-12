@@ -64,7 +64,11 @@ func TestIntegration_Schema_ReappliesOverPopulatedJunctions(t *testing.T) {
 	mustExec(t, db, `
 		INSERT INTO certificates (id, tenant_id, serial_number, subject_dn, issuer_dn, fingerprint_sha256, not_before, not_after, created_at, updated_at)
 		VALUES ($1,$2,'01','CN=a','CN=b',encode(gen_random_bytes(32),'hex'),NOW(),NOW()+interval '1 year',NOW(),NOW())`, certID, tenant)
-	mustExec(t, db, `INSERT INTO crypto_implementation_certificates (crypto_implementation_id, certificate_id) VALUES ($1,$2)`, implID, certID)
+	// role 'leaf' deliberately: it is what LinkCertificateToImplementation writes
+	// for the primary certificate, and the original valid_certificate_role CHECK
+	// did not allow it — every leaf-cert junction insert failed silently while
+	// chain certs linked fine. This pins the widened CHECK.
+	mustExec(t, db, `INSERT INTO crypto_implementation_certificates (crypto_implementation_id, certificate_id, certificate_role) VALUES ($1,$2,'leaf')`, implID, certID)
 
 	libID := uuid.New()
 	mustExec(t, db, `INSERT INTO crypto_libraries (id, tenant_id, name, version, created_at, updated_at) VALUES ($1,$2,'openssl','3.0',NOW(),NOW())`, libID, tenant)

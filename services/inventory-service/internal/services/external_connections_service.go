@@ -187,7 +187,10 @@ LEFT JOIN prev ON true
 		// --- Resolve source_asset_id best-effort ---
 		{
 			var id uuid.UUID
-			q := `SELECT id FROM network_assets WHERE tenant_id = $1 AND ip_address::text = $2 AND deleted_at IS NULL LIMIT 1`
+			// host() rather than ::text: casting inet to text renders the netmask
+			// ("10.0.0.5/32"), which never equals a bare source IP — this lookup
+			// matched nothing for as long as the ::text form was here.
+			q := `SELECT id FROM network_assets WHERE tenant_id = $1 AND host(ip_address) = $2 AND deleted_at IS NULL LIMIT 1`
 			if e := tx.QueryRow(q, tenantID, input.SourceIP).Scan(&id); e == nil {
 				sourceAssetID = &id
 			}

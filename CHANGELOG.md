@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-08-12
+
+Overnight hardening pass driven by running a real sensor against v0.5.1 and
+auditing what it exposed: the schema residue left by the partition conversion
+is retired for good, config-only upgrades finally restart pods, the approval
+workflow tells the truth in its logs and its UI, and a cluster of RLS
+stragglers is closed. Also the first release whose favicons match the brand.
+
+### Fixed
+
+- **The legacy-table residue from the partition conversion is retired.** The
+  drained `network_assets_legacy` / `crypto_implementations_legacy` /
+  `sensor_discoveries_legacy` tables (and the dead `crypto_configurations`
+  table, whose only writer was an unrouted service) are dropped, and everything
+  that still pointed at them is repointed at the live partitioned tables. That
+  fixes four silent-empty defects on every install: Enterprise CMDB sync
+  exported nothing (`v_ci_inventory` read empty tables), the remediation queue
+  and location summaries were permanently empty (`mv_remediation_queue`,
+  `mv_location_finding_summary`), and `external_connections.source_asset_id`
+  could never persist (its FK targeted the empty legacy table — as did the FKs
+  on `ssh_keys`, `crypto_applications`, `database_encryption_states`, and
+  `asset_history`, all retargeted to composite
+  `(tenant_id, id) → network_assets_partitioned`, which also makes cross-tenant
+  asset references unrepresentable). `make audit` now fails if anything
+  references a `*_legacy` relation again.
+
+- **`(tenant_id, id)` uniqueness is actually enforced on the partitioned
+  tables.** `network_assets_partitioned`'s primary key was created parent-only
+  (`ALTER TABLE ONLY`), which leaves it INVALID with no per-partition indexes —
+  uniqueness was never enforced and no FK could reference it;
+  `crypto_implementations_partitioned` had no primary key at all. Fresh installs
+  now build both correctly; upgraded clusters are repaired in POST-MIGRATIONS.
+
+- **Source-IP → asset matching works.** `host(ip_address)` instead of
+  `ip_address::text`, which renders the netmask (`10.0.0.5/32`) and therefore
+  never equaled a bare IP: external connections from an inventoried source IP
+  now link to the asset, and bulk-import dedup by IP actually dedups.
+
 ## [0.5.1] - 2026-08-11
 
 Three defects found by running a real sensor against a v0.5.0 install rather

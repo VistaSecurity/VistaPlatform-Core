@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
+	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
 // ErrUnknownItem is returned when the requested item key has no row in
@@ -122,8 +123,13 @@ func (r *PostgresResolver) Resolve(ctx context.Context, tenantID uuid.UUID, item
 	if err := r.requireTenant(ctx, tenantID); err != nil {
 		return nil, err
 	}
-	row := r.db.QueryRowContext(ctx, resolveOneSQL, tenantID, itemKey)
-	ent, err := scanEntitlement(row.Scan)
+	var ent *EffectiveEntitlement
+	err := shareddatabase.WithTenantTx(ctx, r.db, tenantID, func(tx *sql.Tx) error {
+		row := tx.QueryRowContext(ctx, resolveOneSQL, tenantID, itemKey)
+		var scanErr error
+		ent, scanErr = scanEntitlement(row.Scan)
+		return scanErr
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrUnknownItem
 	}
@@ -193,20 +199,26 @@ func (r *PostgresResolver) ResolveMany(ctx context.Context, tenantID uuid.UUID, 
 	if err := r.requireTenant(ctx, tenantID); err != nil {
 		return nil, err
 	}
-	rows, err := r.db.QueryContext(ctx, resolveManySQL, tenantID, pq.Array(itemKeys))
+	err := shareddatabase.WithTenantTx(ctx, r.db, tenantID, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, resolveManySQL, tenantID, pq.Array(itemKeys))
+		if err != nil {
+			return err
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			ent, err := scanEntitlement(rows.Scan)
+			if err != nil {
+				return fmt.Errorf("scan resolve-many row: %w", err)
+			}
+			out[ent.Item.Key] = ent
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iterate resolve-many rows: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("entitlements: resolve many for tenant %s: %w", tenantID, err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		ent, err := scanEntitlement(rows.Scan)
-		if err != nil {
-			return nil, fmt.Errorf("entitlements: scan resolve-many row: %w", err)
-		}
-		out[ent.Item.Key] = ent
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("entitlements: iterate resolve-many rows: %w", err)
 	}
 	return out, nil
 }

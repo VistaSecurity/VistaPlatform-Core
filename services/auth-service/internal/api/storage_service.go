@@ -16,8 +16,11 @@ var (
 	storageLogger        *logrus.Logger
 )
 
-// InitializeTenantStorageService sets up the storage service for tenant branding
-func InitializeTenantStorageService(db *sql.DB) error {
+// InitializeTenantStorageService sets up the storage service for tenant branding.
+// The storage config is global, but the referenced platform_integrations row is
+// RLS-protected and selected by id from that config, so credential lookup uses
+// the bypass handle.
+func InitializeTenantStorageService(db, bypassDB *sql.DB) error {
 	storageLogger = logrus.New()
 	storageLogger.SetLevel(logrus.InfoLevel)
 
@@ -35,7 +38,7 @@ func InitializeTenantStorageService(db *sql.DB) error {
 
 	// Create config and integration providers
 	configProvider := storage.NewDatabaseConfigProvider(db)
-	integrationProvider := storage.NewDatabaseIntegrationProvider(db, encSvc)
+	integrationProvider := storage.NewDatabaseIntegrationProvider(bypassDB, encSvc)
 
 	// Create S3 storage service
 	tenantStorageService = storage.NewS3StorageService(configProvider, integrationProvider, storageLogger)

@@ -43,14 +43,14 @@ export function ApprovalsPage() {
   const note = queryNote(q, assets.length === 0, {
     thing: 'pending assets',
     emptyTitle: 'Nothing awaiting approval',
-    emptyMessage: 'Newly discovered assets land here for review when auto-approval is off.',
+    emptyMessage: 'Newly discovered assets land here for review. To skip review for trusted networks, enable "Auto-approve discoveries" on a network segment in Settings → Infrastructure.',
   });
 
   return (
     <PageWrap title="Approvals" count={q.isLoading ? '' : assets.length}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
         <p style={{ margin: 0, fontSize: 13, color: 'var(--app-t3)' }}>
-          The hinge between Discovery and Inventory — accept or reject newly discovered assets.
+          The hinge between Discovery and Inventory — accept or reject newly discovered assets. Accepting materializes the asset's deferred certificates and crypto configurations into Inventory; auto-approval is per network segment (Settings → Infrastructure).
         </p>
         <div style={{ flex: 1 }} />
         {assets.length > 0 && (

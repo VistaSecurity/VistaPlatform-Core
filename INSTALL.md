@@ -18,7 +18,7 @@ registration, no phone-home.
 
 ```bash
 git clone https://github.com/VistaSecurity/VistaPlatform-Core.git
-cd VistaPlatform
+cd VistaPlatform-Core
 ./scripts/bootstrap-env.sh
 docker compose up -d
 ```

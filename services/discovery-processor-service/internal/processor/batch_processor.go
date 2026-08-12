@@ -332,10 +332,26 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) error 
 			marks.add(discovery.ID, discovery.ApprovalStatus, discovery.AutoApprovalRuleID)
 		}
 
-		fmt.Printf("Successfully processed batch %s: %d findings imported (%d monitoring, %d pending), %d external connections (%d failed)\n",
-			batchID, totalImported, len(monitoringFindings), len(pendingFindings), len(externalEntries)-externalFailed, externalFailed)
+		// "%d assets created/updated" is inventory-service's import counter: assets
+		// created + assets refreshed/status-changed + findings routed to
+		// external_connections. Pending-approval findings DO create assets — their
+		// certificates/crypto configurations are deferred into asset metadata until
+		// the asset is approved (Discovery → Approvals), so a batch that reports
+		// pending findings here has produced work even though the certificates and
+		// crypto_implementations tables stay empty.
+		deferredNote := ""
+		if len(pendingFindings) > 0 {
+			deferredNote = " — certs/crypto deferred until approval"
+		}
+		fmt.Printf("Successfully processed batch %s: %d internal findings (%d monitoring, %d pending approval%s), %d assets created/updated, %d external connections (%d failed)\n",
+			batchID, len(monitoringFindings)+len(pendingFindings), len(monitoringFindings), len(pendingFindings), deferredNote,
+			totalImported, len(externalEntries)-externalFailed, externalFailed)
 	} else {
-		fmt.Printf("Successfully processed batch %s: 0 asset findings, %d external connections (%d failed)\n",
+		// This branch means the batch genuinely contained no internal (managed-asset)
+		// discoveries — everything classified third_party. Say that, rather than the
+		// old "0 asset findings", which read as "the pipeline produced nothing" even
+		// when other batches were creating pending assets.
+		fmt.Printf("Successfully processed batch %s: no internal findings in this batch (external-only), %d external connections (%d failed)\n",
 			batchID, len(externalEntries)-externalFailed, externalFailed)
 	}
 

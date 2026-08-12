@@ -1,19 +1,39 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Vista Operations">
-  <!-- Mirrors the tenant brand mark (frontend-v2/public/favicon.svg): a Shield on
-       the Vista gold gradient, dark-on-gold (#1a1300). Shield path = lucide-react
-       Shield (v0.460). The blue corner dot (operator structural accent, --op-blue
-       #3772FE) distinguishes the admin "Operations" tab from the tenant Console. -->
+  <!-- Operations (platform-admin) mark: the same Shield as the tenant console,
+       INVERTED - the operator dark surface carrying a blue mark, where the
+       tenant is a blue tile carrying a white mark. Shield path = lucide-react
+       Shield (v0.460).
+
+       Why inversion rather than a badge or an accent dot. This renders at 16x16
+       in a tab strip. The previous version was the tenant tile plus a 5.5px
+       corner dot, which lands under 3px once scaled - invisible in practice, so
+       both tabs looked identical and the admin UI read as having no icon at all.
+       Worse, that dot used the operator blue, which is now the same #3772fe as
+       the tenant accent, so it had stopped distinguishing anything even at full
+       size. Overall tile luminance is the only difference that survives the
+       scale, so that is what carries it.
+
+       The blue ring is not decoration: the tile is near-black and browser tab
+       strips are near-black in dark mode, so without an edge the square would
+       dissolve into the chrome.
+
+       Hexes mirror the op-bg custom property (operator.css) and accent-gradient
+       (frontend-v2/src/styles/tokens.css); duplicated because a favicon is
+       fetched standalone with no app stylesheet, so var() cannot resolve.
+
+       Keep CSS custom-property names out of this comment in their literal form:
+       a double hyphen is not legal inside an XML comment and makes the file
+       malformed, which renders as no icon at all. -->
   <defs>
-    <linearGradient id="vista-gold" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#ffe08a"/>
-      <stop offset="0.55" stop-color="#d8a000"/>
-      <stop offset="1" stop-color="#b07e00"/>
+    <linearGradient id="vista-blue" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6f9bff"/>
+      <stop offset="0.55" stop-color="#3772fe"/>
+      <stop offset="1" stop-color="#2554d8"/>
     </linearGradient>
   </defs>
-  <rect width="32" height="32" rx="7" fill="url(#vista-gold)"/>
+  <rect width="32" height="32" rx="7" fill="#0B0D11"/>
+  <rect x="0.5" y="0.5" width="31" height="31" rx="6.5" fill="none" stroke="#3772fe" stroke-opacity="0.55"/>
   <g transform="translate(6 6) scale(0.8333)">
-    <path fill="#1a1300" d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>
+    <path fill="url(#vista-blue)" d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>
   </g>
-  <circle cx="25" cy="25" r="5.5" fill="#1a1300"/>
-  <circle cx="25" cy="25" r="3.75" fill="#3772FE"/>
 </svg>

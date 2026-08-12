@@ -16,6 +16,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -1249,7 +1250,8 @@ func (s *AssetService) processDiscoveryCryptoData(
 	lifecycleRiskChanged *[]*events.AssetRiskChangedPayload,
 	lifecycleCryptoAdded *[]*events.CryptoConfigurationAddedPayload,
 	lifecycleCertExpiring *[]*events.CertificateExpiringPayload,
-) {
+) error {
+	var materializationErrs []error
 	// Extract and process certificate chain from discovery finding
 	var certIDs []uuid.UUID
 	var primaryCertID *uuid.UUID
@@ -1270,6 +1272,8 @@ func (s *AssetService) processDiscoveryCryptoData(
 			if err != nil {
 				log.Printf("Warning: failed to find/create certificate (subject=%s, fingerprint=%s): %v",
 					certData.SubjectDN, certData.FingerprintSHA256, err)
+				materializationErrs = append(materializationErrs,
+					fmt.Errorf("find/create certificate subject=%q fingerprint=%q: %w", certData.SubjectDN, certData.FingerprintSHA256, err))
 			}
 			if err == nil && cert != nil {
 				certIDs = append(certIDs, cert.ID)
@@ -1284,6 +1288,7 @@ func (s *AssetService) processDiscoveryCryptoData(
 				if i > 0 && len(certIDs) > 1 {
 					if err := s.certificateService.LinkCertificateIssuer(tenantID, certIDs[i-1], cert.ID); err != nil {
 						log.Printf("Warning: failed to link certificate issuer: %v", err)
+						materializationErrs = append(materializationErrs, fmt.Errorf("link certificate issuer: %w", err))
 					}
 				}
 			}
@@ -1329,13 +1334,14 @@ func (s *AssetService) processDiscoveryCryptoData(
 		return e
 	}); err != nil {
 		log.Printf("[AssetService] Warning: failed to insert crypto implementation for asset %s: %v", assetID, err)
-		return
+		materializationErrs = append(materializationErrs, fmt.Errorf("insert crypto implementation: %w", err))
 	}
 
 	// Link certificates to crypto configuration
 	if primaryCertID != nil {
 		if err := s.certificateService.LinkCertificateToImplementation(tenantID, cryptoID, *primaryCertID, "leaf"); err != nil {
 			log.Printf("Warning: failed to link certificate to implementation: %v", err)
+			materializationErrs = append(materializationErrs, fmt.Errorf("link leaf certificate to implementation: %w", err))
 		}
 		for i, certID := range certIDs[1:] {
 			role := "intermediate"
@@ -1344,6 +1350,7 @@ func (s *AssetService) processDiscoveryCryptoData(
 			}
 			if err := s.certificateService.LinkCertificateToImplementation(tenantID, cryptoID, certID, role); err != nil {
 				log.Printf("Warning: failed to link certificate to implementation: %v", err)
+				materializationErrs = append(materializationErrs, fmt.Errorf("link %s certificate to implementation: %w", role, err))
 			}
 		}
 		if s.eventPublisher != nil && lifecycleCertExpiring != nil {
@@ -1482,6 +1489,7 @@ func (s *AssetService) processDiscoveryCryptoData(
 			RiskScore:              cryptoRiskScore,
 		})
 	}
+	return errors.Join(materializationErrs...)
 }
 
 type minimalAsset struct {
@@ -1509,44 +1517,47 @@ func (s *AssetService) ApproveAssets(tenantID uuid.UUID, assetIDs []uuid.UUID) e
 
 	// Process deferred findings for each asset being approved.
 	// These were stored during IngestFindings when the asset was pending_approval.
+	var materializationErrs []error
 	for _, assetID := range assetIDs {
-		s.processDeferredFindings(tenantID, assetID)
+		if err := s.processDeferredFindings(tenantID, assetID); err != nil {
+			materializationErrs = append(materializationErrs, fmt.Errorf("asset %s: %w", assetID, err))
+		}
 	}
-	return nil
+	return errors.Join(materializationErrs...)
 }
 
 // processDeferredFindings reads the deferred_findings array from asset metadata,
 // processes each finding to create certificates and crypto configurations, then
-// clears the deferred_findings from metadata.
-func (s *AssetService) processDeferredFindings(tenantID uuid.UUID, assetID uuid.UUID) {
+// clears the deferred_findings from metadata only after every finding succeeds.
+func (s *AssetService) processDeferredFindings(tenantID uuid.UUID, assetID uuid.UUID) error {
 	var metadataJSON []byte
 	// RLS-scoped read over network_assets.
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		return tx.QueryRow(`SELECT metadata FROM network_assets WHERE id = $1 AND tenant_id = $2`, assetID, tenantID).Scan(&metadataJSON)
 	})
 	if err != nil || len(metadataJSON) == 0 {
-		return
+		return err
 	}
 
 	var metadata map[string]interface{}
 	if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
-		return
+		return fmt.Errorf("unmarshal metadata: %w", err)
 	}
 
 	deferredRaw, ok := metadata["deferred_findings"]
 	if !ok {
-		return
+		return nil
 	}
 
 	deferredJSON, err := json.Marshal(deferredRaw)
 	if err != nil {
-		return
+		return fmt.Errorf("marshal deferred findings: %w", err)
 	}
 
 	var findings []IngestFinding
 	if err := json.Unmarshal(deferredJSON, &findings); err != nil {
 		log.Printf("[AssetService] Warning: failed to unmarshal deferred findings for asset %s: %v", assetID, err)
-		return
+		return fmt.Errorf("unmarshal deferred findings: %w", err)
 	}
 
 	source := "discovery"
@@ -1563,8 +1574,11 @@ func (s *AssetService) processDeferredFindings(tenantID uuid.UUID, assetID uuid.
 	var lifecycleCryptoAdded []*events.CryptoConfigurationAddedPayload
 	var lifecycleCertExpiring []*events.CertificateExpiringPayload
 
-	for _, f := range findings {
-		s.processDiscoveryCryptoData(tenantID, assetID, f, &lifecycleRiskChanged, &lifecycleCryptoAdded, &lifecycleCertExpiring)
+	var materializationErrs []error
+	for i, f := range findings {
+		if err := s.processDiscoveryCryptoData(tenantID, assetID, f, &lifecycleRiskChanged, &lifecycleCryptoAdded, &lifecycleCertExpiring); err != nil {
+			materializationErrs = append(materializationErrs, fmt.Errorf("deferred finding %d: %w", i, err))
+		}
 	}
 
 	if s.eventPublisher != nil && (len(lifecycleRiskChanged) > 0 || len(lifecycleCryptoAdded) > 0 || len(lifecycleCertExpiring) > 0) {
@@ -1582,6 +1596,11 @@ func (s *AssetService) processDeferredFindings(tenantID uuid.UUID, assetID uuid.
 		}()
 	}
 
+	if err := errors.Join(materializationErrs...); err != nil {
+		log.Printf("[AssetService] Warning: preserving deferred findings for asset %s because materialization failed: %v", assetID, err)
+		return err
+	}
+
 	// Clear deferred_findings from metadata.
 	// RLS-scoped write over network_assets.
 	err = database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
@@ -1595,7 +1614,9 @@ func (s *AssetService) processDeferredFindings(tenantID uuid.UUID, assetID uuid.
 	})
 	if err != nil {
 		log.Printf("[AssetService] Warning: failed to clear deferred findings for asset %s: %v", assetID, err)
+		return err
 	}
+	return nil
 }
 
 func (s *AssetService) DenyAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, userID uuid.UUID) error {
@@ -1732,8 +1753,9 @@ func bulkAssetKey(in models.AssetInput) string {
 // rows that duplicate existing inventory.
 func (s *AssetService) assetExists(tenantID uuid.UUID, hostname, ip *string) (bool, error) {
 	var exists bool
-	// Cast to text on both sides so the comparison is agnostic to whether
-	// ip_address is stored as inet or text, and so a NULL parameter is simply
+	// host(ip_address) rather than ::text: casting inet to text renders the
+	// netmask ("10.0.0.5/32"), which never equals a bare imported IP, so the
+	// IP arm of this dedup matched nothing. NULL parameters are simply
 	// skipped rather than matching everything.
 	// RLS-scoped read over network_assets.
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
@@ -1743,7 +1765,7 @@ func (s *AssetService) assetExists(tenantID uuid.UUID, hostname, ip *string) (bo
 				WHERE tenant_id = $1 AND deleted_at IS NULL
 				  AND (
 				    ($2::text IS NOT NULL AND hostname = $2::text) OR
-				    ($3::text IS NOT NULL AND ip_address::text = $3::text)
+				    ($3::text IS NOT NULL AND host(ip_address) = $3::text)
 				  )
 			)`, tenantID, hostname, ip).Scan(&exists)
 	})

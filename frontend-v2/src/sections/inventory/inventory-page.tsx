@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router';
+import { useNavigate, useSearchParams } from 'react-router';
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import type { Asset } from '@vistasecurity/api-contract';
@@ -26,6 +26,24 @@ import { StaleRowActions, StaleBulkBar } from './bulk-actions';
 
 const PAGE_SIZE = 50;
 const STALE_DAYS = 14;
+
+// Count of discovered assets waiting in the approval queue. New discoveries
+// land as pending_approval and are EXCLUDED from every inventory lens until a
+// user approves them (Discovery → Approvals) — without this count, a fresh
+// tenant sees sensors reporting and an empty Inventory with nothing saying why.
+// page_size 1: only pagination.total is needed.
+function usePendingApprovalCount() {
+  return useQuery({
+    queryKey: ['inventory', 'pending-approval-count'],
+    queryFn: async () => {
+      const { data, error } = await clients.inventory.GET('/infrastructure-assets', {
+        params: { query: { asset_status: 'pending_approval', page: 1, page_size: 1 } },
+      });
+      if (error || !data) throw new Error('Failed to load pending-approval count');
+      return data.pagination?.total ?? (data.assets?.length ?? 0);
+    },
+  });
+}
 
 function useAssets(page: number, search: string, enabled: boolean, lastSeenBefore?: string) {
   return useQuery({
@@ -197,6 +215,8 @@ const CONN_GRID = '22px minmax(0,1.6fr) 1fr minmax(0,1.4fr) 90px 100px 90px 104p
 
 export function InventoryPage() {
   const [params] = useSearchParams();
+  const navigate = useNavigate();
+  const pendingCount = usePendingApprovalCount().data ?? 0;
   const def = findLens(params.get('lens'));
   const lens = def.key;
   const isConfig = def.anchor === 'config';
@@ -468,7 +488,14 @@ export function InventoryPage() {
     }
 
     // infrastructure — grouped accordion: asset header → expand → its configs
-    if (assets.length === 0) return <Center icon="inbox" tone="var(--app-t3)" title="Nothing here" message={search ? 'Nothing matches your search.' : 'No assets discovered yet.'} />;
+    if (assets.length === 0) {
+      const emptyMsg = search
+        ? 'Nothing matches your search.'
+        : pendingCount > 0
+          ? `${pendingCount} discovered asset${pendingCount === 1 ? '' : 's'} are awaiting approval in Discovery → Approvals — they appear here once approved.`
+          : 'No assets discovered yet.';
+      return <Center icon="inbox" tone="var(--app-t3)" title="Nothing here" message={emptyMsg} />;
+    }
     return assets.map((a) => <AssetGroup key={a.id} asset={a} openConfig={openConfig} openAsset={openAsset} />);
   };
 
@@ -517,6 +544,21 @@ export function InventoryPage() {
           </button>
         </PermissionGate>
       </div>
+
+      {/* Pending-approval pointer — new discoveries wait in Discovery → Approvals
+          and are invisible to every lens until approved, so say so here. */}
+      {pendingCount > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '0 26px 10px', padding: '8px 14px', borderRadius: 12, border: '1px solid color-mix(in srgb, var(--warn) 35%, transparent)', background: 'color-mix(in srgb, var(--warn) 8%, transparent)' }}>
+          <Icon name="inbox" size={15} style={{ color: 'var(--warn)', flexShrink: 0 }} />
+          <span style={{ fontSize: 12.5, color: 'var(--app-t1)' }}>
+            <strong>{pendingCount}</strong> discovered asset{pendingCount === 1 ? '' : 's'} awaiting approval — approved assets join Inventory with their certificates and crypto configurations.
+          </span>
+          <div style={{ flex: 1 }} />
+          <button className="ui-btn sm" onClick={() => navigate('/discovery/approvals')}>
+            Review<Icon name="chevron-right" size={13} />
+          </button>
+        </div>
+      )}
 
       <div className="panel" style={{ flex: 1, minHeight: 0, margin: '0 26px 14px', overflow: 'auto', borderRadius: 14 }}>
         {renderBody()}
