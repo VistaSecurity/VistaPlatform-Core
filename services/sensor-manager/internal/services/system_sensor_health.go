@@ -15,7 +15,11 @@ import (
 // These are shared platform resources (cluster-sensor-service, device-interrogation-service)
 // that appear in each tenant's sensor list.
 type SystemSensorHealthService struct {
-	db                            *sql.DB
+	db *sql.DB
+	// bypassDB is the BYPASSRLS (crypto_bypass) handle. Platform sensors are
+	// maintained for all tenants at once, so this service has no tenant in scope
+	// and must not run its writes on the RLS-scoped handle.
+	bypassDB                      *sql.DB
 	clusterSensorServiceURL       string
 	deviceInterrogationServiceURL string
 	checkInterval                 time.Duration
@@ -39,7 +43,7 @@ type SystemSensorHealthService struct {
 // (same reason the kubelet liveness/readiness probes use it), so that is what a
 // health poller should ask. This also keeps the check working whether or not
 // mTLS is enabled, rather than silently depending on it.
-func NewSystemSensorHealthService(db *sql.DB, clusterURL, deviceInterrogationURL string) *SystemSensorHealthService {
+func NewSystemSensorHealthService(db, bypassDB *sql.DB, clusterURL, deviceInterrogationURL string) *SystemSensorHealthService {
 	if clusterURL == "" {
 		clusterURL = sharedconfig.PeerURL("cluster-sensor-service", false)
 	}
@@ -49,6 +53,7 @@ func NewSystemSensorHealthService(db *sql.DB, clusterURL, deviceInterrogationURL
 
 	return &SystemSensorHealthService{
 		db:                            db,
+		bypassDB:                      bypassDB,
 		clusterSensorServiceURL:       clusterURL,
 		deviceInterrogationServiceURL: deviceInterrogationURL,
 		checkInterval:                 30 * time.Second,
@@ -134,7 +139,14 @@ func (s *SystemSensorHealthService) updateSensorStatus(ctx context.Context, prof
 		  AND 'system' = ANY(tags)
 		  AND deleted_at IS NULL`
 
-	result, err := s.db.ExecContext(ctx, query, status, profile)
+	// RLS: cross-tenant — runs on the bypass role. Platform sensors exist per
+	// tenant and this sweep updates all of them, so there is no single
+	// app.tenant_id to set. On the RLS-scoped handle the UPDATE silently matches
+	// nothing and every platform sensor's status freezes.
+	if s.bypassDB == nil {
+		return
+	}
+	result, err := s.bypassDB.ExecContext(ctx, query, status, profile)
 	if err != nil {
 		log.Printf("⚠️  Failed to update system sensor status (profile=%s): %v", profile, err)
 		return

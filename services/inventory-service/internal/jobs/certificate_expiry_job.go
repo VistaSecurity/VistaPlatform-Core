@@ -35,7 +35,11 @@ var expiryTiers = []int{30, 14, 7, 0}
 // This closes the gap where expiry events fired only during asset upsert, leaving a
 // long-idle deployment blind to certificates lapsing with no discovery activity.
 type CertificateExpiryScanJob struct {
-	db             *database.DB
+	db *database.DB
+	// bypassDB is the BYPASSRLS (crypto_bypass) handle. The nightly scan spans
+	// every tenant's certificates, so it has no app.tenant_id to set and must not
+	// run on the RLS-scoped handle.
+	bypassDB       *sql.DB
 	eventPublisher *services.EventPublisherService
 	interval       time.Duration
 	logger         *log.Logger
@@ -43,7 +47,7 @@ type CertificateExpiryScanJob struct {
 
 // NewCertificateExpiryScanJob creates the scan job. Interval is configurable via
 // CERT_EXPIRY_SCAN_INTERVAL (default 12h).
-func NewCertificateExpiryScanJob(db *database.DB, eventPublisher *services.EventPublisherService) *CertificateExpiryScanJob {
+func NewCertificateExpiryScanJob(db *database.DB, bypassDB *sql.DB, eventPublisher *services.EventPublisherService) *CertificateExpiryScanJob {
 	interval := 12 * time.Hour
 	if v := os.Getenv("CERT_EXPIRY_SCAN_INTERVAL"); v != "" {
 		if p, err := time.ParseDuration(v); err == nil && p > 0 {
@@ -52,6 +56,7 @@ func NewCertificateExpiryScanJob(db *database.DB, eventPublisher *services.Event
 	}
 	return &CertificateExpiryScanJob{
 		db:             db,
+		bypassDB:       bypassDB,
 		eventPublisher: eventPublisher,
 		interval:       interval,
 		logger:         log.New(log.Writer(), "[CertExpiryScan] ", log.LstdFlags),
@@ -98,7 +103,10 @@ type expiryCert struct {
 }
 
 func (j *CertificateExpiryScanJob) scan(ctx context.Context) {
-	// RLS bypass: cross-tenant expiry sweep — scans every tenant's certificates; runs on owner role (Phase 4 bypassDB).
+	// RLS: cross-tenant — runs on the bypass role. This sweep reads every
+	// tenant's certificates to raise expiry alerts, so there is no single
+	// app.tenant_id to set. On the RLS-scoped handle it returns zero rows and
+	// logs nothing, so no expiry alert would ever fire again.
 	const q = `
 		SELECT id, tenant_id, common_name, not_after, certificate_state, expiry_alert_tier,
 		       FLOOR(EXTRACT(EPOCH FROM (not_after - NOW())) / 86400.0)::int AS days_remaining
@@ -107,7 +115,7 @@ func (j *CertificateExpiryScanJob) scan(ctx context.Context) {
 		  AND is_ca_certificate = false
 		  AND certificate_state NOT IN ('revoked', 'destroyed', 'deactivated')
 	`
-	rows, err := j.db.QueryContext(ctx, q)
+	rows, err := j.bypassDB.QueryContext(ctx, q)
 	if err != nil {
 		j.logger.Printf("scan query failed: %v", err)
 		return

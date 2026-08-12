@@ -1224,31 +1224,101 @@ func (a *AuthService) createUser(user *models.User) error {
 	})
 }
 
-// createTenant creates a new tenant
-// Note: subscription_tier_id is NOT set here - it must be set explicitly via tier selection
+// DefaultSignupTierName is the subscription tier a newly created tenant lands
+// on when the signup request names no tier of its own.
+//
+// It is "community" because that is the Core edition's floor: unlimited
+// CAPACITY, zero paid CAPABILITIES (see the seed.sql block that creates it, and
+// shared/entitlements/editions.go for why capability gating is independent of
+// tier). A tenant with NO tier resolves every numeric cap to
+// billable_items.default_value, and those defaults are deliberately
+// conservative — max_sensors 0, max_assets 0 — so a tier-less tenant cannot
+// register a sensor or track an asset. Sensors are the platform's primary
+// collection path, so "no tier" is indistinguishable from "product does not
+// work".
+//
+// Overridable with DEFAULT_SIGNUP_TIER for the one deployment shape where a
+// different floor is correct: a commercial multi-tenant SaaS, which wants new
+// signups on the "free" trial tier instead. Self-hosted installs — Core or
+// commercial — want the community floor, since their entitlements come from an
+// edition token's tenant_entitlements overrides, not from the tier.
+const DefaultSignupTierName = "community"
+
+// defaultSignupTierName returns the configured default tier name for new
+// tenants.
+func defaultSignupTierName() string {
+	if v := strings.TrimSpace(os.Getenv("DEFAULT_SIGNUP_TIER")); v != "" {
+		return v
+	}
+	return DefaultSignupTierName
+}
+
+// lookupDefaultSignupTier resolves the default tier name to an id.
+//
+// Deliberately does NOT filter on is_active: the community tier is
+// is_active=false precisely so it stays off the customer-facing plan-comparison
+// surface, and it is still the tier we assign. Returns (nil, nil) when no such
+// tier row exists — the caller treats that as "leave NULL and warn" rather than
+// failing signup, because a missing seed row must not make the product
+// unregisterable.
+func (a *AuthService) lookupDefaultSignupTier() (*uuid.UUID, error) {
+	name := defaultSignupTierName()
+	var id uuid.UUID
+	err := a.db.QueryRow(`SELECT id FROM subscription_tiers WHERE name = $1`, name).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("look up default signup tier %q: %w", name, err)
+	}
+	return &id, nil
+}
+
+// createTenant creates a new tenant.
+//
+// The tenant is placed on the default signup tier (see DefaultSignupTierName).
+// Callers that know the tenant's real plan — the invite/paid flows, which carry
+// an explicit subscription_tier_id — overwrite it immediately afterwards, so
+// this is a floor rather than a decision. It used to be left NULL "until the
+// user selects a tier", but no self-signup surface ever asks: the tenant UI has
+// no tier picker, so every self-signup tenant stayed capped at 0 sensors and 0
+// assets forever.
 func (a *AuthService) createTenant(name string) (*models.Tenant, error) {
 	tenantID := uuid.New()
 	slug := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(name), " ", "-"))
 
-	// Do NOT assign a default tier - require explicit tier selection
-	// subscription_tier_id will be NULL until user selects a tier
-	// Note: We'll set it to zero UUID in the model, but pass NULL to database
-	var subscriptionTierID *uuid.UUID = nil
+	subscriptionTierID, err := a.lookupDefaultSignupTier()
+	if err != nil {
+		return nil, err
+	}
+	if subscriptionTierID == nil {
+		logrus.WithFields(logrus.Fields{
+			"tenant_id": tenantID,
+			"tier_name": defaultSignupTierName(),
+		}).Warn("Default signup tier not found; tenant created with no tier — sensor and asset limits will resolve to 0 until a tier is assigned")
+	}
+
+	modelTierID := uuid.Nil
+	if subscriptionTierID != nil {
+		modelTierID = *subscriptionTierID
+	}
 
 	tenant := &models.Tenant{
 		ID:                 tenantID,
 		Name:               name,
 		Slug:               slug,
-		SubscriptionTierID: uuid.Nil, // Zero UUID for model (database will have NULL)
-		BillingEmail:       "",       // Will be set during registration
+		SubscriptionTierID: modelTierID, // uuid.Nil when the tier row is missing (DB stores NULL)
+		BillingEmail:       "",          // Will be set during registration
 		PaymentStatus:      "trial",
 		Settings:           make(map[string]interface{}),
 		CreatedAt:          time.Now(),
 		UpdatedAt:          time.Now(),
 	}
 
-	// Note: trial_ends_at is handled by the database trigger
-	// subscription_tier_id is NULL initially - must be set via tier selection
+	// Note: trial_ends_at is handled by the database trigger.
+	// onboarding_status is left at its 'pending' default: the tier here is a
+	// system-assigned floor, not a choice the user made, and the MSP onboarding
+	// funnel reads that column as "has this tenant been through onboarding".
 	query := `
 		INSERT INTO tenants (id, name, slug, subscription_tier_id, billing_email, payment_status, settings, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
@@ -1260,14 +1330,13 @@ func (a *AuthService) createTenant(name string) (*models.Tenant, error) {
 	// requires app.tenant_id = tenant_id. Without this, those triggers fail.
 	// tenants itself has no RLS policy so the context does not constrain the
 	// INSERT itself.
-	err := shareddatabase.WithTenantTx(context.Background(), a.db, tenantID, func(tx *sql.Tx) error {
+	if err := shareddatabase.WithTenantTx(context.Background(), a.db, tenantID, func(tx *sql.Tx) error {
 		_, e := tx.ExecContext(context.Background(), query,
 			tenant.ID, tenant.Name, tenant.Slug, subscriptionTierID,
 			tenant.BillingEmail, tenant.PaymentStatus, "{}", tenant.CreatedAt, tenant.UpdatedAt,
 		)
 		return e
-	})
-	if err != nil {
+	}); err != nil {
 		return nil, err
 	}
 

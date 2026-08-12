@@ -51,7 +51,7 @@ func TestGetAdminSensors_TenantScopeFilter(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
-	h := &Handler{db: db}
+	h := &Handler{db: db, bypassDB: db}
 	eng := newAdminSensorsRouter(h)
 
 	aUUID := uuid.New().String()
@@ -82,7 +82,7 @@ func TestGetAdminSensors_NoTenantScope(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
-	h := &Handler{db: db}
+	h := &Handler{db: db, bypassDB: db}
 	eng := newAdminSensorsRouter(h)
 
 	// WithArgs() (zero args) is the load-bearing assertion: if the handler had
@@ -114,7 +114,7 @@ func TestGetAdminSensors_InvalidTenantID(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
-	h := &Handler{db: db}
+	h := &Handler{db: db, bypassDB: db}
 	eng := newAdminSensorsRouter(h)
 
 	// No ExpectQuery: the DB must not be touched.

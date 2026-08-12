@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/models"
+	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 )
 
@@ -865,7 +866,12 @@ func (s *TierService) recordManualSubscription(tenantID uuid.UUID, tier *models.
 	`).Scan(&providerID); err != nil {
 		return fmt.Errorf("ensure manual provider: %w", err)
 	}
-	if _, err := s.db.Exec(`
+	// billing_subscriptions is RLS-scoped and tenantID is an INPUT here, so the
+	// write runs inside a tenant-scoped transaction. Unwrapped on the crypto_app
+	// handle the INSERT trips the policy's WITH CHECK and the whole invoice-plan
+	// assignment fails. (billing_providers above carries no policy.)
+	if err := shareddatabase.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sql.Tx) error {
+		_, e := tx.Exec(`
 		INSERT INTO billing_subscriptions (tenant_id, provider_id, external_subscription_id, plan_key, status)
 		VALUES ($1, $2, $3, $4, 'active')
 		ON CONFLICT (tenant_id, provider_id) DO UPDATE
@@ -873,7 +879,9 @@ func (s *TierService) recordManualSubscription(tenantID uuid.UUID, tier *models.
 		    plan_key = EXCLUDED.plan_key,
 		    status = 'active',
 		    updated_at = NOW()
-	`, tenantID, providerID, "invoice:"+tier.ID.String(), tier.Name); err != nil {
+	`, tenantID, providerID, "invoice:"+tier.ID.String(), tier.Name)
+		return e
+	}); err != nil {
 		return fmt.Errorf("write manual subscription: %w", err)
 	}
 	return nil

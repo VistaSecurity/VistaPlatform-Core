@@ -14,6 +14,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/certificates"
+	// Aliased: the device-agent has its own `certificates` package, above.
+	sharedcerts "github.com/vistasecurity/vistaplatform/shared/certificates"
 )
 
 // RotateCertificate rotates the agent's certificate by generating a new CSR and requesting a new certificate
@@ -111,8 +113,11 @@ func (c *OutboundClient) RotateCertificate() error {
 	// Update configuration with new certificate
 	c.config.Security.ClientCert = rotationResp.ClientCert
 	c.config.Security.ClientKey = privateKeyPEM // Store new private key
+	// Merge, for the same reason as enrollment: rotation may restate the
+	// platform CA but must not forget the operator-approved edge anchor.
 	if rotationResp.ServerCACert != "" {
-		c.config.Security.ServerCACert = rotationResp.ServerCACert
+		c.config.Security.ServerCACert = sharedcerts.MergeCAPEMs(
+			c.config.Security.ServerCACert, rotationResp.ServerCACert)
 	}
 
 	// Save certificates to disk files

@@ -14,6 +14,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/certificates"
+	// Aliased: the sensor has its own `certificates` package, imported above.
+	sharedcerts "github.com/vistasecurity/vistaplatform/shared/certificates"
 )
 
 // RotateCertificate rotates the sensor's certificate by generating a new CSR and requesting a new certificate
@@ -113,8 +115,12 @@ func (c *SensorManagerClient) RotateCertificate() error {
 	// Update configuration with new certificate
 	c.config.Security.ClientCert = rotationResp.ClientCert
 	c.config.Security.ClientKey = privateKeyPEM // Store new private key
+	// Merge, for the same reason as registration: rotation reissues the client
+	// certificate and may restate the platform CA, but it is not an instruction
+	// to forget the anchor the operator approved for the edge endpoint.
 	if rotationResp.ServerCACert != "" {
-		c.config.Security.ServerCACert = rotationResp.ServerCACert
+		c.config.Security.ServerCACert = sharedcerts.MergeCAPEMs(
+			c.config.Security.ServerCACert, rotationResp.ServerCACert)
 	}
 
 	// Reconfigure HTTP client with new certificate

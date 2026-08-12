@@ -71,6 +71,25 @@ echo "▶ running DB-integration tests (TEST_DATABASE_URL set) ..."
 ( cd services/cluster-sensor-service && go test "${GO_TEST_FLAGS:--v}" -count=1 -run Integration ./... )
 ( cd services/inventory-service && go test "${GO_TEST_FLAGS:--v}" -count=1 -run Integration ./... )
 ( cd services/admin-service && go test "${GO_TEST_FLAGS:--v}" -count=1 -run Integration ./... )
+# auth-service: signup writes the tenants row every capacity gate then resolves
+# against. The default-signup-tier tests are the regression for a tier-less
+# tenant resolving max_sensors to the catalog default of 0 — a fresh install
+# that could not register a sensor. Only reachable against a real Postgres with
+# the seeded tier/entitlement catalog. `./...` per the comment above.
+#
+# -p 1: internal/api's connectAsBypassRole runs bare `GRANT ... ON ALL TABLES IN
+# SCHEMA public`, which deadlocks against internal/auth's concurrent schema+seed
+# apply. Unlike testdb's appliers it takes no advisory lock, so the two package
+# binaries must not run at the same time.
+( cd services/auth-service && go test "${GO_TEST_FLAGS:--v}" -count=1 -p 1 -run Integration ./... )
+
+# sensor-manager: its repository resolves a sensor's owning tenant before every
+# by-sensor-id read, which only behaves correctly when that one lookup runs on
+# the BYPASSRLS handle and the rest run tenant-scoped. That distinction is
+# invisible to the owner connection, so it is only observable here. The service
+# was missing from this list entirely when the v0.5.0 RLS regression shipped —
+# exactly the silent-omission failure the comment above describes.
+( cd services/sensor-manager && go test "${GO_TEST_FLAGS:--v}" -count=1 -run Integration ./... )
 
 ( cd services/device-interrogation-service && go test "${GO_TEST_FLAGS:--v}" -count=1 -run Integration ./internal/services/ )
 ( cd services/monitoring-service && go test "${GO_TEST_FLAGS:--v}" -count=1 -run Integration ./internal/services/ )

@@ -92,7 +92,15 @@ func (h *Handler) GetAdminSensors(c *gin.Context) {
 	}
 	query += " ORDER BY t.name NULLS LAST, s.created_at DESC"
 
-	rows, err := h.db.QueryContext(c.Request.Context(), query, args...)
+	// RLS: cross-tenant — runs on the bypass role. This is the platform-admin
+	// roll-up across every tenant (the optional tenant_id filter narrows it
+	// server-side but is not a tenant *context*), so app.tenant_id cannot be set.
+	// On the RLS-scoped handle it returns an empty list and a 200.
+	if h.bypassDB == nil {
+		c.JSON(http.StatusOK, gin.H{"sensors": []interface{}{}})
+		return
+	}
+	rows, err := h.bypassDB.QueryContext(c.Request.Context(), query, args...)
 	if err != nil {
 		log.Printf("⚠️  Error listing admin (cross-tenant) sensors: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list sensors"})

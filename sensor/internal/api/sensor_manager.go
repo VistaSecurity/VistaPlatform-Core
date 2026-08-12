@@ -15,6 +15,8 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor/internal/certificates"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/config"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/models"
+	// Aliased: the sensor has its own `certificates` package, imported above.
+	sharedcerts "github.com/vistasecurity/vistaplatform/shared/certificates"
 )
 
 // SensorManagerClient handles communication with the sensor manager service
@@ -171,9 +173,14 @@ func (c *SensorManagerClient) Register() (*models.SensorConfig, error) {
 	// Store private key locally (never sent to platform)
 	c.config.Security.ClientKey = privateKeyPEM
 
-	// Store CA certificate for server verification
+	// ADD the platform's CA to the trust pool; do not replace what is there.
+	// This is the live registration path (cmd/main.go calls
+	// SensorManagerClient.Register, not OutboundClient.Register). Replacing
+	// dropped the operator-approved edge anchor, so registration succeeded and
+	// every subsequent handshake failed when agentMtls is off (the chart default).
 	if registrationResp.ServerCACert != "" {
-		c.config.Security.ServerCACert = registrationResp.ServerCACert
+		c.config.Security.ServerCACert = sharedcerts.MergeCAPEMs(
+			c.config.Security.ServerCACert, registrationResp.ServerCACert)
 	}
 
 	// Switch to the advertised mTLS passthrough endpoint. The

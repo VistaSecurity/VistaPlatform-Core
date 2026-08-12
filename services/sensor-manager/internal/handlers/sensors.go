@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"database/sql"
 	"log"
 	"net/http"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
+	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
 // GetSensors lists sensors for the current tenant
@@ -126,7 +128,14 @@ func (h *Handler) GetPlatformSensorStats(c *gin.Context) {
 		WHERE deleted_at IS NULL
 	`
 
-	err := h.db.QueryRowContext(c.Request.Context(), query).Scan(&stats.ActiveSensors, &stats.TotalSensors)
+	// RLS: cross-tenant — runs on the bypass role. These are platform-wide
+	// counts over every tenant's sensors, so there is no app.tenant_id to set.
+	// On the RLS-scoped handle both counts come back 0 with no error.
+	if h.bypassDB == nil {
+		c.JSON(http.StatusOK, stats)
+		return
+	}
+	err := h.bypassDB.QueryRowContext(c.Request.Context(), query).Scan(&stats.ActiveSensors, &stats.TotalSensors)
 	if err != nil {
 		log.Printf("Error fetching platform sensor stats: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -170,6 +179,7 @@ func (h *Handler) UpdateSensorStatus(c *gin.Context) {
 	}
 
 	if err := h.sensorServiceV2.UpdateSensorStatus(c.Request.Context(), sensor.ID, tenantID, req.Status); err != nil {
+		h.logErr(c, err, "update sensor status", sensor.ID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
@@ -189,6 +199,7 @@ func (h *Handler) DeleteSensor(c *gin.Context) {
 	}
 
 	if err := h.sensorServiceV2.DeleteSensor(c.Request.Context(), sensor.ID, tenantID); err != nil {
+		h.logErr(c, err, "delete sensor", sensor.ID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
@@ -226,6 +237,7 @@ func (h *Handler) CreateSensorCommand(c *gin.Context) {
 	// Use type assertion to underlying repository method signature
 	// Create a minimal wrapper to satisfy the interface without exposing internal types
 	if err := h.repo.CreateCommand(ctx, cmd); err != nil {
+		h.logErr(c, err, "create sensor command", sensorID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
@@ -244,6 +256,7 @@ func (h *Handler) GetSensorCommands(c *gin.Context) {
 	defer cancel()
 	commands, err := h.repo.GetRecentCommands(ctx, sensorID, 50)
 	if err != nil {
+		h.logErr(c, err, "get sensor commands", sensorID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
@@ -303,6 +316,7 @@ func (h *Handler) GetSensorHealthHistory(c *gin.Context) {
 
 	history, err := h.repo.GetHealthMetricsHistory(ctx, sensorID, since, limit)
 	if err != nil {
+		h.logErr(c, err, "get sensor health history", sensorID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query health history"})
 		return
 	}
@@ -337,6 +351,7 @@ func (h *Handler) GetSensorDiscoveries(c *gin.Context) {
 
 	rows, err := h.repo.ListSensorDiscoveries(c.Request.Context(), sensorID, limit)
 	if err != nil {
+		h.logErr(c, err, "list sensor discoveries", sensorID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query discoveries"})
 		return
 	}
@@ -408,24 +423,34 @@ func (h *Handler) GetSensorDiscoveryCounts(c *gin.Context) {
 		WHERE s.tenant_id = $1 AND s.deleted_at IS NULL
 		GROUP BY s.id`
 
-	rows, err := h.sensorService.GetDB().Query(query, tenantID)
+	// Both `sensors` and `sensor_discoveries` are RLS-scoped and the caller's
+	// tenant is already in hand, so this runs inside WithTenantTx. Unwrapped on
+	// the crypto_app handle it returns no rows and the UI shows every sensor with
+	// a discovery count of zero.
+	counts := make(map[string]int)
+	err := shareddatabase.WithTenantTx(c.Request.Context(), h.sensorService.GetDB(), tenantID, func(tx *sql.Tx) error {
+		rows, e := tx.QueryContext(c.Request.Context(), query, tenantID)
+		if e != nil {
+			return e
+		}
+		defer func() { _ = rows.Close() }()
+
+		for rows.Next() {
+			var sensorID uuid.UUID
+			var count int
+
+			if e := rows.Scan(&sensorID, &count); e != nil {
+				continue // Skip invalid rows
+			}
+
+			counts[sensorID.String()] = count
+		}
+		return rows.Err()
+	})
 	if err != nil {
 		log.Printf("⚠️  Error querying discovery counts for tenant %s: %v", tenantID, err)
 		c.JSON(http.StatusOK, gin.H{"counts": map[string]int{}})
 		return
-	}
-	defer rows.Close()
-
-	counts := make(map[string]int)
-	for rows.Next() {
-		var sensorID uuid.UUID
-		var count int
-
-		if err := rows.Scan(&sensorID, &count); err != nil {
-			continue // Skip invalid rows
-		}
-
-		counts[sensorID.String()] = count
 	}
 
 	c.JSON(http.StatusOK, gin.H{"counts": counts})

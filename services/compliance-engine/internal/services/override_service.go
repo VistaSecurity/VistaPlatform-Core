@@ -241,9 +241,16 @@ func (s *OverrideService) DeleteOverride(tenantID, overrideID uuid.UUID) error {
 	return nil
 }
 
-// DeleteOverridesByScenario deletes all overrides for a specific scenario
+// DeleteOverridesByScenario deletes all overrides for a specific scenario.
+//
+// BROKEN UNDER ENFORCED RLS, AND CURRENTLY UNCALLED. compliance_overrides is
+// RLS-scoped and this deletes by scenario_id with no tenant in scope, so on the
+// crypto_app handle it matches zero rows and returns nil — a cascade cleanup
+// that silently cleans nothing. It has no callers today, which is the only
+// reason it is not an active bug. Before wiring it up, either give
+// OverrideService a bypass handle (this is legitimately cross-tenant) or change
+// the signature to take the tenant and use WithTenantTx. Do not call it as-is.
 func (s *OverrideService) DeleteOverridesByScenario(scenarioID uuid.UUID) error {
-	// RLS: deletes by scenario_id without a tenant in scope (cascade cleanup); bypass-deferred (Phase 4).
 	query := `DELETE FROM compliance_overrides WHERE scenario_id = $1`
 
 	_, err := s.db.Exec(query, scenarioID)

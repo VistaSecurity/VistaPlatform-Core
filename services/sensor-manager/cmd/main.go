@@ -119,6 +119,7 @@ func main() {
 	if db != nil {
 		healthService := services.NewSystemSensorHealthService(
 			db,
+			bypassDB,
 			os.Getenv("CLUSTER_SENSOR_SERVICE_URL"),
 			os.Getenv("DEVICE_INTERROGATION_SERVICE_URL"),
 		)
@@ -127,12 +128,12 @@ func main() {
 		// Start the offline reaper so tenant sensors that stop checking in are
 		// transitioned 'active' -> 'offline' (the heartbeat path handles the
 		// reverse). Without this a dead sensor shows "active" forever.
-		reaper := services.NewSensorReaperService(db)
+		reaper := services.NewSensorReaperService(db, bypassDB)
 		go reaper.Start(context.Background())
 	}
 
 	// Initialize handlers with both legacy and V2 services
-	handler := handlers.NewHandlerWithBoth(sensorService, sensorServiceV2, repo, db)
+	handler := handlers.NewHandlerWithBoth(sensorService, sensorServiceV2, repo, db, bypassDB)
 	// Set logger on handler
 	if handler != nil {
 		// Handler now has logger initialized in NewHandlerWithBoth

@@ -21,15 +21,22 @@ import (
 // Platform/system sensors are intentionally excluded: their status is owned by
 // SystemSensorHealthService, which refreshes their last_heartbeat every cycle.
 type SensorReaperService struct {
-	db            *sql.DB
+	// db is retained for non-RLS work; the sweep itself runs on bypassDB.
+	db *sql.DB
+	// bypassDB is the BYPASSRLS (crypto_bypass) handle. The reaper is a
+	// cross-tenant background sweep with no tenant in scope, so it cannot set
+	// app.tenant_id and must not run on the RLS-scoped handle.
+	bypassDB      *sql.DB
 	checkInterval time.Duration
 	offlineAfter  time.Duration
 }
 
-// NewSensorReaperService builds the reaper with a 60s sweep interval.
-func NewSensorReaperService(db *sql.DB) *SensorReaperService {
+// NewSensorReaperService builds the reaper with a 60s sweep interval. bypassDB
+// is the BYPASSRLS handle the cross-tenant sweep runs on.
+func NewSensorReaperService(db, bypassDB *sql.DB) *SensorReaperService {
 	return &SensorReaperService{
 		db:            db,
+		bypassDB:      bypassDB,
 		checkInterval: 60 * time.Second,
 		offlineAfter:  sensorOfflineThreshold(),
 	}
@@ -76,7 +83,11 @@ func (s *SensorReaperService) Start(ctx context.Context) {
 // threshold. COALESCE(last_heartbeat, created_at) catches sensors that
 // registered but never checked in.
 func (s *SensorReaperService) reap(ctx context.Context) {
-	if s.db == nil {
+	// RLS: cross-tenant — runs on the bypass role. The sweep spans every tenant
+	// by design, so there is no app.tenant_id to set. On the RLS-scoped handle
+	// this UPDATE matches zero rows and reports success, leaving dead sensors
+	// showing "active" forever — the precise failure the reaper exists to stop.
+	if s.bypassDB == nil {
 		return
 	}
 
@@ -89,7 +100,7 @@ func (s *SensorReaperService) reap(ctx context.Context) {
 		  AND deleted_at IS NULL
 		  AND COALESCE(last_heartbeat, created_at) < NOW() - make_interval(secs => $1)`
 
-	result, err := s.db.ExecContext(ctx, query, int(s.offlineAfter.Seconds()))
+	result, err := s.bypassDB.ExecContext(ctx, query, int(s.offlineAfter.Seconds()))
 	if err != nil {
 		log.Printf("⚠️  Sensor offline reaper query failed: %v", err)
 		return

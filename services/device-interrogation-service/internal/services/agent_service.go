@@ -98,7 +98,9 @@ func (s *AgentService) RegisterDeviceAgentBootstrap(ctx context.Context, req mod
 		return nil, fmt.Errorf("%w: missing tenant", ErrInvalidDeviceAgentRegistrationKey)
 	}
 
-	if err := s.validateRegistrationKeyWithQuerier(ctx, tx, tenantID, req.RegistrationKey); err != nil {
+	// Global uniqueness check — runs on the bypass handle, not `tx` (see the
+	// method comment: a tenant-scoped tx cannot see another tenant's burned key).
+	if err := s.validateRegistrationKeyWithQuerier(ctx, s.bypassDB, tenantID, req.RegistrationKey); err != nil {
 		return nil, err
 	}
 
@@ -178,8 +180,9 @@ func (s *AgentService) RegisterAgent(ctx context.Context, tenantID uuid.UUID, re
 	agent := &models.Agent{}
 	var tenantIDOut uuid.UUID
 	err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		// Validate registration key (tenant-scoped, on the same tx).
-		if vErr := s.validateRegistrationKeyWithQuerier(ctx, tx, tenantID, req.RegistrationKey); vErr != nil {
+		// Global uniqueness check — deliberately on the bypass handle rather than
+		// this tx, so a key already burned by another tenant is still rejected.
+		if vErr := s.validateRegistrationKeyWithQuerier(ctx, s.bypassDB, tenantID, req.RegistrationKey); vErr != nil {
 			return fmt.Errorf("registration key validation failed: %w", vErr)
 		}
 		return tx.QueryRowContext(ctx, query,
@@ -200,6 +203,16 @@ type registrationKeyQuerier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
+// validateRegistrationKeyWithQuerier rejects a registration key that has already
+// been consumed.
+//
+// RLS: the reuse check is GLOBAL by design — the query deliberately carries no
+// tenant filter, because a key burned by any tenant must not be reusable by
+// another. Callers therefore pass the BYPASSRLS handle, not their tenant tx.
+// Handed a tenant-scoped tx under enforced RLS the SELECT can only see the
+// caller's own agents, silently narrowing a cross-tenant uniqueness check to a
+// per-tenant one. There is no UNIQUE index on device_agents.registration_key,
+// so this check is the only control — nothing downstream would catch the miss.
 func (s *AgentService) validateRegistrationKeyWithQuerier(ctx context.Context, q registrationKeyQuerier, _ uuid.UUID, registrationKey string) error {
 	if len(registrationKey) < 16 {
 		return fmt.Errorf("registration key is too short (minimum 16 characters)")

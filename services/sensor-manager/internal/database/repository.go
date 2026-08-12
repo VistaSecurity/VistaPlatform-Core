@@ -354,14 +354,22 @@ func (r *sensorRepository) UpdateSensorHeartbeat(ctx context.Context, id uuid.UU
 	return nil
 }
 
-// resolveSensorTenant looks up the owning tenant for a sensor id. It runs on the
-// bypass path (no app.tenant_id yet) because the tenant is the OUTPUT — this is
-// the ingestion-side resolution the bypass catalog calls for. Once Phase 4 splits
-// the roles this single lookup moves to bypassDB; today both handles are the same
-// connection, so it is behavior-neutral.
+// resolveSensorTenant looks up the owning tenant for a sensor id.
+//
+// RLS: cross-tenant — runs on the bypass role. The tenant is the OUTPUT of this
+// query, so app.tenant_id cannot be set before it: that is the chicken-and-egg
+// this function exists to break. It MUST use bypassDB. On the RLS-scoped
+// crypto_app handle `sensors` fails closed and every caller below degrades to a
+// bogus "sensor not found" — which is exactly what shipped in v0.5.0 when
+// serviceRls defaulted on and the two handles stopped being the same connection.
+// Its twin in services/sensor_service.go was moved to the bypass handle; this
+// one was missed.
 func (r *sensorRepository) resolveSensorTenant(ctx context.Context, sensorID uuid.UUID) (uuid.UUID, error) {
+	if r.bypassDB == nil {
+		return uuid.Nil, fmt.Errorf("resolve sensor tenant: bypass database handle not configured")
+	}
 	var tenantID uuid.UUID
-	err := r.db.QueryRowContext(ctx, `SELECT tenant_id FROM sensors WHERE id = $1`, sensorID).Scan(&tenantID)
+	err := r.bypassDB.QueryRowContext(ctx, `SELECT tenant_id FROM sensors WHERE id = $1`, sensorID).Scan(&tenantID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return uuid.Nil, fmt.Errorf("sensor not found")

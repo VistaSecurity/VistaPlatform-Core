@@ -16,6 +16,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/jobs"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
+	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
@@ -42,6 +43,17 @@ func main() {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	defer func() { _ = db.Close() }()
+
+	// Bypass connection for the deliberately cross-tenant background sweeps (the
+	// certificate-expiry scan). Reads BYPASS_DATABASE_URL, falling back to
+	// DATABASE_URL. Without it those sweeps run on the RLS-scoped crypto_app role
+	// with no app.tenant_id set and read zero rows — silently, since a sweep that
+	// finds nothing is indistinguishable from a sweep with nothing to find.
+	bypassDB, err := shareddatabase.ConnectBypass()
+	if err != nil {
+		log.Fatalf("Failed to connect to bypass database: %v", err)
+	}
+	defer func() { _ = bypassDB.Close() }()
 
 	// Initialize services
 	assetService := services.NewAssetService(db)
@@ -628,7 +640,7 @@ func main() {
 	// ADR-0015 §6: scheduled certificate-expiry scan. Escalating owner alerts via the
 	// existing certificate.expiring notification path + a certificate.changed bridge
 	// that makes compliance re-evaluate a cert the day it expires (no scheduled re-eval).
-	certExpiryJob := jobs.NewCertificateExpiryScanJob(db, eventPublisher)
+	certExpiryJob := jobs.NewCertificateExpiryScanJob(db, bypassDB, eventPublisher)
 	go certExpiryJob.Start(ctx)
 	log.Println("Certificate expiry scan job started")
 

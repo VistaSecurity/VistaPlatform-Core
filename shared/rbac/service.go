@@ -89,6 +89,28 @@ func (r *RBACService) GetUserPermissions(userID, tenantID uuid.UUID) ([]*models.
 	return permissions, nil
 }
 
+// ---------------------------------------------------------------------------
+// RLS WARNING for the tenant-scoped methods below.
+//
+// Everything from here down that touches tenant_roles, user_tenant_roles or
+// permission_audit_logs issues raw SQL on r.db with no app.tenant_id set. Those
+// tables are RLS-scoped, and every service constructs RBACService with the
+// RLS-scoped crypto_app handle, so under enforced RLS these read zero rows and
+// write zero rows — without error.
+//
+// They are NOT currently reachable: the live tenant RBAC surface is
+// services/auth-service/internal/rbac, which wraps each of these in
+// WithTenantTx correctly. The only shared-RBAC methods with production callers
+// are CheckPermission and CheckPlatformPermission, and those are safe because
+// they delegate to the SECURITY DEFINER functions user_has_permission() /
+// get_user_permissions(), which run as the owner and are not subject to RLS.
+//
+// So this is dead code that is also wrong. Wire any of it up as-is and role
+// listing/assignment silently becomes a no-op. Either delete this block in
+// favour of the auth-service implementation, or wrap each method in
+// WithTenantTx before using it.
+// ---------------------------------------------------------------------------
+
 // GetUserRoles gets all roles for a user in a tenant
 func (r *RBACService) GetUserRoles(userID, tenantID uuid.UUID) ([]*models.TenantRole, error) {
 	query := `

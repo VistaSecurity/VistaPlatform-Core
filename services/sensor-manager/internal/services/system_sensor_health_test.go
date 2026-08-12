@@ -22,7 +22,7 @@ import (
 func TestSystemSensorHealthProbesPlaintextPortUnderMTLS(t *testing.T) {
 	t.Setenv("USE_MTLS", "true")
 
-	svc := NewSystemSensorHealthService(nil, "", "")
+	svc := NewSystemSensorHealthService(nil, nil, "", "")
 
 	for name, got := range map[string]string{
 		"cluster-sensor-service":       svc.clusterSensorServiceURL,
@@ -43,7 +43,7 @@ func TestSystemSensorHealthProbesPlaintextPortUnderMTLS(t *testing.T) {
 func TestSystemSensorHealthRespectsExplicitURLs(t *testing.T) {
 	t.Setenv("USE_MTLS", "true")
 
-	svc := NewSystemSensorHealthService(nil, "http://custom-cluster:9999", "http://custom-device:9999")
+	svc := NewSystemSensorHealthService(nil, nil, "http://custom-cluster:9999", "http://custom-device:9999")
 
 	if svc.clusterSensorServiceURL != "http://custom-cluster:9999" {
 		t.Errorf("explicit cluster URL was overridden: got %q", svc.clusterSensorServiceURL)

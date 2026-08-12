@@ -25,6 +25,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/middleware"
 	"github.com/vistasecurity/vistaplatform/shared/trials"
 )
@@ -164,17 +165,26 @@ func resolveTenantPhase(ctx context.Context, db *sql.DB, tenantID uuid.UUID, now
 		trialStart    sql.NullTime
 		converted     sql.NullBool
 	)
-	err := db.QueryRowContext(ctx, `
-		SELECT
-		    st.trial_days_full,
-		    st.trial_days_soft,
-		    btt.trial_start,
-		    btt.converted_to_paid
-		FROM tenants t
-		LEFT JOIN subscription_tiers st ON st.id = t.subscription_tier_id
-		LEFT JOIN billing_trial_tracking btt ON btt.tenant_id = t.id
-		WHERE t.id = $1
-	`, tenantID).Scan(&trialDaysFull, &trialDaysSoft, &trialStart, &converted)
+	// billing_trial_tracking is RLS-scoped, and it is reached through a LEFT
+	// JOIN — so on the RLS-scoped handle without app.tenant_id the join simply
+	// contributes NULLs instead of raising. trial_start comes back NULL, the
+	// phase resolves to PhaseNone, and the lock never engages for anyone. Every
+	// caller passes the crypto_app pool, so this must set the tenant context;
+	// tenantID is an INPUT here, so wrapping is correct (and keeps RLS enforcing)
+	// rather than reaching for the bypass role.
+	err := database.WithTenantTx(ctx, db, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			SELECT
+			    st.trial_days_full,
+			    st.trial_days_soft,
+			    btt.trial_start,
+			    btt.converted_to_paid
+			FROM tenants t
+			LEFT JOIN subscription_tiers st ON st.id = t.subscription_tier_id
+			LEFT JOIN billing_trial_tracking btt ON btt.tenant_id = t.id
+			WHERE t.id = $1
+		`, tenantID).Scan(&trialDaysFull, &trialDaysSoft, &trialStart, &converted)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		// Unknown tenant ID — treat as no trial. The actual auth
 		// layer should have rejected an unknown tenant; we just

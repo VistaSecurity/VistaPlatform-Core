@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
+	"github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 )
 
@@ -29,9 +30,15 @@ import (
 // itself falls through to default_value (conservative); the legacy
 // carve-out keeps unfinished signups from being hard-blocked. Paid-edition
 // capabilities are excluded from the carve-out — see CheckFeatureAccess.
-// Numeric caps still resolve to the resolver's default value during
-// onboarding (which is conservative — usually 0 — so callers should
-// provision the Free tier ASAP at tenant creation).
+// Numeric caps deliberately have NO such carve-out: they still resolve to
+// the resolver's default value (conservative — usually 0) when a tenant has
+// no tier. Failing those open would hand every tier-less tenant unlimited
+// capacity, which is exactly the gate a commercial deployment relies on. The
+// invariant that makes this safe is upstream: auth-service assigns a default
+// tier at tenant creation (auth.DefaultSignupTierName, "community"), and
+// seed.sql backfills any tenant that predates it, so "no tier" is not a state
+// a live tenant reaches. When it happens anyway, checkCap says so in the
+// denial message rather than reporting an inscrutable "0/0".
 type LimitEnforcementService struct {
 	db       *sql.DB
 	resolver entitlements.Resolver
@@ -299,53 +306,72 @@ func (s *LimitEnforcementService) checkCap(
 				resourceLabel, current, additional, current+additional, *cc.Limit)
 		}
 		res.UpgradePrompt = upgradePrompt
+
+		// A denial sourced from the catalog default, on a tenant with no tier,
+		// is not a plan that ran out — it is a tenant that was never put on a
+		// plan, and the caps it hits are the deliberately-conservative
+		// billable_items defaults (max_sensors 0, max_assets 0). Left as-is it
+		// reads "Sensor limit exceeded: 0/0", which sends the operator hunting
+		// through tier configuration for a limit nobody set. Still fails closed:
+		// only the copy changes. Costs one extra query, on the deny path only.
+		if cc.Source == entitlements.SourceDefault {
+			if hasTier, terr := s.tenantHasTier(tenantID); terr == nil && !hasTier {
+				res.Message += " — this tenant has no subscription tier assigned, so every capacity limit resolves to the platform default"
+				res.UpgradePrompt = "Assign a subscription tier to this tenant (platform admin → Tenants)"
+			}
+		}
 	}
 	return res, nil
 }
 
 // --- counting helpers (unchanged shape from the legacy implementation) ---
 
-func (s *LimitEnforcementService) countSensors(tenantID uuid.UUID) (int, error) {
+// countTenantScoped runs a single-value COUNT against an RLS-protected table
+// inside a tenant-scoped transaction.
+//
+// Every counter below reads a table with a tenant_isolation policy. Run
+// unwrapped on the RLS-scoped crypto_app handle they return 0 — with no error —
+// so every limit check sees zero usage and no cap ever trips. That is an
+// entitlement bypass, not a display bug, which is why these are wrapped rather
+// than moved to the bypass handle: the tenant is an INPUT here, so RLS is a
+// correct second control and should stay enforcing.
+func (s *LimitEnforcementService) countTenantScoped(tenantID uuid.UUID, what, query string, args ...interface{}) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM sensors WHERE tenant_id = $1 AND deleted_at IS NULL`, tenantID).Scan(&n)
+	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRow(query, args...).Scan(&n)
+	})
 	if err != nil {
-		return 0, fmt.Errorf("count sensors: %w", err)
+		return 0, fmt.Errorf("count %s: %w", what, err)
 	}
 	return n, nil
+}
+
+func (s *LimitEnforcementService) countSensors(tenantID uuid.UUID) (int, error) {
+	return s.countTenantScoped(tenantID, "sensors",
+		`SELECT COUNT(*) FROM sensors WHERE tenant_id = $1 AND deleted_at IS NULL`, tenantID)
 }
 
 func (s *LimitEnforcementService) countAssets(tenantID uuid.UUID) (int, error) {
-	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND deleted_at IS NULL`, tenantID).Scan(&n)
-	if err != nil {
-		return 0, fmt.Errorf("count assets: %w", err)
-	}
-	return n, nil
+	return s.countTenantScoped(tenantID, "assets",
+		`SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND deleted_at IS NULL`, tenantID)
 }
 
 func (s *LimitEnforcementService) countUsers(tenantID uuid.UUID) (int, error) {
-	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE tenant_id = $1 AND deleted_at IS NULL`, tenantID).Scan(&n)
-	if err != nil {
-		return 0, fmt.Errorf("count users: %w", err)
-	}
-	return n, nil
+	return s.countTenantScoped(tenantID, "users",
+		`SELECT COUNT(*) FROM users WHERE tenant_id = $1 AND deleted_at IS NULL`, tenantID)
 }
 
 // countPendingInvitations counts live (pending, unexpired) invitations —
-// seats reserved but not yet accepted. Runs on the service's own handle;
-// under enforced RLS this handle is the bypass-capable pool the caller
-// constructed the service with, same as countUsers above.
+// seats reserved but not yet accepted.
+//
+// The previous comment here claimed this ran on "the bypass-capable pool the
+// caller constructed the service with". That was never true for 12 of the 13
+// construction sites, which pass the RLS-scoped handle.
 func (s *LimitEnforcementService) countPendingInvitations(tenantID uuid.UUID) (int, error) {
-	var n int
-	err := s.db.QueryRow(`
+	return s.countTenantScoped(tenantID, "pending invitations", `
 		SELECT COUNT(*) FROM invitations
 		WHERE tenant_id = $1 AND status = 'pending' AND expires_at > NOW()
-	`, tenantID).Scan(&n)
-	if err != nil {
-		return 0, fmt.Errorf("count pending invitations: %w", err)
-	}
-	return n, nil
+	`, tenantID)
 }
 
 // countActiveFrameworkSubscriptions counts the tenant's active platform
@@ -355,8 +381,7 @@ func (s *LimitEnforcementService) countPendingInvitations(tenantID uuid.UUID) (i
 // gate lets it through would let six free activations exhaust a paid tenant's
 // cap.
 func (s *LimitEnforcementService) countActiveFrameworkSubscriptions(tenantID uuid.UUID) (int, error) {
-	var n int
-	err := s.db.QueryRow(`
+	return s.countTenantScoped(tenantID, "active framework subscriptions", `
 		SELECT COUNT(*)
 		FROM tenant_framework_licenses tfl
 		JOIN platform_frameworks pf ON pf.id = tfl.platform_framework_id
@@ -364,11 +389,7 @@ func (s *LimitEnforcementService) countActiveFrameworkSubscriptions(tenantID uui
 		  AND tfl.subscription_status = 'active'
 		  AND COALESCE(pf.is_platform_default, false) = false
 		  AND pf.code <> ALL($2)
-	`, tenantID, pq.Array(FreeFrameworkCodes)).Scan(&n)
-	if err != nil {
-		return 0, fmt.Errorf("count active framework subscriptions: %w", err)
-	}
-	return n, nil
+	`, tenantID, pq.Array(FreeFrameworkCodes))
 }
 
 func (s *LimitEnforcementService) tenantHasTier(tenantID uuid.UUID) (bool, error) {

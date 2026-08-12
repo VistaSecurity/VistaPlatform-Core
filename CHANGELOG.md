@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-11
+
+Three defects found by running a real sensor against a v0.5.0 install rather
+than trusting a green pipeline. Each one independently prevented a default Core
+deployment from collecting any data at all: a new tenant could not register a
+sensor, a registered sensor could not talk to the platform afterwards, and the
+reads that would have shown either problem returned 500 or silently empty.
+
+### Fixed
+
+- **Sensors no longer go silent after a successful registration.** On enroll
+  the agents replaced the operator-approved edge CA with the platform's agent
+  CA, which only signs the mTLS passthrough listener — and that listener is
+  off by default. Every later heartbeat/discovery then failed the handshake.
+  Both CAs are now kept (`MergeCAPEMs`), including on the live
+  `SensorManagerClient.Register` path and on device-agent rotation.
+
+- **Self-signup tenants land on the `community` tier instead of staying at 0
+  sensors / 0 assets forever.** `createTenant` assigned no `subscription_tier_id`
+  "until the user selects a tier", but no self-signup surface ever asks — every
+  Core signup then hit `Sensor limit exceeded: 0/0` (HTTP 402) and could not
+  collect data. New tenants get the community floor (overridable with
+  `DEFAULT_SIGNUP_TIER`); `seed.sql` backfills existing NULL-tier tenants on the
+  next seed run. Capacity checks still fail closed when a tenant has no tier;
+  the denial now names that cause.
+
+- **Queries that ran on the RLS-scoped pool with no tenant context work again
+  after `serviceRls` defaulted on.** Sensor discovery-by-id returned 500, platform
+  sensor roll-ups were empty, the offline reaper never marked sensors offline,
+  certificate-expiry alerts never fired, and usage counters read 0 so capacity
+  caps never tripped. Cross-tenant lookups now use the bypass handle; tenant-
+  scoped counts use `WithTenantTx`. `countAssets` is wrapped the same way as the
+  other counters (it was missed in the original sweep).
+
 ## [0.5.0] - 2026-08-11
 
 The first release published from `VistaSecurity/VistaPlatform-Core`, and the

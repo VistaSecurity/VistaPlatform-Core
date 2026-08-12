@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/config"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/certificates"
 )
 
 // AvailableInterfaceNames returns the host's non-loopback NIC names. Single
@@ -209,8 +210,18 @@ func (c *OutboundClient) Register() (*models.SensorConfig, error) {
 	if registrationResp.ClientKey != "" {
 		c.config.Security.ClientKey = registrationResp.ClientKey
 	}
+	// ADD the platform's CA to the trust pool; do not replace what is there.
+	// The anchor already in Security.ServerCACert is the one the operator
+	// approved at setup and is what verifies the ordinary edge endpoint. The CA
+	// arriving here issues the mTLS passthrough listener's certificate, which
+	// this sensor only talks to when the platform advertises it below — and it
+	// does not when agentMtls is disabled, which is the chart default.
+	// Overwriting therefore left the sensor on the edge endpoint trusting a CA
+	// that never signed it, so registration succeeded and every call after it
+	// failed the handshake.
 	if registrationResp.ServerCACert != "" {
-		c.config.Security.ServerCACert = registrationResp.ServerCACert
+		c.config.Security.ServerCACert = certificates.MergeCAPEMs(
+			c.config.Security.ServerCACert, registrationResp.ServerCACert)
 	}
 
 	// Switch to the advertised mTLS passthrough endpoint before

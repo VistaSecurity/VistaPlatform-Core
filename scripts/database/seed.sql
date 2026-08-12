@@ -355,6 +355,28 @@ JOIN billable_items i ON i.key = v.item_key
 ON CONFLICT (tier_id, item_id) DO NOTHING;
 
 -- =================================================================
+-- Backfill: tier-less tenants land on the default floor
+-- =================================================================
+-- Every tenant created before auth-service started assigning a default tier at
+-- signup sits at subscription_tier_id = NULL. A tenant with no tier resolves
+-- every numeric cap to billable_items.default_value, and those are deliberately
+-- conservative — max_sensors 0, max_assets 0 — so such a tenant cannot register
+-- a sensor ("Sensor limit exceeded: 0/0", HTTP 402) or track an asset. Sensors
+-- are the platform's primary collection path, so those tenants have a product
+-- that cannot collect anything.
+--
+-- Only fills NULLs: never moves a tenant off a tier an operator or a purchase
+-- put them on. A commercial deployment that wants new/legacy self-signups on
+-- the trial tier instead sets DEFAULT_SIGNUP_TIER=free on auth-service and
+-- reassigns these tenants from the admin UI — this statement is a floor, not a
+-- plan decision. Idempotent: re-runs match nothing once every tenant has a tier.
+UPDATE tenants
+SET subscription_tier_id = (SELECT id FROM subscription_tiers WHERE name = 'community'),
+    updated_at = NOW()
+WHERE subscription_tier_id IS NULL
+  AND EXISTS (SELECT 1 FROM subscription_tiers WHERE name = 'community');
+
+-- =================================================================
 -- Measurement Types (required for compliance framework controls)
 -- =================================================================
 INSERT INTO measurement_types (code, name, description, data_type, units, valid_range, allowed_rule_types, enum_values, valid_operators, category) VALUES

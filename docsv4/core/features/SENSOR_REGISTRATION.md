@@ -402,15 +402,21 @@ Accepting writes the CA to `<dataPath>/certs/platform-ca.crt` and records
 `security.serverCACertPath` in the agent's config. Declining cancels setup; the
 agent will not connect to a platform it cannot verify.
 
-The anchor you approve is what **enrollment** is verified against — which is the
-connection that matters, because it is the one that happens before the agent has
-any other way to know who it is talking to. Registration then returns the
-platform's own CA, and the agent adopts that for subsequent connections. That
-handover is deliberate (it is what lets the platform rotate its CA without
-re-touching every agent), and it is safe precisely because it arrives over the
-channel you just verified — but it does mean the file on disk after enrollment
-may not be byte-identical to the CA you approved. Verification is never off in
-either phase.
+The anchor you approve verifies **enrollment** — the connection that matters
+most, because it happens before the agent has any other way to know who it is
+talking to. It then keeps verifying every connection afterwards.
+
+Registration additionally returns the platform's own CA, and the agent **adds**
+it to its trust pool rather than replacing what you approved. Both are kept, and
+that is deliberate: the CA you approved is what signs the ordinary endpoint,
+while the one returned at registration signs the mTLS passthrough listener that
+exists only when `agentMtls` is enabled. Which of the two an agent ends up
+talking to is a deployment choice, so it carries both and verifies against
+whichever applies. The second CA is safe to trust because it arrives over the
+connection the first one just authenticated.
+
+So the file on disk after enrollment may contain more certificates than you
+approved, but never fewer. Verification is never disabled in either phase.
 
 **Unattended install.** A scripted install cannot answer a prompt, so pass the
 expected fingerprint instead:

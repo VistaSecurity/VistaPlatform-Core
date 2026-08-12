@@ -18,6 +18,8 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/certificates"
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/config"
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/models"
+	// Aliased: the device-agent has its own `certificates` package, above.
+	sharedcerts "github.com/vistasecurity/vistaplatform/shared/certificates"
 )
 
 // OutboundClient handles outbound-only communication with the platform
@@ -180,9 +182,16 @@ func (c *OutboundClient) Register(version string) error {
 	// Store private key locally (never sent to platform)
 	c.config.Security.ClientKey = privateKeyPEM
 
-	// Store CA certificate for server verification
+	// ADD the platform's CA to the trust pool rather than replacing what is
+	// there. The existing anchor is the one the operator approved at setup and
+	// is what verifies the ordinary edge endpoint; the CA arriving here issues
+	// the mTLS passthrough listener's certificate, which only exists when
+	// agentMtls is enabled — not the chart default. Replacing left the agent
+	// trusting a CA that had not signed the endpoint it was still talking to,
+	// so enrollment succeeded and everything after it failed the handshake.
 	if result.ServerCACert != "" {
-		c.config.Security.ServerCACert = result.ServerCACert
+		c.config.Security.ServerCACert = sharedcerts.MergeCAPEMs(
+			c.config.Security.ServerCACert, result.ServerCACert)
 	}
 
 	if c.config.Security.ClientCert != "" && c.config.Security.ClientKey != "" {

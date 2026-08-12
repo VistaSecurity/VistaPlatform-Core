@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"log"
 
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/database"
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
@@ -59,10 +60,15 @@ type pcapStore interface {
 
 // Handler contains all the handler functions
 type Handler struct {
-	sensorService       legacySensorService
-	sensorServiceV2     *services.SensorServiceV2
-	repo                database.SensorRepository
-	db                  *sql.DB // Added for platform-level queries
+	sensorService   legacySensorService
+	sensorServiceV2 *services.SensorServiceV2
+	repo            database.SensorRepository
+	db              *sql.DB // Added for platform-level queries
+	// bypassDB is the BYPASSRLS (crypto_bypass) handle used by the deliberately
+	// cross-tenant handlers (platform-wide stats, the admin roll-up). Those
+	// queries have no tenant in scope, so they cannot set app.tenant_id and fail
+	// closed on the RLS-scoped handle.
+	bypassDB            *sql.DB
 	s3Downloader        *services.S3Downloader
 	discoveryJobService *services.DiscoveryJobService
 	pcapService         pcapStore
@@ -93,7 +99,7 @@ func NewHandlerWithService(sensorServiceV2 *services.SensorServiceV2, repo datab
 }
 
 // NewHandlerWithBoth creates a new handler instance with both legacy and v2 services
-func NewHandlerWithBoth(sensorService *services.SensorService, sensorServiceV2 *services.SensorServiceV2, repo database.SensorRepository, db *sql.DB) *Handler {
+func NewHandlerWithBoth(sensorService *services.SensorService, sensorServiceV2 *services.SensorServiceV2, repo database.SensorRepository, db, bypassDB *sql.DB) *Handler {
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.JSONFormatter{})
 	return &Handler{
@@ -101,6 +107,7 @@ func NewHandlerWithBoth(sensorService *services.SensorService, sensorServiceV2 *
 		sensorServiceV2:     sensorServiceV2,
 		repo:                repo,
 		db:                  db,
+		bypassDB:            bypassDB,
 		s3Downloader:        nil, // Will be set via SetS3Downloader
 		discoveryJobService: nil, // Will be set via SetDiscoveryJobService
 		encryptionKey:       "",  // Will be set via SetEncryptionKey
@@ -136,6 +143,24 @@ func (h *Handler) SetNATSClient(client *events.NATSClient) {
 // SetLogger sets the logger for the handler
 func (h *Handler) SetLogger(logger *logrus.Logger) {
 	h.log = logger
+}
+
+// logErr records the underlying cause of a 5xx before the handler replaces it
+// with a generic client-facing message. Handlers that answered 500 while
+// discarding err produced hard failures with no log line anywhere, which is how
+// the v0.5.0 RLS regression on the discoveries route had to be diagnosed by
+// reproducing it by hand against Postgres. Never drop the error on the floor.
+func (h *Handler) logErr(c *gin.Context, err error, op string, sensorID uuid.UUID) {
+	if h.log == nil {
+		log.Printf("sensor-manager: %s failed (sensor_id=%s): %v", op, sensorID, err)
+		return
+	}
+	h.log.WithFields(logrus.Fields{
+		"operation": op,
+		"sensor_id": sensorID.String(),
+		"path":      c.FullPath(),
+		"error":     err.Error(),
+	}).Error("sensor-manager request failed")
 }
 
 // Health handles health check requests

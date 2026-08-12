@@ -64,7 +64,7 @@ jobs:
       is_core: ${{ steps.check.outputs.is_core }}
       version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ env.RELEASE_REF }}
       - id: check
@@ -122,11 +122,11 @@ jobs:
           - { name: web-ui,                       context: ., dockerfile: frontend-v2/Dockerfile.prod }
           - { name: admin-ui,                     context: ., dockerfile: admin-ui-v2/Dockerfile.prod }
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ needs.guard.outputs.version }}
 
-      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2  # v3.10.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
@@ -199,7 +199,7 @@ jobs:
       packages: write
       id-token: write
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ needs.guard.outputs.version }}
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
@@ -297,7 +297,7 @@ jobs:
           - { runner: ubuntu-latest,    target: device-agent-all-platforms, artifact: 'device-agent-*' }
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ needs.guard.outputs.version }}
 
@@ -324,7 +324,7 @@ jobs:
           cp bin/${{ matrix.artifact }} dist/
           ls -la dist/
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: bin-${{ matrix.target }}
           path: dist/*
@@ -347,7 +347,7 @@ jobs:
       contents: write
       id-token: write   # keyless cosign
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ needs.guard.outputs.version }}
 

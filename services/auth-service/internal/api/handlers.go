@@ -1324,8 +1324,9 @@ func (h *AuthHandlers) CompleteRegistration(c *gin.Context) {
 	}
 
 	// Only trust the signup tier selection when it actually persisted; if the
-	// UPDATE fails the tenant retains the prerelease tier — skip trial bootstrap
-	// so we never seed a tracking row against the wrong plan.
+	// UPDATE fails the tenant retains the default signup tier assigned at
+	// creation (auth.DefaultSignupTierName) — skip trial bootstrap so we never
+	// seed a tracking row against the wrong plan.
 	tierSelectionApplied := req.SubscriptionTierID == nil
 	if req.SubscriptionTierID != nil {
 		// tenants is a GLOBAL table (no tenant_isolation policy). Left unwrapped.
@@ -1338,8 +1339,8 @@ func (h *AuthHandlers) CompleteRegistration(c *gin.Context) {
 		`, *req.SubscriptionTierID, user.TenantID)
 
 		if err != nil {
-			// Log error but don't fail registration
-			// The tenant will have default 'free' tier
+			// Log error but don't fail registration.
+			// The tenant keeps the default signup tier assigned at creation.
 			logrus.WithError(err).WithField("tenant_id", user.TenantID).
 				Warn("Failed to persist subscription tier at registration completion")
 		} else {
