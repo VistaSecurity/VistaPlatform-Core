@@ -15,10 +15,12 @@ export function useSensors() {
   });
 }
 
-// Enrolled device interrogation agents — the downloadable device-agent binary,
-// stored in device-interrogation-service (a different service/table than
-// sensors). The Sensors & Agents fleet list merges these in alongside sensors
-// so an enrolled agent is actually visible after registration.
+// Enrolled discovery (interrogation) agents — the downloadable device-agent
+// binary, stored in device-interrogation-service (a different service/table than
+// sensors). Rendered as their OWN table on Sensors & Agents, not merged into the
+// sensor table: the two share almost no columns, and merging them meant agents
+// showed "—" for the sensor-only ones while their real fields (addresses,
+// profile, job history) had nowhere to go.
 export function useDeviceAgents() {
   return useQuery({
     queryKey: ['discovery', 'device-agents'],
@@ -59,6 +61,23 @@ export function useJobs(pageSize = 50) {
     queryFn: async () => {
       const { data, error } = await clients.devices.GET('/jobs', { params: { query: { page: 1, page_size: pageSize } } });
       if (error || !data) throw new Error('Failed to load discovery jobs');
+      return data;
+    },
+  });
+}
+
+// One job's discovered assets + the post-processing verdict, for the job detail
+// modal. Enabled only when a job is selected so opening the page costs nothing.
+// The payload is projected and scrubbed server-side (see JobResultsResponse).
+export function useJobResults(jobId?: string | null) {
+  return useQuery({
+    queryKey: ['discovery', 'job-results', jobId],
+    enabled: !!jobId,
+    queryFn: async () => {
+      const { data, error } = await clients.devices.GET('/jobs/{id}/results', {
+        params: { path: { id: jobId! } },
+      });
+      if (error || !data) throw new Error('Failed to load job results');
       return data;
     },
   });

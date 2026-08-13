@@ -375,6 +375,18 @@ func (e *TLSEnricher) buildEnrichmentDiscovery(req enrichRequest, finding *model
 		metadata["version"] = finding.TLSVersions[0]
 	}
 
+	// The version this probe actually negotiated, falling back to whatever the
+	// passive observation that triggered enrichment had. req.version is often
+	// empty — the passive side may have seen only enough of the flow to decide
+	// the endpoint was worth probing — and shipping that empty value as the
+	// discovery's top-level Version is what erased the protocol version
+	// downstream: the control plane's envelope writes the top-level field
+	// unconditionally. Report the version we measured.
+	version := req.version
+	if len(finding.TLSVersions) > 0 && finding.TLSVersions[0] != "" {
+		version = finding.TLSVersions[0]
+	}
+
 	return &models.CryptoDiscovery{
 		ID:              uuid.New().String(),
 		SensorID:        e.sensorID,
@@ -383,7 +395,7 @@ func (e *TLSEnricher) buildEnrichmentDiscovery(req enrichRequest, finding *model
 		DestIP:          req.destIP,
 		Port:            req.port,
 		Protocol:        req.protocol,
-		Version:         req.version,
+		Version:         version,
 		CipherSuite:     finding.SelectedCipher,
 		DiscoveryMethod: "active_enrichment",
 		Confidence:      0.95,

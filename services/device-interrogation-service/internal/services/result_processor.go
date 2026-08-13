@@ -104,6 +104,15 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 		systemSensorID = s.lookupSystemSensor(ctx, deviceJob.TenantID)
 	}
 
+	// Record what actually happens to each asset so the outcome is visible in
+	// the UI rather than only on this process's stdout.
+	steps := &ProcessingLog{AssetsReceived: len(result.Assets), DiscoveryJobID: discoveryJobID.String()}
+	defer func() {
+		if err := steps.persist(ctx, s.bypassDB, jobID); err != nil {
+			fmt.Printf("Warning: %v\n", err)
+		}
+	}()
+
 	// Process each discovered asset
 	for _, asset := range result.Assets {
 		// Determine target input (hostname or IP)
@@ -112,6 +121,7 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 			targetInput = asset.IPAddress
 		}
 		if targetInput == "" {
+			steps.skip("(unidentified)", StageDiscoveryTarget, "asset has neither hostname nor IP address")
 			continue // Skip assets without hostname or IP
 		}
 
@@ -132,8 +142,10 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 		)
 		if err != nil {
 			fmt.Printf("Warning: failed to create discovery target for %s: %v\n", targetInput, err)
+			steps.fail(targetInput, StageDiscoveryTarget, err)
 			continue
 		}
+		steps.ok(targetInput, StageDiscoveryTarget)
 
 		// Prepare hostname and IP pointers
 		var hostnamePtr, ipPtr *string
@@ -180,13 +192,19 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 
 		// Create discovery finding with proper source type
 		_, err = s.discoveryIntegration.CreateDiscoveryFinding(
-			ctx, discoveryJobID, targetID, sourceType,
+			ctx, deviceJob.TenantID, discoveryJobID, targetID, sourceType,
 			protocol, port, hostnamePtr, ipPtr,
 			details, confidenceScore,
 		)
 		if err != nil {
 			fmt.Printf("Warning: failed to create discovery finding for %s: %v\n", targetInput, err)
-			continue
+			steps.fail(targetInput, StageDiscoveryFinding, err)
+			// Deliberately NOT `continue`: the two sinks are independent, and
+			// skipping the sensor_discoveries write on a findings failure is
+			// what turned one broken INSERT into a total pipeline outage —
+			// no findings AND no classification/auto-approval/auto-import.
+		} else {
+			steps.ok(targetInput, StageDiscoveryFinding)
 		}
 
 		// Also publish into the unified sensor_discoveries pipeline so the
@@ -194,7 +212,14 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 		// auto-approval rules and auto-imports the asset. discovery-processor's
 		// DB poller picks up the batch; no explicit trigger is required.
 		if systemSensorID != uuid.Nil {
-			s.writeSensorDiscovery(ctx, systemSensorID, deviceJob, batchID, asset, certFlags, ocspStatus, ocspDetail)
+			if err := s.writeSensorDiscovery(ctx, systemSensorID, deviceJob, batchID, asset, certFlags, ocspStatus, ocspDetail); err != nil {
+				fmt.Printf("Warning: failed to write sensor discovery for %s: %v\n", targetInput, err)
+				steps.fail(targetInput, StageSensorDiscovery, err)
+			} else {
+				steps.ok(targetInput, StageSensorDiscovery)
+			}
+		} else {
+			steps.skip(targetInput, StageSensorDiscovery, "tenant has no platform system sensor provisioned")
 		}
 	}
 
@@ -422,8 +447,9 @@ func (s *ResultProcessor) lookupSystemSensor(ctx context.Context, tenantID uuid.
 // writeSensorDiscovery publishes a single interrogated asset into the
 // sensor_discoveries table so it flows through the unified discovery pipeline
 // (discovery-processor → network classification → auto-approval → inventory
-// import), mirroring the cloud discovery path. Best-effort: failures are logged
-// and do not abort result processing (the discovery_findings row already exists).
+// import), mirroring the cloud discovery path. Failures do not abort result
+// processing, but they ARE returned so the caller can record them in the job's
+// processing log — a silently swallowed error here is invisible to the user.
 func (s *ResultProcessor) writeSensorDiscovery(
 	ctx context.Context,
 	sensorID uuid.UUID,
@@ -432,7 +458,7 @@ func (s *ResultProcessor) writeSensorDiscovery(
 	asset models.DiscoveredAsset,
 	certFlags map[string]interface{},
 	ocspStatus, ocspDetail string,
-) {
+) error {
 	// Resolve a destination IP: explicit IP, else DNS-resolved hostname, else a
 	// placeholder so the row is still classifiable by hostname.
 	destIP := "0.0.0.0"
@@ -458,8 +484,7 @@ func (s *ResultProcessor) writeSensorDiscovery(
 
 	metadataJSON, err := json.Marshal(metadata)
 	if err != nil {
-		fmt.Printf("Warning: failed to marshal sensor_discovery metadata: %v\n", err)
-		return
+		return fmt.Errorf("failed to marshal sensor_discovery metadata: %w", err)
 	}
 
 	now := time.Now()
@@ -478,8 +503,9 @@ func (s *ResultProcessor) writeSensorDiscovery(
 		return e
 	})
 	if err != nil {
-		fmt.Printf("Warning: failed to insert sensor_discovery for %s: %v\n", asset.Hostname, err)
+		return fmt.Errorf("failed to insert sensor_discovery: %w", err)
 	}
+	return nil
 }
 
 // buildSensorDiscoveryMetadata builds the sensor_discoveries metadata blob for an

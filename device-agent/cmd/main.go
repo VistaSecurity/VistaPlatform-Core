@@ -713,6 +713,12 @@ urlLoop:
 				fmt.Println("Setup cancelled — no CA trusted.")
 				return nil, "", nil, nil
 			}
+			if errors.Is(err, certificates.ErrCertificateNotForHost) {
+				// Already explained in full, including why pinning cannot fix
+				// it. Say what to do next instead of restating it as an error.
+				fmt.Println("Setup cancelled — fix the platform's TLS certificate, then run setup again.")
+				return nil, "", nil, nil
+			}
 			return nil, "", nil, fmt.Errorf("could not establish trust with the platform: %w", err)
 		}
 		pinnedCA = anchor.PEM

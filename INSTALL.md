@@ -12,6 +12,11 @@ each takes longer and looks more like production than the one above it.
 Everything is free under [FSL-1.1-ALv2](LICENSE.md). No licence key, no
 registration, no phone-home.
 
+> **Beta software, provided "AS IS", used at your own risk.** Before you deploy
+> a sensor or agent, read [DISCLAIMER.md](DISCLAIMER.md) — in particular
+> [authorized use](DISCLAIMER.md#authorized-use-only), which covers scanning
+> only what you own and the caution around probing OT/ICS networks.
+
 ---
 
 ## Try it

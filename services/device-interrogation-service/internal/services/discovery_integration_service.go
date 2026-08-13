@@ -93,9 +93,18 @@ func (s *DiscoveryIntegrationService) CreateDiscoveryJob(ctx context.Context, te
 	return jobID, nil
 }
 
-// CreateDiscoveryFinding creates a discovery finding from device interrogation results
+// CreateDiscoveryFinding creates a discovery finding from device interrogation
+// results.
+//
+// tenantID is REQUIRED and is written to discovery_findings.tenant_id, which is
+// NOT NULL. Omitting the column made every insert on this path fail with
+// `null value in column "tenant_id" ... violates not-null constraint`, which
+// callers only logged — so device interrogation produced targets and zero
+// findings, silently, for every job. Its sibling CreateDiscoveryTarget always
+// carried the tenant; this one did not.
 func (s *DiscoveryIntegrationService) CreateDiscoveryFinding(
 	ctx context.Context,
+	tenantID uuid.UUID,
 	jobID uuid.UUID,
 	targetID uuid.UUID,
 	executedVia string,
@@ -106,25 +115,31 @@ func (s *DiscoveryIntegrationService) CreateDiscoveryFinding(
 	details map[string]interface{},
 	confidenceScore float64,
 ) (uuid.UUID, error) {
+	if tenantID == uuid.Nil {
+		return uuid.Nil, fmt.Errorf("failed to create discovery finding: tenant id is required")
+	}
+
 	findingID := uuid.New()
 
 	detailsJSON, _ := json.Marshal(details)
 
 	query := `
 		INSERT INTO discovery_findings (
-			id, job_id, target_id, executed_via, protocol, port,
+			id, job_id, target_id, tenant_id, executed_via, protocol, port,
 			resolved_ip, hostname, details, confidence_score, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		RETURNING id
 	`
 
-	// RLS: keyed by job id / target id with no tenant input (tenant is the OUTPUT,
-	// derived from the parent job). Called from background/async finalize paths
-	// that carry no app.tenant_id → bypass role.
-	err := s.bypassDB.QueryRowContext(ctx, query,
-		findingID, jobID, targetID, executedVia, protocol, port,
-		ipAddress, hostname, string(detailsJSON), confidenceScore, time.Now(),
-	).Scan(&findingID)
+	// RLS-scoped write on `discovery_findings`: tenantID is now an input →
+	// WithTenantTx, matching CreateDiscoveryTarget. The policy's WITH CHECK is
+	// what makes a wrong tenant fail loudly rather than land a cross-tenant row.
+	err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, query,
+			findingID, jobID, targetID, tenantID, executedVia, protocol, port,
+			ipAddress, hostname, string(detailsJSON), confidenceScore, time.Now(),
+		).Scan(&findingID)
+	})
 
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("failed to create discovery finding: %w", err)

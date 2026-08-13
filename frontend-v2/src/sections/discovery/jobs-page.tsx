@@ -1,9 +1,14 @@
+import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
+import type { deviceInterrogationComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { Icon } from '../../components/ui';
 import { DTable, CellMono, CellTxt, PageWrap, queryNote, jobMeta, relTime, durationFmt, shortId } from './kit';
 import { useJobs } from './queries';
+import { JobDetailModal } from './job-detail-modal';
+
+type Job = deviceInterrogationComponents['schemas']['InterrogationJob'];
 
 // Discovery → Discovery Jobs — the mock's `discovery-jobs` table, live from
 // device-interrogation-service: Job · Type · Target · Source · Found · Duration
@@ -47,6 +52,7 @@ export function JobsPage() {
   const q = useJobs();
   const qc = useQueryClient();
   const jobs = q.data?.jobs ?? [];
+  const [selected, setSelected] = useState<Job | null>(null);
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['discovery', 'jobs'] });
 
@@ -83,6 +89,7 @@ export function JobsPage() {
           cols={COLS}
           rows={jobs}
           rowKey={(j) => j.id}
+          onRow={(j) => setSelected(j)}
           render={(j) => {
             const m = jobMeta(j.status);
             const s = (j.status || '').toLowerCase();
@@ -111,6 +118,7 @@ export function JobsPage() {
           }}
         />
       )}
+      <JobDetailModal job={selected} onClose={() => setSelected(null)} />
     </PageWrap>
   );
 }

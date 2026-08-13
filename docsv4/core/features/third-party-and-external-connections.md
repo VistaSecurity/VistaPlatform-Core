@@ -44,6 +44,49 @@ When sensors actively probe a TLS endpoint, they test **all four TLS versions** 
 - Use the **Legacy TLS only** filter to quickly find all connections accepting deprecated TLS versions.
 - The **Legacy TLS** summary card shows the total count of connections accepting TLS 1.0/1.1.
 
+## HTTP/3 and QUIC connections
+
+Some external connections show a protocol version of **QUIC v1** with **no cipher
+suite and no certificate**. This is expected, and it is worth understanding why.
+
+HTTP/3 runs over QUIC, which — unlike TLS over TCP — **encrypts its own handshake**.
+Everything that identifies the negotiated cryptography (the server's chosen cipher
+suite and its certificate) is protected by keys derived during the handshake itself.
+A passive sensor watching the traffic cannot read them, no matter how the sensor is
+configured. This is a property of the protocol, not a gap in your deployment.
+
+**In practice, a passively observed QUIC connection yields little more than its QUIC
+version and its destination.** Some additional detail — the server name requested
+(SNI), the offered ALPN protocols, a client fingerprint — is readable from the very
+first packet of a connection, and the platform reads it when it can. But a sensor
+only sees that packet if it happens to be watching at the moment the connection
+opens. HTTP/3 connections are long-lived, so most of what a sensor observes is
+mid-connection traffic with no handshake left to read. Expect this extra detail to be
+present on a small minority of QUIC connections, and absent on the rest.
+
+By contrast, the same sensor watching ordinary TLS over TCP recovers this detail on
+most connections, because a TLS handshake is readable whenever it occurs and is not
+encrypted end to end.
+
+This matters more over time — HTTP/3 is enabled by default in current browsers, so a
+typical desktop generates a substantial share of its traffic over QUIC.
+
+**Why we don't simply probe those destinations.** Recovering the cipher suite and
+certificate requires opening a connection to the server. The platform does **not**
+send traffic to third-party hosts merely because one of your systems happened to
+connect to them. Probing is reserved for infrastructure you own or have explicitly
+chosen to monitor.
+
+**How to get full crypto detail for a vendor that matters.** Use **Elevate** (below).
+An elevated connection becomes a monitored asset and is actively probed like any
+internal one, which captures its certificate and negotiated cryptography. Deciding to
+elevate is what authorizes the platform to talk to that host.
+
+> Elevated HTTP/3 endpoints are probed over TLS today, which is sufficient for the
+> large majority of them (servers offering HTTP/3 on port 443 almost always serve
+> TLS over TCP on the same port). Native HTTP/3 interrogation — probing the QUIC
+> endpoint directly and recording its QUIC-specific cryptography — is planned.
+
 ## Elevating a vendor connection to monitored
 
 Your sensors observe **thousands** of outbound 3rd-party connections — most are

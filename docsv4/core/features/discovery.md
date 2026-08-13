@@ -140,6 +140,19 @@ All discoveries (sensor and cloud) are **automatically processed** by the `disco
 - Cloud-specific metadata enrichment (e.g., ACM ARN, renewal status) preserved on certificate records
 - Resilient (missed batches automatically picked up)
 
+## What discovery records
+
+Discovery collects cryptographic **posture** — algorithms, key sizes, protocol
+versions, cipher suites, certificate identity and validity — and not key
+material. Device management APIs routinely return secrets alongside the
+configuration being inventoried (VPN pre-shared keys, certificate private keys,
+wireless and relay passwords), so each collector projects the vendor response
+onto an explicit list of fields the platform uses, discarding the rest at the
+point of collection. Cloud key discovery reads key metadata only.
+
+See [Device Interrogation User Guide](../guides/device-interrogation-user-guide.md#what-the-platform-records-from-your-devices)
+for the detail.
+
 ## Integration with Cluster Sensor Service
 
 Discovery jobs are processed by the `cluster-sensor-service`:
@@ -208,6 +221,16 @@ See [Asset Lifecycle Management](./asset-lifecycle-management.md) for more detai
 - Async execution recommended for large scans
 - Results retained for 24 hours (configurable)
 - Rate limiting applies to prevent abuse
+- **QUIC / HTTP-3 connections yield very little when observed passively.** QUIC
+  encrypts its own handshake, so a passive sensor records the QUIC version and
+  destination but not the negotiated cryptography or the server certificate. Server
+  name (SNI), ALPN and a client fingerprint are readable only from a connection's
+  opening packet, which a sensor rarely witnesses for long-lived HTTP/3 connections —
+  expect them on a small minority of QUIC connections. Active probing recovers the
+  full picture, and is performed only against assets you own or have elevated to
+  monitored — never against third-party destinations your systems merely connected
+  to. See
+  [Third-Party Systems and External Connections](./third-party-and-external-connections.md#http3-and-quic-connections).
 
 ## Troubleshooting
 

@@ -258,6 +258,24 @@ func dbInterrogatePostgreSQL(ctx context.Context, connStr string) (*DatabaseEncr
 	return finding, nil
 }
 
+// mysqlRetainedVariables is the set of MySQL server variables worth recording
+// for a crypto posture assessment. The ssl_* path variables (ssl_ca, ssl_cert,
+// ssl_key …) are filesystem paths rather than material, but they describe the
+// server's deployment rather than its cryptography and nothing reads them, so
+// they are left out too.
+var mysqlRetainedVariables = map[string]bool{
+	"have_ssl":                         true,
+	"have_openssl":                     true,
+	"ssl_cipher":                       true,
+	"tls_version":                      true,
+	"tls_ciphersuites":                 true,
+	"require_secure_transport":         true,
+	"default_table_encryption":         true,
+	"innodb_encrypt_tables":            true,
+	"binlog_encryption":                true,
+	"table_encryption_privilege_check": true,
+}
+
 // dbInterrogateMySQL queries a MySQL instance for its encryption settings.
 func dbInterrogateMySQL(ctx context.Context, connStr string) (*DatabaseEncryptionFinding, error) {
 	// MySQL connections use a different driver, so we query via standard database/sql.
@@ -285,7 +303,14 @@ func dbInterrogateMySQL(ctx context.Context, connStr string) (*DatabaseEncryptio
 		finding.RawConfig["version"] = version
 	}
 
-	// Query SSL-related variables
+	// Query SSL-related variables.
+	//
+	// The LIKE patterns are how we ASK, but they are not what we KEEP: a pattern
+	// cannot say what it will match on a MySQL version or fork we have not seen,
+	// and `%encrypt%` in particular is an open door onto whatever keyring
+	// variables a future release adds. The Postgres path above enumerates its
+	// settings; this one filters the response against mysqlRetainedVariables so
+	// both engines have a bounded, reviewable set.
 	rows, err := targetDB.QueryContext(ctx,
 		"SHOW VARIABLES WHERE Variable_name LIKE '%ssl%' OR Variable_name LIKE '%tls%' OR Variable_name LIKE '%encrypt%'")
 	if err == nil {
@@ -293,7 +318,9 @@ func dbInterrogateMySQL(ctx context.Context, connStr string) (*DatabaseEncryptio
 		for rows.Next() {
 			var name, value string
 			if err := rows.Scan(&name, &value); err == nil {
-				finding.RawConfig[name] = value
+				if mysqlRetainedVariables[strings.ToLower(name)] {
+					finding.RawConfig[name] = value
+				}
 
 				switch strings.ToLower(name) {
 				case "have_ssl", "have_openssl":

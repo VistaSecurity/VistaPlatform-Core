@@ -565,6 +565,59 @@ export function DeleteSensorModal({ open, sensor, onClose }: {
   );
 }
 
+// ---- B2) Delete a registered discovery agent ------------------------------
+// Separate from DeleteSensorModal because it hits a different service and says
+// something different: an agent is a binary the operator installed on a host we
+// do not control, so removing the row cannot stop it. The copy says so — the
+// platform fails the agent's calls closed either way, but an operator who thinks
+// "deleted" means "uninstalled" will leave a process running and polling.
+export function DeleteAgentModal({ open, agent, onClose }: {
+  open: boolean;
+  agent: { id: string; name: string } | null;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const del = useMutation({
+    mutationFn: async () => {
+      if (!agent) throw new Error('No agent selected');
+      const { error, response } = await clients.devices.DELETE('/agents/{id}', {
+        params: { path: { id: agent.id } },
+      });
+      if (!response.ok || error) throw new Error('Failed to delete agent');
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['discovery', 'device-agents'] });
+      // Deleting an agent re-queues its pending jobs and fails its in-progress
+      // ones, so any job view on screen is now stale.
+      qc.invalidateQueries({ queryKey: ['discovery', 'jobs'] });
+      onClose();
+    },
+  });
+
+  return (
+    <Modal
+      open={open}
+      onClose={del.isPending ? undefined : onClose}
+      dismissible={!del.isPending}
+      size="sm"
+      tone="danger"
+      icon="x-circle"
+      eyebrow="Sensors & Agents"
+      title="Delete discovery agent"
+      description={agent
+        ? `Remove "${agent.name}"? Its certificate is revoked and it can no longer claim work — queued jobs return to the pool and any job it was running is marked failed. This does not uninstall the agent: stop and remove the binary on its host separately.`
+        : 'Remove this agent?'}
+      primary={
+        <button className="ui-btn" style={{ background: 'var(--danger)', color: '#fff', borderColor: 'var(--danger)' }} disabled={del.isPending} onClick={() => del.mutate()}>
+          {del.isPending ? 'Deleting…' : 'Delete agent'}
+        </button>
+      }
+      secondary={<button className="ui-btn" onClick={onClose} disabled={del.isPending}>Cancel</button>}
+      footerNote={del.isError ? <span style={{ color: 'var(--danger-text)' }}>{(del.error as Error).message}</span> : undefined}
+    />
+  );
+}
+
 // ---- C) Delete a pending registration -------------------------------------
 function DeletePendingModal({ open, pending, onClose }: {
   open: boolean;

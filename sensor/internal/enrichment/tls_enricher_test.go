@@ -582,3 +582,71 @@ func TestGetTLSVersionName(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildEnrichmentDiscovery_ReportsTheVersionItMeasured pins the version the
+// probe puts on the discovery itself, not just in RawMetadata.
+//
+// The passive observation that triggers enrichment often carries no version —
+// it may have seen only enough of the flow to decide the endpoint was worth
+// probing — and forwarding that empty value as the discovery's Version is what
+// erased protocol_version downstream. The control plane's envelope writes the
+// top-level Version unconditionally, so an empty one shadowed the enriched
+// version in RawMetadata and TLS-over-TCP rows landed with a cipher suite, a
+// full certificate chain, and no protocol version at all.
+func TestBuildEnrichmentDiscovery_ReportsTheVersionItMeasured(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Capture: config.CaptureConfig{ActiveProbing: true}}
+	e := NewTLSEnricher(cfg, "sensor-1", make(chan *models.CryptoDiscovery, 10))
+
+	req := enrichRequest{
+		destIP:   "192.0.2.20",
+		port:     443,
+		sourceIP: "192.0.2.5",
+		protocol: "TLS",
+		version:  "", // the passive side never resolved one
+		sensorID: "sensor-1",
+	}
+	finding := &models.DiscoveryFinding{
+		Protocol:       "TLS",
+		Port:           443,
+		TLSVersions:    []string{"TLS 1.3"},
+		SelectedCipher: "TLS_AES_128_GCM_SHA256",
+	}
+
+	d := e.buildEnrichmentDiscovery(req, finding)
+	if d.Version != "TLS 1.3" {
+		t.Errorf("Version = %q, want TLS 1.3 (the version this probe negotiated)", d.Version)
+	}
+	if d.RawMetadata["version"] != "TLS 1.3" {
+		t.Errorf("RawMetadata[version] = %v, want TLS 1.3", d.RawMetadata["version"])
+	}
+}
+
+// TestBuildEnrichmentDiscovery_KeepsPassiveVersionWhenProbeReportsNone is the
+// other polarity: when the probe enumerated no version, the passive
+// observation's version is still the best answer available and must not be
+// thrown away.
+func TestBuildEnrichmentDiscovery_KeepsPassiveVersionWhenProbeReportsNone(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Capture: config.CaptureConfig{ActiveProbing: true}}
+	e := NewTLSEnricher(cfg, "sensor-1", make(chan *models.CryptoDiscovery, 10))
+
+	req := enrichRequest{
+		destIP:   "192.0.2.21",
+		port:     443,
+		sourceIP: "192.0.2.5",
+		protocol: "TLS",
+		version:  "TLS 1.2",
+		sensorID: "sensor-1",
+	}
+	finding := &models.DiscoveryFinding{
+		Protocol:       "TLS",
+		Port:           443,
+		SelectedCipher: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+	}
+
+	d := e.buildEnrichmentDiscovery(req, finding)
+	if d.Version != "TLS 1.2" {
+		t.Errorf("Version = %q, want TLS 1.2 (the passive observation's version)", d.Version)
+	}
+}

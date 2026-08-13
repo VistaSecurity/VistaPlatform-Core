@@ -10,6 +10,14 @@ CycloneDX **Cryptographic Bill of Materials** you can hand to an auditor.
 It is a self-hosted platform, not a SaaS. Your inventory never leaves your
 infrastructure.
 
+> **Beta — use at your own risk.** VistaPlatform is pre-1.0. It discovers,
+> assesses and generates a CBOM today, but interfaces, schema and chart values
+> change between 0.x releases without notice, there is no guaranteed upgrade
+> path, and there is no SLA. **The software is provided "AS IS", without
+> warranty of any kind, and is used entirely at your own risk.** Evaluate it
+> before you depend on it, and read [DISCLAIMER.md](DISCLAIMER.md) before you
+> point it at anything.
+
 ---
 
 ## Why
@@ -32,7 +40,10 @@ actually deployed rather than what was documented.
 passively, and probes actively when you ask it to — including OT/ICS protocols.
 A separate interrogation agent queries network devices (F5, Palo Alto, Cisco,
 Fortinet) and cloud providers for their crypto configuration. Both are Go
-binaries you deploy inside your own network.
+binaries you deploy inside your own network. Active probing and device
+interrogation touch live infrastructure — run them **only against systems you
+own or are authorized to assess**, and read the OT/ICS caution in
+[DISCLAIMER.md](DISCLAIMER.md#authorized-use-only) first.
 
 **Inventory.** Everything discovered lands in a CMDB-aligned model: assets,
 certificates, keys, crypto configurations, and the relationships between them.
@@ -165,3 +176,25 @@ in writing.
 
 Enterprise and MSP features are not in this repository and are licensed
 commercially. See [NOTICE](NOTICE) for third-party components.
+
+## Disclaimer — use at your own risk
+
+**THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING WITHOUT LIMITATION THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, TITLE AND NON-INFRINGEMENT. YOU USE IT
+ENTIRELY AT YOUR OWN RISK, AND THE LICENSOR HAS NO LIABILITY TO YOU ARISING OUT
+OF OR RELATED TO IT** — see [LICENSE.md](LICENSE.md) for the controlling terms.
+
+In practice, the three things to understand before you run it:
+
+- **You are responsible for where you point it.** The sensor probes actively,
+  including OT/ICS, and the interrogation agent authenticates to network devices
+  and cloud accounts. Run it only against infrastructure you own or are
+  authorized to assess.
+- **Compliance output is informational.** It is not an audit, an attestation, a
+  certification, or legal advice. No affiliation with or endorsement by the PCI
+  SSC, AICPA, ISO, NIST, IEC or any named vendor is claimed or implied.
+- **Discovery is best-effort.** An empty result means nothing was found, never
+  that nothing is there.
+
+[**DISCLAIMER.md**](DISCLAIMER.md) covers all of this in full.

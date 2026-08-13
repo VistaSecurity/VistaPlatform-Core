@@ -16,6 +16,7 @@ const __dirname = path.dirname(__filename);
 const root = path.resolve(__dirname, '..');
 const chartPath = path.join(root, 'charts', 'vistaplatform');
 const valuesPath = path.join(chartPath, 'values.yaml');
+const supportedKubeVersion = '1.35.0';
 
 const requiredSetArgs = [
   '--set', 'platform.jwtSecret=l',
@@ -30,6 +31,8 @@ function render(extraArgs = []) {
       'template',
       'config-checksum-test',
       chartPath,
+      '--kube-version',
+      supportedKubeVersion,
       ...requiredSetArgs,
       ...extraArgs,
     ], {

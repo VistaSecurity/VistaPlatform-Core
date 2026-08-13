@@ -14,6 +14,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const root = path.resolve(__dirname, '..');
 const chartPath = path.join(root, 'charts', 'vistaplatform');
+const supportedKubeVersion = '1.35.0';
 
 const commonSetArgs = [
   '--set', 'tls.dnsName=lint.example',
@@ -28,6 +29,8 @@ function helmTemplate(extraArgs) {
     'template',
     'content-bundle-test',
     chartPath,
+    '--kube-version',
+    supportedKubeVersion,
     ...commonSetArgs,
     ...extraArgs,
   ], {

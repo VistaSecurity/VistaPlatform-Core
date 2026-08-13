@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
-	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
 )
 
@@ -124,18 +123,19 @@ func (s *AgentService) resolveJobCredentials(ctx context.Context, tenantID uuid.
 // already-plaintext legacy data, matching how the creation path reads the same
 // rows.
 //
-// RLS: read under the job's tenant on the RLS-scoped pool, so the existing
-// platform_integrations policy decides visibility (including shared rows),
-// exactly as handlers.encryptCredentialsForJob does.
+// RLS: this lookup intentionally includes SHARED (tenant_id IS NULL)
+// integrations. The platform_integrations RLS policy hides NULL-tenant rows, so
+// this runs on the bypass role with an explicit tenant-or-shared predicate.
 func (s *AgentService) credentialsFromIntegration(ctx context.Context, tenantID, credentialID uuid.UUID) (map[string]interface{}, error) {
 	var configJSON string
-	err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, `
-			SELECT config
-			  FROM platform_integrations
-			 WHERE id = $1 AND is_active = true AND deleted_at IS NULL
-		`, credentialID).Scan(&configJSON)
-	})
+	err := s.bypassDB.QueryRowContext(ctx, `
+		SELECT config
+		  FROM platform_integrations
+		 WHERE id = $1
+		   AND (tenant_id = $2 OR (tenant_id IS NULL AND is_shared = true))
+		   AND is_active = true
+		   AND deleted_at IS NULL
+	`, credentialID, tenantID).Scan(&configJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("credential %s not found: %w", credentialID, ErrJobHasNoCredentials)
 	}

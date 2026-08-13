@@ -274,7 +274,7 @@ func (h *JobHandlers) GetJobResults(c *gin.Context) {
 		return
 	}
 
-	status, found, err := h.store.GetJobResultStatus(c.Request.Context(), tenantID, jobID)
+	status, resultsJSON, found, err := h.store.GetJobResultStatus(c.Request.Context(), tenantID, jobID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get job"})
 		return
@@ -284,15 +284,9 @@ func (h *JobHandlers) GetJobResults(c *gin.Context) {
 		return
 	}
 
-	// Return results (placeholder shape; may be empty if job not completed).
-	result := map[string]interface{}{
-		"job_id":  jobID.String(),
-		"status":  status,
-		"assets":  []interface{}{},
-		"summary": map[string]int{"total_assets": 0, "new_assets": 0, "updated_assets": 0},
-	}
-
-	c.JSON(http.StatusOK, result)
+	// Projected, never passed through — see job_results.go. Assets is empty
+	// rather than absent when the job has not produced results yet.
+	c.JSON(http.StatusOK, buildJobResults(jobID.String(), status, resultsJSON))
 }
 
 // RetryJob retries a failed job

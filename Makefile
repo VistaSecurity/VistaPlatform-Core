@@ -1009,6 +1009,11 @@ chart-config-checksum-test: ## Render-test config checksum rollout annotations
 	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
 	node ./scripts/test-chart-config-checksum.mjs
 
+chart-tls-existing-secret-test: ## Render-test the tls.mode=existingSecret pre-existence guard
+	@command -v helm >/dev/null 2>&1 || { echo "❌ helm not found — install helm to run chart-tls-existing-secret-test"; exit 1; }
+	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
+	node ./scripts/test-chart-tls-existing-secret.mjs
+
 chart-content-bundle-test: ## Render-test Enterprise content bundle chart gating
 	@command -v helm >/dev/null 2>&1 || { echo "❌ helm not found — install helm to run chart-content-bundle-test"; exit 1; }
 	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
@@ -1094,7 +1099,7 @@ validate-registry: node_modules_check ## Validate registry-first compliance
 drift-check: validate-registry audit ## Check for configuration drift
 	@echo "Drift check complete!"
 
-standards-check: generate verify-generated audit enforce validate-dockerfiles validate-logging chart-default-host-test chart-lint chart-agent-mtls-test chart-config-checksum-test chart-content-bundle-test release-core-checkout-test verify-action-pins-test audit-guardrails-test rls-policy-rewrite-test admin-plane-audit-test lint-workflows ## Generate, verify and run all standards checks  ## Generate, verify and run all standards checks
+standards-check: generate verify-generated audit enforce validate-dockerfiles validate-logging chart-default-host-test chart-lint chart-agent-mtls-test chart-config-checksum-test chart-tls-existing-secret-test chart-content-bundle-test release-core-checkout-test verify-action-pins-test audit-guardrails-test rls-policy-rewrite-test admin-plane-audit-test lint-workflows ## Generate, verify and run all standards checks  ## Generate, verify and run all standards checks
 
 registry-first: validate-registry generate verify-generated audit ## Complete registry-first workflow
 	@echo "✅ Registry-first workflow complete!"

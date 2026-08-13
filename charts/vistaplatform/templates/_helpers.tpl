@@ -140,6 +140,43 @@ true
 {{- else if eq $mode "existingSecret" -}}
 {{- if not .Values.tls.dnsName -}}{{- fail "tls.dnsName is required when tls.mode=existingSecret" -}}{{- end -}}
 {{- if not .Values.tls.existingSecretName -}}{{- fail "tls.existingSecretName is required when tls.mode=existingSecret" -}}{{- end -}}
+{{/* The named Secret must actually EXIST, and carry a certificate.
+
+     Checking only that the NAME is non-empty is not a check. An IngressRoute
+     pointing at an absent Secret does not fail: Traefik falls back to its own
+     generated default certificate (CN=<hash>.traefik.default) and serves it.
+     So `helm install --wait` returns success, every pod goes Ready, and every
+     health check is green — while every TLS client fails with a hostname
+     mismatch against a cert nobody configured. That is the silent-success
+     shape this repo keeps paying for, and it is reachable by an ordinary
+     bring-your-own-cert operator who applies values before creating the
+     Secret, or who mistypes its name.
+
+     Live-cluster only, using the same offline-detection as the cert-manager
+     probe below: `lookup` returns empty for EVERYTHING during `helm template`
+     and `--dry-run`, so a companion probe on kube-system distinguishes "no
+     cluster" from "genuinely missing". kube-system rather than the release
+     namespace, because on `--create-namespace` the release namespace does not
+     exist yet.
+
+     Note the interaction that follows from this: `helm install
+     --create-namespace` with tls.mode=existingSecret cannot be satisfied — the
+     Secret would have to live in a namespace that does not exist yet. Failing
+     is correct, and the message says what to do instead. */}}
+{{- if or .Release.IsInstall .Release.IsUpgrade -}}
+{{- $live := lookup "v1" "Namespace" "" "kube-system" -}}
+{{- if $live -}}
+{{- $tlsSecret := lookup "v1" "Secret" .Release.Namespace .Values.tls.existingSecretName -}}
+{{- if not $tlsSecret -}}
+{{- fail (printf "tls.mode=existingSecret names Secret %q in namespace %q, but no such Secret exists. Traefik would silently serve its own default certificate instead, so the install would report success while every client failed on a hostname mismatch. Create the Secret first (kubectl -n %s create secret tls %s --cert=fullchain.crt --key=tls.key), then install. If the namespace does not exist yet, create it before the Secret rather than using --create-namespace. To have cert-manager issue and renew the certificate for you instead, use tls.mode=certManager with tls.issuerRef.name." .Values.tls.existingSecretName .Release.Namespace .Release.Namespace .Values.tls.existingSecretName) -}}
+{{- end -}}
+{{- if and $tlsSecret $tlsSecret.data -}}
+{{- if not (index $tlsSecret.data "tls.crt") -}}
+{{- fail (printf "tls.mode=existingSecret names Secret %q in namespace %q, but it has no tls.crt key (found: %s). Traefik cannot serve a certificate from it and would fall back to its own default. Recreate it as a TLS Secret: kubectl -n %s create secret tls %s --cert=fullchain.crt --key=tls.key" .Values.tls.existingSecretName .Release.Namespace (keys $tlsSecret.data | sortAlpha | join ", ") .Release.Namespace .Values.tls.existingSecretName) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- else -}}
 {{- fail (printf "tls.mode must be one of: certManager, existingSecret, selfSigned, none (got %q)" $mode) -}}
 {{- end -}}

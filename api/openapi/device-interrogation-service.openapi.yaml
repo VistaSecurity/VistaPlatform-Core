@@ -418,6 +418,51 @@ paths:
           $ref: '#/components/responses/LegacyBadRequest'
         '500':
           $ref: '#/components/responses/LegacyServerError'
+  /agents/{id}:
+    delete:
+      operationId: deleteAgent
+      tags:
+      - agents
+      summary: Remove one of the tenant's device interrogation agents
+      description: |
+        Soft-deletes the agent (`device_agents.deleted_at`) and settles everything
+        that pointed at it, in one transaction: the agent's PENDING jobs are
+        released back to the unassigned pool (`agent_id = NULL`) so the in-cluster
+        worker or another agent picks them up; its IN-PROGRESS jobs are failed,
+        because a deleted agent will never report a result and re-queueing could
+        double-execute an interrogation; and its certificates are revoked.
+
+        Gated at DiscoveryManage — the same permission as the other destructive
+        routes in this service. RLS-isolated on `device_agents`: another tenant's
+        agent id is answered 404, identically to an unknown id.
+
+        This does NOT uninstall the agent binary, which keeps running on the
+        operator's host. It fails closed regardless: every agent-outbound path
+        resolves the agent with `deleted_at IS NULL`, so a deleted agent's polls
+        are rejected and it receives no jobs and no credentials.
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: The agent's UUID.
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: The agent was removed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
   /devices:
     get:
       operationId: listDevices
@@ -753,7 +798,7 @@ paths:
       tags:
       - interrogation-jobs
       summary: Get an interrogation job's results
-      description: Placeholder results shape today (assets/summary are stubbed); the job_id + status are real.
+      description: Returns the job's discovered assets (crypto posture + certificates), a summary, and the post-processing verdict. Projected and scrubbed — see JobResultsResponse.
       responses:
         '200':
           description: The job results.
@@ -1758,6 +1803,10 @@ components:
       - last_heartbeat
       - created_at
       - updated_at
+      - description
+      - addresses
+      - job_count
+      - last_job_at
       properties:
         id:
           type: string
@@ -1801,6 +1850,59 @@ components:
         updated_at:
           type: string
           format: date-time
+        description:
+          type: string
+          nullable: true
+          description: |
+            The operator's free-text note from the pending registration. Null when
+            the registration carried none.
+        addresses:
+          type: array
+          description: |
+            Every address bound on the agent host, as reported by its own
+            heartbeat, primary first. A discovery agent is routinely multi-homed,
+            so `ip_address` alone (the single address it reaches the platform
+            from) does not describe what it can reach. Empty for agents older than
+            address reporting, or that have not yet checked in.
+          items:
+            $ref: '#/components/schemas/AgentAddress'
+        job_count:
+          type: integer
+          description: All-time count of interrogation jobs assigned to this agent.
+        last_job_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            When this agent's most recent job last moved (completed, else started,
+            else created). Null if the agent has never been assigned one — which,
+            with job_count, distinguishes "enrolled but unused" from "went quiet".
+    AgentAddress:
+      type: object
+      additionalProperties: false
+      description: One address bound on an agent host (a public.agent_addresses row).
+      required:
+      - interface_name
+      - address
+      - prefix_length
+      - is_primary
+      properties:
+        interface_name:
+          type: string
+          description: The interface the address is bound to (e.g. Ethernet, eth0).
+        address:
+          type: string
+          description: |
+            The bare address, without a prefix — rendered with SQL `host()` rather
+            than a text cast, which would append "/24" and break any comparison
+            against a bare IP.
+        prefix_length:
+          type: integer
+          nullable: true
+          description: Prefix length of the address's network; null when the agent reported a bare address.
+        is_primary:
+          type: boolean
+          description: True for the address the agent reaches the platform from. At most one per agent.
     AgentListResponse:
       type: object
       additionalProperties: false
@@ -2300,8 +2402,13 @@ components:
       type: object
       additionalProperties: false
       description: |
-        CURRENT shape for GET /jobs/{id}/results. assets / summary are stubbed
-        placeholders today (empty array, zeroed summary); job_id + status are real.
+        An interrogation job's discovered assets and what happened to them.
+
+        This is a PROJECTION of the stored agent payload, never a passthrough:
+        only the fields enumerated here are served, and the open-ended
+        `metadata` map is additionally scrubbed of secret-looking fields. Vendor
+        APIs return key material (mesh PSKs, device auth keys, SMTP passwords)
+        alongside the crypto posture we want, and none of it may reach a client.
       required:
       - job_id
       - status
@@ -2312,25 +2419,128 @@ components:
           type: string
         status:
           type: string
+        success:
+          type: boolean
+          description: The agent's own verdict on the interrogation run.
         assets:
           type: array
           items:
-            type: object
-            additionalProperties: true
+            $ref: '#/components/schemas/JobResultAsset'
         summary:
+          $ref: '#/components/schemas/JobResultsSummary'
+        processing:
           type: object
-          additionalProperties: false
-          required:
-          - total_assets
-          - new_assets
-          - updated_assets
-          properties:
-            total_assets:
-              type: integer
-            new_assets:
-              type: integer
-            updated_assets:
-              type: integer
+          additionalProperties: true
+          description: |
+            Post-processing verdict written by the result processor: per-asset
+            outcomes (`steps`), de-duplicated `errors`, and counts for each
+            pipeline stage. Absent on jobs that produced no assets or that ran
+            before this was recorded.
+    JobResultsSummary:
+      type: object
+      additionalProperties: false
+      required:
+      - total_assets
+      - with_crypto
+      - with_certificates
+      properties:
+        total_assets:
+          type: integer
+        with_crypto:
+          type: integer
+          description: Assets whose TLS posture was genuinely observed, as opposed to listed by a management API.
+        with_certificates:
+          type: integer
+        materialized:
+          type: integer
+          description: |
+            How many assets became a discovery finding. Sourced from the
+            processing log rather than the asset count, so a pipeline failure
+            shows as "12 discovered / 0 materialized" instead of hiding behind
+            the total.
+    JobResultAsset:
+      type: object
+      additionalProperties: false
+      required:
+      - crypto_observed
+      properties:
+        hostname:
+          type: string
+        ip_address:
+          type: string
+        port:
+          type: integer
+        protocol:
+          type: string
+        asset_type:
+          type: string
+        protocol_version:
+          type: string
+        cipher_suite:
+          type: string
+        key_exchange_algorithm:
+          type: string
+        hash_algorithm:
+          type: string
+        key_size:
+          type: integer
+        tls_versions:
+          type: array
+          items:
+            type: string
+        supported_ciphers:
+          type: array
+          items:
+            type: string
+        cert_validation_status:
+          type: string
+        cert_validation_error:
+          type: string
+        certificates:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobResultCertificate'
+        service_name:
+          type: string
+        crypto_observed:
+          type: boolean
+          description: |
+            True when a handshake was actually measured (a cipher suite or
+            negotiated version is present). False means the asset was listed by
+            a management API and never probed — which is why its crypto fields
+            are empty. Without this flag "not measured" reads as "nothing found".
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Vendor inventory fields, scrubbed of secret-looking keys.
+    JobResultCertificate:
+      type: object
+      additionalProperties: false
+      properties:
+        subject_dn:
+          type: string
+        issuer_dn:
+          type: string
+        serial_number:
+          type: string
+        fingerprint_sha256:
+          type: string
+        not_before:
+          type: string
+        not_after:
+          type: string
+        key_algorithm:
+          type: string
+        key_size:
+          type: integer
+        signature_alg:
+          type: string
+        subject_alternative_names:
+          type: array
+          items:
+            type: string
+        self_signed:
+          type: boolean
     LegacyError:
       type: object
       additionalProperties: true

@@ -7,6 +7,179 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-08-13
+
+### Security
+
+- **Device interrogation no longer collects key material.** Collectors assigned
+  whole vendor API response objects into asset metadata, so every run persisted
+  whatever the vendor returned alongside the configuration being inventoried. A
+  single UniFi interrogation stored the controller's mesh PSK, per-device auth
+  and vwire keys, syslog keys, the SMTP relay password and the operator's email
+  address — roughly 350KB per run, none of which any consumer ever read.
+  FortiOS was equivalent: `vpn.ipsec/phase1-interface` carries `psksecret`, the
+  tunnel's pre-shared key, and `certificate/local` carries `private-key`.
+
+  Every collector now projects the vendor response onto an explicit list of the
+  fields the platform actually uses, so the material is discarded at the point
+  of collection rather than stored and filtered afterwards. Where a device can
+  be asked more narrowly it now is: Cisco interrogation requests
+  `show running-config | include ssl cipher` instead of the whole
+  `| section ssl|crypto`, which returned `crypto isakmp key <PSK>` for lines the
+  parser never read — those keys are no longer transmitted off the device at
+  all. Full `show version` transcripts are no longer retained, and the MySQL
+  settings sweep is bounded to a named set rather than
+  `LIKE '%ssl%' OR '%tls%' OR '%encrypt%'`.
+
+  As a backstop, every interrogator dispatched through the shared registry is
+  wrapped in a redaction pass that removes secret-looking fields by name, so a
+  collector added later cannot skip it. Cryptographic-posture names (`key_size`,
+  `key_exchange_algorithm`, `public_key`, `host_key_fingerprint`) are explicitly
+  exempt — the guard must not eat what the product exists to report.
+
+  Cloud discovery was audited and needed no change: AWS, Azure and GCP all map
+  typed SDK or JSON-tagged structs field by field, which discards unknown fields
+  structurally, and key discovery reads metadata only (AWS KMS keys are
+  non-exportable, Azure is read through the Key Vault management plane).
+
+  **Existing stored results are not retroactively scrubbed.** Interrogation jobs
+  run before this change still hold their original payload in
+  `device_jobs.results`.
+
+### Fixed
+
+- **Device interrogation results now reach inventory.** `CreateDiscoveryFinding`
+  omitted `tenant_id` from its INSERT while the column is `NOT NULL`, so every
+  finding insert on this path failed at the database. Callers logged the error
+  and continued, which meant device interrogation produced discovery targets and
+  zero findings — for every job, since the path was introduced. The failure also
+  skipped the `sensor_discoveries` write that follows it, so one broken
+  statement additionally disabled network classification, auto-approval and
+  auto-import for interrogated assets.
+
+  A job's asset count was read back out of the raw stored payload rather than
+  from anything persisted, so a run that materialized nothing still reported
+  "completed, N assets discovered". Result processing now records a per-asset,
+  per-stage outcome onto the job, and the UI shows "discovered" and "into
+  inventory" as separate figures so the two claims can disagree visibly.
+
+- **A sensor whose registration failed no longer runs silently doing nothing.**
+  Registration was attempted exactly once at startup, and a failure was logged
+  as a warning immediately followed by `Sensor started successfully`. An
+  unregistered sensor cannot submit anything, so the process captured packets on
+  every worker and reported none of it — for hours, with logs that read as a
+  healthy start.
+
+  Registration now retries on its own, 30s doubling to a 15-minute ceiling, so a
+  control plane that restarts mid-install needs no intervention. A *rejected*
+  registration is treated differently: a consumed or invalid key returns the same
+  answer forever, so the sensor refuses to start and quotes the platform's own
+  reason and how to get a new key, rather than looping. 408/425/429 are
+  explicitly retryable — treating "not now" as "never" would turn a rate-limited
+  restart storm into a fleet that gave up for good. The startup banner no longer
+  claims success while unregistered, and repeats the warning every 10 minutes.
+ 
+
+- **The trust-bootstrap prompt no longer offers certificates that can never
+  work.** It showed whatever certificate the platform presented and pinned it on
+  acceptance, without first checking the certificate was valid for the host being
+  connected to. Against a platform whose TLS secret was missing — so its ingress
+  controller served its own placeholder — an operator was shown a fingerprint,
+  accepted it, and the agent still could not connect: hostname verification runs
+  *before* chain building, so no pinned anchor can rescue a name mismatch. The
+  operator had completed what looked like a security step and got nothing, with
+  no way to tell a real CA from a placeholder by reading a fingerprint.
+
+  The agent now refuses before prompting, names what the server is actually
+  serving, and says the platform's TLS is misconfigured. The same refusal applies
+  on the unattended `--ca-fingerprint` path, where a correct fingerprint proves
+  the operator has the right CA but says nothing about whether the server is
+  serving the right certificate. A correctly-named private-CA platform still
+  prompts and pins as before.
+
+- **TLS-over-TCP connections record their protocol version.** They were reaching
+  `external_connections` with a cipher suite and a full certificate chain but
+  `protocol_version` NULL. `protocol_version` is what `isWeakProtocol` reads, so
+  a TLS 1.0/1.1 connection could not be detected or scored at all.
+
+  Two causes. sensor-manager's discovery envelope writes `version`,
+  `cipher_suite` and `key_size` unconditionally, whether or not the sensor
+  populated them, and discovery-processor's flatten let the outer value win
+  unconditionally — so `"version": ""` erased the version the TLS enricher had
+  just measured. An empty value carries no information and no longer beats one
+  that does; a bool `false` is deliberately still an answer rather than an
+  absence. Separately, the enricher now reports the version it negotiated instead
+  of the (often empty) version of the passive observation that triggered the
+  probe.
+
+- **`pending_sensor_registrations.created_at` is set.** Every registration
+  created through the web UI carried `0001-01-01 00:00:00+00`: the handler builds
+  the model without it and the INSERT listed the column, so Go's zero time was
+  written verbatim. Nothing surfaced it — `expires_at` is computed independently
+  so expiry kept working, and the `expires_at > created_at` CHECK is satisfied
+  trivially by year 1. The column already carried `DEFAULT now()`; it is no
+  longer overridden, so the database owns the stamp and the next caller cannot
+  forget it. No schema change.
+
+### Added
+
+- **Interrogation job detail.** Clicking a row on Discovery Jobs or Job Logs
+  opens the run: execution timeline, per-stage pipeline counts, de-duplicated
+  processing errors, and the discovered assets with their negotiated TLS
+  version, cipher suite, key exchange, key size and full certificate detail.
+  `GET /jobs/{id}/results` previously returned a fixed empty response and had no
+  caller; it now serves a projected, secret-scrubbed view of the stored payload.
+
+  Assets carry a `crypto_observed` flag, shown as a **not probed** marker. An
+  asset listed by a device's management API but never given its own handshake
+  has *unknown* posture rather than clean posture — the same distinction as a
+  risk score of 0 meaning "not assessed".
+
+- **Discovery agents can be removed.** A device agent could be registered but
+  never deleted: the tenant-facing `/agents` group had exactly one route, `GET`.
+  `device_agents.deleted_at` and its `deleted_at IS NULL` filters had shipped
+  with the table, so the soft-delete model was designed and simply never
+  implemented. `DELETE /agents/{id}` now completes it, gated on
+  `discovery.manage` — the permission this service's other destructive routes
+  already use, rather than a new one that would let a role delete the devices an
+  agent interrogates but not the agent. One transaction: soft-delete, revoke the
+  agent's certificates, release its queued jobs back to the unassigned pool, and
+  fail the ones nothing can run.
+
+  Queued jobs are released rather than discarded so the in-cluster worker or
+  another agent picks them up, but a job that names no device cannot be released:
+  `device_jobs`' `valid_job_assignment` CHECK permits an unassigned interrogation
+  job only when it carries a `device_id`, because that is how an unassigned job's
+  target gets resolved. Those are failed with their own message. Jobs already
+  **in progress** are failed rather than re-queued — the deleted agent will never
+  report, and re-queueing could run an interrogation against a live device twice.
+
+  Deleting an agent does not uninstall it; the binary keeps running on the
+  operator's host. That already failed closed and now stays that way under test —
+  every agent-outbound path resolves the agent with `deleted_at IS NULL`, so a
+  deleted agent's polls are answered 404 and it receives no jobs and no
+  credentials. The 404 is documented in the agent deployment guide so it reads as
+  the intended outcome rather than a network fault.
+
+### Changed
+
+- **Discovery agents are listed as themselves, not as sensors.** Agents and
+  sensors shared one sensor-shaped fleet table whose columns include *Segment*
+  and *Assets found* — neither of which a discovery agent has — so an agent row
+  was mostly empty, while the fields an agent does have had nowhere to go.
+  Discovery → Sensors & Agents now renders a separate **Discovery agents** table:
+  name and description, host address (with the full multi-homed inventory and
+  prefixes on hover), what the agent may interrogate, when it last ran a job and
+  how many it has run, version, and status. Sensors keep their own table
+  unchanged.
+
+  The listing query was extended to match: it had never selected the agent's
+  `description`, never joined `agent_addresses`, and exposed no job history at
+  all — every one of those already existed in the database. Addresses are
+  rendered with SQL `host()` rather than a text cast, which would append the
+  prefix and never match a bare-IP comparison downstream.
+
+
 ## [0.5.6] - 2026-08-12
 
 ### Security

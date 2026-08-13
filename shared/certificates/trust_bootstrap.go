@@ -50,7 +50,31 @@ type TrustAnchor struct {
 	SelfSigned bool
 	// ChainLength is how many certificates the server presented.
 	ChainLength int
+
+	// Leaf is the end-entity certificate the server presented (chain[0]). It is
+	// not what gets pinned — that is Anchor/Certificate — but it decides whether
+	// pinning can ever work at all, so the caller needs it to answer honestly.
+	Leaf *x509.Certificate
+	// ServerName is the hostname the agent will connect to and therefore the
+	// name the leaf has to be valid for.
+	ServerName string
+	// HostnameErr is non-nil when Leaf is not valid for ServerName.
+	//
+	// This is the difference between "you do not trust this CA yet" (fixable by
+	// pinning) and "this server is serving the wrong certificate" (not fixable
+	// by pinning, ever). Go's x509 Verify runs VerifyHostname BEFORE it builds
+	// a chain, so no trust root the operator installs can rescue a name
+	// mismatch. A platform whose TLS Secret is missing serves its ingress
+	// controller's placeholder — a fingerprint an operator has no way to
+	// recognise as wrong — and pinning it produces a sensor that fails every
+	// connection while the operator believes they completed a security step.
+	HostnameErr error
 }
+
+// UsableForHost reports whether pinning this anchor could actually produce a
+// working connection. False means the server's own certificate is not valid for
+// the host being connected to, so the trust decision is moot.
+func (a *TrustAnchor) UsableForHost() bool { return a.HostnameErr == nil }
 
 // FetchServerTrustAnchor completes a TLS handshake with the platform WITHOUT
 // verifying its certificate, purely to read back the chain it presents, and
@@ -92,6 +116,7 @@ func FetchServerTrustAnchor(rawURL string) (*TrustAnchor, error) {
 	// root, in which case this is the intermediate — pinning it still verifies
 	// correctly, it just anchors trust one level lower than the true root.
 	anchor := chain[len(chain)-1]
+	leaf := chain[0]
 
 	return &TrustAnchor{
 		Certificate:       anchor,
@@ -99,7 +124,39 @@ func FetchServerTrustAnchor(rawURL string) (*TrustAnchor, error) {
 		FingerprintSHA256: FingerprintSHA256(anchor),
 		SelfSigned:        isSelfSigned(anchor),
 		ChainLength:       len(chain),
+		Leaf:              leaf,
+		ServerName:        serverName,
+		// Checked here, at the only point the presented chain is in hand.
+		// Pinning cannot fix a name mismatch, so the caller must not offer one.
+		HostnameErr: leaf.VerifyHostname(serverName),
 	}, nil
+}
+
+// DescribeHostnameMismatch renders, in the operator's terms, why the server's
+// certificate can never work for the host they typed — naming the certificate's
+// actual identity, which is the part that tells them what is misconfigured.
+func DescribeHostnameMismatch(anchor *TrustAnchor) string {
+	if anchor == nil || anchor.HostnameErr == nil {
+		return ""
+	}
+	identity := anchor.Leaf.Subject.CommonName
+	if len(anchor.Leaf.DNSNames) > 0 {
+		identity = strings.Join(anchor.Leaf.DNSNames, ", ")
+	}
+	if strings.TrimSpace(identity) == "" {
+		identity = "(no hostname at all)"
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n❌ The server at %s is presenting a certificate for %s.\n\n", anchor.ServerName, identity)
+	b.WriteString("    Its TLS is misconfigured — this is a problem on the platform, not here.\n")
+	b.WriteString("    Trusting the CA behind it would not help: certificate verification\n")
+	b.WriteString("    checks the hostname BEFORE it checks who signed it, so every\n")
+	b.WriteString("    connection would still fail with the same error.\n\n")
+	b.WriteString("    Common cause: the platform's TLS certificate was never installed, so\n")
+	b.WriteString("    its ingress controller is serving a placeholder.\n\n")
+	fmt.Fprintf(&b, "    Verification error: %v\n", anchor.HostnameErr)
+	return b.String()
 }
 
 // hostPortFromURL extracts a dialable host:port from a platform URL, defaulting

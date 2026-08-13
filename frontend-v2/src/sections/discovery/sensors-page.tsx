@@ -3,44 +3,46 @@ import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rb
 import { Icon } from '../../components/ui';
 import { DTable, CellMono, CellTxt, PageWrap, queryNote, sensorOnline, relTime } from './kit';
 import { useSensors, useDiscoveryCounts, useDeviceAgents } from './queries';
-import { RegisterSensorModal, DeleteSensorModal, PendingRegistrationsSection } from './sensor-modals';
+import { RegisterSensorModal, DeleteSensorModal, DeleteAgentModal, PendingRegistrationsSection } from './sensor-modals';
 import { SensorDetailDrawer } from './sensor-detail-drawer';
+import { profileLabel, jobsSummary, hostSummary, addressTooltip } from './agent-fleet';
 
-// Discovery → Sensors & Agents — the mock's `discovery-sensors` table:
-// Sensor · Type · Segment · Assets found · Version · Status. Two live sources are
-// merged into one fleet list: network sensors from sensor-manager (GET /sensors)
-// and enrolled device interrogation agents from device-interrogation-service
-// (GET /agents) — they live in different services/tables but the tenant thinks
-// of them as one "Sensors & Agents" list. "Assets found" joins
-// GET /sensors/discovery-counts (sensors only); "Segment" renders the monitored
-// interface subnets a sensor reports. Write surface (register / delete / pending
-// registrations) lives in sensor-modals.tsx.
+// Discovery → Sensors & Agents. TWO tables, because a sensor and a discovery
+// agent are two different things:
+//
+//   Sensors          — passive libpcap binaries. Sensor · Type · Segment ·
+//                      Assets found · Version · Status. From sensor-manager.
+//   Discovery agents — command-driven interrogation binaries. Agent · Host ·
+//                      Profile · Jobs · Version · Status. From
+//                      device-interrogation-service.
+//
+// They used to share one sensor-shaped table, which meant every agent row
+// rendered "—" for Segment and Assets found (neither of which an agent has)
+// while the fields an agent DOES have — its address inventory, its profile, what
+// jobs it has run — had nowhere to go. Merging them cost both kinds their detail
+// to gain a row count nobody needed.
+//
+// "Assets found" joins GET /sensors/discovery-counts (sensors only); "Segment"
+// renders the monitored interface subnets a sensor reports. Write surface
+// (register / delete / pending registrations) lives in sensor-modals.tsx.
 
 type SensorRow = NonNullable<ReturnType<typeof useSensors>['data']>[number];
-type AgentRow = NonNullable<ReturnType<typeof useDeviceAgents>['data']>[number];
 
-// Unified fleet row — a sensor or a device agent, flattened to the columns the
-// table renders. `raw`/`kind` let row actions (drill-in, delete) branch by kind:
-// only sensors have a detail drawer and a delete endpoint here.
-type FleetRow = {
-  kind: 'sensor' | 'agent';
-  id: string;
-  name: string;
-  platform?: string | null;
-  ipAddress?: string | null;
-  lastHeartbeat?: string | null;
-  status?: string | null;
-  typeLabel: string;
-  segment: string;
-  version?: string | null;
-  sensor: SensorRow | null;
-};
-
-const COLS = [
+const SENSOR_COLS = [
   { label: 'Sensor', w: '1.4fr' },
   { label: 'Type', w: '1fr' },
   { label: 'Segment', w: '1fr' },
   { label: 'Assets found', w: '120px', align: 'right' as const },
+  { label: 'Version', w: '90px' },
+  { label: 'Status', w: '110px', align: 'right' as const },
+  { label: '', w: '44px', align: 'right' as const },
+];
+
+const AGENT_COLS = [
+  { label: 'Agent', w: '1.4fr' },
+  { label: 'Host', w: '1.1fr' },
+  { label: 'Interrogates', w: '1fr' },
+  { label: 'Jobs', w: '150px' },
   { label: 'Version', w: '90px' },
   { label: 'Status', w: '110px', align: 'right' as const },
   { label: '', w: '44px', align: 'right' as const },
@@ -54,54 +56,31 @@ export function SensorsPage() {
 
   const [registerOpen, setRegisterOpen] = useState(false);
   const [toDelete, setToDelete] = useState<{ id: string; name: string } | null>(null);
+  const [agentToDelete, setAgentToDelete] = useState<{ id: string; name: string } | null>(null);
   const [selected, setSelected] = useState<SensorRow | null>(null);
 
-  // Merge the two fleets. Sensors keep their existing shape; device agents carry
-  // no segment or discovery-count and always render as the "Device agent" type.
-  const rows: FleetRow[] = [
-    ...(q.data ?? []).map((s): FleetRow => ({
-      kind: 'sensor',
-      id: s.id,
-      name: s.name,
-      platform: s.platform,
-      ipAddress: s.ip_address,
-      lastHeartbeat: s.last_heartbeat,
-      status: s.status,
-      typeLabel: s.sensor_type || s.profile,
-      segment: (s.network_interfaces ?? []).join(', '),
-      version: s.version,
-      sensor: s,
-    })),
-    ...(agentsQ.data ?? []).map((a: AgentRow): FleetRow => ({
-      kind: 'agent',
-      id: a.id,
-      // Agents may enroll before the operator-supplied name is set; fall back to
-      // a short id so the row is never blank.
-      name: a.name || `agent-${a.id.slice(0, 8)}`,
-      platform: a.platform,
-      // Self-reported on each heartbeat, like a sensor's. Null until an agent
-      // new enough to report one has checked in.
-      ipAddress: a.ip_address ?? null,
-      lastHeartbeat: a.last_heartbeat,
-      status: a.status,
-      typeLabel: 'Device agent',
-      segment: '',
-      version: a.version,
-      sensor: null,
-    })),
-  ];
+  const sensors = q.data ?? [];
+  const agents = agentsQ.data ?? [];
 
-  // The list is "loaded/empty" only once both sources have resolved, so an agent
-  // that arrives after sensors doesn't flash an empty state. queryNote drives the
-  // loading/error/empty messaging off the sensors query (the primary source).
+  // The page count still spans both fleets — the tenant thinks of this page as
+  // "everything I have deployed", even though the tables are separate.
   const bothLoaded = !q.isLoading && !agentsQ.isLoading;
-  const note = queryNote(q, bothLoaded && rows.length === 0, {
+  const total = sensors.length + agents.length;
+
+  // The sensors table owns the page's empty state: if there are no sensors AND
+  // no agents, this is the one place that says so. When there are agents but no
+  // sensors, the note correctly reports the sensor fleet as empty and the agents
+  // table renders below it.
+  const note = queryNote(q, bothLoaded && total === 0, {
     thing: 'sensors',
     emptyMessage: 'No sensors or agents are registered for this tenant yet.',
   });
+  const sensorNote = note ?? (bothLoaded && sensors.length === 0
+    ? queryNote(q, true, { thing: 'sensors', emptyMessage: 'No network sensors are registered for this tenant yet.' })
+    : null);
 
   return (
-    <PageWrap title="Sensors & Agents" count={bothLoaded ? rows.length : ''}>
+    <PageWrap title="Sensors & Agents" count={bothLoaded ? total : ''}>
       <PermissionGate permission={TENANT_PERMISSIONS.sensors.manage}>
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 14 }}>
           <button className="ui-btn accent" onClick={() => setRegisterOpen(true)}>
@@ -110,47 +89,41 @@ export function SensorsPage() {
         </div>
       </PermissionGate>
 
-      {note ?? (
+      {sensorNote ?? (
         <DTable
-          cols={COLS}
-          rows={rows}
-          rowKey={(r) => r.id}
-          onRow={(r) => { if (r.kind === 'sensor' && r.sensor) setSelected(r.sensor); }}
-          render={(r) => {
-            const on = sensorOnline(r.status, r.lastHeartbeat);
+          cols={SENSOR_COLS}
+          rows={sensors}
+          rowKey={(s) => s.id}
+          onRow={(s) => setSelected(s)}
+          render={(s) => {
+            const on = sensorOnline(s.status, s.last_heartbeat);
             return (
               <>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 }}>
                   <span style={{ width: 8, height: 8, borderRadius: 50, flex: 'none', background: on ? 'var(--ok)' : 'var(--danger)' }} />
                   <div style={{ minWidth: 0 }}>
-                    <CellMono v={r.name} />
+                    <CellMono v={s.name} />
                     <div style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {[r.platform, r.ipAddress, on ? relTime(r.lastHeartbeat) : null].filter(Boolean).join(' · ')}
+                      {[s.platform, s.ip_address, on ? relTime(s.last_heartbeat) : null].filter(Boolean).join(' · ')}
                     </div>
                   </div>
                 </div>
-                <CellTxt v={r.typeLabel} />
-                <CellTxt v={r.segment} />
-                <CellMono right v={counts[r.id] ?? '—'} />
-                <CellMono v={r.version ? 'v' + r.version : '—'} c="var(--app-t3)" />
-                <span style={{ textAlign: 'right', fontSize: 11.5, fontWeight: 600, color: on ? 'var(--ok)' : r.status === 'pending' ? 'var(--warn)' : 'var(--danger)' }}>
-                  {(r.status || 'unknown').replace('_', ' ')}
-                </span>
+                <CellTxt v={s.sensor_type || s.profile} />
+                <CellTxt v={(s.network_interfaces ?? []).join(', ')} />
+                <CellMono right v={counts[s.id] ?? '—'} />
+                <CellMono v={s.version ? 'v' + s.version : '—'} c="var(--app-t3)" />
+                <StatusCell status={s.status} online={on} />
                 <span style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                  {/* Delete is wired to the sensor endpoint; device agents are
-                      managed via device-interrogation-service, so no delete here. */}
-                  {r.kind === 'sensor' ? (
-                    <PermissionGate permission={TENANT_PERMISSIONS.sensors.delete} fallback={<span />}>
-                      <button
-                        className="ui-btn sm ghost"
-                        style={{ color: 'var(--danger-text)', flex: 'none', padding: '0 7px' }}
-                        title="Delete sensor"
-                        onClick={(e) => { e.stopPropagation(); setToDelete({ id: r.id, name: r.name }); }}
-                      >
-                        <Icon name="x" size={13} />
-                      </button>
-                    </PermissionGate>
-                  ) : <span />}
+                  <PermissionGate permission={TENANT_PERMISSIONS.sensors.delete} fallback={<span />}>
+                    <button
+                      className="ui-btn sm ghost"
+                      style={{ color: 'var(--danger-text)', flex: 'none', padding: '0 7px' }}
+                      title="Delete sensor"
+                      onClick={(e) => { e.stopPropagation(); setToDelete({ id: s.id, name: s.name }); }}
+                    >
+                      <Icon name="x" size={13} />
+                    </button>
+                  </PermissionGate>
                 </span>
               </>
             );
@@ -158,11 +131,91 @@ export function SensorsPage() {
         />
       )}
 
+      {/* Quiet when the tenant has no agents — an empty second table is noise,
+          not information, and the sensors table above already carries the
+          page-level "nothing registered yet" state. */}
+      {agents.length > 0 && (
+        <div style={{ marginTop: 26 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+            <h3 style={{ margin: 0, fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 14, color: 'var(--app-t1)' }}>Discovery agents</h3>
+            <span className="mono" style={{ fontSize: 12, color: 'var(--app-t3)' }}>{agents.length}</span>
+          </div>
+          <DTable
+            cols={AGENT_COLS}
+            rows={agents}
+            rowKey={(a) => a.id}
+            render={(a) => {
+              const on = sensorOnline(a.status, a.last_heartbeat);
+              const jobs = jobsSummary(a);
+              const host = hostSummary(a);
+              return (
+                <>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: 50, flex: 'none', background: on ? 'var(--ok)' : 'var(--danger)' }} />
+                    <div style={{ minWidth: 0 }}>
+                      {/* Agents can enroll before a name is set; fall back to a
+                          short id so the row is never blank. */}
+                      <CellMono v={a.name || `agent-${a.id.slice(0, 8)}`} />
+                      <div style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {[a.description, a.platform].filter(Boolean).join(' · ') || '—'}
+                      </div>
+                    </div>
+                  </div>
+                  {/* The cell shows the primary and a count; the tooltip carries
+                      the full inventory with prefixes, which is what makes the
+                      addresses answer "which segments is this agent on?". */}
+                  <div style={{ minWidth: 0 }} title={addressTooltip(a) || undefined}>
+                    <CellMono v={host.primary} />
+                    {host.extra && (
+                      <div style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{host.extra}</div>
+                    )}
+                  </div>
+                  <CellTxt v={profileLabel(a.profile)} />
+                  <div style={{ minWidth: 0 }}>
+                    <CellTxt v={jobs.last} c={a.last_job_at ? 'var(--app-t2)' : 'var(--app-t3)'} />
+                    {jobs.count && (
+                      <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>{jobs.count}</div>
+                    )}
+                  </div>
+                  <CellMono v={a.version ? 'v' + a.version : '—'} c="var(--app-t3)" />
+                  <StatusCell status={a.status} online={on} />
+                  <span style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                    {/* discovery.manage, not sensors.delete: the endpoint behind
+                        this is device-interrogation-service's, gated the same as
+                        its other destructive routes. */}
+                    <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage} fallback={<span />}>
+                      <button
+                        className="ui-btn sm ghost"
+                        style={{ color: 'var(--danger-text)', flex: 'none', padding: '0 7px' }}
+                        title="Delete agent"
+                        onClick={(e) => { e.stopPropagation(); setAgentToDelete({ id: a.id, name: a.name || `agent-${a.id.slice(0, 8)}` }); }}
+                      >
+                        <Icon name="x" size={13} />
+                      </button>
+                    </PermissionGate>
+                  </span>
+                </>
+              );
+            }}
+          />
+        </div>
+      )}
+
       <PendingRegistrationsSection />
 
       <RegisterSensorModal open={registerOpen} onClose={() => setRegisterOpen(false)} />
       <DeleteSensorModal open={!!toDelete} sensor={toDelete} onClose={() => setToDelete(null)} />
+      <DeleteAgentModal open={!!agentToDelete} agent={agentToDelete} onClose={() => setAgentToDelete(null)} />
       {selected && <SensorDetailDrawer sensor={selected} onClose={() => setSelected(null)} />}
     </PageWrap>
+  );
+}
+
+// Shared status cell — both fleets use the same online/pending/offline colouring.
+function StatusCell({ status, online }: { status?: string | null; online: boolean }) {
+  return (
+    <span style={{ textAlign: 'right', fontSize: 11.5, fontWeight: 600, color: online ? 'var(--ok)' : status === 'pending' ? 'var(--warn)' : 'var(--danger)' }}>
+      {(status || 'unknown').replace('_', ' ')}
+    </span>
   );
 }

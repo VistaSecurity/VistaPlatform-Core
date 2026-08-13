@@ -166,10 +166,12 @@ func (c *unifiClient) interrogate(ctx context.Context) (*InterrogateResult, erro
 		result.Assets = append(result.Assets, unifiVPNAssets(confs, controllerHost)...)
 	}
 
-	if settings, err := c.getSettings(ctx, site); err != nil {
-		fmt.Printf("Warning: failed to get settings: %v\n", err)
+	if identity, err := c.getControllerIdentity(ctx, site); err != nil {
+		fmt.Printf("Warning: failed to get controller identity: %v\n", err)
 	} else {
-		result.DeviceInfo["settings"] = settings
+		for k, v := range identity {
+			result.DeviceInfo[k] = v
+		}
 	}
 
 	return result, nil
@@ -307,17 +309,55 @@ func (c *unifiClient) apiRequest(ctx context.Context, method, endpoint string, b
 	return &apiResp, nil
 }
 
-// getSystemInfo retrieves controller/system information.
+// getSystemInfo confirms the authenticated session and returns controller
+// identity.
+//
+// /api/self returns the ADMIN ACCOUNT profile — uid, full name, email address,
+// admin id, owner/super flags. We used to store that response verbatim as the
+// job's device_info, which put the operator's personal email in every
+// interrogation record for no benefit: nothing downstream ever read it. The
+// call is retained because a successful response proves the session is live,
+// but the body is discarded apart from the controller's own identity.
 func (c *unifiClient) getSystemInfo(ctx context.Context) (map[string]interface{}, error) {
 	resp, err := c.apiRequest(ctx, "GET", "/api/self", nil)
 	if err != nil {
 		return nil, err
 	}
-	info := make(map[string]interface{})
+	info := map[string]interface{}{"authenticated": true}
 	if len(resp.Data) > 0 {
-		info = resp.Data[0]
+		// site_name is the controller's site handle, not user identity.
+		if site, ok := resp.Data[0]["site_name"].(string); ok && site != "" {
+			info["site_name"] = site
+		}
 	}
 	return info, nil
+}
+
+// getControllerIdentity returns the controller's own name/hostname from the
+// site settings.
+//
+// The full `list/setting` payload is deliberately NOT retained. It carries the
+// site mesh PSK (super_mgmt/connectivity x_mesh_psk), the SMTP relay password
+// (super_smtp x_password) and RADIUS shared secrets. Nothing downstream read
+// it; only the controller's display identity is of any use, so that is all we
+// take.
+func (c *unifiClient) getControllerIdentity(ctx context.Context, site string) (map[string]interface{}, error) {
+	settings, err := c.getSettings(ctx, site)
+	if err != nil {
+		return nil, err
+	}
+	identity := map[string]interface{}{}
+	for _, entry := range settings {
+		if key, _ := entry["key"].(string); key != "super_identity" {
+			continue
+		}
+		for _, field := range []string{"name", "hostname"} {
+			if v, ok := entry[field].(string); ok && v != "" {
+				identity["controller_"+field] = v
+			}
+		}
+	}
+	return identity, nil
 }
 
 // getDevices retrieves managed devices for a site.
@@ -344,12 +384,47 @@ func (c *unifiClient) getSettings(ctx context.Context, site string) ([]map[strin
 	return resp.Data, nil
 }
 
-// convertDeviceToAsset converts a UniFi managed device to a CryptoAsset.
+// unifiDeviceInventoryFields is the allowlist of `stat/device` fields we keep.
+//
+// The controller's device object carries ~120 fields, including x_authkey,
+// x_vwirekey, syslog_key and the mesh PSK. We copied the whole thing into asset
+// metadata, so every interrogation persisted those keys. We inventory
+// cryptographic posture, not key material, and none of the omitted fields feed
+// any downstream consumer — so the fix is to stop collecting them rather than to
+// scrub them afterwards. Sanitize (redact.go) remains as a backstop.
+//
+// Add a field here only if something actually reads it.
+var unifiDeviceInventoryFields = []string{
+	"name",         // display name
+	"ip",           // management address
+	"mac",          // hardware identity
+	"model",        // hardware model
+	"type",         // uap / usw / ugw / udm
+	"version",      // firmware version
+	"serial",       // hardware serial
+	"adopted",      // controller-managed or not
+	"state",        // connection state
+	"board_rev",    // hardware revision
+	"model_in_eol", // end-of-life signal — real posture input
+	"model_in_lts",
+	"architecture",
+	"kernel_version",
+}
+
+// convertDeviceToAsset converts a UniFi managed device to a CryptoAsset,
+// projecting the raw controller response onto unifiDeviceInventoryFields.
 func (c *unifiClient) convertDeviceToAsset(device map[string]interface{}, site string) CryptoAsset {
+	metadata := make(map[string]interface{}, len(unifiDeviceInventoryFields)+4)
+	for _, field := range unifiDeviceInventoryFields {
+		if v, ok := device[field]; ok && v != nil {
+			metadata[field] = v
+		}
+	}
+
 	asset := CryptoAsset{
 		Protocol: "TLS",
 		Port:     8443, // Default UniFi management port
-		Metadata: device,
+		Metadata: metadata,
 	}
 
 	if name, ok := device["name"].(string); ok {

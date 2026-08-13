@@ -30,6 +30,40 @@ type Agent struct {
 	LastHeartbeat *time.Time `json:"last_heartbeat" db:"last_heartbeat"`
 	CreatedAt     time.Time  `json:"created_at" db:"created_at"`
 	UpdatedAt     time.Time  `json:"updated_at" db:"updated_at"`
+
+	// Description is the operator's note carried from the pending registration
+	// ("the jump host in the DC cage"). It has always been stored and never
+	// returned, so the fleet list could only ever show a machine-generated name.
+	Description *string `json:"description" db:"description"`
+
+	// Addresses is the agent host's full address inventory from agent_addresses,
+	// primary first. A discovery agent is routinely multi-homed, and which
+	// segments it can actually reach is the operator's real question; IPAddress
+	// alone answers only "where does it call home from".
+	//
+	// Always non-nil so the UI can iterate without a null check.
+	Addresses []AgentAddress `json:"addresses"`
+
+	// JobCount and LastJobAt summarize what this agent has actually done —
+	// all-time device_jobs assigned to it, and when the most recent one last
+	// moved. Together they separate "enrolled but never used" from "working" from
+	// "went quiet", which the roster previously could not express at all.
+	// LastJobAt is nil when the agent has never been assigned a job.
+	JobCount  int        `json:"job_count"`
+	LastJobAt *time.Time `json:"last_job_at"`
+}
+
+// AgentAddress is one address bound on an agent host, as reported by the agent's
+// own heartbeat. Mirrors a public.agent_addresses row for the device-agent owner.
+type AgentAddress struct {
+	InterfaceName string `json:"interface_name"`
+	// Address is rendered with host() rather than a cast: inet::text appends the
+	// prefix ("192.0.2.173/24"), which no consumer comparing against a bare IP
+	// would ever match.
+	Address string `json:"address"`
+	// PrefixLength is nil when the agent reported a bare address without one.
+	PrefixLength *int `json:"prefix_length"`
+	IsPrimary    bool `json:"is_primary"`
 }
 
 // AdminAgent represents a registered device interrogation agent enriched with

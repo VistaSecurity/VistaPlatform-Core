@@ -34,13 +34,19 @@ func (r *Registry) Register(interrogator DeviceInterrogator) {
 	}
 }
 
-// Get returns the interrogator for a device type, or an error if none is registered.
+// Get returns the interrogator for a device type, or an error if none is
+// registered.
+//
+// The returned interrogator is wrapped so its result is scrubbed of secret
+// material before any caller sees it (see redact.go). Dispatching through the
+// Registry is therefore the ONLY supported way to run an interrogation —
+// reaching past it to a bare interrogator skips redaction.
 func (r *Registry) Get(deviceType string) (DeviceInterrogator, error) {
 	interrogator, ok := r.interrogators[deviceType]
 	if !ok {
 		return nil, fmt.Errorf("no interrogator found for device type: %s", deviceType)
 	}
-	return interrogator, nil
+	return sanitizingInterrogator{inner: interrogator}, nil
 }
 
 // SupportedDeviceTypes returns every registered device type.

@@ -33,16 +33,32 @@ Fortinet Device Interrogation enables direct collection of cryptographic configu
 #### Certificate Store
 - **Endpoint**: `/api/v2/cmdb/certificate/local`
 - **Data Collected**:
-  - Local certificate store
-  - Certificate metadata
-  - Certificate usage information
+  - Certificate name, source and state
+  - The certificate body, from which subject, issuer, serial, validity,
+    key algorithm and size, signature algorithm, SANs and fingerprints are parsed
 
 #### System Information
 - **Endpoint**: `/api/v2/cmdb/system/status`
 - **Data Collected**:
-  - Device firmware version
-  - System status
-  - Device metadata
+  - Device firmware version, build and branch point
+  - Model and serial number
+  - Hostname
+
+### What is deliberately not collected
+
+FortiOS `cmdb` endpoints return configuration, which means they return the
+material that makes the configuration work. Each response is projected onto the
+fields listed above; everything else is discarded before the result leaves the
+collector. In particular:
+
+| Endpoint | Field dropped | Why it matters |
+|---|---|---|
+| `vpn.ipsec/phase1-interface` | `psksecret`, `ppk-secret`, `authpasswd` | The tunnel's pre-shared key |
+| `certificate/local` | `private-key`, `password`, `csr` | The certificate's own private key |
+| `system/status` | admin/session detail | Not cryptographic posture |
+
+The platform inventories what algorithms a device uses, not the keys it uses
+them with.
 
 ## Workflow
 

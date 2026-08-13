@@ -28,6 +28,12 @@ var ErrTrustDeclined = errors.New("operator declined to trust the platform CA")
 // and neither is something to click through.
 var ErrFingerprintMismatch = errors.New("platform CA fingerprint does not match the expected value")
 
+// ErrCertificateNotForHost is returned when the platform's own certificate is
+// not valid for the hostname the agent was pointed at. Distinct from a trust
+// failure on purpose: no trust decision can fix it, so a caller must report the
+// platform as misconfigured rather than re-prompting or offering a pin.
+var ErrCertificateNotForHost = errors.New("the platform is presenting a certificate that is not valid for its hostname")
+
 // ResolveTrustAnchor decides whether an agent should pin the platform's CA.
 //
 // It fetches the anchor the platform presents (an inspection-only handshake —
@@ -57,6 +63,25 @@ func ResolveTrustAnchor(platformURL, expectedFingerprint string, in LineReader, 
 	anchor, err := FetchServerTrustAnchor(platformURL)
 	if err != nil {
 		return nil, err
+	}
+
+	// Before anything else: can pinning ANY anchor make this connection work?
+	//
+	// Go's x509 Verify runs VerifyHostname before it builds a chain, so a leaf
+	// that is not valid for this host fails regardless of what is trusted. Both
+	// paths below are refused, not just the prompt — an operator who supplied
+	// the correct expected fingerprint would otherwise "succeed" at the trust
+	// step and then watch every connection fail for a reason the pin cannot
+	// address.
+	//
+	// This was not theoretical: a platform whose TLS Secret was missing served
+	// its ingress controller's placeholder certificate, the operator was shown
+	// its fingerprint, accepted it, and the sensor could never connect. A
+	// fingerprint gives a human no way to tell a real CA from a placeholder —
+	// so refusing here is the only place the distinction can be drawn.
+	if !anchor.UsableForHost() {
+		say("%s", DescribeHostnameMismatch(anchor))
+		return nil, fmt.Errorf("%w: %v", ErrCertificateNotForHost, anchor.HostnameErr)
 	}
 
 	if strings.TrimSpace(expectedFingerprint) != "" {

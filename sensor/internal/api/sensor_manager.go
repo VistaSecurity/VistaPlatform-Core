@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -144,7 +145,13 @@ func (c *SensorManagerClient) Register() (*models.SensorConfig, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("registration failed with status %d: %s", resp.StatusCode, string(body))
+		err := fmt.Errorf("registration failed with status %d: %s", resp.StatusCode, string(body))
+		if IsPermanentRegistrationStatus(resp.StatusCode) {
+			// A rejected key, a duplicate sensor id, an unknown route: retrying
+			// changes nothing, so the caller must stop rather than loop.
+			return nil, &RegistrationRejectedError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(body)), err: err}
+		}
+		return nil, err
 	}
 
 	var registrationResp struct {

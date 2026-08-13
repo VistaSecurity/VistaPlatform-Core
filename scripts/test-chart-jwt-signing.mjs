@@ -20,6 +20,7 @@ import yaml from 'yaml';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHART = path.join(ROOT, 'charts', 'vistaplatform');
+const SUPPORTED_KUBE_VERSION = '1.35.0';
 
 // The only services that may ever hold a signing key. Spelled out here as well
 // as in the template so that widening it takes two deliberate edits.
@@ -40,6 +41,7 @@ function render(extra = []) {
     'helm',
     [
       'template', 't', CHART,
+      '--kube-version', SUPPORTED_KUBE_VERSION,
       '--set', 'tls.dnsName=vista.example.com',
       '--set', 'platform.jwtSecret=x',
       '--set', 'platform.internalAuthSecret=x',
@@ -118,6 +120,7 @@ console.log('Chart JWT signing (#584)');
 {
   const out = execFileSync('helm', [
     'template', 't', CHART,
+    '--kube-version', SUPPORTED_KUBE_VERSION,
     '--set', 'tls.dnsName=vista.example.com',
     '--set', 'platform.jwtSecret=x',
     '--set', 'platform.internalAuthSecret=x',

@@ -116,7 +116,7 @@ func (c *fortinetClient) getSystemInfo(ctx context.Context) (map[string]interfac
 	}
 	info := make(map[string]interface{})
 	if len(resp.Results) > 0 {
-		info = resp.Results[0]
+		info = projectFortinet(resp.Results[0], fortinetSystemStatusFields)
 	}
 	return info, nil
 }
@@ -194,8 +194,60 @@ func fortinetIdentity(sysInfo map[string]interface{}) *DeviceIdentity {
 	return id
 }
 
+// FortiOS cmdb objects are configuration, not status — they carry the material
+// that makes the configuration work. `vpn.ipsec/phase1-interface` includes
+// `psksecret` (the tunnel pre-shared key), `certificate/local` includes
+// `private-key`, and system status carries admin session detail. Copying those
+// objects wholesale into asset metadata persisted all of it.
+//
+// Each allowlist below is the set of fields the conversion actually reads, plus
+// the handful that are genuinely useful inventory. Add to one only when
+// something reads the field.
+
+var fortinetSSLVPNFields = []string{
+	"server_hostname", "server_ip", "port",
+	"cipher", "tls_version", "min_tls_version",
+	"server_cert", "status", "ssl_max_proto_ver", "ssl_min_proto_ver",
+	"algorithm",
+}
+
+var fortinetIPSecTunnelFields = []string{
+	"name", "remote-gw", "interface", "ike-version",
+	"proposal", "phase1name", "encryption", "authentication", "dhgrp",
+	"certificate", "ca_cert", "authmethod",
+	"keylife", "nattraversal", "dpd",
+}
+
+// fortinetCertificateFields is the certificate-store projection. Note what is
+// absent: `private-key`, `password`, `csr`, and the enrolment credentials.
+var fortinetCertificateFields = []string{
+	"name", "comments", "range", "source", "state",
+	"cert", "certificate", "cert_pem", "pem", "cert_base64",
+}
+
+var fortinetSystemStatusFields = []string{
+	"version", "serial", "model", "model_name", "hostname",
+	"build", "branch_point", "platform_id", "fortios_version",
+}
+
+// projectFortinet keeps only the allowlisted fields from a FortiOS object.
+func projectFortinet(src map[string]interface{}, fields []string) map[string]interface{} {
+	out := make(map[string]interface{}, len(fields)+4)
+	for _, f := range fields {
+		if v, ok := src[f]; ok && v != nil {
+			out[f] = v
+		}
+	}
+	return out
+}
+
 func (c *fortinetClient) convertSSLVPNToAsset(vpn map[string]interface{}) CryptoAsset {
-	asset := CryptoAsset{Protocol: "SSL VPN", Port: 443, AssetType: "vpn_gateway", Metadata: vpn}
+	asset := CryptoAsset{
+		Protocol:  "SSL VPN",
+		Port:      443,
+		AssetType: "vpn_gateway",
+		Metadata:  projectFortinet(vpn, fortinetSSLVPNFields),
+	}
 
 	if hostname, ok := vpn["server_hostname"].(string); ok {
 		asset.Hostname = hostname
@@ -230,7 +282,12 @@ func (c *fortinetClient) convertSSLVPNToAsset(vpn map[string]interface{}) Crypto
 }
 
 func (c *fortinetClient) convertIPSecToAsset(tunnel map[string]interface{}) CryptoAsset {
-	asset := CryptoAsset{Protocol: "IPSec", Port: 500, AssetType: "vpn_gateway", Metadata: tunnel}
+	asset := CryptoAsset{
+		Protocol:  "IPSec",
+		Port:      500,
+		AssetType: "vpn_gateway",
+		Metadata:  projectFortinet(tunnel, fortinetIPSecTunnelFields),
+	}
 
 	if name, ok := tunnel["name"].(string); ok {
 		asset.Hostname = name
@@ -279,8 +336,12 @@ func (c *fortinetClient) convertIPSecToAsset(tunnel map[string]interface{}) Cryp
 // fields when a PEM/base64 body is present. Parsing goes through the canonical
 // shared/certificates extractor; only the map projection — the shape
 // FortiOS metadata consumers read — lives here.
-func processFortinetCertificate(certData map[string]interface{}) map[string]interface{} {
-	pemData := extractFortinetPEM(certData)
+func processFortinetCertificate(raw map[string]interface{}) map[string]interface{} {
+	// Project BEFORE enriching. The FortiOS certificate-store entry carries the
+	// certificate's own private key; the parsed X.509 fields below are derived
+	// from the public certificate and are all we need.
+	pemData := extractFortinetPEM(raw)
+	certData := projectFortinet(raw, fortinetCertificateFields)
 	if pemData == "" {
 		return certData
 	}

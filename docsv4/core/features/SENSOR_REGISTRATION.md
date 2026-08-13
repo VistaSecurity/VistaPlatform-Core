@@ -464,6 +464,36 @@ If the agent shows a fingerprint that does not match, stop. Either the CA was
 rotated since you last looked, or something is sitting between the agent and the
 platform.
 
+**When the platform's certificate is for the wrong hostname.** Before offering
+you anything to approve, the agent checks that the certificate the platform
+presents is actually valid for the address you pointed it at. If it is not, the
+agent refuses and tells you what it found instead:
+
+```
+❌ The server at vista.example.com is presenting a certificate for
+   a1b2c3d4.traefik.default.
+
+    Its TLS is misconfigured — this is a problem on the platform, not here.
+    Trusting the CA behind it would not help: certificate verification
+    checks the hostname BEFORE it checks who signed it, so every
+    connection would still fail with the same error.
+
+    Common cause: the platform's TLS certificate was never installed, so
+    its ingress controller is serving a placeholder.
+```
+
+This is not a trust decision you can make differently — no CA you approve can
+rescue a name mismatch, because hostname verification runs first. Approving one
+anyway would produce an agent that reports a completed security step and then
+fails every connection, which is exactly what used to happen.
+
+The usual cause is the one named: the platform's TLS secret is missing or
+misnamed, so its ingress controller falls back to its own self-issued
+placeholder. Fix the platform's certificate, then run setup again. The same
+refusal applies on the unattended `--ca-fingerprint` path — a correct
+fingerprint proves you have the right CA, but says nothing about whether the
+server is serving the right certificate.
+
 **When none of this applies.** A platform with a publicly-trusted certificate
 verifies against the host's system trust store and the prompt never appears.
 Installing the internal CA into the host trust store
@@ -568,6 +598,45 @@ HTTP. See [`artifacts/README.md`](../../../artifacts/README.md).
 - **Cause**: Key expired or doesn't exist
 - **Solution**: Generate new key using enhanced modal
 
+#### The sensor is running but nothing appears in the platform
+
+A sensor that could not register can capture traffic but cannot submit any of
+it. Check the sensor's log for its startup line — it reports which state it is
+in, and repeats the warning every 10 minutes while the problem persists:
+
+```
+⚠️  Sensor started UNREGISTERED — it is capturing traffic and can submit none of it.
+```
+
+There are two shapes of this, and the log distinguishes them:
+
+- **The control plane was unreachable.** The sensor keeps retrying on its own,
+  starting 30 seconds out and backing off to a 15-minute ceiling. No restart is
+  needed — once the platform is reachable again the sensor registers and logs
+  `✅ Registration succeeded on retry`. This is the expected behaviour when a
+  sensor is installed before the platform is ready, or while it restarts.
+
+- **The registration key was rejected.** The sensor refuses to start and says
+  so, quoting the platform's own reason:
+
+  ```
+  ⛔ Registration was REJECTED by the control plane (HTTP 400):
+     {"error":"Registration key has already been used"}
+  ```
+
+  Retrying cannot resolve this. Registration keys are single-use, so a key that
+  has already enrolled a sensor is refused permanently. Generate a new one
+  (**Discovery → Sensors & Agents → Register sensor or agent**), put it in the
+  sensor's config, and start it again.
+
+#### "The server ... is presenting a certificate for ..."
+- **Cause**: The platform's TLS certificate is not valid for the hostname you
+  pointed the agent at — most often because its TLS secret is missing and its
+  ingress controller is serving a self-issued placeholder
+- **Solution**: Fix the platform's certificate, then run setup again. Trusting
+  the CA behind the placeholder cannot help; see [Trusting a Privately-Signed
+  Platform](#trusting-a-privately-signed-platform-trust-bootstrap)
+
 #### "Certificate validation failed"
 - **Cause**: Certificate CN mismatch, expired, revoked, or chain validation failure
 - **Solution**: Check certificate status in Certificates tab, rotate if needed
@@ -654,7 +723,7 @@ control plane, and shown on each sensor's **Overview** tab ("Reporting interval"
 
 To change it from the console (requires the **Manage sensors** permission):
 
-1. Go to **Operations → Sensors & Agents** and click the sensor.
+1. Go to **Discovery → Sensors & Agents** and click the sensor.
 2. Open the **Control** tab → **Reporting interval**.
 3. Pick a value from the menu — **30 seconds, 1 / 5 / 15 / 30 minutes, or 1 / 2 /
    4 / 8 / 12 / 24 hours** — and click **Apply**.

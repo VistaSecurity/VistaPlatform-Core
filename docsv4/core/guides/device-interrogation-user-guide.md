@@ -195,11 +195,38 @@ The **Interrogation Jobs** page shows all running and completed jobs:
 
 ### Job Details
 
-Click on a job to view:
-- Target device or integration
-- Start time and duration
-- Assets discovered
-- Error messages (if failed)
+Click any row on **Discovery → Discovery Jobs** or **Discovery → Job Logs** to
+open that run's detail.
+
+**Execution** — target device or integration, status, created / started /
+completed times, duration, and the error message if it failed.
+
+**Outcome** — three counts that are deliberately separate:
+
+| Count | Meaning |
+|-------|---------|
+| Discovered | Assets the interrogation returned |
+| Crypto measured | Assets whose TLS posture was actually observed |
+| Into inventory | Assets that became a discovery finding |
+
+"Discovered" and "Into inventory" are different questions. A job can finish
+successfully and still fail to materialize what it found — the device answered,
+but something downstream rejected the results. When those two numbers disagree
+the panel says so, and the reason appears under **Processing errors**.
+
+**Pipeline** — per-stage counts for the run: assets received, findings created,
+records queued for classification, and anything skipped.
+
+**Discovered assets** — each asset with its negotiated TLS version, cipher
+suite, key exchange and key size, plus every certificate found (subject, issuer,
+key algorithm and size, signature algorithm, expiry, SHA-256 fingerprint, and a
+`self-signed` marker). Certificate validation failures are shown against the
+asset that produced them.
+
+An asset marked **not probed** was listed by the device's management API but
+never had its own handshake measured — so its cryptographic posture is
+*unknown*, not clean. Interrogating a controller commonly returns both kinds:
+the controller itself is measured, the devices it manages are inventoried.
 
 ### Cancelling Jobs
 
@@ -227,6 +254,34 @@ The Discovery Approvals page can filter by source:
 - **Least Privilege**: Use credentials with minimum required permissions
 - **Credential Rotation**: Regularly rotate cloud credentials
 - **Network Segmentation**: Run agents behind firewalls when possible
+
+#### What the platform records from your devices
+
+Interrogation collects cryptographic **posture** — algorithms, key sizes,
+protocol versions, cipher suites, certificate identity and validity. It does
+not collect key material.
+
+Vendor management APIs frequently return secrets next to the configuration we
+want: a FortiGate's IPsec phase-1 object carries the tunnel pre-shared key, its
+certificate store carries private keys, a UniFi controller's settings carry the
+mesh PSK and SMTP relay password. Each collector projects the vendor's response
+onto an explicit list of fields the platform actually uses, so those values are
+discarded at the point of collection rather than stored and filtered later.
+A second, name-based check runs over everything a collector emits as a backstop.
+
+Two consequences worth knowing:
+
+- Where a device's configuration can be read without retrieving secrets, the
+  platform asks narrowly. Cisco interrogation requests only the `ssl cipher`
+  configuration lines rather than the whole crypto section, so pre-shared keys
+  are never transmitted off the device at all.
+- Cloud key discovery reads key *metadata* only — state, algorithm, protection
+  level, rotation policy. AWS KMS keys are non-exportable by design; Azure Key
+  Vault is read through the management plane, which exposes key properties and
+  never secret values.
+
+The credentials **you** give the platform to reach a device are a separate
+matter: those are encrypted at rest and are never returned by any API.
 
 ### Performance
 

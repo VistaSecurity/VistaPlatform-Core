@@ -1,33 +1,51 @@
 # Device Auto-Discovery Troubleshooting Guide
 
-**Last Updated:** February 2, 2026
-
 ## Known Issues
 
-### Device Interrogation Job Failures (Investigation Required)
+### Job reports "completed" but nothing appears in Inventory
 
 **Symptom:**
-- Device successfully added with auto-discovery ✅
-- Device information correctly populated ✅
-- Device test connection works ✅
-- But clicking "Interrogate" creates a job that fails immediately ❌
+- The interrogation job shows **Completed** with a non-zero asset count ✅
+- Nothing appears in Discovery → Approvals or in Inventory ❌
 
-**Error Message:**
+**First: check the job detail, not the job row.** Click the job on Discovery →
+Discovery Jobs or Job Logs. The **Outcome** panel shows *Discovered* and *Into
+inventory* separately. If they disagree, the run found assets but failed to
+materialize them, and **Processing errors** names the reason.
+
+The asset count on the job row is the number of assets the device returned. It
+is not a claim that any of them were kept — which is why the two figures are
+reported apart.
+
+**If "Into inventory" matches "Discovered":** the assets did materialize, and
+this is the approval workflow behaving as designed. Discovered assets land as
+`pending_approval` unless an auto-approval rule matches their network space.
+Look in **Discovery → Approvals**, not Inventory. See
+[Asset approval workflow](../operate/troubleshooting/asset-approval-workflow-issues.md).
+
+**Resolved defect (fixed in Unreleased):** every finding insert on the device
+interrogation path failed on a missing `tenant_id`, so interrogation produced
+discovery targets and no findings at all, silently. The failure additionally
+suppressed the classification write, disabling auto-approval and auto-import for
+interrogated assets. Both are fixed; the per-stage outcome is now recorded on
+the job so a recurrence is visible in the UI rather than only in service logs.
+Jobs run before the fix are not retroactively reprocessed — re-run the
+interrogation.
+
+---
+
+### Interrogation job fails with a `discovery_jobs_created_by_fkey` violation
+
+**Error message:**
 ```
-failed to create discovery job: pq: insert or update on table "discovery_jobs" 
+failed to create discovery job: pq: insert or update on table "discovery_jobs"
 violates foreign key constraint "discovery_jobs_created_by_fkey"
 ```
 
-**Status:** Under investigation
-
-**Likely Cause:**
-This appears to be an architectural issue where network device interrogation jobs are trying to create `discovery_jobs` records (which were designed for cloud discovery workflows) with system user references that may not properly cascade through the foreign key relationships.
-
-**Workaround:**
-Currently none. This does not impact device creation or auto-discovery - only the subsequent interrogation of discovered devices.
-
-**Timeline:**
-This issue will be investigated and resolved in the next development cycle.
+**Status:** Resolved. Device-initiated jobs have no real user to attribute, and
+were writing a synthetic system-user id that no `users` row matched.
+`created_by` is now left NULL in that case. If you see this on a current build,
+report it.
 
 ---
 

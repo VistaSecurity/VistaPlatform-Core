@@ -99,6 +99,7 @@ type stubJobStore struct {
 	activeErr   error
 	resultFound bool
 	resultErr   error
+	resultsJSON string
 	mutStatus   string // status returned by GetJobStatus (retry/cancel gating)
 	mutFound    bool
 	adminList   []AdminInterrogationJob
@@ -123,8 +124,8 @@ func (s *stubJobStore) GetJobStats(context.Context, uuid.UUID) (JobStats, error)
 func (s *stubJobStore) GetActiveJobs(context.Context, uuid.UUID) ([]InterrogationJob, error) {
 	return s.active, s.activeErr
 }
-func (s *stubJobStore) GetJobResultStatus(context.Context, uuid.UUID, uuid.UUID) (string, bool, error) {
-	return "completed", s.resultFound, s.resultErr
+func (s *stubJobStore) GetJobResultStatus(context.Context, uuid.UUID, uuid.UUID) (string, string, bool, error) {
+	return "completed", s.resultsJSON, s.resultFound, s.resultErr
 }
 func (s *stubJobStore) GetJobStatus(context.Context, uuid.UUID, uuid.UUID) (string, bool, error) {
 	return s.mutStatus, s.mutFound, nil

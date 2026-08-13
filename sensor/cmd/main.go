@@ -62,6 +62,139 @@ type Sensor struct {
 	// discoveryTicker is the live data-send ticker, published by the run loop so
 	// an operator's reporting-interval change can Reset() it without a restart.
 	discoveryTicker *time.Ticker
+	// registered reports whether registration has completed. An unregistered
+	// sensor captures packets it can never submit, so the run loop reads this to
+	// keep saying so rather than logging as if all were well.
+	registered bool
+}
+
+// isRegisteredNow reports whether registration has completed.
+func (s *Sensor) isRegisteredNow() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.registered
+}
+
+func (s *Sensor) setRegistered(v bool) {
+	s.mu.Lock()
+	s.registered = v
+	s.mu.Unlock()
+}
+
+// Registration retry schedule. Doubling from 30s to a 15-minute ceiling: quick
+// enough that a control plane restarting mid-install is not noticed, slow enough
+// that a fleet of sensors riding out a long outage does not become the reason it
+// stays down.
+const (
+	registrationRetryInitial = 30 * time.Second
+	registrationRetryMax     = 15 * time.Minute
+)
+
+// resolveRegistrationAtStartup performs the one-time registration decision and,
+// when registration fails transiently, starts the background retry.
+//
+// Shared by both startup paths (main and startSensorWithConfig), which
+// previously carried near-identical copies of this switch — the shape that lets
+// a fix land in one and not the other.
+//
+// alreadyRequested is main's -register flag; the config-file path has no
+// equivalent and passes false.
+func (s *Sensor) resolveRegistrationAtStartup(alreadyRequested bool, stop <-chan struct{}) {
+	cfg := s.config
+	switch {
+	case isRegistered(cfg):
+		log.Printf("✅ Sensor already registered (ID: %s, certificate on disk) — skipping registration", cfg.SensorID)
+		s.setRegistered(true)
+
+	case alreadyRequested || cfg.RegistrationKey != "":
+		log.Println("📝 Attempting to register with control plane...")
+		err := s.register()
+		if err == nil {
+			s.setRegistered(true)
+			log.Println("✅ Successfully registered with control plane")
+			return
+		}
+
+		// An operator supplied a key, so they intend this sensor to report.
+		// Failing to register is not a mode to continue in quietly: an
+		// unregistered sensor captures on every worker and submits nothing.
+		var rejected *api.RegistrationRejectedError
+		if errors.As(err, &rejected) {
+			log.Printf("⛔ Registration was REJECTED by the control plane (HTTP %d): %s", rejected.StatusCode, rejected.Body)
+			log.Printf("⛔ The registration key is invalid, expired, or has already been used.")
+			log.Printf("⛔ Generate a new key in the web UI (Discovery → Sensors & Agents → Register) and put it in the sensor's config.")
+			log.Fatalf("❌ Refusing to start: a sensor that cannot register can capture but can never submit anything.")
+		}
+		log.Printf("⚠️  Registration FAILED: %v", err)
+		log.Printf("⚠️  This sensor is NOT registered and can submit NOTHING until it is.")
+		log.Printf("⚠️  Retrying in the background (first retry in %v, backing off to %v) — no restart needed if the control plane comes back.",
+			registrationRetryInitial, registrationRetryMax)
+		go s.retryRegistrationUntilSuccess(stop)
+
+	default:
+		log.Println("ℹ️  Skipping registration (no registration key provided)")
+		if cfg.TestMode {
+			log.Println("🧪 Running in test mode - discoveries will be logged to file")
+		} else if cfg.SensorID == "" {
+			log.Printf("⚠️  Warning: No sensor ID available. Discoveries cannot be submitted without registration.")
+		}
+	}
+}
+
+// startupStateLine is the line the sensor prints once it is up. It reports what
+// actually happened: "started successfully" printed directly under a
+// registration failure is what made hours of doing nothing look like health.
+func (s *Sensor) startupStateLine(prefix string) string {
+	if s.isRegisteredNow() || s.config.TestMode {
+		return "✅ " + prefix + " started successfully"
+	}
+	return "⚠️  " + prefix + " started, but this sensor is UNREGISTERED — it is capturing traffic and can submit none of it."
+}
+
+// retryRegistrationUntilSuccess keeps attempting registration in the background
+// after the first attempt failed.
+//
+// A sensor that cannot register cannot submit anything: it captures packets on
+// every worker and reports nothing, forever. Before this existed, registration
+// was attempted exactly once at startup and a failure was logged as a warning
+// immediately followed by "Sensor started successfully" — which is how a real
+// sensor ran for hours doing nothing while its logs read as healthy.
+//
+// Retrying rather than exiting is the right default: a sensor should survive the
+// control plane restarting, and on a customer host an exited process may not
+// come back without someone noticing. But a REJECTED registration is different —
+// a consumed or invalid key returns the same answer forever, and only a human
+// with a fresh key can fix it. That case stops the loop and says so.
+func (s *Sensor) retryRegistrationUntilSuccess(stop <-chan struct{}) {
+	delay := registrationRetryInitial
+	for {
+		select {
+		case <-stop:
+			return
+		case <-time.After(delay):
+		}
+
+		if err := s.register(); err != nil {
+			var rejected *api.RegistrationRejectedError
+			if errors.As(err, &rejected) {
+				log.Printf("⛔ Registration was REJECTED by the control plane (HTTP %d): %s", rejected.StatusCode, rejected.Body)
+				log.Printf("⛔ This will not resolve on its own — the registration key is invalid, expired, or already used.")
+				log.Printf("⛔ Generate a new key in the web UI (Discovery → Sensors & Agents → Register), put it in the sensor's config, and restart.")
+				log.Printf("⛔ Giving up on registration. This sensor will keep capturing but can submit NOTHING.")
+				return
+			}
+			log.Printf("⚠️  Registration retry failed (next attempt in %v): %v", delay, err)
+			delay *= 2
+			if delay > registrationRetryMax {
+				delay = registrationRetryMax
+			}
+			continue
+		}
+
+		s.setRegistered(true)
+		log.Printf("✅ Registration succeeded on retry — this sensor can now submit discoveries.")
+		return
+	}
 }
 
 func main() {
@@ -223,30 +356,18 @@ func main() {
 	// restart makes the control plane reject it ("Registration key has already
 	// been used"). Skip registration entirely once we already hold a sensor ID
 	// and a client certificate — that pair is proof of a completed registration.
-	switch {
-	case isRegistered(cfg):
-		log.Printf("✅ Sensor already registered (ID: %s, certificate on disk) — skipping registration", cfg.SensorID)
-	case *register || cfg.RegistrationKey != "":
-		log.Println("📝 Attempting to register with control plane...")
-		if err := sensor.register(); err != nil {
-			log.Printf("⚠️  Registration failed (continuing without registration): %v", err)
-		} else {
-			log.Println("✅ Successfully registered with control plane")
-		}
-	default:
-		log.Println("ℹ️  Skipping registration (no registration key provided)")
-		// If no registration and no valid sensor ID, we can't submit discoveries
-		if cfg.SensorID == "" {
-			log.Printf("⚠️  Warning: No sensor ID available. Discoveries cannot be submitted without registration.")
-		}
-	}
+	// registrationRetryStop ends the background retry loop at shutdown.
+	registrationRetryStop := make(chan struct{})
+	defer close(registrationRetryStop)
+
+	sensor.resolveRegistrationAtStartup(*register, registrationRetryStop)
 
 	// Start sensor
 	log.Println("🚀 Starting sensor services...")
 	if err := sensor.start(); err != nil {
 		log.Fatalf("❌ Failed to start sensor: %v", err)
 	}
-	log.Println("✅ Sensor services started successfully")
+	log.Println(sensor.startupStateLine("Sensor services"))
 
 	// Handle graceful shutdown
 	signalChan := make(chan os.Signal, 1)
@@ -279,7 +400,15 @@ func main() {
 	heartbeatTicker := time.NewTicker(cfg.HeartbeatInterval)
 	defer heartbeatTicker.Stop()
 
-	log.Println("✅ Sensor started successfully")
+	// Unregistered-state reminder. The failure mode was a log that read as
+	// healthy while nothing was submitted, so an unregistered sensor says so on a
+	// schedule rather than only at startup — an operator who scrolls back an hour
+	// must still be able to see it. The handler goes quiet once registration
+	// lands, so a healthy sensor prints nothing extra.
+	unregisteredWarnTicker := time.NewTicker(10 * time.Minute)
+	defer unregisteredWarnTicker.Stop()
+
+	log.Println(sensor.startupStateLine("Sensor"))
 	log.Println("📡 Monitoring network traffic for cryptographic configurations...")
 	log.Printf("🔄 Reporting interval: %v", cfg.ReportingInterval)
 	log.Println("💡 Press Ctrl+C to stop the sensor")
@@ -303,6 +432,11 @@ func main() {
 			// Check certificate expiration daily
 			if sensor.sensorManager != nil && cfg.Security.UseTLS {
 				go sensor.checkAndRotateCertificate()
+			}
+		case <-unregisteredWarnTicker.C:
+			// Only speaks while there is something wrong.
+			if !sensor.isRegisteredNow() && !cfg.TestMode {
+				log.Println("⚠️  Still UNREGISTERED — traffic is being captured and none of it can be submitted.")
 			}
 		case <-cacheCleanupTicker.C:
 			// Clean up expired cache entries
@@ -1632,6 +1766,13 @@ urlLoop:
 				fmt.Println("Setup cancelled — no CA trusted.")
 				return
 			}
+			if errors.Is(err, certificates.ErrCertificateNotForHost) {
+				// ResolveTrustAnchor has already explained what is wrong and
+				// why pinning cannot fix it. Say what to do next rather than
+				// repeating the diagnosis as a bare error line.
+				fmt.Println("Setup cancelled — fix the platform's TLS certificate, then run setup again.")
+				return
+			}
 			fmt.Printf("❌ Could not establish trust with the control plane: %v\n", err)
 			return
 		}
@@ -2271,31 +2412,18 @@ func startSensorWithConfig(verbose bool) {
 	// not already registered. A consumed registration key lingers in the config
 	// file; re-sending it on restart is rejected by the control plane. See the
 	// note on isRegistered() in main() for the full rationale.
-	switch {
-	case isRegistered(cfg):
-		log.Printf("✅ Sensor already registered (ID: %s, certificate on disk) — skipping registration", cfg.SensorID)
-	case cfg.RegistrationKey != "":
-		log.Println("📝 Attempting to register with control plane...")
-		if err := sensor.register(); err != nil {
-			log.Printf("⚠️  Registration failed (continuing without registration): %v", err)
-		} else {
-			log.Println("✅ Successfully registered with control plane")
-		}
-	default:
-		log.Println("ℹ️  Skipping registration (no registration key provided)")
-		if cfg.TestMode {
-			log.Println("🧪 Running in test mode - discoveries will be logged to file")
-		} else if cfg.SensorID == "" {
-			log.Printf("⚠️  Warning: No sensor ID available. Discoveries cannot be submitted without registration.")
-		}
-	}
+	// registrationRetryStop ends the background retry loop at shutdown.
+	registrationRetryStop := make(chan struct{})
+	defer close(registrationRetryStop)
+
+	sensor.resolveRegistrationAtStartup(false, registrationRetryStop)
 
 	// Start sensor
 	log.Println("🚀 Starting sensor services...")
 	if err := sensor.start(); err != nil {
 		log.Fatalf("❌ Failed to start sensor: %v", err)
 	}
-	log.Println("✅ Sensor services started successfully")
+	log.Println(sensor.startupStateLine("Sensor services"))
 
 	// Handle graceful shutdown
 	signalChan := make(chan os.Signal, 1)
@@ -2328,7 +2456,15 @@ func startSensorWithConfig(verbose bool) {
 	heartbeatTicker := time.NewTicker(cfg.HeartbeatInterval)
 	defer heartbeatTicker.Stop()
 
-	log.Println("✅ Sensor started successfully")
+	// Unregistered-state reminder. The failure mode was a log that read as
+	// healthy while nothing was submitted, so an unregistered sensor says so on a
+	// schedule rather than only at startup — an operator who scrolls back an hour
+	// must still be able to see it. The handler goes quiet once registration
+	// lands, so a healthy sensor prints nothing extra.
+	unregisteredWarnTicker := time.NewTicker(10 * time.Minute)
+	defer unregisteredWarnTicker.Stop()
+
+	log.Println(sensor.startupStateLine("Sensor"))
 	log.Println("📡 Monitoring network traffic for cryptographic configurations...")
 	log.Printf("🔄 Reporting interval: %v", cfg.ReportingInterval)
 	log.Println("💡 Press Ctrl+C to stop the sensor")
@@ -2352,6 +2488,11 @@ func startSensorWithConfig(verbose bool) {
 			// Check certificate expiration daily
 			if sensor.sensorManager != nil && cfg.Security.UseTLS {
 				go sensor.checkAndRotateCertificate()
+			}
+		case <-unregisteredWarnTicker.C:
+			// Only speaks while there is something wrong.
+			if !sensor.isRegisteredNow() && !cfg.TestMode {
+				log.Println("⚠️  Still UNREGISTERED — traffic is being captured and none of it can be submitted.")
 			}
 		case <-cacheCleanupTicker.C:
 			// Clean up expired cache entries

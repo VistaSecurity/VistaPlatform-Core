@@ -190,6 +190,11 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 		agents := deviceInterrogationGroup.Group("/agents")
 		{
 			agents.GET("", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryRead), listAgentsHandler(db, bypassDB, redis))
+			// Removing an agent revokes its certificate and settles its queued
+			// work, so it is gated at discovery.manage — the same permission as
+			// every other destructive route in this service (devices,
+			// integrations, schedules), not a new agents-specific one.
+			agents.DELETE("/:id", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryManage), deleteAgentHandler(db, bypassDB, redis))
 		}
 
 		// Cloud discovery routes — these actively run discovery/interrogation.
@@ -317,6 +322,44 @@ func listAgentsHandler(db, bypassDB *sql.DB, redis *redis.Client) gin.HandlerFun
 			"agents": agents,
 			"count":  len(agents),
 		})
+	}
+}
+
+// deleteAgentHandler soft-deletes one of the tenant's device agents.
+//
+// A wrong id and another tenant's id are answered identically (404): the service
+// filters on tenant_id under RLS, so this handler cannot — and must not — tell the
+// caller which of the two it was.
+func deleteAgentHandler(db, bypassDB *sql.DB, redis *redis.Client) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tenantIDVal, exists := c.Get("tenantID")
+		if !exists {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Tenant ID not found"})
+			return
+		}
+		tenantID, ok := tenantIDVal.(uuid.UUID)
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
+			return
+		}
+
+		agentID, err := uuid.Parse(c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid agent id format"})
+			return
+		}
+
+		agentService := services.NewAgentService(db, bypassDB, redis)
+		if err := agentService.DeleteAgent(c.Request.Context(), tenantID, agentID); err != nil {
+			if errors.Is(err, services.ErrAgentNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "Agent not found"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"message": "agent deleted"})
 	}
 }
 

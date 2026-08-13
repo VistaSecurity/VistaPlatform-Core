@@ -887,14 +887,52 @@ Access installation instructions from multiple entry points:
 
 ### Viewing Sensors
 
-The main sensor table displays:
+Sensors and discovery agents are listed in **two separate tables** on this page,
+because they are different things and almost nothing describes both. Network
+sensors come first; discovery agents follow in their own **Discovery agents**
+table (which is hidden entirely if you have none).
 
-- **Sensor Name**: Click to view detailed information
-- **Type**: Sensor type (network, device agent, etc.)
+The sensor table displays:
+
+- **Sensor**: Click to view detailed information
+- **Type**: Sensor type
+- **Segment**: The network segments the sensor is monitoring
+- **Assets found**: How many assets this sensor has discovered
+- **Version**: Installed sensor version
 - **Status**: Current operational status with color-coded badges
-- **Last Reading**: Timestamp of last data received
-- **Sensor Version**: Installed sensor version
-- **IP Address**: Sensor network address
+
+### Viewing Discovery Agents
+
+A discovery agent is the command-driven binary that interrogates network devices
+(F5, Palo Alto, Cisco, Fortinet and so on) — not a passive capture sensor. The
+**Discovery agents** table displays:
+
+- **Agent**: Its name, with your description and host platform beneath
+- **Host**: The address the agent reaches the platform from, plus a count of any
+  other addresses its host holds. Hover for the full list with network prefixes —
+  useful for answering which segments the agent can actually reach
+- **Interrogates**: What the agent is permitted to interrogate
+- **Jobs**: When it last ran a job, and how many it has run in total. An agent
+  that has never been given work reads "Never run"
+- **Version**: Agent binary version
+- **Status**: Whether the agent is currently checking in
+
+An agent that has stopped sending heartbeats shows as offline even if its status
+still reads *active*.
+
+### Removing a Discovery Agent
+
+Click the **✕** on the agent's row and confirm. Requires the **Manage discovery**
+permission.
+
+This removes the agent from the fleet, revokes its certificate, and settles its
+outstanding work: queued jobs go back to the pool for another agent to pick up,
+and any job it was running is marked failed (it is not retried automatically,
+since the agent may already have done the work).
+
+**It does not uninstall the agent.** The binary keeps running on its host and
+must be stopped and removed there separately. Until it is, its check-ins are
+rejected — harmless, but it will log errors.
 
 ### Filtering Sensors
 

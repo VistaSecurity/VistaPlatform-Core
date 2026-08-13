@@ -26,9 +26,10 @@ type jobStore interface {
 	GetJob(ctx context.Context, tenantID, jobID uuid.UUID) (*InterrogationJob, error)
 	GetJobStats(ctx context.Context, tenantID uuid.UUID) (JobStats, error)
 	GetActiveJobs(ctx context.Context, tenantID uuid.UUID) ([]InterrogationJob, error)
-	// GetJobResultStatus reports a job's status for the results endpoint;
-	// found=false when no such job exists for the tenant.
-	GetJobResultStatus(ctx context.Context, tenantID, jobID uuid.UUID) (status string, found bool, err error)
+	// GetJobResultStatus reports a job's status and raw results JSON for the
+	// results endpoint; found=false when no such job exists for the tenant.
+	// resultsJSON is "" when the job has not produced results yet.
+	GetJobResultStatus(ctx context.Context, tenantID, jobID uuid.UUID) (status, resultsJSON string, found bool, err error)
 	// GetJobStatus is used by retry/cancel to gate on the current state.
 	GetJobStatus(ctx context.Context, tenantID, jobID uuid.UUID) (status string, found bool, err error)
 	// GetJobStatusAdmin reads a job's status + owning tenant by id with NO tenant
@@ -404,16 +405,16 @@ func (r *jobRepository) GetActiveJobs(ctx context.Context, tenantID uuid.UUID) (
 	return jobs, nil
 }
 
-func (r *jobRepository) GetJobResultStatus(ctx context.Context, tenantID, jobID uuid.UUID) (string, bool, error) {
+func (r *jobRepository) GetJobResultStatus(ctx context.Context, tenantID, jobID uuid.UUID) (string, string, bool, error) {
 	query := `
-		SELECT dj.status
+		SELECT dj.status, COALESCE(dj.results::text, '')
 		FROM device_jobs dj
 		WHERE dj.id = $1 AND dj.tenant_id = $2 AND dj.deleted_at IS NULL
 	`
-	var status string
+	var status, results string
 	found := false
 	err := shareddatabase.WithTenantTx(ctx, r.db, tenantID, func(tx *sql.Tx) error {
-		scanErr := tx.QueryRowContext(ctx, query, jobID, tenantID).Scan(&status)
+		scanErr := tx.QueryRowContext(ctx, query, jobID, tenantID).Scan(&status, &results)
 		if scanErr == sql.ErrNoRows {
 			return nil
 		}
@@ -424,9 +425,9 @@ func (r *jobRepository) GetJobResultStatus(ctx context.Context, tenantID, jobID 
 		return nil
 	})
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
-	return status, found, nil
+	return status, results, found, nil
 }
 
 func (r *jobRepository) GetJobStatus(ctx context.Context, tenantID, jobID uuid.UUID) (string, bool, error) {

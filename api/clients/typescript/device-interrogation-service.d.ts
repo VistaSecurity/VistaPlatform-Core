@@ -222,6 +222,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/agents/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove one of the tenant's device interrogation agents
+         * @description Soft-deletes the agent (`device_agents.deleted_at`) and settles everything
+         *     that pointed at it, in one transaction: the agent's PENDING jobs are
+         *     released back to the unassigned pool (`agent_id = NULL`) so the in-cluster
+         *     worker or another agent picks them up; its IN-PROGRESS jobs are failed,
+         *     because a deleted agent will never report a result and re-queueing could
+         *     double-execute an interrogation; and its certificates are revoked.
+         *
+         *     Gated at DiscoveryManage — the same permission as the other destructive
+         *     routes in this service. RLS-isolated on `device_agents`: another tenant's
+         *     agent id is answered 404, identically to an unknown id.
+         *
+         *     This does NOT uninstall the agent binary, which keeps running on the
+         *     operator's host. It fails closed regardless: every agent-outbound path
+         *     resolves the agent with `deleted_at IS NULL`, so a deleted agent's polls
+         *     are rejected and it receives no jobs and no credentials.
+         */
+        delete: operations["deleteAgent"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/devices": {
         parameters: {
             query?: never;
@@ -451,7 +485,7 @@ export interface paths {
         };
         /**
          * Get an interrogation job's results
-         * @description Placeholder results shape today (assets/summary are stubbed); the job_id + status are real.
+         * @description Returns the job's discovered assets (crypto posture + certificates), a summary, and the post-processing verdict. Projected and scrubbed — see JobResultsResponse.
          */
         get: operations["getInterrogationJobResults"];
         put?: never;
@@ -1061,6 +1095,43 @@ export interface components {
             created_at: string;
             /** Format: date-time */
             updated_at: string;
+            /**
+             * @description The operator's free-text note from the pending registration. Null when
+             *     the registration carried none.
+             */
+            description: string | null;
+            /**
+             * @description Every address bound on the agent host, as reported by its own
+             *     heartbeat, primary first. A discovery agent is routinely multi-homed,
+             *     so `ip_address` alone (the single address it reaches the platform
+             *     from) does not describe what it can reach. Empty for agents older than
+             *     address reporting, or that have not yet checked in.
+             */
+            addresses: components["schemas"]["AgentAddress"][];
+            /** @description All-time count of interrogation jobs assigned to this agent. */
+            job_count: number;
+            /**
+             * Format: date-time
+             * @description When this agent's most recent job last moved (completed, else started,
+             *     else created). Null if the agent has never been assigned one — which,
+             *     with job_count, distinguishes "enrolled but unused" from "went quiet".
+             */
+            last_job_at: string | null;
+        };
+        /** @description One address bound on an agent host (a public.agent_addresses row). */
+        AgentAddress: {
+            /** @description The interface the address is bound to (e.g. Ethernet, eth0). */
+            interface_name: string;
+            /**
+             * @description The bare address, without a prefix — rendered with SQL `host()` rather
+             *     than a text cast, which would append "/24" and break any comparison
+             *     against a bare IP.
+             */
+            address: string;
+            /** @description Prefix length of the address's network; null when the agent reported a bare address. */
+            prefix_length: number | null;
+            /** @description True for the address the agent reaches the platform from. At most one per agent. */
+            is_primary: boolean;
         };
         /** @description Envelope for GET /agents — `{ "agents": [...], "count": N }`. On an empty/nil result `agents` can serialize as JSON null, so it is typed as a nullable array. */
         AgentListResponse: {
@@ -1314,20 +1385,85 @@ export interface components {
             jobs: components["schemas"]["InterrogationJob"][];
         };
         /**
-         * @description CURRENT shape for GET /jobs/{id}/results. assets / summary are stubbed
-         *     placeholders today (empty array, zeroed summary); job_id + status are real.
+         * @description An interrogation job's discovered assets and what happened to them.
+         *
+         *     This is a PROJECTION of the stored agent payload, never a passthrough:
+         *     only the fields enumerated here are served, and the open-ended
+         *     `metadata` map is additionally scrubbed of secret-looking fields. Vendor
+         *     APIs return key material (mesh PSKs, device auth keys, SMTP passwords)
+         *     alongside the crypto posture we want, and none of it may reach a client.
          */
         JobResultsResponse: {
             job_id: string;
             status: string;
-            assets: {
+            /** @description The agent's own verdict on the interrogation run. */
+            success?: boolean;
+            assets: components["schemas"]["JobResultAsset"][];
+            summary: components["schemas"]["JobResultsSummary"];
+            /**
+             * @description Post-processing verdict written by the result processor: per-asset
+             *     outcomes (`steps`), de-duplicated `errors`, and counts for each
+             *     pipeline stage. Absent on jobs that produced no assets or that ran
+             *     before this was recorded.
+             */
+            processing?: {
                 [key: string]: unknown;
-            }[];
-            summary: {
-                total_assets: number;
-                new_assets: number;
-                updated_assets: number;
             };
+        };
+        JobResultsSummary: {
+            total_assets: number;
+            /** @description Assets whose TLS posture was genuinely observed, as opposed to listed by a management API. */
+            with_crypto: number;
+            with_certificates: number;
+            /**
+             * @description How many assets became a discovery finding. Sourced from the
+             *     processing log rather than the asset count, so a pipeline failure
+             *     shows as "12 discovered / 0 materialized" instead of hiding behind
+             *     the total.
+             */
+            materialized?: number;
+        };
+        JobResultAsset: {
+            hostname?: string;
+            ip_address?: string;
+            port?: number;
+            protocol?: string;
+            asset_type?: string;
+            protocol_version?: string;
+            cipher_suite?: string;
+            key_exchange_algorithm?: string;
+            hash_algorithm?: string;
+            key_size?: number;
+            tls_versions?: string[];
+            supported_ciphers?: string[];
+            cert_validation_status?: string;
+            cert_validation_error?: string;
+            certificates?: components["schemas"]["JobResultCertificate"][];
+            service_name?: string;
+            /**
+             * @description True when a handshake was actually measured (a cipher suite or
+             *     negotiated version is present). False means the asset was listed by
+             *     a management API and never probed — which is why its crypto fields
+             *     are empty. Without this flag "not measured" reads as "nothing found".
+             */
+            crypto_observed: boolean;
+            /** @description Vendor inventory fields, scrubbed of secret-looking keys. */
+            metadata?: {
+                [key: string]: unknown;
+            };
+        };
+        JobResultCertificate: {
+            subject_dn?: string;
+            issuer_dn?: string;
+            serial_number?: string;
+            fingerprint_sha256?: string;
+            not_before?: string;
+            not_after?: string;
+            key_algorithm?: string;
+            key_size?: number;
+            signature_alg?: string;
+            subject_alternative_names?: string[];
+            self_signed?: boolean;
         };
         /** @description CURRENT error shape — a single human-readable string under `error`. Superseded by the ADR-0002 Error envelope as endpoints are hardened. */
         LegacyError: {
@@ -1817,6 +1953,33 @@ export interface operations {
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    deleteAgent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The agent's UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The agent was removed. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
         };
     };

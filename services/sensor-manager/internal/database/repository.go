@@ -409,22 +409,31 @@ func (r *sensorRepository) DeleteSensor(ctx context.Context, id, tenantID uuid.U
 // Pending sensor methods
 
 func (r *sensorRepository) CreatePendingSensor(ctx context.Context, pending *models.PendingSensorRegistration) error {
+	// created_at is deliberately NOT in the column list: the column carries
+	// DEFAULT now(), and letting the database stamp it is the only way it cannot
+	// be forgotten. It was, for every registration created through the web UI —
+	// that caller never set CreatedAt, so Go's zero time was inserted verbatim
+	// and every row read `0001-01-01 00:00:00+00`. Nothing complained, because
+	// expires_at is computed independently (so expiry kept working) and the
+	// `expires_at > created_at` CHECK is trivially satisfied by year 1.
+	// RETURNING feeds the real timestamp back so the caller's model matches the
+	// row rather than the zero value it came in with.
 	query := `
 		INSERT INTO pending_sensor_registrations (id, tenant_id, registration_key, name, ip_address, profile,
-		                            network_interfaces, tags, description, status, created_at, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
+		                            network_interfaces, tags, description, status, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		RETURNING created_at`
 
 	// RLS-scoped write on `pending_sensor_registrations`: WithTenantTx sets
 	// app.tenant_id so the INSERT's tenant_id satisfies WITH CHECK. The tenant is
 	// the authenticated admin creating the registration.
 	err := shareddatabase.WithTenantTx(ctx, r.db, pending.TenantID, func(tx *sql.Tx) error {
-		_, e := tx.ExecContext(ctx, query,
+		return tx.QueryRowContext(ctx, query,
 			pending.ID, pending.TenantID, pending.RegistrationKey, pending.Name,
 			pending.IPAddress, pending.Profile, pq.Array(pending.NetworkInterfaces),
 			pq.Array(pending.Tags), pending.Description, pending.Status,
-			pending.CreatedAt, pending.ExpiresAt,
-		)
-		return e
+			pending.ExpiresAt,
+		).Scan(&pending.CreatedAt)
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create pending sensor: %w", err)

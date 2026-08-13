@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -240,16 +241,47 @@ func (s *AgentService) validateRegistrationKeyWithQuerier(ctx context.Context, q
 	return nil
 }
 
-// ListAgents lists all agents for a tenant
+// ListAgents lists all agents for a tenant, with the detail the fleet UI needs to
+// render a discovery agent as itself rather than as a sensor with empty columns:
+// the operator's description, the host's full address inventory, and a summary of
+// the work the agent has actually done.
+//
+// Both extras are LEFT JOIN LATERAL rather than separate round-trips — the roster
+// is small and per-tenant, and an N+1 over agent_addresses would be paid on every
+// page load for data that is always wanted.
 func (s *AgentService) ListAgents(ctx context.Context, tenantID uuid.UUID) ([]*models.Agent, error) {
 	query := `
-		SELECT id, tenant_id, name, platform, profile, version, status, ip_address, last_heartbeat, created_at, updated_at
-		FROM device_agents
-		WHERE tenant_id = $1 AND deleted_at IS NULL
-		ORDER BY created_at DESC
+		SELECT a.id, a.tenant_id, a.name, a.description, a.platform, a.profile, a.version,
+		       a.status, a.ip_address, a.last_heartbeat, a.created_at, a.updated_at,
+		       COALESCE(j.job_count, 0), j.last_job_at,
+		       addr.addresses
+		FROM device_agents a
+		LEFT JOIN LATERAL (
+			SELECT COUNT(*) AS job_count,
+			       MAX(COALESCE(dj.completed_at, dj.started_at, dj.created_at)) AS last_job_at
+			FROM device_jobs dj
+			WHERE dj.agent_id = a.id AND dj.deleted_at IS NULL
+		) j ON TRUE
+		LEFT JOIN LATERAL (
+			SELECT json_agg(
+				json_build_object(
+					'interface_name', aa.interface_name,
+					-- host() not ::text: the cast appends the prefix, so a bare-IP
+					-- comparison downstream would never match.
+					'address', host(aa.address),
+					'prefix_length', aa.prefix_length,
+					'is_primary', aa.is_primary
+				) ORDER BY aa.is_primary DESC, aa.interface_name
+			) AS addresses
+			FROM agent_addresses aa
+			WHERE aa.device_agent_id = a.id
+		) addr ON TRUE
+		WHERE a.tenant_id = $1 AND a.deleted_at IS NULL
+		ORDER BY a.created_at DESC
 	`
 
-	// RLS-scoped read on `device_agents`: WithTenantTx sets app.tenant_id; the
+	// RLS-scoped read on `device_agents` (and the joined `device_jobs` /
+	// `agent_addresses`, both RLS tables): WithTenantTx sets app.tenant_id; the
 	// explicit WHERE tenant_id = $1 is kept as the primary control.
 	var agents []*models.Agent
 	err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
@@ -262,11 +294,22 @@ func (s *AgentService) ListAgents(ctx context.Context, tenantID uuid.UUID) ([]*m
 		for rows.Next() {
 			agent := &models.Agent{}
 			var tenantIDOut uuid.UUID
+			var addressesJSON []byte
 			if scanErr := rows.Scan(
-				&agent.ID, &tenantIDOut, &agent.Name, &agent.Platform, &agent.Profile, &agent.Version,
-				&agent.Status, &agent.IPAddress, &agent.LastHeartbeat, &agent.CreatedAt, &agent.UpdatedAt,
+				&agent.ID, &tenantIDOut, &agent.Name, &agent.Description, &agent.Platform,
+				&agent.Profile, &agent.Version, &agent.Status, &agent.IPAddress,
+				&agent.LastHeartbeat, &agent.CreatedAt, &agent.UpdatedAt,
+				&agent.JobCount, &agent.LastJobAt, &addressesJSON,
 			); scanErr != nil {
 				return fmt.Errorf("failed to scan agent: %w", scanErr)
+			}
+			// json_agg over no rows yields SQL NULL, not '[]'. Normalize here so
+			// the field is always an array on the wire.
+			agent.Addresses = []models.AgentAddress{}
+			if len(addressesJSON) > 0 {
+				if jsonErr := json.Unmarshal(addressesJSON, &agent.Addresses); jsonErr != nil {
+					return fmt.Errorf("failed to decode agent addresses: %w", jsonErr)
+				}
 			}
 			agents = append(agents, agent)
 		}
@@ -278,6 +321,116 @@ func (s *AgentService) ListAgents(ctx context.Context, tenantID uuid.UUID) ([]*m
 
 	return agents, nil
 }
+
+// DeleteAgent soft-deletes a device agent and settles everything that pointed at
+// it. Completes the model device_agents.deleted_at was created for: the column and
+// the `deleted_at IS NULL` filters have existed since the table was added, but
+// nothing ever wrote the column, so an enrolled agent could never be removed.
+//
+// Four effects, one transaction, in this order:
+//
+//  1. Soft-delete the agent row. Zero rows affected → ErrAgentNotFound, so a
+//     wrong id (or another tenant's id, which RLS + the tenant_id filter make
+//     indistinguishable from a wrong one) changes nothing.
+//  2. Release the agent's PENDING jobs back to the unassigned pool. device_jobs
+//     has ON DELETE SET NULL for a hard delete, which a soft delete never fires,
+//     so without this the queued work is stranded: GetNextJobForAgent will not
+//     hand an agent_id-pinned job to anyone else, and the deleted agent can no
+//     longer claim it. Nulling agent_id puts it back where the in-cluster
+//     PlatformAgentWorker (or another agent in the tenant) will pick it up.
+//  3. Fail the agent's IN-PROGRESS jobs. The deleted agent will never report a
+//     result — its next SubmitJobResult is rejected upstream — so those jobs would
+//     otherwise sit in_progress forever. They are failed rather than released
+//     because the work may already have run; re-queueing could double-execute an
+//     interrogation against a live device.
+//  4. Revoke the agent's certificates. Deleting the row already fails closed (see
+//     below), but leaving a valid client certificate bound to a decommissioned
+//     identity is not a state worth choosing.
+//
+// The agent binary keeps running on the operator's host and keeps polling. That
+// is handled, and was already handled before this method existed: every
+// agent-outbound path resolves the agent with `deleted_at IS NULL` —
+// middleware.AgentAuth (404 "Agent not registered"), JobQueueService's
+// resolveAgentTenant, and sealJobCredentials — so a deleted agent is rejected at
+// the door and gets no jobs and no credentials. Deleting is therefore safe to do
+// while the agent is live; it just will not uninstall it, which the UI says.
+func (s *AgentService) DeleteAgent(ctx context.Context, tenantID, agentID uuid.UUID) error {
+	// RLS-scoped writes on device_agents / device_jobs / agent_certificates:
+	// WithTenantTx sets app.tenant_id; every statement also carries an explicit
+	// tenant_id filter as the primary control.
+	return shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `
+			UPDATE device_agents
+			SET deleted_at = NOW(), updated_at = NOW()
+			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+			agentID, tenantID)
+		if err != nil {
+			return fmt.Errorf("failed to delete agent: %w", err)
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to confirm agent deletion: %w", err)
+		}
+		if affected == 0 {
+			return ErrAgentNotFound
+		}
+
+		// Release pending jobs that CAN be re-dispatched. The `device_id IS NOT
+		// NULL` filter is not defensive padding — it is the device_jobs
+		// `valid_job_assignment` CHECK, which permits an unassigned
+		// device_interrogation job only when it names a device. That constraint is
+		// right: the in-cluster worker resolves an unassigned job's target by
+		// re-reading the device row, so a job with neither an agent nor a device
+		// is one nothing can execute. Nulling agent_id on those would abort the
+		// whole delete on a constraint violation.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE device_jobs
+			SET agent_id = NULL
+			WHERE agent_id = $1 AND tenant_id = $2
+			  AND status = 'pending' AND device_id IS NOT NULL AND deleted_at IS NULL`,
+			agentID, tenantID); err != nil {
+			return fmt.Errorf("failed to release pending jobs: %w", err)
+		}
+
+		// Everything still pinned to the agent is now unrunnable and must be
+		// failed rather than left to sit:
+		//   - in_progress — the deleted agent will never report a result.
+		//   - pending with no device_id — nothing else can resolve its target
+		//     (and the CHECK above forbids un-assigning it).
+		// The two get different messages because they are different situations,
+		// and a tenant reading the job list should not have to guess which.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE device_jobs
+			SET status = 'failed',
+			    error_message = CASE WHEN status = 'in_progress' THEN $3 ELSE $4 END,
+			    completed_at = NOW()
+			WHERE agent_id = $1 AND tenant_id = $2
+			  AND status IN ('pending', 'assigned', 'in_progress') AND deleted_at IS NULL`,
+			agentID, tenantID, agentDeletedJobError, agentDeletedUnrunnableJobError); err != nil {
+			return fmt.Errorf("failed to fail unrunnable jobs: %w", err)
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE agent_certificates
+			SET revoked_at = NOW(), revocation_reason = 'agent_deleted', updated_at = NOW()
+			WHERE agent_id = $1 AND tenant_id = $2 AND revoked_at IS NULL`,
+			agentID, tenantID); err != nil {
+			return fmt.Errorf("failed to revoke agent certificates: %w", err)
+		}
+
+		return nil
+	})
+}
+
+// agentDeletedJobError is what a tenant sees on a job that was mid-flight when
+// its agent was removed. It names the cause rather than leaving a bare timeout,
+// because the job did not fail on its own merits.
+const agentDeletedJobError = "the agent assigned to this job was deleted before it reported a result"
+
+// agentDeletedUnrunnableJobError covers the queued jobs that could not be handed
+// back to the pool because they name no device — nothing else can resolve their
+// target, so they die with the agent. Re-create them against a device to run them.
+const agentDeletedUnrunnableJobError = "the agent assigned to this job was deleted, and the job names no device for another agent to pick up"
 
 // ListAllAgents lists interrogation agents across ALL tenants for the
 // platform-admin Fleet view. It deliberately omits the tenant_id WHERE clause

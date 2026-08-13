@@ -1,13 +1,23 @@
+import { useState } from 'react';
+import type { deviceInterrogationComponents } from '@vistasecurity/api-contract';
 import { PageWrap, queryNote, jobMeta, relTime, durationFmt, shortId } from './kit';
 import { useJobs } from './queries';
+import { JobDetailModal } from './job-detail-modal';
 
 // Discovery → Job Logs — the mock's `discovery-logs` stream: every job run as a
 // log line (newest first, the API's order), failures carrying their live
 // error_message instead of the mock's canned "connection refused".
+//
+// A line is a summary, not the log. Clicking one opens the run's detail —
+// timeline, per-stage pipeline outcome, processing errors, and the assets it
+// discovered.
+
+type Job = deviceInterrogationComponents['schemas']['InterrogationJob'];
 
 export function LogsPage() {
   const q = useJobs();
   const jobs = q.data?.jobs ?? [];
+  const [selected, setSelected] = useState<Job | null>(null);
 
   const note = queryNote(q, jobs.length === 0, {
     thing: 'job logs',
@@ -23,7 +33,15 @@ export function LogsPage() {
             const m = jobMeta(j.status);
             const failed = (j.status || '').toLowerCase() === 'failed';
             return (
-              <div key={j.id} style={{ padding: '12px 18px', borderTop: i ? '1px solid var(--app-border)' : 'none', display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+              <div
+                key={j.id}
+                className="row-hover"
+                role="button"
+                tabIndex={0}
+                onClick={() => setSelected(j)}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(j); } }}
+                style={{ padding: '12px 18px', borderTop: i ? '1px solid var(--app-border)' : 'none', display: 'flex', gap: 12, alignItems: 'flex-start', cursor: 'pointer' }}
+              >
                 <span style={{ width: 7, height: 7, borderRadius: 50, background: m.c, marginTop: 6, flex: 'none' }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', gap: 9, alignItems: 'center' }}>
@@ -46,6 +64,7 @@ export function LogsPage() {
           })}
         </div>
       )}
+      <JobDetailModal job={selected} onClose={() => setSelected(null)} />
     </PageWrap>
   );
 }

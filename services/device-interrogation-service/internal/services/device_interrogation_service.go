@@ -29,8 +29,7 @@ type DeviceInterrogationService struct {
 // NewDeviceInterrogationService creates a new device interrogation service. db is
 // the RLS-scoped (crypto_app) connection; bypassDB is the BYPASSRLS
 // (crypto_bypass) connection threaded into the discovery integration's
-// keyed-by-job-id finalize paths. All device/credential reads here run under the
-// resolved tenantID via WithTenantTx.
+// keyed-by-job-id finalize paths and shared-integration credential reads.
 func NewDeviceInterrogationService(db, bypassDB *sql.DB, masterKey string) *DeviceInterrogationService {
 	return &DeviceInterrogationService{
 		db:                   db,
@@ -146,7 +145,7 @@ func (s *DeviceInterrogationService) InterrogateDevice(
 
 		confidenceScore := 0.9 // High confidence for direct device interrogation
 		if _, err := s.discoveryIntegration.CreateDiscoveryFinding(
-			ctx, jobID, targetID, "device_interrogation",
+			ctx, tenantID, jobID, targetID, "device_interrogation",
 			asset.Protocol, asset.Port, hostname, ipAddress,
 			details, confidenceScore,
 		); err != nil {
@@ -287,15 +286,18 @@ func (s *DeviceInterrogationService) getDeviceCredentials(
 	query := `
 		SELECT config, integration_type
 		FROM platform_integrations
-		WHERE id = $1 AND is_active = true AND deleted_at IS NULL
+		WHERE id = $1
+		  AND (tenant_id = $2 OR (tenant_id IS NULL AND is_shared = true))
+		  AND is_active = true
+		  AND deleted_at IS NULL
 	`
 
 	var configJSON string
 	var integrationType string
-	// RLS-scoped read on `platform_integrations` under the device's tenant.
-	if err = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, query, device.CredentialID).Scan(&configJSON, &integrationType)
-	}); err != nil {
+	// RLS: credential_id may point at a shared integration visible to the tenant
+	// through integrationRepository.List/Get. RLS hides NULL-tenant rows, so this
+	// read uses bypassDB with the same explicit tenant-or-shared predicate.
+	if err = s.bypassDB.QueryRowContext(ctx, query, device.CredentialID, tenantID).Scan(&configJSON, &integrationType); err != nil {
 		return "", "", "", false, fmt.Errorf("failed to load credentials: %w", err)
 	}
 
@@ -431,12 +433,14 @@ func (s *DeviceInterrogationService) interrogateDatabase(
 	}
 
 	confidenceScore := 0.95
-	s.discoveryIntegration.CreateDiscoveryFinding(
-		ctx, jobID, targetID, "device_interrogation",
+	if _, err := s.discoveryIntegration.CreateDiscoveryFinding(
+		ctx, tenantID, jobID, targetID, "device_interrogation",
 		protocol, port,
 		&finding.Hostname, nil,
 		details, confidenceScore,
-	)
+	); err != nil {
+		fmt.Printf("Warning: failed to create database discovery finding: %v\n", err)
+	}
 
 	s.updateDeviceInterrogationTime(ctx, tenantID, device.ID)
 	s.discoveryIntegration.MarkJobCompleted(ctx, jobID)

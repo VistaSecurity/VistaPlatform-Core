@@ -221,8 +221,12 @@ func (c *ciscoSSHClient) getSystemInfo(ctx context.Context) (map[string]interfac
 		return nil, err
 	}
 
+	// The parsed fields below are what we use. The full `show version` transcript
+	// was also being stored — a whole command output kept on the chance someone
+	// wanted it, which nothing ever did. Storing raw device transcripts is how
+	// material ends up in the database by accident: the next command someone adds
+	// to this collector may not be as harmless as `show version`.
 	info := make(map[string]interface{})
-	info["raw_output"] = output
 
 	versionRegex := regexp.MustCompile(`Version\s+([^\s,]+)`)
 	if matches := versionRegex.FindStringSubmatch(output); len(matches) > 1 {
@@ -308,7 +312,14 @@ func (c *ciscoSSHClient) getSSLConfigs(ctx context.Context) ([]ciscoSSLConfig, e
 	if output, err := c.executeCommand(ctx, "show webvpn"); err == nil {
 		configs = append(configs, c.parseWebVPNOutput(output)...)
 	}
-	if output, err := c.executeCommand(ctx, "show running-config | section ssl|crypto"); err == nil {
+	// `| include ssl cipher`, NOT `| section ssl|crypto`.
+	//
+	// The section form returns the whole crypto configuration, which contains
+	// `crypto isakmp key <PRESHARED-KEY> address …` and `pre-shared-key <KEY>`.
+	// parseRunningCryptoConfig only ever reads lines beginning `ssl cipher`, so
+	// the rest was retrieved, held in memory and discarded — a standing risk for
+	// no benefit. Ask the device for the lines we actually parse.
+	if output, err := c.executeCommand(ctx, "show running-config | include ssl cipher"); err == nil {
 		configs = append(configs, c.parseRunningCryptoConfig(output)...)
 	}
 

@@ -200,6 +200,16 @@ inspect its own certificate, get it from the host directly:
 openssl s_client -showcerts -connect <platform-host>:443 </dev/null 2>/dev/null | openssl x509 -outform PEM | openssl x509 -noout -fingerprint -sha256
 ```
 
+Before offering you a CA to approve, the agent checks that the certificate the
+platform presents is valid for the hostname you gave it. If it is not, the agent
+refuses and names what the server is actually serving — commonly an ingress
+controller's placeholder such as `a1b2c3d4.traefik.default`, which means the
+platform's TLS certificate was never installed. Trusting a CA cannot fix this:
+verification checks the hostname before it checks the signature, so the
+connection would fail either way, and approving one would look like a completed
+security step while changing nothing. Fix the platform's certificate and run
+setup again. The same refusal applies on the `--ca-fingerprint` path.
+
 Full explanation, including the trust-on-first-use caveat:
 [Sensor Registration → Trust Bootstrap](../../features/SENSOR_REGISTRATION.md).
 
@@ -228,7 +238,26 @@ Currently supported:
 
 ### Heartbeat
 
-The agent sends a heartbeat to the platform every 60 seconds to indicate it's alive and ready for jobs.
+The agent sends a heartbeat to the platform every 60 seconds to indicate it's alive and ready for jobs. The heartbeat also reports the agent's binary version and the addresses bound on its host, which is how the fleet list shows a multi-homed agent's full address inventory — the platform cannot observe those itself, because NAT and ingress rewrite the connection source.
+
+### Viewing the fleet
+
+Enrolled agents appear under **Discovery → Sensors & Agents**, in their own **Discovery agents** table below the network sensors. Sensors and agents are different things and are listed separately: the table shows, per agent, the host and its addresses, what the agent is permitted to interrogate, when it last ran a job and how many it has run in total, its version, and whether it is currently checking in.
+
+An agent whose last heartbeat is stale shows as offline even if its status column still reads `active` — nothing rewrites that column after enrollment, so the heartbeat is the authority.
+
+### Removing an agent
+
+**Discovery → Sensors & Agents → Discovery agents → ✕** on the row, then confirm. Requires the `discovery.manage` permission.
+
+Removing an agent:
+
+- takes it out of the fleet list and stops it being assigned any further work;
+- **revokes its client certificate**;
+- returns its queued jobs to the pool, so another agent — or the platform's own in-cluster worker — picks them up. A queued job that names no device cannot be reassigned and is marked failed, because nothing else can resolve its target;
+- marks any job it was **currently running** as failed. That job is not retried automatically, since the agent may have already carried out the work before it was removed; re-run it from the device if you need the result.
+
+**This does not uninstall the agent.** The binary keeps running on its host and will keep polling. Stop and remove it separately on its host (stop the service, then delete its install directory and config). Until you do, its polls are rejected with a 404 — harmless, but noisy in its logs, and covered under Troubleshooting below.
 
 ## Security Considerations
 
@@ -266,10 +295,25 @@ Usually means the agent request hit a route that still required a **tenant JWT**
 - Wrong key type: use a **device interrogation** pending key, not a network sensor key.
 - Key expired, already used, or database was reset: create a new pending key and enroll again.
 
+### The platform is presenting a certificate for another hostname
+
+Setup stops before offering you a trust decision, and names the certificate's
+real identity. A name like `<hash>.traefik.default` means the platform's TLS
+secret is missing and its ingress controller is serving a self-issued
+placeholder. This is a platform-side fix; no CA you pin on the agent changes the
+outcome, because hostname verification runs before signature verification. See
+[Platforms with a privately-signed certificate](#platforms-with-a-privately-signed-certificate).
+
+### HTTP 404 "Agent not registered" on every poll
+
+The agent was **deleted from the platform** (Discovery → Sensors & Agents), but the binary is still installed and running. This is the expected, deliberate response: a removed agent is rejected at the door and receives no jobs and no credentials, even though its certificate file is still on disk.
+
+It is not a network fault and there is nothing to fix on the platform side. Either stop and uninstall the agent on this host, or — if it was deleted by mistake — mint a fresh registration key and enroll it again. The old key cannot be reused.
+
 ### Agent Not Receiving Jobs
 
 1. Verify registration key is correct
-2. Check agent status in platform UI
+2. Check agent status in platform UI — if the agent is missing from the **Discovery agents** table entirely, it has been deleted (see the 404 entry above)
 3. Verify network connectivity to platform
 4. Check agent logs for errors
 

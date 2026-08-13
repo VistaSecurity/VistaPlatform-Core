@@ -779,6 +779,31 @@ func newHTTPXClient(cfg httpxConfig) *httpxClient {
 	}
 }
 
+// httpCertificateFields is the allowlist for a generic REST certificate entry —
+// the descriptive fields a certificate inventory needs. Notably absent: any
+// private key, passphrase or enrolment credential a device might return
+// alongside the certificate it describes.
+var httpCertificateFields = []string{
+	"name", "id", "alias", "common_name", "subject", "issuer",
+	"serial_number", "fingerprint", "fingerprint_sha1", "fingerprint_sha256",
+	"not_before", "not_after", "valid_from", "valid_to", "expires_at",
+	"key_algorithm", "key_size", "signature_algorithm", "public_key_algorithm",
+	"subject_alternative_names", "san", "is_ca", "self_signed", "status",
+	"certificate_pem", "pem", "version",
+}
+
+// projectHTTPCertificate keeps only the allowlisted fields from a certificate
+// object returned by a generic REST endpoint.
+func projectHTTPCertificate(cert map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(httpCertificateFields))
+	for _, f := range httpCertificateFields {
+		if v, ok := cert[f]; ok && v != nil {
+			out[f] = v
+		}
+	}
+	return out
+}
+
 // HTTPInterrogator interrogates devices via HTTP/REST APIs. It is zero-value
 // constructable: every per-device setting is resolved from the DeviceInfo /
 // Credentials passed to Interrogate.
@@ -834,7 +859,13 @@ func (*HTTPInterrogator) Interrogate(ctx context.Context, device DeviceInfo, cre
 			IPAddress: device.IPAddress,
 			Protocol:  "HTTPS",
 			AssetType: "server",
-			Metadata:  cert,
+			// Projected, not copied. This endpoint is device-configurable
+			// (DeviceInfo.Metadata["cert_path"]), so the response shape is
+			// entirely under the remote device's control — an operator pointing
+			// it at a key-management API would have persisted whatever it
+			// returned. Keep the certificate-descriptive fields; anything a
+			// particular device adds is not ours to store.
+			Metadata: projectHTTPCertificate(cert),
 		}
 
 		// Map common certificate fields if present.
