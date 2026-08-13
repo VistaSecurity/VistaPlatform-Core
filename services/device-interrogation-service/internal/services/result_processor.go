@@ -71,11 +71,21 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 		jobMetadata["integration_id"] = deviceJob.IntegrationID.String()
 	}
 
-	// Check if discovery job already exists in metadata
+	// Reuse the discovery job an upstream executor already created for this
+	// device job, when one was stamped on it (see RecordDiscoveryJob). Only a
+	// parseable, non-nil id counts — a malformed value must not silently become
+	// a uuid.Nil foreign key on every target and finding we then write.
 	var discoveryJobID uuid.UUID
-	if metadata, ok := deviceJob.Parameters["discovery_job_id"].(string); ok {
-		discoveryJobID, _ = uuid.Parse(metadata)
-	} else {
+	reusedDiscoveryJob := false
+	if raw, ok := deviceJob.Parameters["discovery_job_id"].(string); ok {
+		if parsed, perr := uuid.Parse(raw); perr == nil && parsed != uuid.Nil {
+			discoveryJobID = parsed
+			reusedDiscoveryJob = true
+		} else {
+			fmt.Printf("Warning: device job %s carries an unusable discovery_job_id %q; creating a new discovery job\n", jobID, raw)
+		}
+	}
+	if !reusedDiscoveryJob {
 		// Create new discovery job with enhanced source tracking
 		discoveryJobID, err = s.discoveryIntegration.CreateDiscoveryJob(
 			ctx, deviceJob.TenantID, systemUserID, sourceType, jobMetadata,
@@ -106,7 +116,15 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 
 	// Record what actually happens to each asset so the outcome is visible in
 	// the UI rather than only on this process's stdout.
+	//
+	// When we are reusing a discovery job, count what it already holds first.
+	// The in-cluster executor materializes its findings itself and hands this
+	// processor an empty asset list, so without the pre-count the log reports
+	// 0/0/0 for a run that discovered a dozen devices.
 	steps := &ProcessingLog{AssetsReceived: len(result.Assets), DiscoveryJobID: discoveryJobID.String()}
+	if reusedDiscoveryJob {
+		steps.ExistingFindings = s.countDiscoveryFindings(ctx, discoveryJobID)
+	}
 	defer func() {
 		if err := steps.persist(ctx, s.bypassDB, jobID); err != nil {
 			fmt.Printf("Warning: %v\n", err)
@@ -223,8 +241,12 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 		}
 	}
 
-	// Mark discovery job as completed if all assets processed
-	if len(result.Assets) > 0 {
+	// Mark the discovery job completed once the assets are processed. A job WE
+	// created is also marked completed when the payload was empty — otherwise it
+	// stays `queued` forever on Discovery → Discovery Jobs with nothing in it. A
+	// reused job's own creator owns its lifecycle when there was nothing for us
+	// to add.
+	if !reusedDiscoveryJob || len(result.Assets) > 0 {
 		err = s.discoveryIntegration.MarkJobCompleted(ctx, discoveryJobID)
 		if err != nil {
 			fmt.Printf("Warning: failed to mark discovery job as completed: %v\n", err)
@@ -232,6 +254,24 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 	}
 
 	return nil
+}
+
+// countDiscoveryFindings returns how many findings a discovery job already
+// carries. Used to reconcile the processing log against reality when the results
+// were materialized by whoever created the discovery job rather than here.
+//
+// RLS: keyed by discovery job id with no tenant input → bypass role, matching
+// the other finalize-by-id paths. A failure yields 0 and a warning; it must not
+// abort result processing.
+func (s *ResultProcessor) countDiscoveryFindings(ctx context.Context, discoveryJobID uuid.UUID) int {
+	var n int
+	if err := s.bypassDB.QueryRowContext(ctx,
+		`SELECT count(*) FROM discovery_findings WHERE job_id = $1`, discoveryJobID,
+	).Scan(&n); err != nil {
+		fmt.Printf("Warning: failed to count existing findings for discovery job %s: %v\n", discoveryJobID, err)
+		return 0
+	}
+	return n
 }
 
 // buildFindingDetails constructs the enriched details map for a discovery finding,
@@ -561,38 +601,14 @@ func (s *ResultProcessor) updateDeviceIdentity(ctx context.Context, tenantID, de
 
 	di := asset.DeviceInfo
 
-	// Build SET clauses dynamically for non-empty fields
-	var setClauses []string
-	var args []interface{}
-	argIdx := 1
-
-	if di.Vendor != "" {
-		setClauses = append(setClauses, fmt.Sprintf("vendor = $%d", argIdx))
-		args = append(args, di.Vendor)
-		argIdx++
-	}
-	if di.Model != "" {
-		setClauses = append(setClauses, fmt.Sprintf("model = $%d", argIdx))
-		args = append(args, di.Model)
-		argIdx++
-	}
-	if di.FirmwareVersion != "" {
-		setClauses = append(setClauses, fmt.Sprintf("firmware_version = $%d", argIdx))
-		args = append(args, di.FirmwareVersion)
-		argIdx++
-	}
-	if di.SerialNumber != "" {
-		setClauses = append(setClauses, fmt.Sprintf("serial_number = $%d", argIdx))
-		args = append(args, di.SerialNumber)
-		argIdx++
-	}
-
+	setClauses, args := deviceIdentitySetClauses(di.Vendor, di.Model, di.FirmwareVersion, di.SerialNumber, 1)
 	if len(setClauses) == 0 {
 		return
 	}
+	argIdx := len(args) + 1
 
 	// Add updated_at and last_interrogated_at
-	setClauses = append(setClauses, fmt.Sprintf("updated_at = NOW(), last_interrogated_at = NOW(), connection_status = 'connected'"))
+	setClauses = append(setClauses, "updated_at = NOW(), last_interrogated_at = NOW(), connection_status = 'connected'")
 
 	//nolint:gosec // intentional — placeholder concatenation only; values are parameterized via args slice
 	query := fmt.Sprintf(

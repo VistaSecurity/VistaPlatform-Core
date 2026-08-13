@@ -177,11 +177,18 @@ type UpdateRuleRequest struct {
 
 // SendNotificationRequest represents a request to send a notification (internal API)
 type SendNotificationRequest struct {
-	TenantID         *uuid.UUID             `json:"tenant_id,omitempty"` // NULL for platform notifications
-	AlertSource      string                 `json:"alert_source" binding:"required"`
-	AlertType        string                 `json:"alert_type" binding:"required"`
-	Severity         string                 `json:"severity" binding:"required"`
-	Message          string                 `json:"message" binding:"required"`
-	Metadata         map[string]interface{} `json:"metadata,omitempty"`
-	NotificationType string                 `json:"notification_type,omitempty"` // Defaults to 'alert' if not provided
+	TenantID    *uuid.UUID             `json:"tenant_id,omitempty"` // NULL for platform notifications
+	AlertSource string                 `json:"alert_source" binding:"required"`
+	AlertType   string                 `json:"alert_type" binding:"required"`
+	Severity    string                 `json:"severity" binding:"required"`
+	Message     string                 `json:"message" binding:"required"`
+	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+	// Title is the human-readable headline for the in-app bell / notification
+	// channels (e.g. "Control noncompliant: PCI-3.4"). Optional — when a
+	// producer omits it, delivery falls back to a humanized form of AlertType
+	// (see services.humanizeAlertType) rather than showing severity+alert_type
+	// verbatim (that used to be the ONLY behavior and is why the bell showed
+	// "[medium] job_completed").
+	Title            string `json:"title,omitempty"`
+	NotificationType string `json:"notification_type,omitempty"` // Defaults to 'alert' if not provided
 }

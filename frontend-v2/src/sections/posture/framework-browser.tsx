@@ -105,6 +105,15 @@ function FrameworkCard({ fw, onOpen }: { fw: AvailableFrameworkRow; onOpen: () =
           <span style={{ fontSize: 11.5, color: 'var(--danger-text)', marginLeft: 'auto' }}>{fw.controls_failing} failing</span>
         )}
       </div>
+      {/* A control can carry an open finding and still score as passing — the
+          weighted score only fails a control at Medium+ severity. Surface the raw
+          open-finding count so a clean-looking score isn't read as "nothing found". */}
+      {!!fw.open_findings_controls && fw.open_findings_controls > (fw.controls_failing ?? 0) && (
+        <div style={{ fontSize: 11, color: 'var(--app-t3)', display: 'flex', alignItems: 'center', gap: 5 }}>
+          <Icon name="info" size={12} />
+          {fw.open_findings_controls} control{fw.open_findings_controls !== 1 ? 's' : ''} with open findings (below scoring severity)
+        </div>
+      )}
     </button>
   );
 }

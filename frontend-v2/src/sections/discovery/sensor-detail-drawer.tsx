@@ -17,6 +17,12 @@ import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rb
 import { clients } from '../../lib/clients';
 import { Icon, DrawerShell, DrawerCloseBtn, MetaRow, SectionLabel, Pill, Modal, ModalField } from '../../components/ui';
 import { DTable, CellMono, CellTxt, Note, sensorOnline, relTime } from './kit';
+// useDiscoveryCounts is the one hook this drawer borrows from the shared
+// queries.ts (everything else lives locally per the note above) — it's a
+// cheap bulk id→count fetch already shared by sensors-page.tsx and
+// command-center.tsx, and duplicating it here would mean a second cache entry
+// for the same data.
+import { useDiscoveryCounts } from './queries';
 
 type Sensor = sensorManagerComponents['schemas']['Sensor'];
 type HealthMetrics = sensorManagerComponents['schemas']['SensorHealthMetrics'];
@@ -492,6 +498,12 @@ function MetricCard({ icon, label, value }: { icon: string; label: string; value
 
 function HealthTab({ sensorId }: { sensorId: string }) {
   const healthQ = useSensorHealth(sensorId, true);
+  // Cumulative discoveries for this sensor — the fleet row on Sensors & Agents
+  // shows this same number as "Assets found". h.discoveries_made below is only
+  // the latest heartbeat's PER-INTERVAL count, so labeling it as if cumulative
+  // read as "Discoveries made: 0/1" beside a fleet row saying "4429" (M-8).
+  const countsQ = useDiscoveryCounts();
+  const totalDiscoveries = countsQ.data?.[sensorId];
   const [range, setRange] = useState('24h');
   const since = useMemo(() => {
     const r = HISTORY_RANGES.find((x) => x.key === range) ?? HISTORY_RANGES[1];
@@ -517,7 +529,8 @@ function HealthTab({ sensorId }: { sensorId: string }) {
               <MetricCard icon="clock" label="Uptime" value={fmtUptime(h.uptime_seconds)} />
               <MetricCard icon="database" label="Memory" value={fmtBytes(h.memory_usage_bytes)} />
               <MetricCard icon="radar" label="Packets captured" value={fmtNum(h.packets_captured)} />
-              <MetricCard icon="search" label="Discoveries made" value={fmtNum(h.discoveries_made)} />
+              <MetricCard icon="search" label="Discoveries (last interval)" value={fmtNum(h.discoveries_made)} />
+              <MetricCard icon="layers" label="Discoveries (total)" value={countsQ.isLoading ? '…' : fmtNum(totalDiscoveries)} />
             </div>
             <div style={{ fontSize: 10.5, color: 'var(--app-t3)', marginTop: 8 }}>as of {fmtTs(h.recorded_at)}</div>
           </>

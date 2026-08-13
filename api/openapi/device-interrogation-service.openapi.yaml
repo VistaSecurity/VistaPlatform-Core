@@ -1942,6 +1942,7 @@ components:
       - status
       - created_at
       - updated_at
+      - executor
       properties:
         id:
           type: string
@@ -1990,6 +1991,18 @@ components:
         updated_at:
           type: string
           format: date-time
+        agent_id:
+          type: string
+          format: uuid
+          description: |
+            device_jobs.agent_id. Absent means the in-cluster platform agent
+            executed the job rather than a named device agent.
+        executor:
+          type: string
+          description: |
+            Human-readable resolution of agent_id: "Platform Agent" when no
+            device agent was assigned, otherwise the executing device agent's
+            name (or "Device Agent" if it has none).
     Last24hStats:
       type: object
       additionalProperties: false

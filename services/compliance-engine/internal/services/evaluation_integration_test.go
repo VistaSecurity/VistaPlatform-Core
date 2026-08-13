@@ -67,9 +67,14 @@ func newEvalFixture(t *testing.T) *evalFixture {
 	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM platform_users WHERE id = $1`, userID) })
 
 	frameworkID := uuid.New()
+	// organization is set (not left NULL) because models.PlatformFramework.Organization
+	// is a plain string, not sql.NullString — scanning a NULL organization column fails
+	// with "converting NULL to string is unsupported" wherever it's selected (e.g.
+	// GetAvailableFrameworks), and the fixture should exercise the same shape real rows
+	// have rather than a shape that happens to dodge that.
 	if _, err := db.Exec(`
-		INSERT INTO platform_frameworks (id, code, name, version, description, status, created_by)
-		VALUES ($1, $2, 'IT Framework', '1.0', 'integration fixture', 'published', $3)`,
+		INSERT INTO platform_frameworks (id, code, name, version, description, organization, status, created_by)
+		VALUES ($1, $2, 'IT Framework', '1.0', 'integration fixture', 'IT Org', 'published', $3)`,
 		frameworkID, "it-fw-"+suffix, userID); err != nil {
 		t.Fatalf("seed framework: %v", err)
 	}

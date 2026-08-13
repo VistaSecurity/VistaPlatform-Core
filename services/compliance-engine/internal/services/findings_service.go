@@ -390,6 +390,22 @@ func (s *FindingsService) ListFindings(tenantID uuid.UUID, filters FindingListFi
 	// Scan manually to handle the JSONB evidence field (same as the other
 	// finding readers). The asset join is display-only: hostname/IP/port/
 	// environment for rendering a row without an N+1 per-asset fetch.
+	//
+	// cf.asset_id is NOT always a network_assets id — compliance_findings.asset_type
+	// (compliance_findings_asset_type_check) is network_asset / certificate /
+	// crypto_implementation, and only ~1 in 4 findings on a live tenant are the
+	// network_asset kind (v0.5.7 live QA: 15 of 19). Without these two extra
+	// joins, a certificate- or crypto-config-scoped finding resolved to no asset at
+	// all and the UI fell back to rendering the raw asset_id UUID (H-9b).
+	//   - certificate: join certificates directly, display common_name (fallback
+	//     subject_dn) as DisplayName. A certificate can be bound to zero, one, or
+	//     several assets (see assetsForCertificate below) so it is not resolved to
+	//     a single host here — the certificate's own identity IS the object.
+	//   - crypto_implementation: the config row carries its OWN asset_id pointing at
+	//     the network asset it was observed on, so that asset's hostname/ip/port/
+	//     environment/type resolve directly — this is the "asset it's deployed on"
+	//     case. DisplayName additionally carries the protocol/cipher label so two
+	//     configs on the same host are distinguishable.
 	query := `
 		SELECT cf.id, cf.tenant_id, cf.control_id, cf.asset_id, cf.severity, cf.summary,
 		       cf.evidence, cf.first_seen, cf.last_seen, cf.assigned_to, cf.assigned_at,
@@ -397,9 +413,15 @@ func (s *FindingsService) ListFindings(tenantID uuid.UUID, filters FindingListFi
 		       cf.occurrence_count, cf.resurfaced_at, cf.suppressed_until, cf.suppression_reason,
 		       cf.is_stale, cf.last_evaluated_at, cf.evaluation_version,
 		       cf.created_at, cf.updated_at,
-		       na.hostname, na.ip_address, na.port, na.asset_type, na.environment
+		       na.hostname, na.ip_address, na.port, na.asset_type, na.environment,
+		       cert.common_name, cert.subject_dn,
+		       ci_na.hostname, ci_na.ip_address, ci_na.port, ci_na.asset_type, ci_na.environment,
+		       ci.protocol, ci.protocol_version
 		FROM compliance_findings cf
-		LEFT JOIN network_assets na ON na.id = cf.asset_id AND na.deleted_at IS NULL
+		LEFT JOIN network_assets na ON na.id = cf.asset_id AND na.deleted_at IS NULL AND cf.asset_type = 'network_asset'
+		LEFT JOIN certificates cert ON cert.id = cf.asset_id AND cf.asset_type = 'certificate'
+		LEFT JOIN crypto_implementations ci ON ci.id = cf.asset_id AND cf.asset_type = 'crypto_implementation'
+		LEFT JOIN network_assets ci_na ON ci_na.id = ci.asset_id AND ci_na.deleted_at IS NULL
 		WHERE ` + whereSQL + fmt.Sprintf(`
 		ORDER BY cf.last_seen DESC, cf.id
 		LIMIT $%d OFFSET $%d`, idx, idx+1)
@@ -424,6 +446,10 @@ func (s *FindingsService) ListFindings(tenantID uuid.UUID, filters FindingListFi
 			var assignedAt, resurfacedAt, suppressedUntil, lastEvaluatedAt sql.NullTime
 			var aHostname, aIP, aType, aEnv sql.NullString
 			var aPort sql.NullInt64
+			var certCommonName, certSubjectDN sql.NullString
+			var ciHostname, ciIP, ciType, ciEnv sql.NullString
+			var ciPort sql.NullInt64
+			var ciProtocol, ciProtocolVersion sql.NullString
 
 			err := rows.Scan(
 				&finding.ID, &finding.TenantID, &finding.ControlID, &finding.AssetID,
@@ -435,6 +461,9 @@ func (s *FindingsService) ListFindings(tenantID uuid.UUID, filters FindingListFi
 				&lastEvaluatedAt, &finding.EvaluationVersion,
 				&finding.CreatedAt, &finding.UpdatedAt,
 				&aHostname, &aIP, &aPort, &aType, &aEnv,
+				&certCommonName, &certSubjectDN,
+				&ciHostname, &ciIP, &ciPort, &ciType, &ciEnv,
+				&ciProtocol, &ciProtocolVersion,
 			)
 			if err != nil {
 				return fmt.Errorf("failed to scan finding: %w", err)
@@ -474,7 +503,9 @@ func (s *FindingsService) ListFindings(tenantID uuid.UUID, filters FindingListFi
 			if lastEvaluatedAt.Valid {
 				finding.LastEvaluatedAt = &lastEvaluatedAt.Time
 			}
-			if aHostname.Valid || aIP.Valid || aType.Valid || aEnv.Valid || aPort.Valid {
+			switch {
+			case aHostname.Valid || aIP.Valid || aType.Valid || aEnv.Valid || aPort.Valid:
+				// asset_type = network_asset: resolved directly.
 				asset := &models.Asset{ID: finding.AssetID, TenantID: finding.TenantID}
 				if aHostname.Valid {
 					asset.Hostname = &aHostname.String
@@ -491,6 +522,46 @@ func (s *FindingsService) ListFindings(tenantID uuid.UUID, filters FindingListFi
 				}
 				if aEnv.Valid {
 					asset.Environment = &aEnv.String
+				}
+				finding.Asset = asset
+			case certCommonName.Valid || certSubjectDN.Valid:
+				// asset_type = certificate: the certificate itself is the named object.
+				asset := &models.Asset{ID: finding.AssetID, TenantID: finding.TenantID, AssetType: "certificate"}
+				name := certCommonName.String
+				if name == "" {
+					name = certSubjectDN.String
+				}
+				if name != "" {
+					asset.DisplayName = &name
+				}
+				finding.Asset = asset
+			case ciHostname.Valid || ciIP.Valid || ciProtocol.Valid:
+				// asset_type = crypto_implementation: resolve to the network asset the
+				// configuration was observed on (ci.asset_id), plus a protocol/version
+				// label so multiple configs on one host stay distinguishable.
+				asset := &models.Asset{ID: finding.AssetID, TenantID: finding.TenantID}
+				if ciHostname.Valid {
+					asset.Hostname = &ciHostname.String
+				}
+				if ciIP.Valid {
+					asset.IPAddress = &ciIP.String
+				}
+				if ciPort.Valid {
+					port := int(ciPort.Int64)
+					asset.Port = &port
+				}
+				if ciType.Valid {
+					asset.AssetType = ciType.String
+				}
+				if ciEnv.Valid {
+					asset.Environment = &ciEnv.String
+				}
+				if ciProtocol.Valid {
+					label := ciProtocol.String
+					if ciProtocolVersion.Valid && ciProtocolVersion.String != "" {
+						label = label + " " + ciProtocolVersion.String
+					}
+					asset.DisplayName = &label
 				}
 				finding.Asset = asset
 			}
@@ -531,6 +602,31 @@ type FindingsByControlGroup struct {
 	FindingCount   int            `json:"finding_count"`
 	AffectedAssets int            `json:"affected_assets"`
 	SeverityCounts SeverityCounts `json:"severity_counts"`
+	// TargetKind names what AffectedAssets is actually counting: "asset" when
+	// every finding in the group targets a network asset, "certificate" /
+	// "configuration" when every finding targets that other kind, "mixed"
+	// otherwise (compliance_findings.asset_type is network_asset / certificate /
+	// crypto_implementation — see compliance_findings_asset_type_check). L-5:
+	// the UI used to always say "N assets" even when the objects were
+	// certificates, which reads as wrong to anyone who knows what they're
+	// looking at.
+	TargetKind string `json:"target_kind"`
+}
+
+// targetKindFromAssetTypes maps the set of asset_type values observed in a
+// findings-by-control group to the display noun for AffectedAssets.
+func targetKindFromAssetTypes(assetTypes []string) string {
+	if len(assetTypes) != 1 {
+		return "mixed"
+	}
+	switch assetTypes[0] {
+	case "certificate":
+		return "certificate"
+	case "crypto_implementation":
+		return "configuration"
+	default:
+		return "asset"
+	}
 }
 
 // severityFromRank maps the SQL CASE rank back to the stored severity label.
@@ -573,6 +669,7 @@ func (s *FindingsService) GetFindingsByControl(tenantID uuid.UUID, limit int) ([
 			COALESCE(pf.name, tf.name, 'Unknown framework')        AS framework_name,
 			COUNT(*)                                               AS finding_count,
 			COUNT(DISTINCT cf.asset_id)                            AS asset_count,
+			ARRAY_AGG(DISTINCT cf.asset_type)                      AS asset_types,
 			COUNT(*) FILTER (WHERE cf.severity = 'Critical')       AS crit,
 			COUNT(*) FILTER (WHERE cf.severity = 'High')           AS high,
 			COUNT(*) FILTER (WHERE cf.severity = 'Med')            AS med,
@@ -592,17 +689,18 @@ func (s *FindingsService) GetFindingsByControl(tenantID uuid.UUID, limit int) ([
 		LIMIT $2`
 
 	type byControlRow struct {
-		ControlID     uuid.UUID `db:"control_id"`
-		ControlName   string    `db:"control_name"`
-		FrameworkID   uuid.UUID `db:"framework_id"`
-		FrameworkName string    `db:"framework_name"`
-		FindingCount  int       `db:"finding_count"`
-		AssetCount    int       `db:"asset_count"`
-		Crit          int       `db:"crit"`
-		High          int       `db:"high"`
-		Med           int       `db:"med"`
-		Low           int       `db:"low"`
-		WorstRank     int       `db:"worst_rank"`
+		ControlID     uuid.UUID      `db:"control_id"`
+		ControlName   string         `db:"control_name"`
+		FrameworkID   uuid.UUID      `db:"framework_id"`
+		FrameworkName string         `db:"framework_name"`
+		FindingCount  int            `db:"finding_count"`
+		AssetCount    int            `db:"asset_count"`
+		AssetTypes    pq.StringArray `db:"asset_types"`
+		Crit          int            `db:"crit"`
+		High          int            `db:"high"`
+		Med           int            `db:"med"`
+		Low           int            `db:"low"`
+		WorstRank     int            `db:"worst_rank"`
 	}
 	var rowsData []byControlRow
 	if err := shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenantID, func(tx *sql.Tx) error {
@@ -615,7 +713,7 @@ func (s *FindingsService) GetFindingsByControl(tenantID uuid.UUID, limit int) ([
 			var r byControlRow
 			if err := dbRows.Scan(
 				&r.ControlID, &r.ControlName, &r.FrameworkID, &r.FrameworkName,
-				&r.FindingCount, &r.AssetCount, &r.Crit, &r.High, &r.Med, &r.Low, &r.WorstRank,
+				&r.FindingCount, &r.AssetCount, &r.AssetTypes, &r.Crit, &r.High, &r.Med, &r.Low, &r.WorstRank,
 			); err != nil {
 				return fmt.Errorf("failed to scan findings-by-control row: %w", err)
 			}
@@ -637,6 +735,7 @@ func (s *FindingsService) GetFindingsByControl(tenantID uuid.UUID, limit int) ([
 			FindingCount:   r.FindingCount,
 			AffectedAssets: r.AssetCount,
 			SeverityCounts: SeverityCounts{Critical: r.Crit, High: r.High, Med: r.Med, Low: r.Low},
+			TargetKind:     targetKindFromAssetTypes([]string(r.AssetTypes)),
 		})
 	}
 	return groups, nil
@@ -653,6 +752,13 @@ type FindingStatistics struct {
 	ResolvedFindings   int `json:"resolved_findings"`
 	SuppressedFindings int `json:"suppressed_findings"`
 	ResurfacedFindings int `json:"resurfaced_findings"`
+	// SeverityCounts tallies ACTIVE findings by severity, tenant-wide, off the
+	// same materialized compliance_findings table the Findings page and
+	// GetFindingsByControl read — so a dashboard tile built from this field
+	// agrees with the Findings page instead of inventory-service's
+	// crypto-implementation-risk-score-derived "critical findings" count
+	// (H-2: the two used to read from unrelated tables and disagree).
+	SeverityCounts SeverityCounts `json:"severity_counts"`
 }
 
 // GetFindingStatistics returns aggregated statistics for findings
@@ -685,6 +791,19 @@ func (s *FindingsService) GetFindingStatistics(tenantID uuid.UUID) (*FindingStat
 		WHERE tenant_id = $1
 		  AND detection_state = 'ACTIVE'
 		  AND resurfaced_at IS NOT NULL
+	`
+	// Get counts by severity, ACTIVE findings only, tenant-wide (no control-join,
+	// no LIMIT) — the same detection_state scope GetFindingsByControl uses, so
+	// this is the true tenant-wide total rather than a sum over a capped list of
+	// control groups.
+	severityQuery := `
+		SELECT
+			severity,
+			COUNT(*) as count
+		FROM compliance_findings
+		WHERE tenant_id = $1
+		  AND detection_state = 'ACTIVE'
+		GROUP BY severity
 	`
 
 	err := shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenantID, func(tx *sql.Tx) error {
@@ -737,6 +856,32 @@ func (s *FindingsService) GetFindingStatistics(tenantID uuid.UUID) (*FindingStat
 		}
 		if err := wfRows.Err(); err != nil {
 			return fmt.Errorf("failed to get workflow status counts: %w", err)
+		}
+
+		sevRows, err := tx.QueryContext(context.Background(), severityQuery, tenantID)
+		if err != nil {
+			return fmt.Errorf("failed to get severity counts: %w", err)
+		}
+		defer func() { _ = sevRows.Close() }()
+		for sevRows.Next() {
+			var severity string
+			var count int
+			if err := sevRows.Scan(&severity, &count); err != nil {
+				return fmt.Errorf("failed to scan severity count: %w", err)
+			}
+			switch severity {
+			case "Critical":
+				stats.SeverityCounts.Critical = count
+			case "High":
+				stats.SeverityCounts.High = count
+			case "Med":
+				stats.SeverityCounts.Med = count
+			case "Low":
+				stats.SeverityCounts.Low = count
+			}
+		}
+		if err := sevRows.Err(); err != nil {
+			return fmt.Errorf("failed to get severity counts: %w", err)
 		}
 
 		if err := tx.QueryRowContext(context.Background(), resurfacedQuery, tenantID).Scan(&stats.ResurfacedFindings); err != nil {

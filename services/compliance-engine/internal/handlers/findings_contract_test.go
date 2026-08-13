@@ -149,6 +149,7 @@ func TestContract_GetFindingStatistics_200(t *testing.T) {
 		TotalFindings: 10, ActiveFindings: 7, InactiveFindings: 2, ArchivedFindings: 1,
 		NewFindings: 4, NotifiedFindings: 2, ResolvedFindings: 3, SuppressedFindings: 1,
 		ResurfacedFindings: 0,
+		SeverityCounts:     services.SeverityCounts{Critical: 4, High: 3, Med: 2, Low: 1},
 	}})
 	w := do(eng, http.MethodGet, cBase+"/findings/statistics", nil)
 	if w.Code != http.StatusOK {
@@ -163,12 +164,12 @@ func TestContract_GetFindingsByControl_200(t *testing.T) {
 		{
 			ControlID: uuid.New(), ControlName: "Strong Cryptography", FrameworkID: uuid.New(),
 			FrameworkName: "PCI DSS", WorstSeverity: "Critical", FindingCount: 29, AffectedAssets: 29,
-			SeverityCounts: services.SeverityCounts{Critical: 29},
+			SeverityCounts: services.SeverityCounts{Critical: 29}, TargetKind: "asset",
 		},
 		{
 			ControlID: uuid.New(), ControlName: "Secure Protocols", FrameworkID: uuid.New(),
 			FrameworkName: "ISO/IEC 27001", WorstSeverity: "High", FindingCount: 12, AffectedAssets: 8,
-			SeverityCounts: services.SeverityCounts{High: 12},
+			SeverityCounts: services.SeverityCounts{High: 12}, TargetKind: "certificate",
 		},
 	}})
 	w := do(eng, http.MethodGet, cBase+"/findings/by-control?limit=5", nil)

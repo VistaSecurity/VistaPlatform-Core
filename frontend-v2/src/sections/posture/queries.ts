@@ -66,6 +66,13 @@ export interface AvailableFrameworkRow {
   preview_score?: number | null;
   controls_passing?: number | null;
   controls_failing?: number | null;
+  /**
+   * Controls with at least one ACTIVE, non-suppressed finding of any severity.
+   * controls_failing is severity-weighted (a control whose worst finding is Low
+   * scores as passing), so this raw count can be higher — the same "has an open
+   * exposure" definition /findings/by-control uses (#H-4/#M-15).
+   */
+  open_findings_controls?: number | null;
 }
 
 /**

@@ -206,7 +206,48 @@ func (h *DeviceHandlers) ListDevices(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"devices": devices})
+	c.JSON(http.StatusOK, gin.H{"devices": stripBulkyDeviceMetadata(devices)})
+}
+
+// deviceMetadataCertKeys are the metadata keys under which cloud discovery
+// (cloud_discovery_service.go) stashes full certificate chains — each entry
+// can carry a multi-KB certificate_pem per certificate. Nothing on the
+// Devices list view reads any of these (frontend-v2's devices-page.tsx never
+// touches device.metadata); GetDevice (single) keeps them intact for whatever
+// might want the full chain on a detail view.
+var deviceMetadataCertKeys = []string{"certificates", "crypto_configs"}
+
+// stripBulkyDeviceMetadata returns devices with the certificate-chain-bearing
+// metadata keys removed, so a list of N devices doesn't ship N sets of PEM
+// blobs to the browser on every page load (L-7). Devices with no such keys
+// (the common case — network devices with no crypto_configs metadata at all)
+// are returned unmodified; only devices carrying the heavy keys pay the cost
+// of a shallow metadata copy.
+func stripBulkyDeviceMetadata(devices []*models.Device) []*models.Device {
+	for _, d := range devices {
+		if d == nil || d.Metadata == nil {
+			continue
+		}
+		hasCertKey := false
+		for _, k := range deviceMetadataCertKeys {
+			if _, ok := d.Metadata[k]; ok {
+				hasCertKey = true
+				break
+			}
+		}
+		if !hasCertKey {
+			continue
+		}
+		trimmed := make(models.JSONB, len(d.Metadata))
+		for k, v := range d.Metadata {
+			trimmed[k] = v
+		}
+		for _, k := range deviceMetadataCertKeys {
+			delete(trimmed, k)
+		}
+		d.Metadata = trimmed
+	}
+	return devices
 }
 
 // GetDevice handles GET /devices/:id

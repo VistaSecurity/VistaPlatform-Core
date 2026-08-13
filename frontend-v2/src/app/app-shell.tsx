@@ -21,7 +21,7 @@ import { Icon as LensIcon } from '../components/ui';
 import { usePlatformBranding, BrandLogo } from './platform-branding';
 import { INVENTORY_LENSES, DEFAULT_LENS, type InventoryLens } from '../sections/inventory/lenses';
 import { SettingsRail } from '../sections/settings/settings-rail';
-import { FINDINGS_LENSES, DEFAULT_FINDINGS_LENS } from '../sections/findings/lenses';
+import { FINDINGS_LENSES, DEFAULT_FINDINGS_LENS, SCOPE_LABEL } from '../sections/findings/lenses';
 import { POSTURE_TABS, DEFAULT_POSTURE_TAB } from '../sections/posture/tabs';
 
 const ICONS: Record<string, LucideIcon> = {
@@ -161,9 +161,18 @@ function Sidebar() {
 
                             {onFindings && (
                               <div className="fade-up" style={{ margin: '2px 0 5px', display: 'flex', flexDirection: 'column', gap: 1 }}>
-                                <LensGroupLabel indent={54}>Lenses</LensGroupLabel>
-                                {FINDINGS_LENSES.map((l) => (
-                                  <ContextSubLink key={l.key} to={`/risk-compliance/findings?lens=${l.key}`} icon={l.icon} label={l.label} active={curLens === l.key} />
+                                {/* L-5: lenses are grouped and labeled by which finding
+                                    universe they read (crypto-risk stream vs. persisted
+                                    compliance findings) — switching groups changes what
+                                    "Open" is counting, and that needs to be visible right
+                                    where the user makes the switch. */}
+                                {(['compliance', 'crypto'] as const).map((scope) => (
+                                  <div key={scope}>
+                                    <LensGroupLabel indent={54}>{SCOPE_LABEL[scope]}</LensGroupLabel>
+                                    {FINDINGS_LENSES.filter((l) => l.scope === scope).map((l) => (
+                                      <ContextSubLink key={l.key} to={`/risk-compliance/findings?lens=${l.key}`} icon={l.icon} label={l.label} active={curLens === l.key} />
+                                    ))}
+                                  </div>
                                 ))}
                               </div>
                             )}

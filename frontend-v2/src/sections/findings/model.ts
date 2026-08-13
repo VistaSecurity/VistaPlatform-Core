@@ -9,6 +9,17 @@ export type BatchFinding = complianceEngineComponents['schemas']['BatchFindingSu
 export type BatchControl = complianceEngineComponents['schemas']['BatchControlStatus'];
 export type ComplianceFinding = complianceEngineComponents['schemas']['ComplianceFinding'];
 
+/**
+ * The subset of BatchControl the UI actually renders (just the name, in the
+ * inspector drawer and workflow actions). Findings against a published-but-
+ * unlicensed framework (#H-4b) resolve their control via GET
+ * /frameworks/published/{id} instead of batch-evaluate (which skips unlicensed
+ * frameworks), and that path has no status/severity/findings-count — only id +
+ * title. BatchControl satisfies this type structurally, so either source works
+ * wherever a ControlRef is expected.
+ */
+export type ControlRef = Pick<BatchControl, 'id' | 'name'>;
+
 /** The joined asset object GET /findings rides on each finding (unpinned in the contract slice). */
 export interface FindingAsset {
   hostname?: string | null;
@@ -16,8 +27,21 @@ export interface FindingAsset {
   port?: number | null;
   asset_type?: string;
   environment?: string | null;
+  /**
+   * Set when the finding's target isn't a network asset — a certificate's
+   * common name, or a crypto-configuration's protocol/version label (H-9b:
+   * without this, findings on certificates/configs rendered as a truncated
+   * raw asset_id UUID instead of a real object name).
+   */
+  display_name?: string | null;
 }
 export const assetOf = (f: ComplianceFinding): FindingAsset => (f.asset ?? {}) as FindingAsset;
+
+/** The best available human label for a finding's target object. */
+export function targetLabel(f: ComplianceFinding): string {
+  const a = assetOf(f);
+  return a.display_name || a.hostname || a.ip_address || f.asset_id.slice(0, 8);
+}
 
 // Finding workflow vocabulary (backend: findings_service.go) with the mock's
 // status colors (Findings.jsx FSTATUS).

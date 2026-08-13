@@ -176,6 +176,10 @@ export function JobDetailModal({ job, onClose }: { job: Job | null; onClose: () 
         <Row label="Status" value={m.l} color={m.c} />
         <Row label="Target" value={firstText(job.device_name, job.integration_name)} />
         <Row label="Device type" value={firstText(job.device_type, job.cloud_provider)} mono />
+        {/* Which executor ran this job — a platform-agent-executed job has no
+            row on Sensors & Agents that owns it (the agent's job columns are
+            all zero), so this is the only place attribution is visible. */}
+        <Row label="Executed by" value={job.executor} />
         <Row label="Created" value={relTime(job.created_at)} />
         <Row label="Started" value={job.started_at ? relTime(job.started_at) : 'not started'} />
         <Row label="Completed" value={job.completed_at ? relTime(job.completed_at) : undefined} />

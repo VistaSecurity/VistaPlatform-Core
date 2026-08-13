@@ -49,6 +49,26 @@ const certificateColumns = `
 	created_at, updated_at,
 	known_bad_ca, cert_ownership`
 
+// effectiveOwnershipExpr resolves the SAME "which ownership bucket does this
+// certificate belong to" answer for both the `?ownership=` filter and the
+// list response's `ownership` field (#H-6). Precedence: the ownership of an
+// asset the cert is actually deployed on (crypto_implementations link) wins
+// when present, else the declared cert_ownership (manual uploads), else
+// "unknown" — never NULL, so every certificate lands in exactly one of
+// internal / third_party / unknown and the buckets always sum to the total.
+const effectiveOwnershipExpr = `COALESCE(
+	(SELECT na.asset_ownership
+	   FROM crypto_implementations ci
+	   JOIN network_assets na ON na.id = ci.asset_id
+	  WHERE ci.certificate_id = certificates.id
+	    AND ci.tenant_id = certificates.tenant_id
+	    AND ci.deleted_at IS NULL
+	    AND na.deleted_at IS NULL
+	  LIMIT 1),
+	cert_ownership,
+	'unknown'
+)`
+
 // scanCertificateRow scans a single row into a Certificate model. The scanner
 // must return columns in the order defined by certificateColumns.
 func scanCertificateRow(scanner interface {
@@ -57,18 +77,26 @@ func scanCertificateRow(scanner interface {
 	return scanCertificateRowWithOptions(scanner, false)
 }
 
-// scanCertificateRowWithCount scans a certificate row that includes the
-// deployment_count subquery as a trailing column. Used by list queries so the
-// frontend row can display a deployment count without hydrating each cert.
-func scanCertificateRowWithCount(scanner interface {
-	Scan(dest ...interface{}) error
-}) (models.Certificate, error) {
-	return scanCertificateRowWithOptions(scanner, true)
-}
-
 func scanCertificateRowWithOptions(scanner interface {
 	Scan(dest ...interface{}) error
 }, withDeploymentCount bool) (models.Certificate, error) {
+	return scanCertificateRowFull(scanner, withDeploymentCount, false)
+}
+
+// scanCertificateRowWithCountAndOwnership scans a certificate row that
+// includes both the deployment_count and effective-ownership trailing
+// columns (in that order). Used by GetCertificates so the list response can
+// expose the SAME "which ownership bucket does this cert belong to" answer
+// the `?ownership=` filter uses (see effectiveOwnershipExpr) — see #H-6.
+func scanCertificateRowWithCountAndOwnership(scanner interface {
+	Scan(dest ...interface{}) error
+}) (models.Certificate, error) {
+	return scanCertificateRowFull(scanner, true, true)
+}
+
+func scanCertificateRowFull(scanner interface {
+	Scan(dest ...interface{}) error
+}, withDeploymentCount bool, withOwnership bool) (models.Certificate, error) {
 	var cert models.Certificate
 	var serialNumber, commonName, sigAlg, pubKeyAlg, certPEM, fpSHA1, dataSource sql.NullString
 	var certStateReason, sigAlgOID, pubKeyAlgOID sql.NullString
@@ -79,6 +107,7 @@ func scanCertificateRowWithOptions(scanner interface {
 	var issuerCertID, supersededByCertID sql.NullString
 	var sanArray pq.StringArray
 	var deploymentCount sql.NullInt64
+	var effectiveOwnership sql.NullString
 
 	dest := []interface{}{
 		&cert.ID, &cert.TenantID, &serialNumber, &cert.SubjectDN, &cert.IssuerDN, &commonName,
@@ -96,6 +125,9 @@ func scanCertificateRowWithOptions(scanner interface {
 	if withDeploymentCount {
 		dest = append(dest, &deploymentCount)
 	}
+	if withOwnership {
+		dest = append(dest, &effectiveOwnership)
+	}
 
 	err := scanner.Scan(dest...)
 	if err != nil {
@@ -105,6 +137,13 @@ func scanCertificateRowWithOptions(scanner interface {
 	if withDeploymentCount && deploymentCount.Valid {
 		count := int(deploymentCount.Int64)
 		cert.DeploymentCount = &count
+	}
+	if withOwnership {
+		if effectiveOwnership.Valid && effectiveOwnership.String != "" {
+			cert.Ownership = effectiveOwnership.String
+		} else {
+			cert.Ownership = "unknown"
+		}
 	}
 
 	if knownBadCA.Valid && knownBadCA.String != "" {
@@ -205,19 +244,37 @@ func (s *CertificateService) GetCertificates(tenantID uuid.UUID, filters models.
 	}
 
 	// deploymentCountSubquery returns, per-certificate, the number of distinct
-	// non-deleted network assets that use this certificate via a
-	// crypto_implementation. Populated in the SELECT list so the frontend row
-	// can show host counts without hydrating each cert.
+	// non-deleted network assets that use this certificate — either directly
+	// (a crypto_implementation's certificate_id points at it, the leaf-cert
+	// case) OR as an ancestor of a directly-deployed cert via the issuer
+	// chain (certificates.issuer_certificate_id). Without the chain walk, a
+	// CA/intermediate cert that is never itself a config's leaf certificate_id
+	// always shows deployment_count 0 → "Unassigned", even though the SAME
+	// asset's crypto_implementation carries a key extracted from that exact CA
+	// cert (implementation_keys → keys, see keyDeploymentCountSubquery) and so
+	// the Keys lens correctly shows it as "used by N assets". That
+	// cert-vs-key contradiction is #M-7. WITH RECURSIVE walks from every
+	// directly-deployed leaf cert up through issuer_certificate_id so an
+	// intermediate/root CA cert is credited with the deployments of every leaf
+	// it issued (directly or transitively), matching what the key badge shows.
 	const deploymentCountSubquery = `
-		(SELECT COUNT(DISTINCT ci.asset_id)
-		   FROM crypto_implementations ci
-		   JOIN network_assets na ON na.id = ci.asset_id
-		  WHERE ci.certificate_id = certificates.id
-		    AND ci.tenant_id = certificates.tenant_id
-		    AND ci.deleted_at IS NULL
-		    AND na.deleted_at IS NULL) AS deployment_count`
+		(WITH RECURSIVE deployed_chain AS (
+			SELECT ci.asset_id, ci.certificate_id AS cert_id
+			  FROM crypto_implementations ci
+			  JOIN network_assets na ON na.id = ci.asset_id
+			 WHERE ci.tenant_id = certificates.tenant_id
+			   AND ci.deleted_at IS NULL
+			   AND na.deleted_at IS NULL
+			   AND ci.certificate_id IS NOT NULL
+			UNION
+			SELECT dc.asset_id, c.issuer_certificate_id
+			  FROM deployed_chain dc
+			  JOIN certificates c ON c.id = dc.cert_id
+			 WHERE c.issuer_certificate_id IS NOT NULL
+		)
+		SELECT COUNT(DISTINCT asset_id) FROM deployed_chain WHERE cert_id = certificates.id) AS deployment_count`
 
-	selectClause := `SELECT` + certificateColumns + `, ` + deploymentCountSubquery
+	selectClause := `SELECT` + certificateColumns + `, ` + deploymentCountSubquery + `, ` + effectiveOwnershipExpr + ` AS effective_ownership`
 
 	baseFrom := ` FROM certificates WHERE tenant_id = $1`
 
@@ -262,22 +319,18 @@ func (s *CertificateService) GetCertificates(tenantID uuid.UUID, filters models.
 		args = append(args, *filters.SelfSigned)
 	}
 
-	// Ownership filter: cert matches if linked to an asset with the requested ownership
-	// OR if cert_ownership is explicitly set to the requested value (covers manually
-	// uploaded certs that have no asset link yet, or may never have one).
+	// Ownership filter: partitions the WHOLE set into internal / third_party /
+	// unknown using the same effectiveOwnershipExpr the list SELECT exposes as
+	// `ownership` (#H-6). Previously this matched only
+	// `na.asset_ownership = $N OR cert_ownership = $N`, which let a cert with
+	// NO asset link and a NULL cert_ownership fall through every bucket
+	// (unknown != NULL, so equality against the literal 'unknown' never
+	// matched it) — filtered counts summed to less than the unfiltered total.
+	// effectiveOwnershipExpr's COALESCE(...,'unknown') guarantees every
+	// certificate matches exactly one of the three values.
 	if filters.Ownership != nil {
 		argCount++
-		whereConditions = append(whereConditions, fmt.Sprintf(`(
-			EXISTS (
-				SELECT 1 FROM crypto_implementations ci
-				  JOIN network_assets na ON na.id = ci.asset_id
-				 WHERE ci.certificate_id = certificates.id
-				   AND ci.tenant_id = certificates.tenant_id
-				   AND ci.deleted_at IS NULL
-				   AND na.deleted_at IS NULL
-				   AND na.asset_ownership = $%d)
-			OR cert_ownership = $%d
-		)`, argCount, argCount))
+		whereConditions = append(whereConditions, fmt.Sprintf(`(%s) = $%d`, effectiveOwnershipExpr, argCount))
 		args = append(args, *filters.Ownership)
 	}
 
@@ -360,7 +413,7 @@ func (s *CertificateService) GetCertificates(tenantID uuid.UUID, filters models.
 		defer func() { _ = rows.Close() }()
 
 		for rows.Next() {
-			cert, e := scanCertificateRowWithCount(rows)
+			cert, e := scanCertificateRowWithCountAndOwnership(rows)
 			if e != nil {
 				return fmt.Errorf("failed to scan certificate: %w", e)
 			}
@@ -451,9 +504,27 @@ func (s *CertificateService) GetExpiringCertificates(tenantID uuid.UUID, days in
 	return certificates, nil
 }
 
-// getRelatedAssets retrieves assets that use this certificate
+// getRelatedAssets retrieves assets that use this certificate — directly (a
+// crypto_implementation's certificate_id points at it) or as an ancestor CA
+// in the issuer chain of a directly-deployed leaf cert. Mirrors
+// deploymentCountSubquery (#M-7) so the drawer's related-asset list agrees
+// with the list row's deployment_count badge for CA/intermediate certs.
 func (s *CertificateService) getRelatedAssets(tenantID, certID uuid.UUID) ([]models.Asset, error) {
 	query := `
+		WITH RECURSIVE deployed_chain AS (
+			SELECT ci.asset_id, ci.certificate_id AS cert_id
+			  FROM crypto_implementations ci
+			  JOIN network_assets na ON na.id = ci.asset_id
+			 WHERE ci.tenant_id = $2
+			   AND ci.deleted_at IS NULL
+			   AND na.deleted_at IS NULL
+			   AND ci.certificate_id IS NOT NULL
+			UNION
+			SELECT dc.asset_id, c.issuer_certificate_id
+			  FROM deployed_chain dc
+			  JOIN certificates c ON c.id = dc.cert_id
+			 WHERE c.issuer_certificate_id IS NOT NULL
+		)
 		SELECT DISTINCT
 			a.id, a.tenant_id, a.hostname, a.ip_address, a.port, a.asset_type,
 			a.operating_system, a.environment, a.business_unit, a.owner_email,
@@ -461,11 +532,10 @@ func (s *CertificateService) getRelatedAssets(tenantID, certID uuid.UUID) ([]mod
 			a.first_discovered_at, a.last_seen_at,
 			a.created_at, a.updated_at, a.deleted_at
 		FROM network_assets a
-		JOIN crypto_implementations ci ON a.id = ci.asset_id
-		WHERE ci.certificate_id = $1
+		JOIN deployed_chain dc ON dc.asset_id = a.id
+		WHERE dc.cert_id = $1
 		AND a.tenant_id = $2
 		AND a.deleted_at IS NULL
-		AND ci.deleted_at IS NULL
 		LIMIT 10
 	`
 

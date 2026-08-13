@@ -16,6 +16,7 @@
 // is DELETE /{id} (204, no body).
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import toast from 'react-hot-toast';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
 import { Icon, Modal } from '../../components/ui';
@@ -178,7 +179,12 @@ export function ScanAssetButton({ assetId }: { assetId: string }) {
       if (error || !data) throw new Error('Failed to start active scan');
       return data;
     },
-    onSuccess: () => invalidateInventory(qc, assetId),
+    // The scan is dispatched asynchronously (a job the discovery pipeline picks
+    // up), so the drawer has nothing to re-render on success — without a toast
+    // the click looked like a no-op. Mirrors Discovery → Active Scan.
+    onSuccess: () => toast.success('Active scan started — results appear once the probe completes'),
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Failed to start active scan'),
+    onSettled: () => invalidateInventory(qc, assetId),
   });
   return (
     <PermissionGate permission={TENANT_PERMISSIONS.assets.update}>

@@ -81,10 +81,22 @@ func (c pqcCounts) ReadyPercent() float64 {
 // denominator, so one implementation contributed to several families at once
 // and the readiness percentage could exceed 100%.
 func classifyTenantImplementationsPQC(db *database.DB, tenantID uuid.UUID) (pqcCounts, error) {
+	// INNER JOIN network_assets (na), scoped to asset_status = 'monitoring':
+	// without it this classifier's Total counted every non-deleted
+	// crypto_implementations row regardless of whether its asset still exists
+	// or is still pending approval — a strictly broader population than
+	// crypto-configurations' and risk/summary's total_crypto, which both
+	// require a live, monitoring-status asset. That divergence is exactly what
+	// let /pqc/progress's total_implementations disagree with the Dashboard's
+	// "Configs" count and the Inventory Configuration lens total for the same
+	// tenant (M-1). All three now share one definition: implementations on a
+	// live, monitoring asset.
 	const query = `
 		WITH impl_component AS (
 			SELECT ci.id AS impl_id, a.is_pqc, a.primitive
 			  FROM crypto_implementations ci
+			  INNER JOIN network_assets na ON na.id = ci.asset_id
+			        AND na.deleted_at IS NULL AND na.asset_status = 'monitoring'
 			  LEFT JOIN crypto_implementation_algorithms cia
 			         ON cia.crypto_implementation_id = ci.id
 			        AND cia.algorithm_type = ANY($2)

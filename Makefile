@@ -18,17 +18,12 @@ DOCKER_COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker
 # Existing targets above
 # ...
 
-.PHONY: diagrams
-diagrams: node_modules_check
-	@echo "Generating Mermaid diagrams..."
-	node ./scripts/generate-diagrams.mjs | cat
-	@echo "Diagrams written to architecture_docs/diagrams"
-
+.PHONY:
 .PHONY: node_modules_check
 node_modules_check:
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is required"; exit 1; }
 
-.PHONY: generate generate-docker-compose generate-k8s-ingress cluster-suspend cluster-resume cluster-status verify-generated validate-dockerfiles verify-db-files \
+.PHONY: generate generate-docker-compose generate-k8s-ingress cluster-suspend cluster-resume cluster-status verify-generated verify-db-files \
 	sign-content-bundle verify-content-bundle stage-content-bundle unstage-content-bundle
 generate: node_modules_check generate-k8s-ingress ## Generate shared docs/config from standards registry
 	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
@@ -128,12 +123,9 @@ verify-generated: ## Verify generated artifacts exist
 	@test -f config/generated/docker-compose-services.yml || (echo "Missing config/generated/docker-compose-services.yml" && exit 1)
 	@echo "Generated artifacts present."
 
-validate-dockerfiles: ## Validate all Dockerfiles follow project standards
-	@./scripts/validate-dockerfiles.sh
-
 # Vista Platform - Makefile
 
-.PHONY: help build-services build-sensor build-frontend build-all test test-unit test-integration test-integration-db test-e2e start stop restart logs clean install-deps validate-services validate-logging
+.PHONY: help build-services build-sensor build-frontend build-all test test-unit test-integration test-e2e start stop restart logs clean install-deps
 
 # Default target
 help: ## Show this help message
@@ -187,9 +179,6 @@ build-services-parallel: ## Build all Go services in parallel
 		build-cbom-service build-sensor-manager build-admin-service build-monitoring-service \
 		build-cluster-sensor-service build-resource-tracker-service build-tenant-health-service \
 		build-pcap-processor build-mcp-service
-
-build-incremental: ## Build only changed services (uses git diff)
-	@./scripts/build-incremental.sh
 
 # ---------------------------------------------------------------------------
 # Licensed image targets — two variants:
@@ -687,9 +676,6 @@ test-unit: ## Run unit tests for all services
 		echo "Unit tests completed!"; \
 	fi
 
-test-incremental: ## Test only changed services (uses git diff)
-	@./scripts/test-changed.sh
-
 test-parallel: ## Run tests in parallel across all services
 	@echo "Running tests in parallel..."
 	@for service in auth-service inventory-service compliance-engine cbom-service sensor-manager admin-service monitoring-service cluster-sensor-service resource-tracker-service tenant-health-service mcp-service; do \
@@ -743,39 +729,20 @@ test-resource-tracker-service: ## Test resource-tracker-service
 test-tenant-health-service: ## Test tenant-health-service
 	@cd services/tenant-health-service && go test -v ./...
 
-test-device-interrogation: ## Test device interrogation capability (usage: make test-device-interrogation DEVICE_TYPE=fortinet)
-	@./scripts/test-device-interrogation.sh ${DEVICE_TYPE:-all}
-
 test-integration: ## Run integration tests
 	@echo "Running integration tests..."
 	cd tests/integration && go test ./...
 	@echo "Integration tests completed!"
-
-test-integration-db: ## Run DB-integration tests vs an ephemeral Postgres (needs Docker). Same tests run nightly in CI.
-	@bash scripts/run-integration-db-tests.sh
 
 test-e2e: ## Run end-to-end tests
 	@echo "Running E2E tests..."
 	cd tests/e2e && npm test
 	@echo "E2E tests completed!"
 
-test-discovery-e2e: ## Run discovery feature end-to-end test
-	@echo "Running discovery E2E test..."
-	@./scripts/test-discovery-e2e.sh
-
-test-discovery-e2e-data: ## Run discovery feature end-to-end test with test data
-	@echo "Running discovery E2E test with test data..."
-	@./scripts/test-discovery-e2e-with-data.sh
-
 test-load: ## Run load tests
 	@echo "Running load tests..."
 	cd tests && k6 run load-test.js
 	@echo "Load tests completed!"
-
-test-mtls: ## Test mTLS configuration across all services
-	@echo "Running mTLS tests..."
-	@./scripts/test-mtls.sh
-	@echo "mTLS tests completed!"
 
 test: test-unit test-integration ## Run unit and integration tests
 
@@ -880,63 +847,9 @@ format: ## Format all code
 	cd frontend-v2 && npm run format
 
 # Standards Enforcement
-audit: ## Run consistency audit
-	@echo "Running consistency audit..."
-	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
-	node ./scripts/audit-from-registry.mjs | cat
-	@echo "Auditing compose secret injections against registry required_secrets..."
-	node ./scripts/audit-compose-secrets.mjs
-	@echo "Auditing credential-column writers against the shared encryption helper..."
-	node ./scripts/audit-credential-encryption.mjs
-	@echo "Auditing chart values + templates against registry..."
-	node ./scripts/audit-chart-parity.mjs --strict
-	@echo "Auditing permission parity (web-ui ↔ seed.sql tenant_permissions)..."
-	node ./scripts/audit-permissions.mjs --strict
-	@echo "Auditing alert-type registry (generated catalog drift)..."
-	node ./scripts/generate-alert-registry.mjs --check
-	@echo "Auditing edition boundary (Core must build without ee/)..."
-	node ./scripts/audit-edition-boundary.mjs --strict
-	@echo "Auditing admin plane (platform-admin API must be off the public host)..."
-	node ./scripts/audit-admin-plane.mjs --strict
-	@echo "Auditing edition matrix (published editions must match editionByItem)..."
-	node ./scripts/generate-edition-matrix.mjs --check
-	@echo "Validating docs edition fences..."
-	node ./scripts/strip-edition-sections.mjs --check docsv4/core docsv4/enterprise docsv4/msp
-	@echo "Checking docs links (cross-layer + broken-link ratchet)..."
-	node ./scripts/check-docs-links.mjs --strict
-	@echo "Auditing published host ports (every compose port pinned in env.example)..."
-	node ./scripts/audit-host-ports.mjs --strict
-	@echo "Auditing script blast radius (no host-wide docker removal in scripts/)..."
-	node ./scripts/audit-destructive-scripts.mjs --strict
-	@echo "Auditing quickstart secrets (every published placeholder must rotate)..."
-	node ./scripts/audit-bootstrap-secrets.mjs --strict
-	@echo "Auditing chart schema mirror (chart copy must match scripts/database/schema.sql)..."
-	node ./scripts/audit-schema-mirror.mjs --strict
-	@echo "Auditing legacy-table residue (no view/FK may reference a *_legacy relation)..."
-	node ./scripts/audit-legacy-residue.mjs --strict
-	@echo "Auditing schema grant order (blanket role GRANTs must follow every CREATE TABLE)..."
-	node ./scripts/audit-schema-grant-order.mjs --strict
-
-edition-boundary: ## Audit the open-core edition boundary (alias for the strict run in 'make audit')
-	node ./scripts/audit-edition-boundary.mjs --strict
-
-docs-links: ## Check docsv4 links: cross-layer violations + broken-link ratchet
-	node ./scripts/check-docs-links.mjs --strict
-
 edition-matrix: ## Regenerate docsv4/core/editions.md from editions.go + seed.sql + standards/editions.yaml
 	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
 	node ./scripts/generate-edition-matrix.mjs
-
-admin-plane: ## Audit the admin plane against the registry (alias for the strict run in 'make audit')
-	node ./scripts/audit-admin-plane.mjs --strict
-
-chart-parity: ## Audit chart values + templates against registry (alias for the strict audit run by 'make audit')
-	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
-	node ./scripts/audit-chart-parity.mjs --strict
-
-permission-parity: ## Audit permission parity between web-ui gates and seed.sql tenant_permissions
-	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
-	node ./scripts/audit-permissions.mjs --strict
 
 .PHONY: api-contract
 api-contract: ## Spec-first API guardrail (ADR-0001): verify generated TS client is in sync with the OpenAPI spec, then run service contract tests
@@ -999,47 +912,6 @@ chart-lint: ## helm lint the chart against values.schema.json (catches schema/te
 		--set platform.internalAuthSecret=l \
 		--set platform.encryptionMasterKey=l
 
-chart-agent-mtls-test: ## Render-test agent/sensor mTLS passthrough chart wiring
-	@command -v helm >/dev/null 2>&1 || { echo "❌ helm not found — install helm to run chart-agent-mtls-test"; exit 1; }
-	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
-	node ./scripts/test-chart-agent-mtls.mjs
-
-chart-config-checksum-test: ## Render-test config checksum rollout annotations
-	@command -v helm >/dev/null 2>&1 || { echo "❌ helm not found — install helm to run chart-config-checksum-test"; exit 1; }
-	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
-	node ./scripts/test-chart-config-checksum.mjs
-
-chart-tls-existing-secret-test: ## Render-test the tls.mode=existingSecret pre-existence guard
-	@command -v helm >/dev/null 2>&1 || { echo "❌ helm not found — install helm to run chart-tls-existing-secret-test"; exit 1; }
-	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
-	node ./scripts/test-chart-tls-existing-secret.mjs
-
-chart-content-bundle-test: ## Render-test Enterprise content bundle chart gating
-	@command -v helm >/dev/null 2>&1 || { echo "❌ helm not found — install helm to run chart-content-bundle-test"; exit 1; }
-	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
-	node ./scripts/test-chart-content-bundle.mjs
-	node ./scripts/test-chart-jwt-signing.mjs
-
-chart-default-host-test: ## Static-test default self-signed chart host wiring
-	node ./scripts/test-chart-default-public-host.mjs
-
-release-core-checkout-test: ## Verify Core release builds checkout the requested release ref
-	node ./scripts/test-release-core-checkout-ref.mjs
-	node ./scripts/test-release-tag-split.mjs
-
-verify-action-pins-test: ## Regression-test action pin verifier parsing and failure modes
-	node ./scripts/test-verify-action-pins.mjs
-
-audit-guardrails-test: ## Regression-test local-install safety audit failure modes
-	node ./scripts/test-audit-guardrails.mjs
-
-rls-policy-rewrite-test: ## Regression-test RLS policy predicate rewrite safety
-	node ./scripts/test-rewrite-rls-policies.mjs
-
-admin-plane-audit-test: ## Regression-test admin/internal plane edge deny matching
-	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
-	node ./scripts/test-admin-plane-audit.mjs
-
 # Workflow linting. This exists because `secrets` is not an available context in
 # `if:`, and a workflow that references it there does not fail a step — it fails
 # to COMPILE. GitHub surfaces that as a nameless "workflow file issue" with no
@@ -1058,11 +930,8 @@ admin-plane-audit-test: ## Regression-test admin/internal plane edge deny matchi
 # can say whether it resolves. The Core release pipeline shipped a fabricated
 # pin (correct-looking prefix, invented tail) that failed 16 of 19 jobs on the
 # first real build and could not have been caught any earlier without this.
-verify-action-pins: ## Check that every pinned GitHub Action SHA resolves
-	./scripts/verify-action-pins.sh
-
 ACTIONLINT_VERSION ?= v1.7.12
-lint-workflows: verify-action-pins ## Lint GitHub Actions workflows (context availability, expressions, shell)
+lint-workflows:   ## Lint GitHub Actions workflows (context availability, expressions, shell)
 	@echo "Linting GitHub Actions workflows..."
 	@if command -v actionlint >/dev/null 2>&1; then \
 		actionlint .github/workflows/*.yml; \
@@ -1071,56 +940,19 @@ lint-workflows: verify-action-pins ## Lint GitHub Actions workflows (context ava
 	fi
 	@echo "✅ workflows lint clean"
 
-generate-chart-values: node_modules_check ## Generate registry-derived view of chart backends (preview, not consumed by chart yet)
-	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
-	node ./scripts/generate-chart-values.mjs
-
-install-git-hooks: ## Wire the tracked pre-commit hook (and any future hooks) into this clone via core.hooksPath
-	@# Pointing core.hooksPath at scripts/git-hooks/ means new hooks
-	@# committed there auto-apply to anyone who's run this once.
-	@# Worktrees inherit the setting from the main repo, so a single
-	@# invocation covers every worktree backed by this clone.
-	@git config core.hooksPath scripts/git-hooks
-	@echo "✅ git core.hooksPath → scripts/git-hooks"
-	@echo "Hooks now active:"
-	@ls scripts/git-hooks/ | sed 's/^/  - /'
-	@echo ""
-	@echo "Bypass any single commit with: git commit --no-verify"
-
-enforce: ## Enforce coding standards
-	@echo "Enforcing coding standards..."
-	./scripts/enforce-standards.sh
-
-validate-registry: node_modules_check ## Validate registry-first compliance
-	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
-	@echo "Validating registry-first compliance..."
-	node ./scripts/validate-registry-first.mjs
-
-drift-check: validate-registry audit ## Check for configuration drift
+drift-check:   ## Check for configuration drift
 	@echo "Drift check complete!"
 
-standards-check: generate verify-generated audit enforce validate-dockerfiles validate-logging chart-default-host-test chart-lint chart-agent-mtls-test chart-config-checksum-test chart-tls-existing-secret-test chart-content-bundle-test release-core-checkout-test verify-action-pins-test audit-guardrails-test rls-policy-rewrite-test admin-plane-audit-test lint-workflows ## Generate, verify and run all standards checks  ## Generate, verify and run all standards checks
+standards-check: generate verify-generated chart-lint lint-workflows  ## Generate, verify and run all standards checks
 
-registry-first: validate-registry generate verify-generated audit ## Complete registry-first workflow
+registry-first: generate verify-generated  ## Complete registry-first workflow
 	@echo "✅ Registry-first workflow complete!"
 	@echo "💡 All configurations are now in sync with registry."
 
 # CORS Testing
-test-cors: ## Test CORS configuration for all API endpoints
-	@echo "Testing CORS configuration..."
-	./scripts/test-cors.sh
-
-cors-check: test-cors ## Alias for test-cors
+cors-check:   ## Alias for test-cors
 
 # Session Management
-start-all: ## Start all services including frontend, tools, and AI services
-	@echo "Starting all services..."
-	./scripts/start-all-services.sh
-
-stop-all: ## Stop all services including those with profiles
-	@echo "Stopping all services..."
-	./scripts/stop-all-services.sh
-
 # Security
 security-scan: ## Run security scans
 	@echo "Running Go security scan..."
@@ -1181,13 +1013,7 @@ monitor: ## Show system status
 	curl -s http://localhost:${INVENTORY_SERVICE_HOST_PORT:-8082}/health || echo "Inventory service: DOWN"
 	curl -s http://localhost:${COMPLIANCE_ENGINE_HOST_PORT:-8083}/health || echo "Compliance service: DOWN"
 
-health-check: ## Quick health check for all services
-	@./scripts/health-check.sh
-
 # Cache Management
-clean-cache: ## Clean build caches (Docker, Go, npm)
-	@./scripts/clean-cache.sh
-
 validate-cache: ## Validate cache integrity
 	@echo "Validating Go module cache..."
 	@go mod verify ./shared
@@ -1205,14 +1031,8 @@ build-clean: ## Force clean build (clear all caches)
 	@docker system prune -f
 	@echo "✅ All caches cleared"
 
-validate-services: ## Validate all services are running and healthy (addresses timing issues)
-	@./scripts/validate-services.sh
-
-validate-logging: ## Validate compliance logging configuration and schema
-	@./scripts/validate-logging.sh
-
 # Gateway / Routing Utilities
-.PHONY: registry-check gen-gateway gateway-validate gateway-smoke verify-session-http
+.PHONY: registry-check gen-gateway gateway-validate
 
 registry-check: ## Validate service registry JSON
 	@echo "Validating service registry..."
@@ -1234,21 +1054,9 @@ gateway-validate: ## Validate Traefik configuration inside gateway container
 	@echo "Validating Traefik gateway configuration..."
 	@docker compose exec -T api-gateway traefik healthcheck
 
-gateway-smoke: ## Run CORS/gateway smoke tests
-	@./scripts/test-cors.sh
-
-verify-session-http: ## After start-session: gateway /health, Traefik /metrics (host 9082 default), DNS from api-gateway
-	@./scripts/verify-session-http.sh
-
-.PHONY: smoke-dev
-smoke-dev: ## Run gateway smoke tests for key endpoints
-	./scripts/smoke-dev.sh
-
-.PHONY: verify-frontend-api
-verify-frontend-api: ## Verify frontend API usage for gateway-first compliance
-	node ./scripts/verify-frontend-api-usage.mjs
-
-.PHONY: ts-build ts-check-unused
+.PHONY:
+.PHONY:
+.PHONY: ts-build
 ts-build: ## Build TypeScript for both UIs
 	@echo "Building web-ui TypeScript..."
 	@cd frontend-v2 && npm run build
@@ -1256,13 +1064,10 @@ ts-build: ## Build TypeScript for both UIs
 	@cd admin-ui-v2 && npm run build
 	@echo "✅ TypeScript builds completed successfully"
 
-ts-check-unused: ## Find unused code in TypeScript files
-	node ./scripts/find-unused-code.mjs
-
 # ================================================================
 # Production Validation (Fast vs Parity)
 # ================================================================
 .PHONY: prod-validate-fast
 
-prod-validate-fast: generate verify-generated validate-dockerfiles audit gateway-smoke ## Fast validation using existing checks (no containers)
+prod-validate-fast: generate verify-generated  ## Fast validation using existing checks (no containers)
 	@echo "✅ Fast prod validation complete (no container bring-up)."

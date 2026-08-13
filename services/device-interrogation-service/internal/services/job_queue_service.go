@@ -439,6 +439,36 @@ func (s *JobQueueService) UpdateJobStatus(
 	return nil
 }
 
+// RecordDiscoveryJob stamps onto a device job the discovery job its results have
+// ALREADY been materialized into, so the result processor reuses that job rather
+// than creating a second one.
+//
+// The in-cluster executor interrogates through DeviceInterrogationService, which
+// creates its own discovery job and writes the targets and findings there. The
+// result processor only knew to reuse an existing discovery job when this
+// parameter was set — and nothing set it — so every in-cluster interrogation
+// left behind a second discovery job that no executor ever picks up. It sits
+// `queued` forever on Discovery → Discovery Jobs, owning zero targets and zero
+// findings, while the job's processing log points at that empty job instead of
+// the one holding the real results.
+//
+// RLS: keyed by job id with no tenant input (the owning tenant is the OUTPUT),
+// called from the background worker → bypass role, like UpdateJobStatus.
+func (s *JobQueueService) RecordDiscoveryJob(ctx context.Context, jobID, discoveryJobID uuid.UUID) error {
+	if discoveryJobID == uuid.Nil {
+		return fmt.Errorf("failed to record discovery job: discovery job id is required")
+	}
+	_, err := s.bypassDB.ExecContext(ctx, `
+		UPDATE device_jobs
+		SET parameters = jsonb_set(COALESCE(parameters, '{}'::jsonb), '{discovery_job_id}', to_jsonb($1::text), true),
+		    updated_at = now()
+		WHERE id = $2`, discoveryJobID.String(), jobID)
+	if err != nil {
+		return fmt.Errorf("failed to record discovery job on device job: %w", err)
+	}
+	return nil
+}
+
 // GetJobByID retrieves a job by its ID.
 //
 // RLS: keyed by job id with no tenant input (the owning tenant is the OUTPUT) —

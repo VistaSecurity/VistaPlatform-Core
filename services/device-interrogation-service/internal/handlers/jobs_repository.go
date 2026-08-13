@@ -76,10 +76,12 @@ const jobSelectColumns = `
 		   dj.device_id, d.hostname as device_name, d.device_type,
 		   dj.integration_id, pi.integration_name, pi.integration_type as cloud_provider,
 		   dj.started_at, dj.completed_at, dj.error_message,
-		   dj.results, dj.created_at, dj.deleted_at as updated_at
+		   dj.results, dj.created_at, dj.deleted_at as updated_at,
+		   dj.agent_id, da.name as agent_name
 	FROM device_jobs dj
 	LEFT JOIN devices d ON dj.device_id = d.id
 	LEFT JOIN platform_integrations pi ON dj.integration_id = pi.id
+	LEFT JOIN device_agents da ON dj.agent_id = da.id
 	WHERE dj.tenant_id = $1 AND dj.deleted_at IS NULL
 `
 
@@ -138,6 +140,7 @@ func (r *jobRepository) ListJobs(ctx context.Context, tenantID uuid.UUID, f JobL
 			var job InterrogationJob
 			var updatedAt sql.NullTime
 			var resultsRaw []byte
+			var agentName *string
 
 			if scanErr := rows.Scan(
 				&job.ID, &job.TenantID, &job.JobType, &job.Status,
@@ -145,6 +148,7 @@ func (r *jobRepository) ListJobs(ctx context.Context, tenantID uuid.UUID, f JobL
 				&job.IntegrationID, &job.IntegrationName, &job.CloudProvider,
 				&job.StartedAt, &job.CompletedAt, &job.ErrorMessage,
 				&resultsRaw, &job.CreatedAt, &updatedAt,
+				&job.AgentID, &agentName,
 			); scanErr != nil {
 				continue
 			}
@@ -161,6 +165,7 @@ func (r *jobRepository) ListJobs(ctx context.Context, tenantID uuid.UUID, f JobL
 			if len(resultsRaw) > 0 {
 				job.AssetsDiscovered = assetsDiscoveredFromResults(string(resultsRaw))
 			}
+			job.Executor = executorLabel(job.AgentID, agentName)
 			jobs = append(jobs, job)
 		}
 		return rows.Err()
@@ -287,15 +292,18 @@ func (r *jobRepository) GetJob(ctx context.Context, tenantID, jobID uuid.UUID) (
 			   dj.device_id, d.hostname as device_name, d.device_type,
 			   dj.integration_id, pi.integration_name, pi.integration_type as cloud_provider,
 			   dj.started_at, dj.completed_at, dj.error_message,
-			   dj.results, dj.created_at
+			   dj.results, dj.created_at,
+			   dj.agent_id, da.name as agent_name
 		FROM device_jobs dj
 		LEFT JOIN devices d ON dj.device_id = d.id
 		LEFT JOIN platform_integrations pi ON dj.integration_id = pi.id
+		LEFT JOIN device_agents da ON dj.agent_id = da.id
 		WHERE dj.id = $1 AND dj.tenant_id = $2 AND dj.deleted_at IS NULL
 	`
 
 	var job InterrogationJob
 	var resultsRaw []byte
+	var agentName *string
 	found := false
 	err := shareddatabase.WithTenantTx(ctx, r.db, tenantID, func(tx *sql.Tx) error {
 		scanErr := tx.QueryRowContext(ctx, query, jobID, tenantID).Scan(
@@ -304,6 +312,7 @@ func (r *jobRepository) GetJob(ctx context.Context, tenantID, jobID uuid.UUID) (
 			&job.IntegrationID, &job.IntegrationName, &job.CloudProvider,
 			&job.StartedAt, &job.CompletedAt, &job.ErrorMessage,
 			&resultsRaw, &job.CreatedAt,
+			&job.AgentID, &agentName,
 		)
 		if scanErr == sql.ErrNoRows {
 			return nil
@@ -325,6 +334,7 @@ func (r *jobRepository) GetJob(ctx context.Context, tenantID, jobID uuid.UUID) (
 	if len(resultsRaw) > 0 {
 		job.AssetsDiscovered = assetsDiscoveredFromResults(string(resultsRaw))
 	}
+	job.Executor = executorLabel(job.AgentID, agentName)
 	return &job, nil
 }
 

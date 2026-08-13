@@ -250,6 +250,51 @@ func GetTenantBillingWithStore(store tenantBillingStore, cfg *config.Config) gin
 	}
 }
 
+// resolveUsageLimits turns the tier's raw limit columns into a UsageLimits
+// struct using ONE sentinel for "no cap": -1. That is the convention already
+// used throughout tier_entitlements/subscription_tiers (see seed.sql: "N=null
+// means unlimited", and the community/enterprise tiers' max_sensors=-1 rows) —
+// this is the only place that convention must also cover the two columns that
+// never adopted it: no tier's `limits` JSONB has ever populated api_requests
+// or storage_bytes, so they fell through to Go's int64 zero value, which is
+// indistinguishable from an intentional zero cap. A tenant on a tier whose
+// max_sensors/max_assets/max_users is NULL (not currently seeded, but the
+// column allows it) gets the same -1 treatment as an explicit -1, matching
+// the "N=null means unlimited" convention everywhere else in this file.
+//
+// A frontend renderer must only treat a NEGATIVE (or missing) limit as
+// "unlimited" — a genuine 0 is a real zero cap and should render as such.
+func resolveUsageLimits(tierLimitsJSON []byte, maxSensors, maxAssets, maxUsers sql.NullInt64) UsageLimits {
+	limits := UsageLimits{
+		APIRequests:  -1,
+		StorageBytes: -1,
+		SensorsCount: -1,
+		AssetsCount:  -1,
+		UsersCount:   -1,
+	}
+	if tierLimitsJSON != nil {
+		var customLimits map[string]interface{}
+		if err := json.Unmarshal(tierLimitsJSON, &customLimits); err == nil {
+			if apiLimit, ok := customLimits["api_requests"].(float64); ok {
+				limits.APIRequests = int64(apiLimit)
+			}
+			if storageLimit, ok := customLimits["storage_bytes"].(float64); ok {
+				limits.StorageBytes = int64(storageLimit)
+			}
+		}
+	}
+	if maxSensors.Valid {
+		limits.SensorsCount = int(maxSensors.Int64)
+	}
+	if maxAssets.Valid {
+		limits.AssetsCount = int(maxAssets.Int64)
+	}
+	if maxUsers.Valid {
+		limits.UsersCount = int(maxUsers.Int64)
+	}
+	return limits
+}
+
 // GetCurrentUsage handles GET /billing/usage/current - Get current usage
 func GetCurrentUsage(db *sql.DB) gin.HandlerFunc {
 	return GetCurrentUsageWithStore(newBillingRepo(db))
@@ -309,29 +354,7 @@ func GetCurrentUsageWithStore(store billingUsageStore) gin.HandlerFunc {
 			return
 		}
 
-		limits := UsageLimits{}
-		if tierLimitsJSON != nil {
-			var customLimits map[string]interface{}
-			if err := json.Unmarshal(tierLimitsJSON, &customLimits); err == nil {
-				if apiLimit, ok := customLimits["api_requests"].(float64); ok {
-					limits.APIRequests = int64(apiLimit)
-				}
-				if storageLimit, ok := customLimits["storage_bytes"].(float64); ok {
-					limits.StorageBytes = int64(storageLimit)
-				}
-			}
-		}
-
-		// Set defaults from tier columns
-		if maxSensors.Valid {
-			limits.SensorsCount = int(maxSensors.Int64)
-		}
-		if maxAssets.Valid {
-			limits.AssetsCount = int(maxAssets.Int64)
-		}
-		if maxUsers.Valid {
-			limits.UsersCount = int(maxUsers.Int64)
-		}
+		limits := resolveUsageLimits(tierLimitsJSON, maxSensors, maxAssets, maxUsers)
 
 		// Calculate percentages
 		percentages := make(map[string]float64)
@@ -495,8 +518,11 @@ func CheckLimits(db *sql.DB) gin.HandlerFunc {
 			// Read-consistency: assets/sensors from live COUNT(*), api_calls
 			// from the per-event tenant_resource_usage source. Best-effort live
 			// reads — leave the metric at 0 on error (errcheck: deliberately ignored).
-			_ = tx.QueryRowContext(c.Request.Context(), `SELECT COUNT(*) FROM sensors WHERE tenant_id = $1 AND deleted_at IS NULL`, tenantID).Scan(&usage.SensorsCount)
-			_ = tx.QueryRowContext(c.Request.Context(), `SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND deleted_at IS NULL`, tenantID).Scan(&usage.AssetsCount)
+			// Excludes platform-provided sensors (platform='platform' — see
+			// billing_repository.go's GetRealtimeCounts) and non-monitoring assets,
+			// matching the same definitions GetCurrentUsage uses.
+			_ = tx.QueryRowContext(c.Request.Context(), `SELECT COUNT(*) FROM sensors WHERE tenant_id = $1 AND deleted_at IS NULL AND platform != 'platform'`, tenantID).Scan(&usage.SensorsCount)
+			_ = tx.QueryRowContext(c.Request.Context(), `SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND deleted_at IS NULL AND asset_status = 'monitoring'`, tenantID).Scan(&usage.AssetsCount)
 			_ = tx.QueryRowContext(c.Request.Context(), `
 				SELECT COALESCE(SUM(api_calls), 0)
 				FROM tenant_resource_usage
@@ -528,28 +554,7 @@ func CheckLimits(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 
-		limits := UsageLimits{}
-		if tierLimitsJSON != nil {
-			var customLimits map[string]interface{}
-			if err := json.Unmarshal(tierLimitsJSON, &customLimits); err == nil {
-				if apiLimit, ok := customLimits["api_requests"].(float64); ok {
-					limits.APIRequests = int64(apiLimit)
-				}
-				if storageLimit, ok := customLimits["storage_bytes"].(float64); ok {
-					limits.StorageBytes = int64(storageLimit)
-				}
-			}
-		}
-
-		if maxSensors.Valid {
-			limits.SensorsCount = int(maxSensors.Int64)
-		}
-		if maxAssets.Valid {
-			limits.AssetsCount = int(maxAssets.Int64)
-		}
-		if maxUsers.Valid {
-			limits.UsersCount = int(maxUsers.Int64)
-		}
+		limits := resolveUsageLimits(tierLimitsJSON, maxSensors, maxAssets, maxUsers)
 
 		// Build checks map
 		checks := make(map[string]LimitCheck)

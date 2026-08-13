@@ -16,6 +16,18 @@ type Config struct {
 	InternalAuthSecret string
 	SensorManagerURL   string
 	Port               string
+
+	// mTLS Configuration (M-14: pcap-processor previously never read these
+	// and never started the :8443 listener, so under serviceMtls.enabled it
+	// only ever answered on plaintext :8080 — monitoring-service's version
+	// aggregator probes https://pcap-processor:8443/health and reported the
+	// pod "unreachable" even when healthy, and any S2S caller using
+	// PeerURL()/mTLS could not reach it either.)
+	UseMTLS            bool
+	TLSPort            string
+	ServiceCertPath    string
+	ServiceKeyPath     string
+	PlatformCACertPath string
 }
 
 // Load reads configuration from environment variables.
@@ -34,5 +46,11 @@ func Load() *Config {
 		InternalAuthSecret: sharedconfig.GetEnv("INTERNAL_AUTH_SECRET", ""),
 		SensorManagerURL:   sharedconfig.PeerServiceURLAuto("SENSOR_MANAGER_URL", "sensor-manager"),
 		Port:               sharedconfig.GetEnv("PORT", "8080"),
+
+		UseMTLS:            sharedconfig.GetEnvAsBool("USE_MTLS", true),
+		TLSPort:            sharedconfig.GetEnv("TLS_PORT", "8443"),
+		ServiceCertPath:    sharedconfig.GetEnv("SERVICE_CERT_PATH", "/app/certs/server-cert.pem"),
+		ServiceKeyPath:     sharedconfig.GetEnv("SERVICE_KEY_PATH", "/app/certs/server-key.pem"),
+		PlatformCACertPath: sharedconfig.GetEnv("PLATFORM_CA_CERT_PATH", "/app/certs/platform-ca-cert.pem"),
 	}
 }

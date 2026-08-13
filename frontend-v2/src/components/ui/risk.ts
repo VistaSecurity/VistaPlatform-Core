@@ -31,6 +31,14 @@ export const riskColor = (lvl: string): string => LEVEL_COLOR[lvl as RiskLevel] 
 export const levelFromScore = (s: number): RiskLevel =>
   s >= 90 ? 'Critical' : s >= 70 ? 'High' : s >= 40 ? 'Medium' : s >= 1 ? 'Low' : 'Informational';
 
+// The minimum score for each band, exported so captions ("risk score ≥ N")
+// can be built from the same numbers levelFromScore uses instead of a
+// hand-typed literal drifting out of sync with it (L-4: a caption once read
+// "≥ 60" while the actual High threshold was 70).
+export const LEVEL_MIN: Record<RiskLevel, number> = {
+  Critical: 90, High: 70, Medium: 40, Low: 1, Informational: 0,
+};
+
 /** Heat ramp for matrices: 0 → transparent, rising → amber → red. */
 export function heatColor(ratio: number): string {
   if (ratio <= 0) return 'transparent';

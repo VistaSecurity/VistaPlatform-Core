@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/pcap-processor/internal/database"
 	"github.com/vistasecurity/vistaplatform/pcap-processor/internal/processor"
 	"github.com/vistasecurity/vistaplatform/shared/events"
+	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 )
 
@@ -58,9 +60,10 @@ func main() {
 	}
 	log.Printf("Subscribed to %s", events.SubjectPcapJobsProcess)
 
-	// Start health check HTTP server
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	// HTTP surface: /health only (pcap-processor is primarily a NATS
+	// consumer with no other API surface). Registered on both listeners —
+	// see StartDualListeners below for why there are two.
+	healthHandler := func(w http.ResponseWriter, r *http.Request) {
 		if err := db.Ping(); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			fmt.Fprintf(w, `{"status":"unhealthy","error":"database connection failed"}`)
@@ -79,19 +82,42 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, string(body))
-	})
-
-	server := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: mux,
 	}
 
-	go func() {
-		log.Printf("Health check server starting on port %s", cfg.Port)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to start health server: %v", err)
-		}
-	}()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", healthHandler)
+
+	probeMux := http.NewServeMux()
+	probeMux.HandleFunc("/health", healthHandler)
+
+	// M-14 fix: pcap-processor previously ran a single plaintext :8080
+	// server unconditionally and never started a :8443 mTLS listener, even
+	// when USE_MTLS was true. Under serviceMtls.enabled, monitoring-service's
+	// version aggregator and any S2S caller using PeerURL() reach every
+	// other backend on https://<svc>:8443 — pcap-processor answered
+	// "connection refused" there, showing as a permanently unreachable/
+	// degraded row on the About page despite the pod being healthy.
+	// StartDualListeners gives it the same shape every other backend uses:
+	// the real handler on :8443 under mTLS, plus a plaintext :8080 /health
+	// listener for kubelet probes (which can't present a client cert).
+	apiPort := cfg.Port
+	if cfg.UseMTLS {
+		apiPort = cfg.TLSPort
+	}
+	dlCfg := sharedhttp.DualListenerConfig{
+		APIHandler:   mux,
+		ProbeHandler: probeMux,
+		UseMTLS:      cfg.UseMTLS,
+		APIPort:      apiPort,
+		ProbePort:    cfg.Port,
+		CertPath:     cfg.ServiceCertPath,
+		KeyPath:      cfg.ServiceKeyPath,
+		CACertPath:   cfg.PlatformCACertPath,
+	}
+	servers, err := sharedhttp.StartDualListeners(dlCfg)
+	if err != nil {
+		log.Fatalf("Failed to start HTTP listeners: %v", err)
+	}
 
 	// Wait for interrupt signal
 	sigChan := make(chan os.Signal, 1)
@@ -105,10 +131,12 @@ func main() {
 		log.Printf("Error draining subscriptions: %v", err)
 	}
 
-	// Shutdown health server
-	log.Println("Shutting down health server...")
-	if err := server.Close(); err != nil {
-		log.Printf("Error shutting down health server: %v", err)
+	// Shutdown HTTP listeners
+	log.Println("Shutting down HTTP listeners...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := servers.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Error shutting down HTTP listeners: %v", err)
 	}
 
 	log.Println("Shutdown complete")

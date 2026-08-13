@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-08-13
+
+### Fixed
+
+- **UI data-consistency sweep: 30+ discrepancies fixed across every section**
+  (PRs–). A full-platform QA pass on a live install found the
+  Dashboard, Inventory, Risk & Compliance, Discovery, Remediation and Settings
+  pages disagreeing with each other because they read unreconciled sources of
+  truth. Highlights, by what a user saw:
+  - **A completed device interrogation no longer reports "0 assets /
+    fully materialized"** while the rest of the UI shows its results.
+    Interrogation results were processed twice into two discovery jobs (one an
+    orphan that stayed `queued` forever) and the honest-reporting block scored
+    the empty twin; the discovery job stamped by the executor is now reused,
+    job "Found" counts derive from what actually materialized, and the jobs
+    list shows which executor ran each job.
+  - **Dashboard "critical findings" now shows the same number the Findings
+    page shows.** It read inventory's crypto-risk rollup (0 critical) while
+    Findings/Posture read compliance findings (4 critical). The hero, tile and
+    lifecycle stage now read compliance-engine's severity counts. Config
+    totals, the PQC tile and "monitored assets" were likewise aligned to one
+    population each — pending-approval assets are excluded from "monitored,"
+    and unclassified crypto configs surface as "not yet assessed" instead of
+    being branded "on classical crypto".
+  - **Framework cards no longer say "0 controls" under a real score** (missing
+    controls join), and a framework with open findings can no longer preview
+    as "100% / 0 failing" without disclosure — cards now carry an
+    open-findings count; findings from published-but-unactivated frameworks
+    bucket under their real framework name instead of "Other / retired
+    controls".
+  - **The Posture control grid no longer silently drops findings** whose
+    subject is a certificate or crypto configuration (15 of 19 on the QA
+    tenant) — they roll into a labeled row and grid totals reconcile with the
+    scorecards; findings show object names instead of truncated UUIDs.
+  - **The certificate Ownership filter partitions the whole set** (an
+    "Unknown" option exists; no cert vanishes from all buckets), TLS/SSH
+    sub-lens counts match the rows shown, unassessed configs group as "Not
+    assessed" rather than "Strong," weak-crypto badges show *why* (e.g.
+    "Certificate missing SCTs"), CA certificates are credited with the
+    deployments of the leaves they issued instead of showing "Unassigned,"
+    and raw `/32` masks and `"QUIC v1 ()"` artifacts are gone.
+  - **Usage & Limits stops calling a zero cap "unlimited"** (only −1/absent
+    means no cap), platform-provided in-cluster agents no longer count against
+    the tenant's own sensor usage, and the features endpoint reports the true
+    active-framework count.
+  - **The About page no longer shows "Degraded" on a healthy install:**
+    pcap-processor and tenant-health-service ran with `USE_MTLS=true` but
+    never opened the :8443 mesh listener every other backend opens; both now
+    use the shared dual-listener bootstrap.
+  - **Notification bell titles are human** ("Discovery job completed", not
+    "[medium] job_completed") — producers' composed titles were being dropped
+    in the NATS→HTTP conversion; sensor drawer labels per-interval vs total
+    discoveries honestly; the Command Center fleet tile includes device agents
+    so it can't contradict the Sensors & Agents header.
+
+- **Asset drawer: hostname no longer wraps mid-name.** The identity block shared
+  a row with the drawer's action buttons, leaving it a narrow column in a 500px
+  drawer — any real FQDN broke across lines. Actions now sit on their own row
+  above the identity block, which gets the full drawer width.
+- **Active Scan on an asset now confirms it started.** The drawer button
+  dispatched the scan job correctly, but the work happens asynchronously in the
+  discovery pipeline, so nothing in the drawer changed and the click read as a
+  no-op. It now raises a success (or failure) toast, matching Discovery →
+  Active Scan.
+
 ## [0.5.7] - 2026-08-13
 
 ### Security

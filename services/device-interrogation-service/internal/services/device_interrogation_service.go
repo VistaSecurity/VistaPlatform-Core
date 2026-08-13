@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
@@ -151,6 +152,15 @@ func (s *DeviceInterrogationService) InterrogateDevice(
 		); err != nil {
 			fmt.Printf("Warning: failed to create discovery finding: %v\n", err)
 		}
+	}
+
+	// Persist the identity the interrogator observed (vendor/model/firmware/
+	// serial) back onto the device row. Without this the finding carries it
+	// (see "device_identity" above) but the Devices page — which reads straight
+	// off `devices` — keeps showing "—" for firmware forever, even after a
+	// successful interrogation that plainly reported one (L-7).
+	if result.DeviceIdentity != nil {
+		s.updateDeviceIdentity(ctx, tenantID, deviceID, result.DeviceIdentity)
 	}
 
 	s.updateDeviceInterrogationTime(ctx, tenantID, deviceID)
@@ -360,6 +370,31 @@ func (s *DeviceInterrogationService) updateDeviceInterrogationTime(ctx context.C
 	`
 	_ = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
 		_, e := tx.ExecContext(ctx, query, deviceID, tenantID)
+		return e
+	})
+}
+
+// updateDeviceIdentity writes the vendor/model/firmware/serial an interrogation
+// observed back onto the device row, under the resolved tenantID (devices is
+// RLS-scoped). Only non-empty fields are set — an interrogator that doesn't
+// populate a given field must not blank out a value a prior run recorded.
+func (s *DeviceInterrogationService) updateDeviceIdentity(ctx context.Context, tenantID, deviceID uuid.UUID, identity *di.DeviceIdentity) {
+	setClauses, args := deviceIdentitySetClauses(identity.Vendor, identity.Model, identity.FirmwareVersion, identity.SerialNumber, 1)
+	if len(setClauses) == 0 {
+		return
+	}
+	setClauses = append(setClauses, "updated_at = NOW()")
+	argIdx := len(args) + 1
+
+	//nolint:gosec // intentional — placeholder concatenation only; values are parameterized via args slice
+	query := fmt.Sprintf(
+		"UPDATE devices SET %s WHERE id = $%d AND tenant_id = $%d",
+		strings.Join(setClauses, ", "), argIdx, argIdx+1,
+	)
+	args = append(args, deviceID, tenantID)
+
+	_ = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
+		_, e := tx.ExecContext(ctx, query, args...)
 		return e
 	})
 }

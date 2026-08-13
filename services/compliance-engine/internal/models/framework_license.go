@@ -82,13 +82,22 @@ type LicensedFrameworkResponse struct {
 // tenant_framework_scores rollup (ADR-0014) and are present for EVERY published
 // framework — activated or not — so a card can show a preview score before the
 // tenant activates. They are nil until the evaluation engine has produced a rollup.
+//
+// ControlsFailing is severity-weighted (frameworkScore/statusForWorstSeverity):
+// a control whose worst active finding is Low severity scores as passing, so
+// ControlsFailing can be lower than the number of controls that actually carry
+// an open finding. OpenFindingsControls reports that raw count — any control
+// with at least one ACTIVE, non-suppressed finding regardless of severity, the
+// same definition GetFindingsByControl uses — so the UI never claims "0
+// failing" while findings are genuinely open (#H-4/#M-15).
 type AvailableFrameworkResponse struct {
-	PlatformFramework *PlatformFramework `json:"platform_framework"`
-	IsLicensed        bool               `json:"is_licensed"`
-	IsPlatformDefault bool               `json:"is_platform_default"`
-	PreviewScore      *int               `json:"preview_score,omitempty"`
-	ControlsPassing   *int               `json:"controls_passing,omitempty"`
-	ControlsFailing   *int               `json:"controls_failing,omitempty"`
+	PlatformFramework    *PlatformFramework `json:"platform_framework"`
+	IsLicensed           bool               `json:"is_licensed"`
+	IsPlatformDefault    bool               `json:"is_platform_default"`
+	PreviewScore         *int               `json:"preview_score,omitempty"`
+	ControlsPassing      *int               `json:"controls_passing,omitempty"`
+	ControlsFailing      *int               `json:"controls_failing,omitempty"`
+	OpenFindingsControls *int               `json:"open_findings_controls,omitempty"`
 }
 
 // DefaultFrameworkResponse represents the tenant's default framework

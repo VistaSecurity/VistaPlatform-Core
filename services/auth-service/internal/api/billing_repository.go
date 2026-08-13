@@ -196,8 +196,17 @@ func (r *billingRepository) GetRealtimeCounts(ctx context.Context, tenantID uuid
 	// is global). Tenant is known, so all three counts run inside one WithTenantTx;
 	// errors are best-effort ignored as before.
 	_ = shareddatabase.WithTenantTx(ctx, r.db, tenantID, func(tx *sql.Tx) error {
-		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sensors WHERE tenant_id = $1 AND deleted_at IS NULL`, tenantID).Scan(&sensors)
-		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND deleted_at IS NULL`, tenantID).Scan(&assets)
+		// Platform-provided sensors (the in-cluster Platform Discovery Sensor and
+		// Platform Device Interrogation Agent, registered by cluster-sensor-service
+		// / device-interrogation-service — see admin_sensors.go's IsPlatformSensor
+		// and system_sensor_health.go) are NOT tenant-purchased capacity and must
+		// not count against the tenant's sensor usage/limit. platform='platform'
+		// is the same signature the admin Fleet view uses to flag them.
+		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sensors WHERE tenant_id = $1 AND deleted_at IS NULL AND platform != 'platform'`, tenantID).Scan(&sensors)
+		// Match inventory-service's definition of a tenant-visible asset
+		// (asset_query_builder.go defaults to asset_status = 'monitoring') so
+		// usage here doesn't count assets still sitting in pending_approval.
+		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND deleted_at IS NULL AND asset_status = 'monitoring'`, tenantID).Scan(&assets)
 		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE tenant_id = $1 AND deleted_at IS NULL`, tenantID).Scan(&users)
 		return nil
 	})

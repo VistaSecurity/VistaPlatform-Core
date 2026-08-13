@@ -3306,6 +3306,7 @@ components:
         - finding_count
         - affected_assets
         - severity_counts
+        - target_kind
       properties:
         control_id: { type: string, format: uuid }
         control_name: { type: string }
@@ -3317,6 +3318,15 @@ components:
           description: Worst severity present in the group.
         finding_count: { type: integer }
         affected_assets: { type: integer, description: COUNT(DISTINCT asset_id) in the group. }
+        target_kind:
+          type: string
+          enum: [asset, certificate, configuration, mixed]
+          description: >
+            What affected_assets is actually counting. "asset" when every finding in
+            the group targets a network asset, "certificate" / "configuration" when
+            every finding targets that other kind (compliance_findings.asset_type),
+            "mixed" otherwise — lets the UI say "N certificates" instead of always
+            "N assets".
         severity_counts:
           $ref: "#/components/schemas/SeverityCounts"
     FindingsByControlResponse:
@@ -3343,6 +3353,7 @@ components:
         - resolved_findings
         - suppressed_findings
         - resurfaced_findings
+        - severity_counts
       properties:
         total_findings:
           type: integer
@@ -3362,6 +3373,14 @@ components:
           type: integer
         resurfaced_findings:
           type: integer
+        severity_counts:
+          allOf:
+            - $ref: "#/components/schemas/SeverityCounts"
+          description: >-
+            ACTIVE findings by severity, tenant-wide (no control-join, no
+            limit) — read off the same materialized compliance_findings table
+            as the Findings page, so a dashboard tile built from
+            severity_counts.critical agrees with the Findings page.
     FindingListResponse:
       type: object
       additionalProperties: false
@@ -3894,7 +3913,7 @@ components:
     FrameworkStatusItem:
       type: object
       additionalProperties: false
-      required: [id, name, code, version, compliance_percent, controls_total, controls_passing, controls_failing, is_default]
+      required: [id, name, code, version, compliance_percent, controls_total, controls_passing, controls_failing, open_findings_controls, is_default]
       properties:
         id:
           type: string
@@ -3912,6 +3931,14 @@ components:
           type: integer
         controls_failing:
           type: integer
+        open_findings_controls:
+          type: integer
+          description: >-
+            Controls with at least one ACTIVE, non-suppressed finding of any
+            severity. controls_failing is severity-weighted (a control whose
+            worst finding is Low scores as passing), so this raw count can be
+            higher — it's the same "has an open exposure" definition
+            /findings/by-control uses.
         is_default:
           type: boolean
     FrameworkContextStatus:
@@ -4373,6 +4400,16 @@ components:
           type: integer
           nullable: true
           description: Failing control count behind preview_score (null until scored).
+        open_findings_controls:
+          type: integer
+          nullable: true
+          description: >-
+            Controls with at least one ACTIVE, non-suppressed finding of any
+            severity. controls_failing is severity-weighted (a control whose
+            worst finding is Low scores as passing), so this raw count can be
+            higher — it's the same "has an open exposure" definition
+            /findings/by-control uses. Null until scored, same as
+            controls_failing.
 
     DefaultFrameworkDescriptor:
       type: object

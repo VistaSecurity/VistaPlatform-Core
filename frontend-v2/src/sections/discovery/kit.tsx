@@ -46,6 +46,42 @@ export function sensorOnline(status?: string | null, lastHeartbeat?: string | nu
   return Number.isFinite(age) && age < OFFLINE_AFTER_MS;
 }
 
+// Cloud-sourced devices (AWS/Azure/GCP resources such as a CloudFront
+// distribution or a KMS key) are created with discovery_method 'cloud_api' by
+// the cloud discovery service. They carry no SSH/HTTPS management credentials
+// and are not network-reachable the way an F5/Palo Alto/UniFi appliance is —
+// clicking Interrogate or Test connection on one fails with "Device has no
+// credentials configured" (device-interrogation-service/internal/handlers/
+// devices.go's errNoDeviceCredentials). L-7: the Devices page uses this to
+// disable those buttons and show a "Cloud" origin chip instead of letting them
+// look clickable and then fail.
+export function isCloudSourced(d: { discovery_method?: string | null }): boolean {
+  return (d.discovery_method || '').toLowerCase() === 'cloud_api';
+}
+
+export interface FleetMember {
+  status?: string | null;
+  last_heartbeat?: string | null;
+}
+
+/** Count of `rows` that `sensorOnline` considers online. */
+export function onlineCount(rows: FleetMember[]): number {
+  return rows.filter((r) => sensorOnline(r.status, r.last_heartbeat)).length;
+}
+
+/**
+ * Combined online/total across sensors AND discovery agents (M-13). The
+ * Command Center "Sensors online" tile used to count sensor-manager rows
+ * only, while the Sensors & Agents page header counts both fleets — a device
+ * agent going offline never moved the tile, which stayed all-green. Both
+ * surfaces now read the same combined number.
+ */
+export function combinedFleetHealth(sensors: FleetMember[], agents: FleetMember[]): { online: number; total: number; offline: number } {
+  const online = onlineCount(sensors) + onlineCount(agents);
+  const total = sensors.length + agents.length;
+  return { online, total, offline: total - online };
+}
+
 export function relTime(iso?: string | null): string {
   if (!iso) return 'never';
   const mins = (Date.now() - new Date(iso).getTime()) / 60000;

@@ -101,7 +101,12 @@ export function JobsPage() {
                   <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>{relTime(j.started_at || j.created_at)}</div>
                 </div>
                 <CellTxt v={j.device_name || j.integration_name} />
-                <CellMono v={j.cloud_provider || j.device_type || (j.integration_name ? 'cloud' : null)} c="var(--app-t3)" />
+                <div style={{ minWidth: 0 }}>
+                  <CellMono v={j.cloud_provider || j.device_type || (j.integration_name ? 'cloud' : null)} c="var(--app-t3)" />
+                  {j.executor && (
+                    <div className="mono" style={{ fontSize: 10, color: 'var(--app-t3)', marginTop: 1 }}>{j.executor}</div>
+                  )}
+                </div>
                 <CellMono right v={j.assets_discovered ?? '—'} />
                 <CellMono right v={durationFmt(j.duration_seconds)} c="var(--app-t3)" />
                 <span style={{ textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 5, justifyContent: 'flex-end', fontSize: 11.5, fontWeight: 600, color: m.c }}>

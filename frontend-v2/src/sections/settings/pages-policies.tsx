@@ -218,6 +218,17 @@ export function FrameworksPage({ meta }: { meta: SettingsNavItem }) {
           )}
         </div>
 
+        {/* A control can carry an open finding and still score as "passing" — the
+            weighted score only fails a control on Medium+ severity. Surface the raw
+            open-finding count so a 100%/"0 failing" framework isn't read as nothing
+            was found when something was, just not severe enough to move the score. */}
+        {!!f.open_findings_controls && f.open_findings_controls > (f.controls_failing ?? 0) && (
+          <div style={{ fontSize: 11, color: 'var(--app-t3)', display: 'flex', alignItems: 'center', gap: 5 }}>
+            <Icon name="info" size={12} />
+            {f.open_findings_controls} control{f.open_findings_controls !== 1 ? 's' : ''} with open findings (below scoring severity)
+          </div>
+        )}
+
         {/* Bottom row: action buttons */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, paddingTop: 2, borderTop: '1px solid var(--app-border)' }}>
           {isActive ? (

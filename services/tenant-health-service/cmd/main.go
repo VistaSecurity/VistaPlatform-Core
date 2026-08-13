@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -17,8 +18,10 @@ import (
 	"github.com/vistasecurity/vistaplatform/services/tenant-health-service/internal/repository"
 	"github.com/vistasecurity/vistaplatform/services/tenant-health-service/internal/service"
 	"github.com/vistasecurity/vistaplatform/services/tenant-health-service/internal/subscribers"
+	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
+	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 )
 
 func main() {
@@ -106,12 +109,44 @@ func main() {
 		port = "8080" // Default port
 	}
 
-	go func() {
-		logrus.Infof("Tenant Health Service starting on port %s", port)
-		if err := router.Run(":" + port); err != nil {
-			logrus.Fatalf("Failed to run server: %v", err)
-		}
-	}()
+	// mTLS configuration (M-14: tenant-health-service previously never read
+	// these and always called router.Run() on plaintext :8080 regardless of
+	// USE_MTLS, so under serviceMtls.enabled it never started a :8443
+	// listener like every other backend. monitoring-service's version
+	// aggregator and any S2S caller using PeerURL() reach peers on
+	// https://<svc>:8443 under mTLS — this service answered "connection
+	// refused" there, reporting as unreachable/degraded on the About page
+	// despite being healthy, and made it unreachable to S2S callers.
+	useMTLS := sharedconfig.GetEnvAsBool("USE_MTLS", true)
+	tlsPort := sharedconfig.GetEnv("TLS_PORT", "8443")
+	serviceCertPath := sharedconfig.GetEnv("SERVICE_CERT_PATH", "/app/certs/server-cert.pem")
+	serviceKeyPath := sharedconfig.GetEnv("SERVICE_KEY_PATH", "/app/certs/server-key.pem")
+	platformCACertPath := sharedconfig.GetEnv("PLATFORM_CA_CERT_PATH", "/app/certs/platform-ca-cert.pem")
+
+	// Probe-only router for the plaintext :8080 listener kubelet uses (it
+	// can't present a client cert). Only /health — same handler the main
+	// router already serves unauthenticated, kept on a separate gin.Engine
+	// so the plaintext port never exposes the platform-admin API surface.
+	probeRouter := gin.New()
+	probeRouter.GET("/health", healthHandlers.HealthCheck)
+
+	apiPort := port
+	if useMTLS {
+		apiPort = tlsPort
+	}
+	servers, err := sharedhttp.StartDualListeners(sharedhttp.DualListenerConfig{
+		APIHandler:   router,
+		ProbeHandler: probeRouter,
+		UseMTLS:      useMTLS,
+		APIPort:      apiPort,
+		ProbePort:    port,
+		CertPath:     serviceCertPath,
+		KeyPath:      serviceKeyPath,
+		CACertPath:   platformCACertPath,
+	})
+	if err != nil {
+		logrus.Fatalf("Failed to start HTTP listeners: %v", err)
+	}
 
 	// Wait for interrupt signal to gracefully shutdown
 	quit := make(chan os.Signal, 1)
@@ -127,6 +162,13 @@ func main() {
 	}
 	if natsClient != nil {
 		natsClient.Close()
+	}
+
+	// Shutdown HTTP listeners
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	if err := servers.Shutdown(shutdownCtx); err != nil {
+		logrus.WithError(err).Warn("Error shutting down HTTP listeners")
 	}
 
 	logrus.Info("Tenant health service stopped")

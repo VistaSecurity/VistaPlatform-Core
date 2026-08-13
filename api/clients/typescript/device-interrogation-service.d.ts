@@ -1177,6 +1177,18 @@ export interface components {
             created_at: string;
             /** Format: date-time */
             updated_at: string;
+            /**
+             * Format: uuid
+             * @description device_jobs.agent_id. Absent means the in-cluster platform agent
+             *     executed the job rather than a named device agent.
+             */
+            agent_id?: string;
+            /**
+             * @description Human-readable resolution of agent_id: "Platform Agent" when no
+             *     device agent was assigned, otherwise the executing device agent's
+             *     name (or "Device Agent" if it has none).
+             */
+            executor: string;
         };
         Last24hStats: {
             completed: number;

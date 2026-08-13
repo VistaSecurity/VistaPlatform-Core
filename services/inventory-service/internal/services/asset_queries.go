@@ -275,20 +275,33 @@ func (s *AssetService) GetRiskSummary(tenantID uuid.UUID) (*models.RiskSummary, 
 	//
 	// critical_findings is deliberately a different unit: it counts high-severity
 	// *implementations*, not assets, which is why it is computed separately.
+	//
+	// asset_status = 'monitoring' (M-3): a pending-approval asset is not yet part
+	// of inventory — every Inventory lens excludes it via the same default filter
+	// (buildAssetListWhereAndHaving), and the Approvals banner/tile is the
+	// dedicated surface for surfacing it. Counting it here made "8 monitored
+	// assets" on the Dashboard/Posture disagree with "7" everywhere else. The
+	// same filter is applied to total_crypto/critical_findings so a crypto
+	// configuration on a still-pending asset doesn't inflate "Configs" either —
+	// keeping risk/summary's whole payload scoped to the one universe of assets
+	// it claims to be monitoring (M-1: this is also the scope crypto-configurations
+	// and the PQC classifier now use, see crypto_implementation_service.go and
+	// pqc_readiness.go).
 	criticalMin, _ := models.RiskBandMin("Critical")
 	query := fmt.Sprintf(`
 		WITH asset_risk AS (
 			SELECT a.id, COALESCE(MAX(ci.risk_score), 0) AS score
 			FROM network_assets a
 			LEFT JOIN crypto_implementations ci ON a.id = ci.asset_id AND ci.deleted_at IS NULL
-			WHERE a.tenant_id = $1 AND a.deleted_at IS NULL
+			WHERE a.tenant_id = $1 AND a.deleted_at IS NULL AND a.asset_status = 'monitoring'
 			GROUP BY a.id
 		)
 		SELECT
 			(SELECT COUNT(*) FROM asset_risk) AS total_assets,
 			(SELECT COUNT(*) FROM crypto_implementations ci
 			   JOIN network_assets a ON a.id = ci.asset_id
-			  WHERE ci.tenant_id = $1 AND ci.deleted_at IS NULL AND a.deleted_at IS NULL) AS total_crypto,
+			  WHERE ci.tenant_id = $1 AND ci.deleted_at IS NULL AND a.deleted_at IS NULL
+			    AND a.asset_status = 'monitoring') AS total_crypto,
 			(SELECT COUNT(*) FROM asset_risk WHERE %s) AS high_risk,
 			(SELECT COUNT(*) FROM asset_risk WHERE %s) AS medium_risk,
 			(SELECT COUNT(*) FROM asset_risk WHERE %s) AS low_risk,
@@ -296,6 +309,7 @@ func (s *AssetService) GetRiskSummary(tenantID uuid.UUID) (*models.RiskSummary, 
 			(SELECT COUNT(*) FROM crypto_implementations ci
 			   JOIN network_assets a ON a.id = ci.asset_id
 			  WHERE ci.tenant_id = $1 AND ci.deleted_at IS NULL AND a.deleted_at IS NULL
+			    AND a.asset_status = 'monitoring'
 			    AND ci.risk_score >= %d) AS critical_findings
 	`,
 		models.MustRiskAtLeastSQL("score", "High"), // high AND above, so Critical is included

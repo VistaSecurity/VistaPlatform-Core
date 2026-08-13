@@ -175,12 +175,27 @@ func checkFeatureAccess(ctx context.Context, resolver entitlements.Resolver, ten
 	return true, nil
 }
 
-// GetComplianceFrameworkUsage returns (current_subscriptions, limit) for
-// the compliance_frameworks_max gate. Excludes the auto-licensed Best
-// Practices framework and every other zero-cost framework (FreeFrameworkCodes)
-// from the current count.
+// GetComplianceFrameworkUsage returns (current_active_licenses, limit) for
+// the tenant-facing compliance_frameworks usage figure (GET
+// /tenant/features's limits.compliance_frameworks).
+//
+// current is every active platform_framework license the tenant holds —
+// including the auto-licensed Best Practices framework and the other
+// zero-cost Core frameworks — because this field's job is to answer "how
+// many frameworks does this tenant have active", the same question
+// /frameworks/licenses answers. It deliberately does NOT use
+// countActiveFrameworkSubscriptions, which excludes free frameworks because
+// THAT count feeds cap enforcement (CheckComplianceFrameworkCountLimit) where
+// free activations must never consume paid cap. Conflating the two here
+// previously reported current:0 for a tenant with 3 active free-framework
+// licenses, which is honest about cap-consumption but not about what the
+// tenant actually has.
+//
+// limit is the compliance_frameworks_max entitlement (paid cap only, e.g. 0
+// on Community/Free) — unchanged, and deliberately NOT the total-active
+// count's ceiling.
 func (s *LimitEnforcementService) GetComplianceFrameworkUsage(tenantID uuid.UUID) (current int, limit *int, err error) {
-	current, err = s.countActiveFrameworkSubscriptions(tenantID)
+	current, err = s.countAllActiveFrameworkLicenses(tenantID)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -390,6 +405,19 @@ func (s *LimitEnforcementService) countActiveFrameworkSubscriptions(tenantID uui
 		  AND COALESCE(pf.is_platform_default, false) = false
 		  AND pf.code <> ALL($2)
 	`, tenantID, pq.Array(FreeFrameworkCodes))
+}
+
+// countAllActiveFrameworkLicenses counts every active platform framework
+// license the tenant holds, free or paid — the tenant-truth figure surfaced
+// by GetComplianceFrameworkUsage's `current`. Do NOT use this for cap
+// enforcement; see countActiveFrameworkSubscriptions and CMP-6.
+func (s *LimitEnforcementService) countAllActiveFrameworkLicenses(tenantID uuid.UUID) (int, error) {
+	return s.countTenantScoped(tenantID, "active framework licenses", `
+		SELECT COUNT(*)
+		FROM tenant_framework_licenses
+		WHERE tenant_id = $1
+		  AND subscription_status = 'active'
+	`, tenantID)
 }
 
 func (s *LimitEnforcementService) tenantHasTier(tenantID uuid.UUID) (bool, error) {

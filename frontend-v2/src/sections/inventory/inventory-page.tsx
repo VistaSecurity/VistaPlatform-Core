@@ -11,6 +11,10 @@ import { AssetDrawer, CertDrawer, ConfigDrawer, KeyDrawer, type Certificate, typ
 import { AssetFormModal } from './asset-form-modal';
 import { CertificateUploadModal } from './certificate-upload-modal';
 import { StaleRowActions, StaleBulkBar } from './bulk-actions';
+import {
+  type Strength, STRENGTH_META, STRENGTH_OPTS, ENV_OPTS, RISK_OPTS, configStrength,
+  segmentForAsset, stripInetMask, stripEmptyParens, keyAlgorithmLabel,
+} from './lens-helpers';
 
 // Inventory — lens-based view. One backend dataset reshaped by angle. The active
 // lens comes from the URL (`?lens=`); the switcher lives in the LEFT SIDEBAR.
@@ -88,12 +92,18 @@ function useKeys(enabled: boolean) {
   });
 }
 
-function useConfigs(page: number, search: string, enabled: boolean) {
+// protocol is passed straight to the server (?protocol=TLS / ?protocol=SSH —
+// the repeated-param convention the API accepts an array for) so the
+// TLS/SSH sub-lenses filter and paginate over the WHOLE matching set, not
+// just whatever protocols happen to land on the current 50-row page (#H-7).
+// Every ingestion path writes protocol as uppercase "TLS"/"SSH", matching
+// InventoryLens.protocol exactly, so this is a safe exact-match filter.
+function useConfigs(page: number, search: string, enabled: boolean, protocol?: string) {
   return useQuery({
-    queryKey: ['inventory', 'configs', page, search],
+    queryKey: ['inventory', 'configs', page, search, protocol ?? ''],
     queryFn: async () => {
       const { data, error } = await clients.inventory.GET('/crypto-configurations', {
-        params: { query: { page, page_size: PAGE_SIZE, ...(search ? { search } : {}) } },
+        params: { query: { page, page_size: PAGE_SIZE, ...(search ? { search } : {}), ...(protocol ? { protocol: [protocol] } : {}) } },
       });
       if (error || !data) throw new Error('Failed to load crypto configurations');
       return data;
@@ -162,25 +172,6 @@ function daysAgo(iso?: string | null): string {
   const d = daysSince(iso);
   return d == null ? '—' : d < 1 ? 'today' : `${d}d ago`;
 }
-
-// ---- client-side filters (mock parity: Environment / Risk / Strength) ----
-// Server lists support only search, so these cut the current page ( tracks
-// pushing staleness/status — and eventually these — into query params).
-type Strength = 'Weak' | 'Acceptable' | 'Strong';
-const STRENGTH_META: Record<Strength, { color: string; icon: string }> = {
-  Weak: { color: 'var(--danger)', icon: 'shield-x' },
-  Acceptable: { color: 'var(--warn)', icon: 'shield' },
-  Strong: { color: 'var(--ok)', icon: 'shield-check' },
-};
-function strengthOfLevel(level: string): Strength {
-  const l = level.toLowerCase();
-  if (l === 'critical' || l === 'high') return 'Weak';
-  if (l === 'medium') return 'Acceptable';
-  return 'Strong';
-}
-const ENV_OPTS = ['All', 'Production', 'Staging', 'Development', 'Test'];
-const RISK_OPTS = ['All', 'Critical', 'High', 'Medium', 'Low', 'Informational'];
-const STRENGTH_OPTS = ['All', 'Weak', 'Acceptable', 'Strong'];
 
 function downloadCsv(filename: string, header: string[], rows: (string | number | null | undefined)[][]) {
   const esc = (v: string | number | null | undefined) => {
@@ -267,10 +258,14 @@ export function InventoryPage() {
     ? new Date(Math.floor(Date.now() / 3600000) * 3600000 - STALE_DAYS * 86400000).toISOString()
     : undefined;
   const assetsQ = useAssets(page, search, def.anchor === 'asset' && !isConn, staleCutoff);
-  const certOwnership = fCertOwner === '3rd-party' ? 'third_party' : fCertOwner === 'Internal' ? 'internal' : undefined;
+  // #H-6: "Unknown" must be offered — the server already partitions the whole
+  // set into internal / third_party / unknown (see effectiveOwnershipExpr in
+  // certificate_service.go), but the filter dropdown previously only exposed
+  // 3rd-party/Internal, silently hiding whichever certs matched neither.
+  const certOwnership = fCertOwner === '3rd-party' ? 'third_party' : fCertOwner === 'Internal' ? 'internal' : fCertOwner === 'Unknown' ? 'unknown' : undefined;
   const certsQ = useCerts(page, search, isCert, isCert ? certOwnership : undefined);
   const keysQ = useKeys(isKey);
-  const configsQ = useConfigs(page, search, isConfig);
+  const configsQ = useConfigs(page, search, isConfig, def.protocol);
   const connsQ = useConnections(page, search, isConn);
   const segsQ = useSegments(lens === 'network');
   const q = isConn ? connsQ : isCert ? certsQ : isKey ? keysQ : isConfig ? configsQ : assetsQ;
@@ -292,11 +287,12 @@ export function InventoryPage() {
       .some((v) => (v || '').toLowerCase().includes(needle)));
   }
 
+  // Protocol is now filtered server-side (passed to useConfigs above) so the
+  // count/pagination cover the whole matching set, not just the current page.
   let configs = configsQ.data?.crypto_implementations ?? [];
-  if (def.protocol) configs = configs.filter((c) => (c.protocol || '').toUpperCase() === def.protocol);
   if (fEnv !== 'All') configs = configs.filter((c) => (c.asset_environment || '').toLowerCase() === fEnv.toLowerCase());
   if (fRisk !== 'All') configs = configs.filter((c) => levelOfC(c as CryptoConfig) === fRisk);
-  if (fStrength !== 'All') configs = configs.filter((c) => strengthOfLevel(levelOfC(c as CryptoConfig)) === fStrength);
+  if (fStrength !== 'All') configs = configs.filter((c) => configStrength(c as CryptoConfig) === fStrength);
 
   const conns = connsQ.data?.connections ?? [];
   // Server already applied the staleness cut for the stale lens.
@@ -314,8 +310,8 @@ export function InventoryPage() {
     const stamp = new Date().toISOString().slice(0, 10);
     if (isConn) {
       downloadCsv(`vista-inventory-connections-${stamp}.csv`,
-        ['destination', 'port', 'source', 'protocol', 'version', 'cipher_suite', 'crypto_strength', 'cert_not_after', 'last_seen_at'],
-        conns.map((cn) => [cn.dest_hostname || cn.dest_ip, cn.dest_port, cn.source_hostname || cn.source_ip, cn.protocol, cn.protocol_version, cn.cipher_suite, cn.crypto_strength, cn.cert_not_after, cn.last_seen_at]));
+        ['destination', 'port', 'source', 'protocol', 'version', 'cipher_suite', 'crypto_strength', 'weak_reasons', 'cert_not_after', 'last_seen_at'],
+        conns.map((cn) => [cn.dest_hostname ?? stripInetMask(cn.dest_ip), cn.dest_port, cn.source_hostname ?? stripInetMask(cn.source_ip), cn.protocol, stripEmptyParens(cn.protocol_version), cn.cipher_suite, cn.crypto_strength, ((cn as unknown as Record<string, unknown>).weak_reasons as string[] | undefined)?.join('; '), cn.cert_not_after, cn.last_seen_at]));
     } else if (isCert) {
       downloadCsv(`vista-inventory-certificates-${stamp}.csv`,
         ['common_name', 'subject', 'issuer', 'key_algorithm', 'key_size', 'signature_algorithm', 'not_after', 'days_remaining', 'state', 'data_source', 'deployment_count'],
@@ -352,16 +348,24 @@ export function InventoryPage() {
             const strength = cn.crypto_strength || 'unknown';
             const tone = strength === 'good' ? 'var(--ok)' : strength === 'weak' ? 'var(--danger)' : 'var(--warn)';
             const certDays = cn.cert_not_after ? -(daysSince(cn.cert_not_after) ?? 0) : null;
+            // weak_reasons is where the ACTUAL reason for a "weak" badge lives
+            // (e.g. "Certificate missing SCTs — not logged in CT") — the badge
+            // alone doesn't say why a TLS 1.3 connection with a strong cipher
+            // suite is flagged (#M-5). Surfaced as a tooltip on the badge.
+            const weakReasons = (cn as unknown as Record<string, unknown>).weak_reasons as string[] | undefined;
+            const reasonsTitle = weakReasons && weakReasons.length > 0 ? weakReasons.join('; ') : undefined;
             return (
               <div key={cn.id} className="row-hover" style={{ display: 'grid', gridTemplateColumns: CONN_GRID, gap: 12, padding: '0 16px', minHeight: 46, alignItems: 'center', borderBottom: '1px solid var(--app-border)' }}>
                 <LevelDot level={strength === 'weak' ? 'High' : strength === 'good' ? 'Informational' : 'Medium'} />
                 <div style={{ minWidth: 0 }}>
-                  <div className="mono" style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cn.dest_hostname || cn.dest_ip}:{cn.dest_port}</div>
-                  <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>from {cn.source_hostname || cn.source_ip}</div>
+                  <div className="mono" style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cn.dest_hostname ?? stripInetMask(cn.dest_ip)}:{cn.dest_port}</div>
+                  <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>from {cn.source_hostname ?? stripInetMask(cn.source_ip)}</div>
                 </div>
-                <Mono v={`${cn.protocol || ''} ${cn.protocol_version || ''}`.trim()} />
+                <Mono v={`${cn.protocol || ''} ${stripEmptyParens(cn.protocol_version) || ''}`.trim()} />
                 <Mono v={cn.cipher_suite} small />
-                <span style={{ fontSize: 11, fontWeight: 600, color: tone, background: `color-mix(in srgb, ${tone} 11%, transparent)`, borderRadius: 40, padding: '2px 9px', justifySelf: 'start', textTransform: 'capitalize' }}>{strength}</span>
+                <span title={reasonsTitle} style={{ fontSize: 11, fontWeight: 600, color: tone, background: `color-mix(in srgb, ${tone} 11%, transparent)`, borderRadius: 40, padding: '2px 9px', justifySelf: 'start', textTransform: 'capitalize', display: 'inline-flex', alignItems: 'center', gap: 4, cursor: reasonsTitle ? 'help' : 'default' }}>
+                  {strength}{reasonsTitle && <Icon name="info" size={10} />}
+                </span>
                 <Mono v={certDays == null ? '—' : cn.cert_is_expired ? 'expired' : `${certDays}d`} />
                 <Mono v={daysAgo(cn.last_seen_at)} small />
                 <div style={{ justifySelf: 'end' }}>
@@ -414,7 +418,7 @@ export function InventoryPage() {
       // Pre-seed with all known segments so empty ones still render
       for (const seg of segs) byName.set(seg.name as string, []);
       for (const a of assets) {
-        const k = a.network_segment_name || 'Unsegmented';
+        const k = a.network_segment_name ?? segmentForAsset(a.ip_address, segs) ?? 'Unsegmented';
         if (!byName.has(k)) byName.set(k, []);
         byName.get(k)!.push(a);
       }
@@ -456,11 +460,13 @@ export function InventoryPage() {
     }
 
     if (lens === 'configuration') {
-      // mock parity: configs grouped by strength (Weak / Acceptable / Strong)
+      // mock parity: configs grouped by strength (Weak / Acceptable / Strong),
+      // plus a "Not assessed" group for configs with no resolved risk_score
+      // (#M-4) so they're never counted as "Strong".
       if (configs.length === 0) return <Center icon="inbox" tone="var(--app-t3)" title="Nothing here" message={search || hasFilters ? 'Nothing matches your filters.' : 'No crypto configurations yet.'} />;
-      const order: Strength[] = ['Weak', 'Acceptable', 'Strong'];
+      const order: Strength[] = ['Weak', 'Acceptable', 'Strong', 'Not assessed'];
       return order
-        .map((st) => ({ st, list: configs.filter((c) => strengthOfLevel(levelOfC(c as CryptoConfig)) === st) }))
+        .map((st) => ({ st, list: configs.filter((c) => configStrength(c as CryptoConfig) === st) }))
         .filter((g) => g.list.length > 0)
         .map((g) => <StrengthGroup key={g.st} strength={g.st} configs={g.list as CryptoConfig[]} openConfig={openConfig} defaultOpen={g.st === 'Weak'} />);
     }
@@ -512,7 +518,7 @@ export function InventoryPage() {
             style={{ width: '100%', height: 33, padding: '0 12px 0 33px', borderRadius: 9, border: '1px solid var(--app-border2)', background: 'var(--app-panel2)', color: 'var(--app-t1)', fontSize: 13, outline: 'none' }} />
         </div>
         {isCert && (
-          <FilterSelect label="Ownership" value={fCertOwner} onChange={setFCertOwner} options={['All', '3rd-party', 'Internal']} />
+          <FilterSelect label="Ownership" value={fCertOwner} onChange={setFCertOwner} options={['All', '3rd-party', 'Internal', 'Unknown']} />
         )}
         {!isConn && !isCert && !isKey && (
           <>
@@ -729,7 +735,7 @@ function ConfigChildRow({ config, onClick, showHost }: { config: CryptoConfig; o
     <button onClick={onClick} className="row-hover" style={{ display: 'grid', gridTemplateColumns: CHILD_GRID, gap: 12, alignItems: 'center', width: '100%', padding: '0 16px 0 40px', minHeight: 38, border: 'none', borderBottom: '1px solid var(--app-border)', background: 'transparent', cursor: 'pointer', textAlign: 'left' }}>
       <LevelDot level={level} />
       <div style={{ minWidth: 0 }}>
-        <div className="mono" style={{ fontSize: 12.5, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.protocol as string} · {c.protocol_version as string}</div>
+        <div className="mono" style={{ fontSize: 12.5, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{[c.protocol as string, c.protocol_version as string].filter(Boolean).join(' · ') || '—'}</div>
         <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{showHost ? (c.asset_hostname as string) || '' : (c.cipher_suite as string) || ''}</div>
       </div>
       <Mono v={[(c.signature_algorithm as string) || (c.key_exchange_algorithm as string), c.key_size ? `${c.key_size}b` : ''].filter(Boolean).join(' · ')} />
@@ -817,7 +823,7 @@ function KeyRow({ keyItem, onClick }: { keyItem: Key; onClick: () => void }) {
   const expTone = expDays == null ? 'var(--app-t3)' : expDays < 0 ? 'var(--danger)' : expDays < 90 ? 'var(--warn-strong)' : 'var(--ok)';
   const deployCount = typeof k.deployment_count === 'number' ? k.deployment_count : null;
   const sizeLabel = k.size_bits ? `${k.size_bits}-bit` : (k.curve as string) || '';
-  const algo = [k.algorithm_ref as string, sizeLabel].filter(Boolean).join(' · ') || '—';
+  const algo = keyAlgorithmLabel(k.algorithm_ref as string, k.key_type as string, sizeLabel);
   const title = [k.key_type as string, sizeLabel].filter(Boolean).join(' · ') || (k.material_type as string) || '—';
   return (
     <div className="row-hover" onClick={onClick} style={{ display: 'grid', gridTemplateColumns: KEY_GRID, gap: 12, padding: '0 16px', minHeight: 46, alignItems: 'center', borderBottom: '1px solid var(--app-border)', cursor: 'pointer' }}>

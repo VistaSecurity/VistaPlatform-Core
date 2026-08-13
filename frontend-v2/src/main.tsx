@@ -3,7 +3,9 @@ import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router';
 import { QueryClientProvider } from '@tanstack/react-query';
 import toast, { Toaster } from 'react-hot-toast';
-import { AuthProvider } from '@vistasecurity/primitives/auth';
+import { AuthProvider, createAuthClient, tokenManager } from '@vistasecurity/primitives/auth';
+import { createSessionExpiryHandler } from '@vistasecurity/primitives/shared';
+import { setSessionExpiredHandler } from '@vistasecurity/api-contract';
 import { queryClient } from './lib/query-client';
 import { ErrorBoundary } from './app/error-boundary';
 import App from './App';
@@ -15,6 +17,25 @@ const notifier = {
   success: (m: string) => toast.success(m),
   error: (m: string) => toast.error(m),
 };
+
+// Session-timeout handling: when any API call 401s mid-session, try one silent
+// refresh-token exchange (concurrent 401s share it); if the refresh token is
+// dead too, clear the session signal and land on /login, which explains the
+// expiry via ?reason=. Auth-flow endpoints are exempt inside the middleware, so
+// a wrong password never triggers this.
+const sessionAuthClient = createAuthClient();
+setSessionExpiredHandler(
+  createSessionExpiryHandler({
+    hasSession: () => tokenManager.hasToken(),
+    refresh: () => sessionAuthClient.refresh(),
+    onSessionExpired: () => {
+      tokenManager.clearTokens();
+      if (window.location.pathname !== '/login') {
+        window.location.assign('/login?reason=session-expired');
+      }
+    },
+  }),
+);
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

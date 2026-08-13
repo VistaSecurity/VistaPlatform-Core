@@ -179,6 +179,58 @@ func (s *CryptoRisksService) GetSummary(tenantID uuid.UUID) (*CryptoRisksSummary
 			return fmt.Errorf("failed to count medium risks: %w", err)
 		}
 
+		// Informational: any implementation with a positive risk_score that
+		// doesn't match one of the Critical/High protocol/cipher/hash/key-size
+		// signatures or the Medium cert-expiry window. This predicate must stay
+		// IDENTICAL to ListRisks' `severity=informational` filter (L-9a): before
+		// this fix, Informational was never assigned (always the Go zero value),
+		// so /crypto-risks/summary reported all-zero severity buckets tenant-wide
+		// while /crypto-risks (list, unfiltered) returned non-zero rows —
+		// classifyRisk defaults unmatched-but-risk_score>0 rows to
+		// "informational", which the summary had no query for at all.
+		informationalQuery := `
+		SELECT COUNT(DISTINCT ci.asset_id)
+		FROM crypto_implementations ci
+		JOIN network_assets na ON ci.asset_id = na.id AND na.deleted_at IS NULL
+		WHERE ci.tenant_id = $1
+		  AND ci.deleted_at IS NULL
+		  AND ci.risk_score IS NOT NULL AND ci.risk_score > 0
+		  AND NOT (
+			UPPER(ci.protocol_version) IN ('SSLV2', 'SSLV3', 'SSL2', 'SSL3')
+			OR UPPER(ci.protocol_version) LIKE '%TLS%1.0%'
+			OR UPPER(ci.protocol_version) LIKE '%TLS%1%0%'
+			OR UPPER(ci.protocol_version) LIKE '%TLS%1.1%'
+			OR UPPER(ci.protocol_version) LIKE '%TLS%1%1%'
+			OR (ci.protocol_version IS NOT NULL AND (
+				ci.protocol_version = '1.0'
+				OR ci.protocol_version = '1.1'
+				OR ci.protocol_version LIKE '1.0%'
+				OR ci.protocol_version LIKE '1.1%'
+				OR ci.protocol_version LIKE '%1.0'
+				OR ci.protocol_version LIKE '%1.1'
+			))
+			OR UPPER(ci.cipher_suite) LIKE '%RC4%'
+			OR UPPER(ci.cipher_suite) LIKE '%DES%'
+			OR UPPER(ci.cipher_suite) LIKE '%NULL%'
+			OR UPPER(ci.cipher_suite) LIKE '%EXPORT%'
+			OR UPPER(ci.hash_algorithm) LIKE '%MD5%'
+			OR UPPER(ci.hash_algorithm) LIKE '%MD4%'
+			OR UPPER(ci.hash_algorithm) LIKE '%SHA1%'
+			OR UPPER(ci.hash_algorithm) LIKE '%SHA-1%'
+			OR ` + anyWeakKeySizeSQL("ci.key_size", "ci.key_exchange_algorithm") + `
+			OR EXISTS (
+				SELECT 1 FROM crypto_implementation_certificates cic
+				JOIN certificates c ON cic.certificate_id = c.id
+				WHERE cic.crypto_implementation_id = ci.id
+				  AND c.not_after IS NOT NULL
+				  AND c.not_after BETWEEN NOW() AND NOW() + INTERVAL '30 days'
+			)
+		  )
+	`
+		if err := tx.Get(&summary.Informational, informationalQuery, tenantID); err != nil {
+			return fmt.Errorf("failed to count informational risks: %w", err)
+		}
+
 		// Total affected assets (any risk)
 		totalQuery := `
 		SELECT COUNT(DISTINCT ci.asset_id)

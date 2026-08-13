@@ -323,23 +323,32 @@ func (w *PlatformAgentWorker) executeDeviceInterrogation(ctx context.Context, jo
 	// Use system user ID for device-initiated jobs
 	systemUserID := uuid.MustParse("00000000-0000-0000-0000-000000000000")
 
-	// Interrogate device using device interrogation service
-	// This will create a discovery job and return findings
-	_, err = w.deviceInterrogation.InterrogateDevice(ctx, job.TenantID, systemUserID, *job.DeviceID)
+	// Interrogate device using device interrogation service. This creates its own
+	// discovery job and materializes the targets and findings there.
+	discoveryJobID, err := w.deviceInterrogation.InterrogateDevice(ctx, job.TenantID, systemUserID, *job.DeviceID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to interrogate device: %w", err)
 	}
 
-	// For now, return success result
-	// The actual assets will be created through the discovery integration
+	// Hand that discovery job forward. Without this the result processor cannot
+	// tell that the results are already materialized and creates a second,
+	// never-executed discovery job — see RecordDiscoveryJob.
+	if err := w.jobQueue.RecordDiscoveryJob(ctx, job.ID, discoveryJobID); err != nil {
+		log.Printf("Warning: failed to record discovery job %s on device job %s: %v", discoveryJobID, job.ID, err)
+	}
+
+	// The assets themselves are not carried in this payload — they were written
+	// straight to the discovery job above. The processing log reconciles against
+	// that job so the counts describe what actually landed.
 	result := &models.JobResult{
 		JobID:       job.ID,
 		Success:     true,
 		Assets:      []models.DiscoveredAsset{}, // Assets created via discovery integration
 		CompletedAt: time.Now(),
 		Metadata: map[string]interface{}{
-			"device_id":   device.ID.String(),
-			"device_type": device.DeviceType,
+			"device_id":        device.ID.String(),
+			"device_type":      device.DeviceType,
+			"discovery_job_id": discoveryJobID.String(),
 		},
 	}
 

@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/shared/events"
-	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 
 	"github.com/gin-gonic/gin"
@@ -38,59 +37,24 @@ func NewMiddleware(config *Config) *Middleware {
 		config = DefaultConfig()
 	}
 
-	// Check if mTLS should be used (from config or environment)
-	useMTLS := config.UseMTLS
-	if !useMTLS {
-		// Check environment variable as fallback
-		if os.Getenv("USE_MTLS") == "true" {
-			useMTLS = true
-		}
-	}
-
-	// Get mTLS certificate paths (from config or environment)
-	clientCertPath := config.ClientCertPath
-	if clientCertPath == "" {
-		clientCertPath = os.Getenv("CLIENT_CERT_PATH")
-	}
-	clientKeyPath := config.ClientKeyPath
-	if clientKeyPath == "" {
-		clientKeyPath = os.Getenv("CLIENT_KEY_PATH")
-	}
-	platformCACertPath := config.PlatformCACertPath
-	if platformCACertPath == "" {
-		platformCACertPath = os.Getenv("PLATFORM_CA_CERT_PATH")
-	}
-
-	// Update URL to use HTTPS and port 8443 if mTLS is enabled
-	auditServiceURL := config.AuditServiceURL
-	if useMTLS {
-		// Convert http:// to https:// and :8080 to :8443
-		auditServiceURL = strings.Replace(auditServiceURL, "http://", "https://", 1)
-		auditServiceURL = strings.Replace(auditServiceURL, ":8080", ":8443", 1)
-	}
-
 	// Create HMAC signer for internal service auth
 	var signer *serviceauth.Signer
 	if secret := os.Getenv("INTERNAL_AUTH_SECRET"); secret != "" {
 		signer = serviceauth.NewSigner(secret)
 	}
 
-	var client *Client
-	if useMTLS && clientCertPath != "" && clientKeyPath != "" && platformCACertPath != "" {
-		// Create mTLS client
-		httpClient, err := sharedhttp.NewMTLSClient(clientCertPath, clientKeyPath, platformCACertPath)
-		if err != nil {
-			// Fallback to standard client if mTLS setup fails
-			client = NewClientWithSigner(auditServiceURL, config.Timeout, config.RetryAttempts, signer)
-		} else {
-			// Override timeout
-			httpClient.Timeout = config.Timeout
-			client = NewClientWithHTTPClientAndSigner(auditServiceURL, httpClient, config.RetryAttempts, signer)
-		}
-	} else {
-		// Use standard HTTP client
-		client = NewClientWithSigner(auditServiceURL, config.Timeout, config.RetryAttempts, signer)
-	}
+	// Transport selection (mTLS vs plaintext, and the matching peer URL) is
+	// shared with NewJobLogger — see NewClientForEnv.
+	client := NewClientForEnv(
+		config.AuditServiceURL,
+		config.Timeout,
+		config.RetryAttempts,
+		signer,
+		config.UseMTLS,
+		config.ClientCertPath,
+		config.ClientKeyPath,
+		config.PlatformCACertPath,
+	)
 
 	mw := &Middleware{
 		config:   config,

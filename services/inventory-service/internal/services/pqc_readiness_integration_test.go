@@ -211,3 +211,34 @@ func TestIntegration_PQC_ProgressAndSummaryAgree(t *testing.T) {
 		t.Errorf("headline counters sum to %d, want total %d", sum, progress.TotalImplementations)
 	}
 }
+
+// M-1: an implementation whose asset is still pending_approval must not count
+// toward Total. Before this fix the classifier read crypto_implementations
+// with no asset join at all, so it disagreed with crypto-configurations and
+// risk/summary's total_crypto — both of which already required a live,
+// monitoring-status asset — for the same tenant.
+func TestIntegration_PQC_PendingApprovalAssetExcludedFromTotal(t *testing.T) {
+	f := newPQCFixture(t)
+	f.addImpl(t, map[string]string{"key_exchange": "ECDHE", "symmetric": "AES256"}) // on the fixture's monitoring asset
+
+	pending := uuid.New()
+	if _, err := f.db.Exec(`
+		INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+		VALUES ($1,$2,'pending.example.test','server','pending_approval',NOW(),NOW(),NOW(),NOW())`, pending, f.tenant); err != nil {
+		t.Fatalf("insert pending asset: %v", err)
+	}
+	implID := uuid.New()
+	if _, err := f.db.Exec(`
+		INSERT INTO crypto_implementations (id, tenant_id, asset_id, protocol, discovery_method, created_at, updated_at)
+		VALUES ($1,$2,$3,'TLS','passive',NOW(),NOW())`, implID, f.tenant, pending); err != nil {
+		t.Fatalf("insert implementation on pending asset: %v", err)
+	}
+
+	got, err := classifyTenantImplementationsPQC(f.db, f.tenant)
+	if err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if got.Total != 1 {
+		t.Errorf("Total = %d, want 1 (the pending-approval asset's implementation must be excluded)", got.Total)
+	}
+}

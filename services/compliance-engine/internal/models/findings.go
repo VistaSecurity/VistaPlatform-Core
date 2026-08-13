@@ -115,4 +115,8 @@ type Asset struct {
 	AssetType   string                 `json:"asset_type" db:"asset_type"`
 	Environment *string                `json:"environment" db:"environment"`
 	Tags        map[string]interface{} `json:"tags" db:"tags"`
+	// DisplayName is set when the finding's target isn't a network asset (a
+	// certificate's common name, or a crypto-configuration's protocol/version
+	// label) — the object has no hostname/IP of its own to fall back on.
+	DisplayName *string `json:"display_name,omitempty" db:"-"`
 }

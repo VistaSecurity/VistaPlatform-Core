@@ -18,8 +18,8 @@ import { Icon, RiskChip, LevelDot, Pill, byLevel, worstLevel, LEVELS, riskColor,
 import { AssetDrawer } from '../inventory/drawers';
 import { GroupBand, EmptyState, CatChip, ColLabel, Loading } from './bits';
 import { WorkflowActions } from './workflow';
-import { useBatchEvaluate, useCryptoRisks, useFindingsList, useFrameworkContext } from './queries';
-import { assetOf, catOf, isOpenWf, issueLabel, sevLevel, sevRank, wfOf, WF_COLOR, WF_LABEL, type BatchControl, type ComplianceFinding, type CryptoRisk } from './model';
+import { useAllPublishedFrameworks, useBatchEvaluate, useCryptoRisks, useFindingsList, useFrameworkContext, useFrameworkControlNames } from './queries';
+import { assetOf, catOf, isOpenWf, issueLabel, sevLevel, sevRank, targetLabel, wfOf, WF_COLOR, WF_LABEL, type ComplianceFinding, type ControlRef, type CryptoRisk } from './model';
 import { DEFAULT_FINDINGS_LENS } from './lenses';
 
 const GRID = '12px minmax(0,1.7fr) 118px minmax(0,1.5fr) minmax(0,1.25fr) 122px';
@@ -27,10 +27,10 @@ const SEVS: RiskLevel[] = [...LEVELS];
 
 type Sel =
   | { kind: 'crypto'; risk: CryptoRisk }
-  | { kind: 'compliance'; finding: ComplianceFinding; fw: string; control?: BatchControl }
+  | { kind: 'compliance'; finding: ComplianceFinding; fw: string; control?: ControlRef }
   | null;
 
-interface ControlMeta { fwId: string; fwName: string; control: BatchControl }
+interface ControlMeta { fwId: string; fwName: string; control: ControlRef }
 
 interface Group {
   key: string;
@@ -79,6 +79,16 @@ export function FindingsPage() {
   const frameworkIds = useMemo(() => (ctxQ.data?.status?.frameworks ?? []).map((f) => f.id), [ctxQ.data]);
   const batchQ = useBatchEvaluate(complianceLens ? frameworkIds : undefined);
   const listQ = useFindingsList(complianceLens);
+  // #H-4b: batch-evaluate only covers actively-licensed frameworks, so a finding
+  // against a published-but-unlicensed framework has no entry in controlMeta and
+  // falls into "Other / retired controls" even though the framework is real.
+  // Resolve the gap from the license-independent published-framework detail.
+  const publishedQ = useAllPublishedFrameworks(complianceLens);
+  const unlicensedFrameworkIds = useMemo(() => {
+    const covered = new Set((batchQ.data?.results ?? []).map((r) => r.framework_id));
+    return (publishedQ.data ?? []).map((f) => f.id).filter((id) => !covered.has(id));
+  }, [publishedQ.data, batchQ.data]);
+  const fallbackControlsQ = useFrameworkControlNames(unlicensedFrameworkIds);
 
   // ---- crypto-risk stream, filtered ----
   const allRisks = useMemo(() => risksQ.data?.risks ?? [], [risksQ.data]);
@@ -137,13 +147,21 @@ export function FindingsPage() {
     return fwFilter === 'All' ? rs : rs.filter((r) => r.framework_id === fwFilter);
   }, [batchQ.data, fwFilter]);
 
-  // control_id → framework + control meta (from the evaluation structure)
+  // control_id → framework + control meta (from the evaluation structure, plus
+  // the #H-4b fallback for published-but-unlicensed frameworks batch-evaluate skips)
   const controlMeta = useMemo(() => {
     const m = new Map<string, ControlMeta>();
     (batchQ.data?.results ?? []).forEach((r) =>
       (r.control_breakdown ?? []).forEach((c) => m.set(c.id, { fwId: r.framework_id, fwName: r.framework_name, control: c })));
+    fallbackControlsQ.forEach((q) => {
+      if (!q.data) return;
+      q.data.controls.forEach((c) => {
+        if (m.has(c.id)) return; // batch-evaluate's richer entry wins if present
+        m.set(c.id, { fwId: q.data.fwId, fwName: q.data.fwName, control: c });
+      });
+    });
     return m;
-  }, [batchQ.data]);
+  }, [batchQ.data, fallbackControlsQ]);
 
   // persisted findings (workflow + assignee + joined asset), segment-filtered
   const complianceAll = useMemo(() => {
@@ -237,7 +255,7 @@ export function FindingsPage() {
 
   // ---- compliance finding row (framework lens) — mock row shape: host,
   // summary, then workflow status + framework pill in the last column ----
-  const CRow = ({ f, fw, control }: { f: ComplianceFinding; fw: string; control?: BatchControl }) => {
+  const CRow = ({ f, fw, control }: { f: ComplianceFinding; fw: string; control?: ControlRef }) => {
     const on = sel?.kind === 'compliance' && sel.finding.id === f.id;
     const a = assetOf(f);
     const wf = wfOf(f);
@@ -246,7 +264,7 @@ export function FindingsPage() {
         style={{ display: 'grid', gridTemplateColumns: '12px minmax(0,1.4fr) minmax(0,2.2fr) 160px', gap: 12, width: '100%', alignItems: 'center', padding: '0 18px 0 36px', minHeight: 44, border: 'none', borderBottom: '1px solid var(--app-border)', borderLeft: on ? '2px solid var(--accent)' : '2px solid transparent', background: on ? 'color-mix(in srgb, var(--accent) 8%, transparent)' : 'transparent', cursor: 'pointer', textAlign: 'left' }}>
         <LevelDot level={sevLevel(f.severity)} />
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.hostname || a.ip_address || f.asset_id.slice(0, 8)}</div>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{targetLabel(f)}</div>
           <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{[a.environment, a.asset_type].filter(Boolean).join(' · ') || f.asset_type}</div>
         </div>
         <span style={{ fontSize: 12.5, color: 'var(--app-t2)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.summary}</span>
@@ -286,6 +304,11 @@ export function FindingsPage() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       {/* toolbar */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '13px 24px', borderBottom: '1px solid var(--app-border)', flexWrap: 'wrap' }}>
+        {/* L-5: this lens's scope, so a count that jumps switching lenses reads as
+            "different data set" rather than "broken counting". */}
+        <Pill color={complianceLens ? 'var(--accent)' : 'var(--neutral)'} style={{ fontSize: 10, padding: '3px 8px' }}>
+          {complianceLens ? 'Compliance findings' : 'Crypto findings'}
+        </Pill>
         {!complianceLens && ([['open', 'Open'], ['crit', 'Critical + High']] as const).map(([k, l]) => (
           <button key={k} onClick={() => setSeg(k)} className={'chip' + (seg === k ? ' active' : '')}>
             {l}<span className="mono" style={{ marginLeft: 5, opacity: 0.7 }}>{counts[k]}</span>
@@ -315,6 +338,17 @@ export function FindingsPage() {
           </select>
         )}
         <button className="ui-btn sm" onClick={onExport}><Icon name="download" size={13} />Export</button>
+      </div>
+
+      {/* L-6: device-interrogation / discovery findings never appear on this page —
+          they live in Discovery, and nothing here says so. Minimal pointer rather
+          than an ingestion pipeline. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 24px', borderBottom: '1px solid var(--app-border)', fontSize: 12, color: 'var(--app-t3)', background: 'var(--app-panel2)' }}>
+        <Icon name="info" size={13} style={{ flex: 'none' }} />
+        <span>Looking for findings from a device interrogation or discovery job? Those live in Discovery, not here.</span>
+        <button className="ui-btn sm" style={{ marginLeft: 'auto' }} onClick={() => nav('/discovery/jobs')}>
+          Go to Discovery Jobs<Icon name="arrow-up-right" size={13} />
+        </button>
       </div>
 
       {lens === 'control' ? (
@@ -349,13 +383,12 @@ export function FindingsPage() {
                         {openCtrl === ct.id && expandable && (
                           <div style={{ padding: '0 16px 12px 50px', animation: 'fadeUp .2s ease both' }}>
                             {ctFindings.slice(0, 8).map((f) => {
-                              const a = assetOf(f);
                               const wf = wfOf(f);
                               return (
                                 <button key={f.id} onClick={() => setSel({ kind: 'compliance', finding: f, fw: g.framework_name, control: ct })} className="row-hover" style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', padding: '6px 8px', border: 'none', background: 'transparent', cursor: 'pointer', borderRadius: 7, textAlign: 'left' }}>
                                   <LevelDot level={sevLevel(f.severity)} />
                                   <span className="mono" style={{ fontSize: 11.5, color: 'var(--app-t2)', flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                    {a.hostname || a.ip_address || f.asset_id.slice(0, 8)} · {f.summary}
+                                    {targetLabel(f)} · {f.summary}
                                   </span>
                                   <span style={{ fontSize: 10, color: WF_COLOR[wf] ?? 'var(--app-t3)', fontWeight: 600, flex: 'none' }}>{WF_LABEL[wf] ?? wf}</span>
                                   <Icon name="chevron-right" size={13} style={{ color: 'var(--app-t3)' }} />
@@ -461,7 +494,7 @@ function Inspector({ sel, allRisks, onClose, onSelect, onOpenAsset, go }: {
   const title = isCrypto ? issueLabel(risk!) : sel.finding.summary;
   const host = isCrypto
     ? (risk!.asset_hostname || risk!.asset_ip_address || '—')
-    : (fAsset!.hostname || fAsset!.ip_address || sel.finding.asset_id.slice(0, 8));
+    : targetLabel(sel.finding);
   const assetId = isCrypto ? risk!.asset_id : sel.finding.asset_id;
   const sameIssue = isCrypto ? allRisks.filter((f) => f.issue_type === risk!.issue_type) : [];
 

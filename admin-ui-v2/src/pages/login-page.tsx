@@ -46,10 +46,12 @@ export function LoginPage() {
   const providersQ = useStaffSsoProviders();
   const ssoProviders = providersQ.data ?? [];
 
-  // Surface a failed SSO round-trip (?error= from the callback redirect).
+  // Surface a failed SSO round-trip (?error= from the callback redirect) or a
+  // session-expiry redirect (?reason= from the 401 handler in main.tsx).
   useEffect(() => {
     const e = params.get('error');
     if (e) setError(SSO_ERRORS[e] ?? 'Single sign-on failed. Please try again or use credentials.');
+    else if (params.get('reason') === 'session-expired') setError('Your session has expired. Please sign in again.');
   }, [params]);
 
   useEffect(() => {

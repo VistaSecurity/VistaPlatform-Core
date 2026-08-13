@@ -1602,6 +1602,11 @@ export interface components {
             finding_count: number;
             /** @description COUNT(DISTINCT asset_id) in the group. */
             affected_assets: number;
+            /**
+             * @description What affected_assets is actually counting. "asset" when every finding in the group targets a network asset, "certificate" / "configuration" when every finding targets that other kind (compliance_findings.asset_type), "mixed" otherwise — lets the UI say "N certificates" instead of always "N assets".
+             * @enum {string}
+             */
+            target_kind: "asset" | "certificate" | "configuration" | "mixed";
             severity_counts: components["schemas"]["SeverityCounts"];
         };
         /** @description Envelope for GET /findings/by-control — `{ "groups": [...] }`, ranked. */
@@ -1619,6 +1624,8 @@ export interface components {
             resolved_findings: number;
             suppressed_findings: number;
             resurfaced_findings: number;
+            /** @description ACTIVE findings by severity, tenant-wide (no control-join, no limit) — read off the same materialized compliance_findings table as the Findings page, so a dashboard tile built from severity_counts.critical agrees with the Findings page. */
+            severity_counts: components["schemas"]["SeverityCounts"];
         };
         /** @description CURRENT list envelope for GET /findings — `{ "findings": [...], "total": N, "page": P, "page_size": S }`. `total` is the unpaginated count. On an empty/nil result `findings` can serialize as JSON null, so it is typed as a nullable array. Each finding carries the joined `asset` object when the owning asset exists and is not deleted. */
         FindingListResponse: {
@@ -1875,6 +1882,8 @@ export interface components {
             controls_total: number;
             controls_passing: number;
             controls_failing: number;
+            /** @description Controls with at least one ACTIVE, non-suppressed finding of any severity. controls_failing is severity-weighted (a control whose worst finding is Low scores as passing), so this raw count can be higher — it's the same "has an open exposure" definition /findings/by-control uses. */
+            open_findings_controls: number;
             is_default: boolean;
         };
         FrameworkContextStatus: {
@@ -2090,6 +2099,8 @@ export interface components {
             controls_passing?: number | null;
             /** @description Failing control count behind preview_score (null until scored). */
             controls_failing?: number | null;
+            /** @description Controls with at least one ACTIVE, non-suppressed finding of any severity. controls_failing is severity-weighted (a control whose worst finding is Low scores as passing), so this raw count can be higher — it's the same "has an open exposure" definition /findings/by-control uses. Null until scored, same as controls_failing. */
+            open_findings_controls?: number | null;
         };
         DefaultFrameworkDescriptor: {
             /** Format: uuid */

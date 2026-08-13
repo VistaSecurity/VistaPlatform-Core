@@ -52,16 +52,24 @@ type FrameworkContextStatus struct {
 }
 
 // FrameworkStatusItem represents the compliance status for a single framework
+//
+// ControlsFailing is severity-weighted (frameworkScore/statusForWorstSeverity):
+// a control whose worst active finding is Low severity scores as passing, so
+// ControlsFailing can undercount versus /findings/by-control, which lists any
+// control with an open finding regardless of severity. OpenFindingsControls
+// reports that raw count so the Posture scorecard and the Findings page never
+// disagree about whether a control has an open exposure (#M-6).
 type FrameworkStatusItem struct {
-	ID                string `json:"id"`
-	Name              string `json:"name"`
-	Code              string `json:"code"`
-	Version           string `json:"version"`
-	CompliancePercent int    `json:"compliance_percent"`
-	ControlsTotal     int    `json:"controls_total"`
-	ControlsPassing   int    `json:"controls_passing"`
-	ControlsFailing   int    `json:"controls_failing"`
-	IsDefault         bool   `json:"is_default"`
+	ID                   string `json:"id"`
+	Name                 string `json:"name"`
+	Code                 string `json:"code"`
+	Version              string `json:"version"`
+	CompliancePercent    int    `json:"compliance_percent"`
+	ControlsTotal        int    `json:"controls_total"`
+	ControlsPassing      int    `json:"controls_passing"`
+	ControlsFailing      int    `json:"controls_failing"`
+	OpenFindingsControls int    `json:"open_findings_controls"`
+	IsDefault            bool   `json:"is_default"`
 }
 
 // FrameworkSubscriptionInfo contains tenant subscription information related to frameworks
@@ -160,17 +168,19 @@ func (s *FrameworkContextService) GetFrameworkContext(tenantID, userID uuid.UUID
 
 		// Calculate compliance score for this framework
 		score, controlsTotal, controlsPassing, controlsFailing := s.calculateFrameworkStats(tenantID, frameworkID)
+		openFindingsControls := s.countControlsWithOpenFindings(tenantID, frameworkID)
 
 		statusItems = append(statusItems, FrameworkStatusItem{
-			ID:                lic.PlatformFrameworkID,
-			Name:              lic.PlatformFramework.Name,
-			Code:              lic.PlatformFramework.Code,
-			Version:           lic.PlatformFramework.Version,
-			CompliancePercent: score,
-			ControlsTotal:     controlsTotal,
-			ControlsPassing:   controlsPassing,
-			ControlsFailing:   controlsFailing,
-			IsDefault:         lic.IsDefault,
+			ID:                   lic.PlatformFrameworkID,
+			Name:                 lic.PlatformFramework.Name,
+			Code:                 lic.PlatformFramework.Code,
+			Version:              lic.PlatformFramework.Version,
+			CompliancePercent:    score,
+			ControlsTotal:        controlsTotal,
+			ControlsPassing:      controlsPassing,
+			ControlsFailing:      controlsFailing,
+			OpenFindingsControls: openFindingsControls,
+			IsDefault:            lic.IsDefault,
 		})
 
 		totalScore += float64(score)
@@ -191,6 +201,36 @@ func (s *FrameworkContextService) GetFrameworkContext(tenantID, userID uuid.UUID
 	response.Subscription = s.getSubscriptionInfo(tenantID, len(licensed))
 
 	return response, nil
+}
+
+// countControlsWithOpenFindings returns how many of a framework's controls
+// carry at least one ACTIVE, non-suppressed finding, regardless of severity —
+// the same "has an open exposure" definition FindingsService.GetFindingsByControl
+// uses. calculateFrameworkStats's ControlsFailing is severity-weighted (a
+// control whose worst finding is Low scores as passing), so it can read lower
+// than this raw count. Exposed separately rather than folded into
+// ControlsFailing so the scoring model stays the single documented one
+// (framework_score.go) while the UI still gets a truthful "has findings" signal.
+func (s *FrameworkContextService) countControlsWithOpenFindings(tenantID, frameworkID uuid.UUID) int {
+	var count int
+	// RLS: compliance_findings — must run inside a tenant tx with app.tenant_id
+	// set, or the plain pool returns zero rows silently (no error).
+	err := shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRow(`
+			SELECT COUNT(DISTINCT cf.control_id)
+			FROM compliance_findings cf
+			JOIN platform_framework_controls pfc ON pfc.id = cf.control_id
+			WHERE cf.tenant_id = $1
+			  AND pfc.framework_id = $2
+			  AND cf.detection_state = 'ACTIVE'
+			  AND (cf.workflow_status <> 'SUPPRESSED' OR cf.workflow_status IS NULL)
+		`, tenantID, frameworkID).Scan(&count)
+	})
+	if err != nil {
+		log.Printf("WARN: Failed to count controls with open findings for framework %s: %v", frameworkID, err)
+		return 0
+	}
+	return count
 }
 
 // calculateFrameworkStats calculates compliance statistics for a framework.

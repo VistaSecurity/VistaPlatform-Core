@@ -118,33 +118,34 @@ export function AssetDrawer({ assetId, seed, onOpenConfig, onClose, onEdit, acti
   return (
     <DrawerShell onClose={onClose} width={500} active={active} depth={depth}>
       <div style={{ padding: '18px 22px 16px', borderBottom: '1px solid var(--app-border)' }}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
-          <div style={{ display: 'flex', gap: 14, alignItems: 'center', minWidth: 0 }}>
-            <RiskGauge score={risk} level={riskLevel} size={68} label="" stroke={6} />
-            <div style={{ minWidth: 0 }}>
-              <div className="eyebrow-app">{(a.asset_type as string) || 'asset'}</div>
-              <h2 className="mono" style={{ margin: '4px 0 2px', fontSize: 16, fontWeight: 600, color: 'var(--app-t1)', wordBreak: 'break-all', lineHeight: 1.2 }}>{(a.hostname as string) || '—'}</h2>
-              <div className="mono" style={{ fontSize: 11.5, color: 'var(--app-t3)' }}>{(a.ip_address as string) || ''}{a.port ? ':' + a.port : ''}</div>
-            </div>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 'none' }}>
-            {detailQ.data && (a.deleted_at || a.asset_status === 'archived') && (
-              <RestoreAssetButton assetId={assetId} onDone={onClose} />
-            )}
-            {detailQ.data && !a.deleted_at && a.asset_status !== 'archived' && (
-              <ScanAssetButton assetId={assetId} />
-            )}
-            {onEdit && detailQ.data && (
-              <PermissionGate permission={TENANT_PERMISSIONS.assets.update}>
-                <button onClick={() => onEdit(detailQ.data!)} className="ui-btn sm" title="Edit asset" style={{ height: 28, padding: '0 9px' }}>
-                  <Icon name="sliders-horizontal" size={13} />Edit
-                </button>
-              </PermissionGate>
-            )}
-            {detailQ.data && !a.deleted_at && (
-              <DeleteAssetButton assetId={assetId} hostname={a.hostname as string} onDone={onClose} />
-            )}
-            <CloseBtn onClose={onClose} />
+        {/* Actions sit on their own row ABOVE the identity block: sharing a row
+            with the hostname left it a narrow column in a 500px drawer, so any
+            real FQDN wrapped mid-name. The identity block now gets full width. */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, flexWrap: 'wrap' }}>
+          {detailQ.data && (a.deleted_at || a.asset_status === 'archived') && (
+            <RestoreAssetButton assetId={assetId} onDone={onClose} />
+          )}
+          {detailQ.data && !a.deleted_at && a.asset_status !== 'archived' && (
+            <ScanAssetButton assetId={assetId} />
+          )}
+          {onEdit && detailQ.data && (
+            <PermissionGate permission={TENANT_PERMISSIONS.assets.update}>
+              <button onClick={() => onEdit(detailQ.data!)} className="ui-btn sm" title="Edit asset" style={{ height: 28, padding: '0 9px' }}>
+                <Icon name="sliders-horizontal" size={13} />Edit
+              </button>
+            </PermissionGate>
+          )}
+          {detailQ.data && !a.deleted_at && (
+            <DeleteAssetButton assetId={assetId} hostname={a.hostname as string} onDone={onClose} />
+          )}
+          <CloseBtn onClose={onClose} />
+        </div>
+        <div style={{ display: 'flex', gap: 14, alignItems: 'center', minWidth: 0, marginTop: 12 }}>
+          <RiskGauge score={risk} level={riskLevel} size={68} label="" stroke={6} />
+          <div style={{ minWidth: 0 }}>
+            <div className="eyebrow-app">{(a.asset_type as string) || 'asset'}</div>
+            <h2 className="mono" style={{ margin: '4px 0 2px', fontSize: 16, fontWeight: 600, color: 'var(--app-t1)', wordBreak: 'break-word', lineHeight: 1.25 }}>{(a.hostname as string) || '—'}</h2>
+            <div className="mono" style={{ fontSize: 11.5, color: 'var(--app-t3)' }}>{(a.ip_address as string) || ''}{a.port ? ':' + a.port : ''}</div>
           </div>
         </div>
         {tags.length > 0 && (

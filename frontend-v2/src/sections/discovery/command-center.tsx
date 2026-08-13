@@ -2,8 +2,8 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { Icon } from '../../components/ui';
-import { jobMeta, sensorOnline, relTime, PageWrap } from './kit';
-import { useSensors, useSensorStats, useDiscoveryCounts, useJobs, useJobStats, usePendingAssets } from './queries';
+import { jobMeta, sensorOnline, onlineCount, relTime, PageWrap } from './kit';
+import { useSensors, useSensorStats, useDiscoveryCounts, useDeviceAgents, useJobs, useJobStats, usePendingAssets } from './queries';
 import { DiscoverAssetsModal } from './discover-modal';
 import { ImportSpreadsheetModal } from './import-modal';
 
@@ -40,16 +40,24 @@ function PanelHead({ title, action, to }: { title: string; action: string; to: s
 export function CommandCenterPage() {
   const sensorsQ = useSensors();
   const statsQ = useSensorStats();
+  const agentsQ = useDeviceAgents();
   const countsQ = useDiscoveryCounts();
   const jobsQ = useJobs();
   const jobStatsQ = useJobStats();
   const pendingQ = usePendingAssets();
 
   const sensors = sensorsQ.data ?? [];
+  const agents = agentsQ.data ?? [];
   const counts = countsQ.data ?? {};
   const jobs = jobsQ.data?.jobs ?? [];
-  const total = statsQ.data?.total_sensors ?? sensors.length;
-  const online = statsQ.data?.active_sensors ?? sensors.filter((s) => sensorOnline(s.status, s.last_heartbeat)).length;
+  // Combined across BOTH fleets (M-13): the Sensors & Agents page header
+  // counts sensors + device agents, and this tile must not disagree — a
+  // device agent going offline used to leave "Sensors online" all-green
+  // because agents were excluded entirely.
+  const sensorTotal = statsQ.data?.total_sensors ?? sensors.length;
+  const sensorOnlineCount = statsQ.data?.active_sensors ?? onlineCount(sensors);
+  const total = sensorTotal + agents.length;
+  const online = sensorOnlineCount + onlineCount(agents);
   const offline = total - online;
   const running = jobStatsQ.data?.in_progress ?? 0;
   const failed = jobStatsQ.data?.failed ?? 0;
@@ -74,7 +82,7 @@ export function CommandCenterPage() {
       <ImportSpreadsheetModal open={importOpen} onClose={() => setImportOpen(false)} />
 
       <div className="fade-up" style={{ display: 'flex', gap: 14, marginBottom: 16 }}>
-        <StatCard label="Sensors online" val={dash(statsQ, `${online}/${total}`)} sub={offline > 0 ? `${offline} offline` : 'all healthy'} tone={offline > 0 ? 'var(--warn-strong)' : 'var(--ok)'} icon="radar" to="/discovery/sensors" />
+        <StatCard label="Fleet online" val={statsQ.isLoading || agentsQ.isLoading ? '…' : `${online}/${total}`} sub={offline > 0 ? `${offline} offline` : 'all healthy'} tone={offline > 0 ? 'var(--warn-strong)' : 'var(--ok)'} icon="radar" to="/discovery/sensors" />
         <StatCard label="Jobs running" val={dash(jobStatsQ, running)} sub="in progress" tone="var(--info)" icon="loader" to="/discovery/jobs" />
         <StatCard label="Failed jobs" val={dash(jobStatsQ, failed)} sub={failed > 0 ? 'need attention' : 'none failing'} tone={failed > 0 ? 'var(--danger)' : 'var(--app-t3)'} icon="x-circle" to="/discovery/logs" />
         <StatCard label="Pending approvals" val={dash(pendingQ, pending)} sub="awaiting review" tone="var(--info)" icon="inbox" to="/discovery/approvals" />

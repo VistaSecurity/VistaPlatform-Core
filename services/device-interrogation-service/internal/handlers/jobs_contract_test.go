@@ -191,10 +191,12 @@ func sampleJob() InterrogationJob {
 		AssetsDiscovered: &assets,
 		CreatedAt:        started,
 		UpdatedAt:        now,
+		Executor:         "Platform Agent",
 	}
 }
 
-// minimalJob leaves all omitempty fields unset (absent, not null).
+// minimalJob leaves all omitempty fields unset (absent, not null). Executor is
+// always populated by the repository (see executorLabel), so it is set here too.
 func minimalJob() InterrogationJob {
 	now := time.Now().UTC()
 	return InterrogationJob{
@@ -204,6 +206,7 @@ func minimalJob() InterrogationJob {
 		Status:    "pending",
 		CreatedAt: now,
 		UpdatedAt: now,
+		Executor:  "Platform Agent",
 	}
 }
 

@@ -367,6 +367,16 @@ type Certificate struct {
 	// via a correlated subquery so the frontend row can show a host count
 	// without expanding the row.
 	DeploymentCount *int `json:"deployment_count,omitempty"`
+	// Ownership is the EFFECTIVE ownership bucket used by the `?ownership=`
+	// list filter — the linked asset's asset_ownership when the cert is
+	// deployed, else the declared CertOwnership (manual uploads), else
+	// "unknown". Unlike CertOwnership (which is null unless explicitly
+	// declared at upload time), this is always populated so the list view and
+	// the filter agree on which of internal/third_party/unknown a cert falls
+	// into (#H-6: filter buckets summed to less than the unfiltered total
+	// because the list payload only ever showed the raw, mostly-null
+	// cert_ownership column). Populated by list queries only.
+	Ownership string `json:"ownership,omitempty" db:"-"`
 }
 
 // CertificateData represents certificate data for ingestion

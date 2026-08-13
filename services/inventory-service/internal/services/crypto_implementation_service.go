@@ -42,6 +42,13 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 
 	// Base query with JOIN to network_assets for asset information
 	// Also LEFT JOIN to certificates for additional context
+	//
+	// asset_status = 'monitoring' (M-1): matches the default scope every other
+	// asset-list endpoint uses (buildAssetListWhereAndHaving) and the scope
+	// risk/summary's total_crypto/critical_findings and the PQC classifier
+	// (pqc_readiness.go) now use — a crypto configuration on a still-pending
+	// asset should not inflate this count relative to the Dashboard/Remediation
+	// PQC surfaces reading the same underlying implementations.
 	query := `
 		SELECT
 			ci.id, ci.tenant_id, ci.asset_id, ci.protocol, ci.protocol_version, ci.cipher_suite,
@@ -57,7 +64,7 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 		FROM crypto_implementations ci
 		INNER JOIN network_assets a ON ci.asset_id = a.id
 		LEFT JOIN certificates c ON ci.certificate_id = c.id
-		WHERE ci.tenant_id = $1 AND ci.deleted_at IS NULL AND a.deleted_at IS NULL
+		WHERE ci.tenant_id = $1 AND ci.deleted_at IS NULL AND a.deleted_at IS NULL AND a.asset_status = 'monitoring'
 	`
 
 	args := []interface{}{tenantID}
@@ -148,7 +155,7 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 		FROM crypto_implementations ci
 		INNER JOIN network_assets a ON ci.asset_id = a.id
 		LEFT JOIN certificates c ON ci.certificate_id = c.id
-		WHERE ci.tenant_id = $1 AND ci.deleted_at IS NULL AND a.deleted_at IS NULL
+		WHERE ci.tenant_id = $1 AND ci.deleted_at IS NULL AND a.deleted_at IS NULL AND a.asset_status = 'monitoring'
 	` + whereClause
 
 	var total int

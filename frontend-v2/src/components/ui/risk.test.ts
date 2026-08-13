@@ -10,7 +10,7 @@
 // score "Medium" — and a score of 1-19 rendered "Informational", conflating
 // "assessed Low" with "not assessed" (score 0).
 import { describe, it, expect } from 'vitest';
-import { levelFromScore } from './risk';
+import { levelFromScore, LEVEL_MIN, LEVELS, type RiskLevel } from './risk';
 
 describe('levelFromScore', () => {
   it.each([
@@ -25,5 +25,18 @@ describe('levelFromScore', () => {
     [100, 'Critical'],
   ] as const)('bands score %i as %s', (score, expected) => {
     expect(levelFromScore(score)).toBe(expected);
+  });
+});
+
+// L-4: LEVEL_MIN is the shared constant a caption ("risk score ≥ N") should be
+// built from. Pin it against levelFromScore directly so the two can never
+// drift apart the way the hand-typed "≥ 60" dashboard caption once did.
+describe('LEVEL_MIN', () => {
+  it.each(LEVELS)('is the lowest score levelFromScore bands as %s', (level: RiskLevel) => {
+    const min = LEVEL_MIN[level];
+    expect(levelFromScore(min)).toBe(level);
+    if (min > 0) {
+      expect(levelFromScore(min - 1)).not.toBe(level);
+    }
   });
 });

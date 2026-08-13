@@ -74,11 +74,18 @@ func (s *NotificationSubscriber) handleNotification(ctx context.Context, msg *na
 
 // convertNotificationEventToRequest maps a NATS NotificationEvent to
 // the notification-service SendNotificationRequest model.
+//
+// e.Title used to be dropped on the floor here — SendNotificationRequest had
+// no Title field, so a properly-composed title (e.g. compliance-engine's
+// "Control noncompliant: PCI-3.4") never reached the bell. It was replaced by
+// delivery_service.go's unconditional "[severity] alert_type" fallback. Carry
+// it through now so a producer that composed a real title gets to use it.
 func convertNotificationEventToRequest(e *events.NotificationEvent) *models.SendNotificationRequest {
 	req := &models.SendNotificationRequest{
 		AlertSource:      e.AlertSource,
 		AlertType:        e.AlertType,
 		Severity:         e.Severity,
+		Title:            e.Title,
 		Message:          e.Message,
 		Metadata:         e.Metadata,
 		NotificationType: "alert",
@@ -87,16 +94,6 @@ func convertNotificationEventToRequest(e *events.NotificationEvent) *models.Send
 	if e.TenantID != uuid.Nil {
 		tid := e.TenantID
 		req.TenantID = &tid
-	}
-
-	// Propagate title from metadata if present
-	if e.Metadata != nil {
-		if title, ok := e.Metadata["title"]; ok {
-			if req.Metadata == nil {
-				req.Metadata = make(map[string]interface{})
-			}
-			req.Metadata["title"] = title
-		}
 	}
 
 	return req

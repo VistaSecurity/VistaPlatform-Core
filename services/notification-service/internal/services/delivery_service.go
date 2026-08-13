@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -486,6 +487,48 @@ func (ds *DeliveryService) sendSMS(config map[string]interface{}, req *models.Se
 	return fmt.Errorf("SMS delivery not yet implemented")
 }
 
+// knownAlertTitles maps a raw AlertType to the human headline shown in the
+// in-app bell when the producer didn't compose its own Title (see
+// humanizeAlertType). Add an entry here when a new machine-cased alert_type
+// starts showing up as its own title (M-8/L-3 QA finding, 2026-08).
+var knownAlertTitles = map[string]string{
+	"job_completed": "Discovery job completed",
+	"job_failed":    "Discovery job failed",
+	"new_findings":  "New discovery findings",
+	"test":          "Test notification",
+	"digest":        "Notification digest",
+}
+
+// humanizeAlertType turns a machine-cased AlertType ("job_completed") into a
+// human headline ("Job completed") when the producer supplied no Title.
+// Prefers the curated table above; falls back to title-casing the
+// underscore-joined string so an unrecognized future alert_type still reads
+// as words instead of an identifier.
+func humanizeAlertType(alertType string) string {
+	if t, ok := knownAlertTitles[alertType]; ok {
+		return t
+	}
+	words := strings.Fields(strings.ReplaceAll(alertType, "_", " "))
+	if len(words) == 0 {
+		return "Notification"
+	}
+	words[0] = strings.ToUpper(words[0][:1]) + words[0][1:]
+	return strings.Join(words, " ")
+}
+
+// resolveInAppTitle picks the in-app bell headline for a request: the
+// producer's own Title when it composed one (e.g. compliance-engine's
+// "Control noncompliant: PCI-3.4"), otherwise a humanized form of AlertType.
+// Severity is deliberately NOT folded into the title — it belongs in the
+// severity field/badge; baking it into the headline text is what produced
+// "[medium] job_completed" (M-8/L-3).
+func resolveInAppTitle(req *models.SendNotificationRequest) string {
+	if t := strings.TrimSpace(req.Title); t != "" {
+		return t
+	}
+	return humanizeAlertType(req.AlertType)
+}
+
 // sendInApp sends an in-app notification
 func (ds *DeliveryService) sendInApp(ctx context.Context, tenantID *uuid.UUID, req *models.SendNotificationRequest) error {
 	// Determine notification type
@@ -494,8 +537,7 @@ func (ds *DeliveryService) sendInApp(ctx context.Context, tenantID *uuid.UUID, r
 		notificationType = "alert"
 	}
 
-	// Create title from alert type
-	title := fmt.Sprintf("[%s] %s", req.Severity, req.AlertType)
+	title := resolveInAppTitle(req)
 
 	// Platform-scoped notifications land in the operator inbox
 	// (platform_in_app_notifications, no RLS — global table like the other

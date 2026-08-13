@@ -247,6 +247,24 @@ func (s *DiscoveryIntegrationService) MarkJobCompleted(ctx context.Context, jobI
 	return err
 }
 
+// discoveryNotificationTitle turns a discovery alertType into the headline
+// shown in the notification bell. Used to compose a human Title at the
+// producer instead of letting the raw machine string ("job_completed") reach
+// notification-service, where it used to be discarded entirely and replaced
+// with "[severity] alert_type" (M-8/L-3 QA finding, 2026-08).
+func discoveryNotificationTitle(alertType string) string {
+	switch alertType {
+	case "job_completed":
+		return "Discovery job completed"
+	case "job_failed":
+		return "Discovery job failed"
+	case "new_findings":
+		return "New discovery findings"
+	default:
+		return alertType
+	}
+}
+
 // SendDiscoveryNotification sends a notification to the unified notification service
 // for discovery events (job_completed, job_failed, new_findings, etc.).
 // It tries NATS first and falls back to HTTP if NATS is unavailable.
@@ -263,6 +281,7 @@ func (s *DiscoveryIntegrationService) SendDiscoveryNotification(
 	}
 	metadata["job_id"] = jobID.String()
 	metadata["alert_type"] = alertType
+	title := discoveryNotificationTitle(alertType)
 
 	// Try NATS first
 	if s.natsClient != nil && s.natsClient.IsConnected() {
@@ -272,7 +291,7 @@ func (s *DiscoveryIntegrationService) SendDiscoveryNotification(
 			AlertSource: "discovery",
 			AlertType:   alertType,
 			Severity:    "medium",
-			Title:       alertType,
+			Title:       title,
 			Message:     message,
 			Timestamp:   time.Now(),
 			Metadata:    metadata,
@@ -299,6 +318,7 @@ func (s *DiscoveryIntegrationService) SendDiscoveryNotification(
 		"alert_source":      "discovery",
 		"alert_type":        alertType,
 		"severity":          "medium",
+		"title":             title,
 		"message":           message,
 		"notification_type": "discovery",
 		"metadata":          metadata,

@@ -20,13 +20,13 @@ import { clients } from '../../lib/clients';
 import { Icon } from '../../components/ui';
 import {
   catOf, issueLabel, sevLevel, wfOf, WF_COLOR, WF_LABEL, WF_STATUSES,
-  type BatchControl, type ComplianceFinding, type CryptoRisk,
+  type ComplianceFinding, type ControlRef, type CryptoRisk,
 } from './model';
 import { useTenantUsers } from './queries';
 
 export type TicketTarget =
   | { kind: 'crypto'; risk: CryptoRisk }
-  | { kind: 'compliance'; finding: ComplianceFinding; fw: string; control?: BatchControl; host: string };
+  | { kind: 'compliance'; finding: ComplianceFinding; fw: string; control?: ControlRef; host: string };
 
 function ticketBody(t: TicketTarget) {
   if (t.kind === 'crypto') {

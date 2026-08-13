@@ -791,12 +791,23 @@ func discoverCloudResourcesHandler(db, bypassDB *sql.DB, discoveryIntegrationSer
 						log.Printf("ERROR: Failed to update device_job status to failed: %v", updateErr)
 					}
 				} else {
-					// Count crypto-config assets from devices (matches platform_agent_worker semantics)
-					assetsCount := 0
-					for i := range devices {
-						if devices[i].Metadata != nil {
-							if configs, ok := devices[i].Metadata["crypto_configs"].([]interface{}); ok {
-								assetsCount += len(configs)
+					// assets_count is what the UI's "Found" column and the Cloud page
+					// card sum — it must reflect what the run actually produced, not
+					// just how many devices happened to carry an extractable crypto
+					// config. `inserted` is the number of sensor_discoveries rows this
+					// run actually wrote (the same figure the fleet table's
+					// discovery-counts derive from), so a resource discovered with no
+					// crypto config still counts as "found" instead of reading as 0.
+					assetsCount := inserted
+					if assetsCount == 0 {
+						// Fall back to the crypto-config-derived count on the (unexpected)
+						// chance more configs were extracted than sensor_discoveries rows
+						// were written for — keeps the number honest in either direction.
+						for i := range devices {
+							if devices[i].Metadata != nil {
+								if configs, ok := devices[i].Metadata["crypto_configs"].([]interface{}); ok {
+									assetsCount += len(configs)
+								}
 							}
 						}
 					}

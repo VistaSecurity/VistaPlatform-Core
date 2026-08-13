@@ -4,7 +4,7 @@ import toast from 'react-hot-toast';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import type { deviceInterrogationComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
-import { DTable, CellMono, CellTxt, PageWrap, queryNote, relTime } from './kit';
+import { DTable, CellMono, CellTxt, PageWrap, queryNote, relTime, isCloudSourced } from './kit';
 import { Icon } from '../../components/ui';
 import { useDevices } from './queries';
 import { DeviceFormModal, DeviceDeleteModal, TestConnectionModal, DiscoverDeviceModal } from './device-modals';
@@ -109,31 +109,54 @@ export function DevicesPage() {
           cols={COLS}
           rows={devices}
           rowKey={(d) => d.id}
-          render={(d) => (
-            <>
-              <div style={{ minWidth: 0 }}>
-                <CellMono v={d.hostname || d.management_url || '—'} />
-                <div style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {[d.vendor, d.model].filter(Boolean).join(' · ')}
+          render={(d) => {
+            const cloud = isCloudSourced(d);
+            return (
+              <>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <CellMono v={d.hostname || d.management_url || '—'} />
+                    {cloud && (
+                      <span
+                        title="Discovered via cloud API — not a network-reachable device"
+                        style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3, textTransform: 'uppercase', padding: '1px 6px', borderRadius: 20, border: '1px solid var(--app-border)', color: 'var(--app-t3)', flex: 'none' }}
+                      >
+                        Cloud
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {[d.vendor, d.model].filter(Boolean).join(' · ')}
+                  </div>
                 </div>
-              </div>
-              <CellMono v={d.ip_address} c="var(--app-t3)" />
-              <CellTxt v={d.device_type} />
-              <CellTxt v={d.firmware_version} />
-              <CellTxt v={d.last_interrogated_at ? relTime(d.last_interrogated_at) : 'never'} c="var(--app-t3)" />
-              <span style={{ textAlign: 'right', fontSize: 11.5, fontWeight: 600, color: connColor(d.connection_status) }} title={d.interrogation_error || ''}>
-                {(d.connection_status || 'unknown').replace('_', ' ')}
-              </span>
-              <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage} fallback={<span />}>
-                <span style={{ display: 'inline-flex', gap: 4, justifyContent: 'flex-end' }}>
-                  <RowBtn icon={interrogatingId === d.id ? 'loader' : 'activity'} title="Interrogate" onClick={() => interrogate.mutate(d.id)} disabled={interrogatingId === d.id} />
-                  <RowBtn icon="plug" title="Test connection" onClick={() => setTesting(d)} />
-                  <RowBtn icon="wrench" title="Edit device" onClick={() => { setEditing(d); setFormOpen(true); }} />
-                  <RowBtn icon="x-circle" title="Delete device" danger onClick={() => setDeleting(d)} />
+                <CellMono v={d.ip_address} c="var(--app-t3)" />
+                <CellTxt v={d.device_type} />
+                <CellTxt v={d.firmware_version} />
+                <CellTxt v={d.last_interrogated_at ? relTime(d.last_interrogated_at) : 'never'} c="var(--app-t3)" />
+                <span style={{ textAlign: 'right', fontSize: 11.5, fontWeight: 600, color: connColor(d.connection_status) }} title={d.interrogation_error || ''}>
+                  {(d.connection_status || 'unknown').replace('_', ' ')}
                 </span>
-              </PermissionGate>
-            </>
-          )}
+                <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage} fallback={<span />}>
+                  <span style={{ display: 'inline-flex', gap: 4, justifyContent: 'flex-end' }}>
+                    <RowBtn
+                      icon={interrogatingId === d.id ? 'loader' : 'activity'}
+                      title={cloud ? 'Not interrogable — discovered via cloud API, no management credentials' : 'Interrogate'}
+                      onClick={() => interrogate.mutate(d.id)}
+                      disabled={interrogatingId === d.id || cloud}
+                    />
+                    <RowBtn
+                      icon="plug"
+                      title={cloud ? 'Not applicable — discovered via cloud API' : 'Test connection'}
+                      onClick={() => setTesting(d)}
+                      disabled={cloud}
+                    />
+                    <RowBtn icon="wrench" title="Edit device" onClick={() => { setEditing(d); setFormOpen(true); }} />
+                    <RowBtn icon="x-circle" title="Delete device" danger onClick={() => setDeleting(d)} />
+                  </span>
+                </PermissionGate>
+              </>
+            );
+          }}
         />
       )}
 

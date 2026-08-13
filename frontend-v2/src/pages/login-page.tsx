@@ -54,7 +54,13 @@ export function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPw, setShowPw] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // Arriving via the session-expiry redirect (?reason=session-expired, set by
+  // the 401 handler in main.tsx) explains WHY the user is back at sign-in.
+  const [error, setError] = useState<string | null>(() =>
+    new URLSearchParams(window.location.search).get('reason') === 'session-expired'
+      ? 'Your session has expired. Please sign in again.'
+      : null,
+  );
   const [busy, setBusy] = useState(false);
   const [ssoOptions, setSsoOptions] = useState<SsoOption[]>([]);
   // Provider types (e.g. "google") this email signed up with via Vista's shared

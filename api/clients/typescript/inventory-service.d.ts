@@ -2557,8 +2557,13 @@ export interface components {
             updated_at: string;
             /** @description Populated by GetCertificateByID; absent from list rows. */
             related_assets?: components["schemas"]["Asset"][];
-            /** @description Count of distinct assets using this certificate via crypto_implementations. */
+            /** @description Count of distinct assets using this certificate via crypto_implementations, INCLUDING assets deployed on a certificate this one issued (walking issuer_certificate_id) — so a CA/intermediate cert is credited with the deployments of every leaf it issued, not just certs that are themselves a config's direct leaf certificate_id. */
             deployment_count?: number;
+            /**
+             * @description The EFFECTIVE ownership bucket the `?ownership=` list filter partitions on: the linked asset's asset_ownership when the cert is deployed, else the declared cert_ownership (manual uploads), else "unknown". Always populated on list rows (never null) — unlike cert_ownership, which is null unless explicitly declared at upload time. Absent from GetCertificateByID (list rows only).
+             * @enum {string}
+             */
+            ownership?: "internal" | "third_party" | "unknown";
         };
         /** @description CURRENT list envelope for GET /certificates. Pre-ADR-0002: the collection is wrapped under `certificates` with a sibling `pagination` block (sharedapi.PaginationMeta, same shape as the asset list). */
         CertificateListResponse: {

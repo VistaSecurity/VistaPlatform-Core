@@ -221,6 +221,59 @@ export function makeCsrfMiddleware(
  * code should prefer `makeCsrfMiddleware(opts.csrfCookie)` via the factories. */
 export const csrfMiddleware: Middleware = makeCsrfMiddleware();
 
+/**
+ * App-level hook the 401 middleware calls when an authenticated request is
+ * rejected. Returns whether the session was recovered (e.g. via a silent
+ * refresh-token exchange) — if so, idempotent requests are retried once.
+ * Each app registers exactly one handler at startup (see
+ * `@vistasecurity/primitives/shared` `createSessionExpiryHandler`).
+ */
+export type SessionExpiredHandler = (request: Request) => Promise<boolean>;
+
+let sessionExpiredHandler: SessionExpiredHandler | null = null;
+
+/** Register (or clear, with `null`) the app's session-expiry handler. */
+export function setSessionExpiredHandler(
+  handler: SessionExpiredHandler | null,
+): void {
+  sessionExpiredHandler = handler;
+}
+
+/** Auth-flow endpoints legitimately answer 401 (bad password on /auth/login,
+ * dead refresh token on /auth/refresh, SSO handshakes...) — routing those
+ * through the session-expiry handler would turn a failed sign-in attempt into
+ * a "session expired" redirect, and /auth/refresh must be exempt or the
+ * handler's own refresh call would recurse. `/auth/me` (tenant) and
+ * `/admin/auth/me` (platform) stay covered: a 401 there IS an expired session. */
+function isAuthFlowPath(pathname: string): boolean {
+  return pathname.includes("/auth/") && !pathname.endsWith("/auth/me");
+}
+
+/**
+ * Build the session-expiry middleware every factory installs. On a 401 from a
+ * non-auth-flow endpoint it defers to the registered handler; if the handler
+ * recovers the session, GET/HEAD requests are replayed once (mutations are not
+ * auto-replayed — their caller surfaces the error and the next attempt rides
+ * the refreshed session). With no handler registered the 401 passes through
+ * untouched.
+ */
+export function makeSessionExpiryMiddleware(
+  fetchImpl?: typeof globalThis.fetch,
+): Middleware {
+  return {
+    async onResponse({ request, response }) {
+      if (response.status !== 401 || !sessionExpiredHandler) return undefined;
+      if (isAuthFlowPath(new URL(request.url).pathname)) return undefined;
+      const recovered = await sessionExpiredHandler(request);
+      if (recovered && (request.method === "GET" || request.method === "HEAD")) {
+        const doFetch = fetchImpl ?? globalThis.fetch;
+        return doFetch(new Request(request));
+      }
+      return undefined;
+    },
+  };
+}
+
 export interface CreateClientOptions {
   /** Override the base URL (default: the gateway path for cbom-service). */
   baseUrl?: string;
@@ -244,6 +297,7 @@ export function createCbomServiceClient(
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
   });
   client.use(makeCsrfMiddleware(opts.csrfCookie));
+  client.use(makeSessionExpiryMiddleware(opts.fetch));
   return client;
 }
 
@@ -261,6 +315,7 @@ export function createInventoryServiceClient(
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
   });
   client.use(makeCsrfMiddleware(opts.csrfCookie));
+  client.use(makeSessionExpiryMiddleware(opts.fetch));
   return client;
 }
 
@@ -278,6 +333,7 @@ export function createComplianceEngineClient(
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
   });
   client.use(makeCsrfMiddleware(opts.csrfCookie));
+  client.use(makeSessionExpiryMiddleware(opts.fetch));
   return client;
 }
 
@@ -296,6 +352,7 @@ export function createAuthServiceClient(
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
   });
   client.use(makeCsrfMiddleware(opts.csrfCookie));
+  client.use(makeSessionExpiryMiddleware(opts.fetch));
   return client;
 }
 
@@ -315,6 +372,7 @@ export function createSensorManagerClient(
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
   });
   client.use(makeCsrfMiddleware(opts.csrfCookie));
+  client.use(makeSessionExpiryMiddleware(opts.fetch));
   return client;
 }
 
@@ -333,6 +391,7 @@ export function createAuditServiceClient(
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
   });
   client.use(makeCsrfMiddleware(opts.csrfCookie));
+  client.use(makeSessionExpiryMiddleware(opts.fetch));
   return client;
 }
 
@@ -352,6 +411,7 @@ export function createDeviceInterrogationServiceClient(
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
   });
   client.use(makeCsrfMiddleware(opts.csrfCookie));
+  client.use(makeSessionExpiryMiddleware(opts.fetch));
   return client;
 }
 
@@ -371,6 +431,7 @@ export function createNotificationServiceClient(
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
   });
   client.use(makeCsrfMiddleware(opts.csrfCookie));
+  client.use(makeSessionExpiryMiddleware(opts.fetch));
   return client;
 }
 
@@ -390,6 +451,7 @@ export function createAdminServiceClient(
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
   });
   client.use(makeCsrfMiddleware(opts.csrfCookie));
+  client.use(makeSessionExpiryMiddleware(opts.fetch));
   return client;
 }
 
@@ -409,6 +471,7 @@ export function createMonitoringServiceClient(
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
   });
   client.use(makeCsrfMiddleware(opts.csrfCookie));
+  client.use(makeSessionExpiryMiddleware(opts.fetch));
   return client;
 }
 
@@ -428,6 +491,7 @@ export function createResourceTrackerServiceClient(
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
   });
   client.use(makeCsrfMiddleware(opts.csrfCookie));
+  client.use(makeSessionExpiryMiddleware(opts.fetch));
   return client;
 }
 
@@ -448,5 +512,6 @@ export function createTenantHealthServiceClient(
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
   });
   client.use(makeCsrfMiddleware(opts.csrfCookie));
+  client.use(makeSessionExpiryMiddleware(opts.fetch));
   return client;
 }

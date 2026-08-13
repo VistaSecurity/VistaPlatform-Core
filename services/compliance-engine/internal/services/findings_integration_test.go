@@ -459,3 +459,50 @@ func TestIntegration_AssetsForCertificate_ResolvesBothLinkPaths(t *testing.T) {
 		t.Fatalf("unbound certificate scoping: targets=%v tenantWide=%v, want the cert alone", targets, tenantWide)
 	}
 }
+
+// GetFindingStatistics.SeverityCounts must tally ACTIVE findings by severity,
+// tenant-wide, off the same compliance_findings table the Findings page reads —
+// this is the H-2 fix: the dashboard's "critical findings" number used to come
+// from an unrelated inventory-service crypto-implementation-risk-score count
+// and could disagree with what the Findings page showed for the same tenant.
+func TestIntegration_GetFindingStatistics_SeverityCounts(t *testing.T) {
+	svc, _, tenant := newFindingsServiceIT(t)
+
+	withSeverity := func(sev string) *models.ComplianceFinding {
+		c, a := uuid.New(), uuid.New()
+		f := activeViolation(c, a)
+		f.Severity = sev
+		mustUpsert(t, svc, tenant, c, a, f, "ACTIVE")
+		return f
+	}
+	withSeverity("Critical")
+	withSeverity("Critical")
+	withSeverity("High")
+	withSeverity("Med")
+	withSeverity("Low")
+
+	// An INACTIVE finding must not be counted — SeverityCounts scopes to ACTIVE
+	// only, matching GetFindingsByControl and the Findings page default view.
+	cInactive, aInactive := uuid.New(), uuid.New()
+	fInactive := activeViolation(cInactive, aInactive)
+	fInactive.Severity = "Critical"
+	mustUpsert(t, svc, tenant, cInactive, aInactive, fInactive, "ACTIVE")
+	mustInactivate(t, svc, tenant, cInactive, aInactive)
+
+	stats, err := svc.GetFindingStatistics(tenant)
+	if err != nil {
+		t.Fatalf("GetFindingStatistics: %v", err)
+	}
+	if stats.SeverityCounts.Critical != 2 {
+		t.Fatalf("Critical = %d, want 2 (inactive finding must not count)", stats.SeverityCounts.Critical)
+	}
+	if stats.SeverityCounts.High != 1 {
+		t.Fatalf("High = %d, want 1", stats.SeverityCounts.High)
+	}
+	if stats.SeverityCounts.Med != 1 {
+		t.Fatalf("Med = %d, want 1", stats.SeverityCounts.Med)
+	}
+	if stats.SeverityCounts.Low != 1 {
+		t.Fatalf("Low = %d, want 1", stats.SeverityCounts.Low)
+	}
+}

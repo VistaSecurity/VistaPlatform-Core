@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router';
 import { clients } from '../../lib/clients';
-import { Icon, LevelBar, LevelDot, MiniBar, RiskGauge, levelFromScore, riskColor } from '../../components/ui';
+import { Icon, LevelBar, LevelDot, MiniBar, RiskGauge, levelFromScore, riskColor, LEVEL_MIN } from '../../components/ui';
 import { PostureTrendChart } from '../../components/posture-trend-chart';
 import { getDashboardPqcMetric } from './dashboard-metrics';
 
@@ -29,12 +29,29 @@ function useRollups() {
       return data?.sensors ?? [];
     },
   });
+  // /pqc/progress rather than /pqc/summary (M-2): progress exposes the
+  // classifier's full partition (pqc_ready, symmetric_safe, non_pqc,
+  // unclassified) so "not yet assessed" configs can be shown separately
+  // instead of being folded into "on classical crypto".
   const pqc = useQuery({
-    queryKey: ['dashboard', 'pqc-summary'],
+    queryKey: ['dashboard', 'pqc-progress'],
     queryFn: async () => {
-      const { data, error } = await clients.inventory.GET('/pqc/summary', {});
-      if (error || !data) throw new Error('Failed to load PQC summary');
-      return data;
+      const { data, error } = await clients.inventory.GET('/pqc/progress', {});
+      if (error || !data) throw new Error('Failed to load PQC progress');
+      return data.progress;
+    },
+  });
+  // H-2: critical-findings counts sourced from compliance-engine's own
+  // materialized findings (the same table the Findings page reads), not from
+  // inventory-service's crypto-implementation-risk-score-derived
+  // risk_summary.critical_findings — those two used to disagree ("0 critical"
+  // on the Dashboard vs. "4 Critical" on the Findings page for the same tenant).
+  const findingsSeverity = useQuery({
+    queryKey: ['dashboard', 'findings-severity'],
+    queryFn: async () => {
+      const { data, error } = await clients.compliance.GET('/findings/statistics', {});
+      if (error || !data) throw new Error('Failed to load finding statistics');
+      return data.severity_counts;
     },
   });
   const expiring = useQuery({
@@ -71,29 +88,38 @@ function useRollups() {
       return data;
     },
   });
-  return { risk, sensors, pqc, expiring, tickets, trend, connections };
+  return { risk, sensors, pqc, expiring, tickets, trend, connections, findingsSeverity };
 }
 
 export function DashboardPage() {
   const nav = useNavigate();
-  const { risk, sensors, pqc, expiring, tickets, trend, connections } = useRollups();
+  const { risk, sensors, pqc, expiring, tickets, trend, connections, findingsSeverity } = useRollups();
   const s = risk.data;
   const total = s?.total_assets ?? 0;
   const high = s?.high_risk ?? 0;
-  const crit = s?.critical_findings ?? 0;
+  // H-2: sourced from compliance-engine's materialized findings, same table
+  // and same ACTIVE scope the Findings page reads — not inventory-service's
+  // risk_summary.critical_findings (crypto-implementation risk_score >= 90
+  // count), which answers a different question and could disagree with what
+  // clicking through to the Findings page actually shows.
+  const crit = findingsSeverity.data?.critical ?? 0;
   const crypto = s?.total_crypto ?? 0;
   const unknown = s?.unknown_risk ?? 0;
   const pctHigh = total ? Math.round((high / total) * 100) : 0;
   const lvl = levelFromScore(pctHigh);
   // The dashboard's PQC number is ALWAYS config adoption (% of crypto configs on PQC
-  // algorithms, /pqc/summary) so the % and the config counts beside it are one metric.
+  // algorithms, /pqc/progress) so the % and the config counts beside it are one metric.
   // It must never swap to the PQC Readiness framework's severity-weighted score — that
   // lives on the Risk & Compliance posture surfaces and answers a different question;
   // the old activation-dependent fallback made this stat jump 7.6→45 on a settings click.
   const pqcMetric = getDashboardPqcMetric(pqc.data);
   const pqcPct = pqcMetric.adoptionPercent;
   const pqcReady = pqcMetric.pqcReady;
-  const pqcTotal = pqcMetric.total;
+  // M-2: kept separate — needsMigration is a real migration target (a
+  // classical asymmetric component), unclassified is a data-quality gap
+  // (no algorithm data at all). Never present unclassified as "on classical crypto".
+  const pqcNeedsMigration = pqcMetric.needsMigration;
+  const pqcUnclassified = pqcMetric.unclassified;
 
   const sensorList = sensors.data ?? [];
   const sensorsOnline = sensorList.filter((x) => (x.status || '').toLowerCase() === 'active').length;
@@ -130,10 +156,11 @@ export function DashboardPage() {
 
   const attention = [
     { id: 'crit', count: crit, label: 'Critical findings', sub: 'across all assets', icon: 'circle-alert', tone: RED, route: '/risk-compliance/findings' },
-    { id: 'high', count: high, label: 'High-risk assets', sub: 'risk score ≥ 60', icon: 'server', tone: 'var(--danger-soft)', route: '/inventory?lens=infrastructure' },
+    { id: 'high', count: high, label: 'High-risk assets', sub: `risk score ≥ ${LEVEL_MIN.High}`, icon: 'server', tone: 'var(--danger-soft)', route: '/inventory?lens=infrastructure' },
     { id: 'exp', count: expSoon, label: 'Certs expiring', sub: 'within 30 days', icon: 'file-badge', tone: ORANGE, route: '/inventory?lens=certificate' },
     { id: 'unk', count: unknown, label: 'Unscored assets', sub: 'no risk signal yet', icon: 'search', tone: 'var(--warn)', route: '/inventory?lens=infrastructure' },
-    { id: 'pqc', count: pqcMetric.configsOnClassicalCrypto, label: 'Not PQC-ready', sub: 'configs on classical crypto', icon: 'key-round', tone: BLUE, route: '/inventory?lens=configuration' },
+    { id: 'pqc', count: pqcNeedsMigration, label: 'Not PQC-ready', sub: 'configs on classical crypto', icon: 'key-round', tone: BLUE, route: '/inventory?lens=configuration' },
+    { id: 'pqc-unclassified', count: pqcUnclassified, label: 'Not yet assessed', sub: 'no algorithm data', icon: 'help-circle', tone: 'var(--app-t3)', route: '/inventory?lens=configuration' },
     { id: 'tick', count: tkOverdue, label: 'Overdue tickets', sub: 'past SLA', icon: 'wrench', tone: ORANGE, route: '/remediation/plans' },
   ];
 
@@ -345,7 +372,10 @@ export function DashboardPage() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
             <RiskGauge score={pqcPct} level={pqcPct >= 50 ? 'Low' : 'Critical'} size={104} label="" stroke={8} />
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 11 }}>
-              {([[pqcReady, 'quantum-ready configs', GREEN], [pqcTotal - pqcReady, 'awaiting migration', 'var(--app-t2)']] as const).map(([v, k, c], i) => (
+              {/* M-2: unclassified (no algorithm data at all) is shown as its own
+                  "not yet assessed" row, never folded into "awaiting migration" —
+                  that would misrepresent a data-quality gap as classical crypto. */}
+              {([[pqcReady, 'quantum-ready configs', GREEN], [pqcNeedsMigration, 'awaiting migration', ORANGE], [pqcUnclassified, 'not yet assessed', 'var(--app-t3)']] as const).map(([v, k, c], i) => (
                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
                   <span style={{ width: 8, height: 8, borderRadius: 50, background: c, flex: 'none' }} />
                   <span className="mono" style={{ fontSize: 16, fontWeight: 700, color: c }}>{v.toLocaleString()}</span>

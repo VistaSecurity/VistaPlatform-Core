@@ -245,7 +245,12 @@ export function UsagePage({ meta }: { meta: SettingsNavItem }) {
         <SCard pad={22}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
             {meters.map((m) => {
-              const unlimited = !m.lim || m.lim <= 0;
+              // Only a negative (or missing) limit means unlimited — the
+              // backend's convention (see resolveUsageLimits in
+              // services/auth-service/internal/api/billing.go) is -1 for "no
+              // cap"; a real 0 is a genuine zero cap and must render as such,
+              // not be mistaken for "unlimited".
+              const unlimited = m.lim == null || m.lim < 0;
               return (
                 <SMeter
                   key={m.label}

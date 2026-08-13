@@ -26,13 +26,16 @@ type JobLogger struct {
 }
 
 // NewJobLogger creates a new job logger instance.
-// It automatically signs requests using INTERNAL_AUTH_SECRET if set.
+// It automatically signs requests using INTERNAL_AUTH_SECRET if set, and picks
+// its transport the same way the audit middleware does — under app-level mTLS
+// the audit-service peer URL is https://audit-service:8443, which a bare
+// http.Client cannot verify.
 func NewJobLogger(auditServiceURL string, jobID uuid.UUID, jobType, jobName string, tenantID, initiatedBy *uuid.UUID) *JobLogger {
 	var signer *serviceauth.Signer
 	if secret := os.Getenv("INTERNAL_AUTH_SECRET"); secret != "" {
 		signer = serviceauth.NewSigner(secret)
 	}
-	client := NewClientWithSigner(auditServiceURL, 5*time.Second, 3, signer)
+	client := NewClientForEnv(auditServiceURL, 5*time.Second, 3, signer, false, "", "", "")
 	return &JobLogger{
 		client:      client,
 		signer:      signer,
@@ -46,7 +49,7 @@ func NewJobLogger(auditServiceURL string, jobID uuid.UUID, jobType, jobName stri
 
 // NewJobLoggerWithSigner creates a new job logger with HMAC request signing
 func NewJobLoggerWithSigner(auditServiceURL string, jobID uuid.UUID, jobType, jobName string, tenantID, initiatedBy *uuid.UUID, signer *serviceauth.Signer) *JobLogger {
-	client := NewClientWithSigner(auditServiceURL, 5*time.Second, 3, signer)
+	client := NewClientForEnv(auditServiceURL, 5*time.Second, 3, signer, false, "", "", "")
 	return &JobLogger{
 		client:      client,
 		signer:      signer,

@@ -20,6 +20,7 @@ import { Loading, EmptyState } from '../findings/bits';
 import { useAssetFacts, useBatchEvaluate, useFrameworkContext, usePostureByControl, usePostureTrend, useRiskSummary, type AssetFacts } from '../findings/queries';
 import { PostureTrendChart } from '../../components/posture-trend-chart';
 import { sevLevel, type BatchFinding } from '../findings/model';
+import { buildControlGrid } from '../findings/posture-grid';
 
 function FwRing({ pct, size = 50, stroke = 5 }: { pct: number; size?: number; stroke?: number }) {
   const r = (size - stroke) / 2;
@@ -35,6 +36,14 @@ function FwRing({ pct, size = 50, stroke = 5 }: { pct: number; size?: number; st
     </div>
   );
 }
+
+/** L-5: label the object /findings/by-control's affected_assets is actually counting. */
+const TARGET_NOUN: Record<string, { singular: string; plural: string }> = {
+  asset: { singular: 'asset', plural: 'assets' },
+  certificate: { singular: 'certificate', plural: 'certificates' },
+  configuration: { singular: 'configuration', plural: 'configurations' },
+  mixed: { singular: 'target', plural: 'targets' },
+};
 
 const DIMS: [keyof AssetFacts & ('environment' | 'businessUnit' | 'assetType'), string][] = [
   ['businessUnit', 'Business unit'],
@@ -82,24 +91,8 @@ export function PostureOverview() {
 
   const rows = useMemo(() => {
     const facts = factsQ.data;
-    if (!facts || !cols.length) return [];
-    const groups = new Map<string, { ids: Set<string>; riskSum: number }>();
-    facts.forEach((f, id) => {
-      const k = f[dim] || 'unspecified';
-      if (!groups.has(k)) groups.set(k, { ids: new Set(), riskSum: 0 });
-      const g = groups.get(k)!;
-      g.ids.add(id);
-      g.riskSum += f.riskScore;
-    });
-    return [...groups.entries()].map(([key, g]) => {
-      const cells = cols.map((ck) => {
-        const fs = (findingsByControl.get(ck.id) ?? []).filter((f) => g.ids.has(f.asset_id));
-        return { fail: fs.length, ratio: g.ids.size ? Math.min(1, fs.length / g.ids.size) : 0 };
-      });
-      const totFail = cells.reduce((sum, c) => sum + c.fail, 0);
-      const avg = g.ids.size ? Math.round(g.riskSum / g.ids.size) : 0;
-      return { key, count: g.ids.size, cells, totFail, level: levelFromScore(avg) };
-    }).sort((a, b) => b.totFail - a.totFail);
+    if (!facts) return [];
+    return buildControlGrid(facts, cols, findingsByControl, dim);
   }, [factsQ.data, cols, findingsByControl, dim]);
 
   // ---- top exposures: server-ranked by severity → count → breadth (ADR-0007
@@ -109,6 +102,11 @@ export function PostureOverview() {
     ct: { id: g.control_id, name: g.control_name, fw: g.framework_name, fwId: g.framework_id },
     count: g.finding_count,
     assets: g.affected_assets,
+    // L-5: affected_assets isn't always counting network assets — a control's
+    // findings can all be on certificates or crypto configurations, and
+    // labeling those "assets" reads as wrong to anyone who knows what the
+    // objects actually are.
+    targetNoun: TARGET_NOUN[g.target_kind] ?? TARGET_NOUN.mixed,
     worst: sevLevel(g.worst_severity) as RiskLevel,
     byLevel: {
       Critical: g.severity_counts.critical,
@@ -229,7 +227,9 @@ export function PostureOverview() {
                   <tr key={row.key} className="mrow">
                     <td style={{ position: 'sticky', left: 0, zIndex: 2, background: 'var(--app-panel)', padding: '0 14px', height: 38, borderBottom: '1px solid var(--app-border)' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', textTransform: 'capitalize', whiteSpace: 'nowrap' }}>{row.key}</span>
+                        <span
+                          title={row.unattributed ? 'Findings on certificates or crypto configurations that are not directly pivotable by ' + DIMS.find((d) => d[0] === dim)![1].toLowerCase() : undefined}
+                          style={{ fontSize: 12.5, fontWeight: 600, color: row.unattributed ? 'var(--app-t2)' : 'var(--app-t1)', fontStyle: row.unattributed ? 'italic' : 'normal', textTransform: row.unattributed ? 'none' : 'capitalize', whiteSpace: 'nowrap' }}>{row.key}</span>
                         <span className="mono" style={{ fontSize: 10, color: 'var(--app-t3)' }}>{row.count}</span>
                       </div>
                     </td>
@@ -276,7 +276,7 @@ export function PostureOverview() {
                 <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--app-t1)' }}>{a.ct.name}</div>
                 <div style={{ fontSize: 11.5, color: 'var(--app-t3)' }}>
                   <Pill color="var(--accent)" style={{ fontSize: 9.5, padding: '1px 6px', marginRight: 6 }}>{a.ct.fw}</Pill>
-                  {a.count} finding{a.count !== 1 ? 's' : ''} · {a.assets} asset{a.assets !== 1 ? 's' : ''}
+                  {a.count} finding{a.count !== 1 ? 's' : ''} · {a.assets} {a.assets !== 1 ? a.targetNoun.plural : a.targetNoun.singular}
                 </div>
               </div>
               <div style={{ width: 130 }}><LevelBar counts={a.byLevel} h={7} /></div>

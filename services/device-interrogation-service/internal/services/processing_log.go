@@ -49,7 +49,15 @@ type ProcessingStep struct {
 type ProcessingLog struct {
 	AssetsReceived int
 	DiscoveryJobID string
-	steps          []ProcessingStep
+	// ExistingFindings is how many findings the referenced discovery job already
+	// carried before this processor ran. It is non-zero when the executor
+	// materialized the results itself and handed us nothing to process — the
+	// in-cluster interrogation path does exactly that. Counting them is what
+	// keeps the headline honest in BOTH directions: the run is not credited with
+	// zero when a dozen findings landed, and it is not credited with a clean
+	// success either, because the payload plainly does not describe the run.
+	ExistingFindings int
+	steps            []ProcessingStep
 }
 
 func (p *ProcessingLog) record(target, stage, status, detail string) {
@@ -121,10 +129,10 @@ func (p *ProcessingLog) distinctErrors() []map[string]interface{} {
 
 // Summary is the persisted shape, read back by GET /jobs/{id}/results.
 //
-// materialized is the honest headline: how many assets actually became a
-// discovery finding. It is deliberately NOT the same number as the asset count
-// parsed from the raw results, so a pipeline failure can no longer hide behind
-// "12 assets discovered".
+// materialized is the honest headline: how many findings the run's discovery job
+// holds — the ones this processor created plus the ones it already carried. It
+// is deliberately NOT the asset count parsed from the raw results, so a pipeline
+// failure can no longer hide behind "12 assets discovered".
 func (p *ProcessingLog) Summary() map[string]interface{} {
 	findingsOK, findingsFailed, _ := p.counts(StageDiscoveryFinding)
 	discOK, discFailed, discSkipped := p.counts(StageSensorDiscovery)
@@ -137,15 +145,36 @@ func (p *ProcessingLog) Summary() map[string]interface{} {
 		"targets_failed":         targetsFailed,
 		"findings_created":       findingsOK,
 		"findings_failed":        findingsFailed,
+		"existing_findings":      p.ExistingFindings,
 		"discoveries_written":    discOK,
 		"discoveries_failed":     discFailed,
 		"discoveries_skipped":    discSkipped,
-		"materialized":           findingsOK,
-		"fully_materialized":     findingsFailed == 0 && discFailed == 0 && targetsFailed == 0,
+		"materialized":           findingsOK + p.ExistingFindings,
+		"fully_materialized":     p.fullyMaterialized(findingsFailed, discFailed, targetsFailed),
 		"errors":                 p.distinctErrors(),
 		"steps":                  p.steps,
 		"processing_finished_at": time.Now().UTC().Format(time.RFC3339),
 	}
+}
+
+// fullyMaterialized is the "nothing to see here" claim, and it has to be hard to
+// make.
+//
+// No failed step is necessary but not sufficient: a payload carrying zero assets
+// runs zero steps, so it fails nothing and would otherwise report a clean
+// success. That is precisely how an interrogation of twelve devices persisted
+// `0 assets / 0 findings / fully_materialized: true`. When the discovery job
+// already holds findings, the empty payload is evidence that something
+// materialized results this processor never saw — the run is real, the report of
+// it is not, and the flag must say so.
+func (p *ProcessingLog) fullyMaterialized(findingsFailed, discFailed, targetsFailed int) bool {
+	if findingsFailed != 0 || discFailed != 0 || targetsFailed != 0 {
+		return false
+	}
+	if p.AssetsReceived == 0 && p.ExistingFindings > 0 {
+		return false
+	}
+	return true
 }
 
 // persist merges the summary into device_jobs.results under a "processing" key.

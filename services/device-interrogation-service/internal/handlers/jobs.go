@@ -11,13 +11,26 @@ import (
 	"github.com/google/uuid"
 )
 
-// jobResultsPayload is used to parse device_jobs.results JSON for assets_discovered
+// jobResultsPayload is used to parse device_jobs.results JSON for assets_discovered.
+// Processing is the post-processing verdict ResultProcessor.persist writes under
+// the "processing" key (see processing_log.go) — when present, its "materialized"
+// field is the honest count of what actually landed (findings created this run
+// plus any the run's discovery job already carried), independent of which
+// execution path (in-cluster router, platform agent, device agent) produced it.
 type jobResultsPayload struct {
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	Processing map[string]interface{} `json:"processing,omitempty"`
 }
 
 // assetsDiscoveredFromResults extracts assets_discovered from job results JSON.
-// Prefers metadata.assets_count; falls back to metadata.devices_count for cloud discovery.
+//
+// Prefers processing.materialized: it is written by ResultProcessor after the
+// findings pipeline actually ran, so it reflects what was materialized rather
+// than what the executor merely counted in its own payload. Falls back to
+// metadata.assets_count then metadata.devices_count for job types /
+// execution paths that never go through ResultProcessor (e.g. the direct
+// in-service cloud discovery handler, which writes sensor_discoveries itself
+// without a processing log).
 func assetsDiscoveredFromResults(resultsJSON string) *int {
 	if resultsJSON == "" {
 		return nil
@@ -26,48 +39,89 @@ func assetsDiscoveredFromResults(resultsJSON string) *int {
 	if err := json.Unmarshal([]byte(resultsJSON), &payload); err != nil {
 		return nil
 	}
+	if payload.Processing != nil {
+		if v, ok := payload.Processing["materialized"]; ok && v != nil {
+			if n, ok := numberFromInterface(v); ok {
+				return &n
+			}
+		}
+	}
 	if payload.Metadata == nil {
 		return nil
 	}
 	// Prefer assets_count (crypto assets created), then devices_count (devices/resources found)
 	for _, key := range []string{"assets_count", "devices_count"} {
 		if v, ok := payload.Metadata[key]; ok && v != nil {
-			switch n := v.(type) {
-			case float64:
-				val := int(n)
-				return &val
-			case int:
+			if n, ok := numberFromInterface(v); ok {
 				return &n
-			case int64:
-				val := int(n)
-				return &val
 			}
 		}
 	}
 	return nil
 }
 
+// numberFromInterface coerces a JSON-decoded numeric value (always float64 from
+// encoding/json, but int/int64 are accepted too for callers that build the map
+// in Go rather than round-tripping through JSON) into an int.
+func numberFromInterface(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	}
+	return 0, false
+}
+
+// executorLabel resolves device_jobs.agent_id (+ the joined device_agents.name,
+// when present) into the human-readable string the UI shows for "which
+// executor ran this job". A NULL agent_id means the in-cluster platform agent
+// ran it — there is no row to name, and the job's Sensors & Agents fleet entry
+// (the platform agent) carries no job-count columns of its own, so this label
+// is the only place that attribution is visible.
+func executorLabel(agentID *uuid.UUID, agentName *string) string {
+	if agentID == nil {
+		return "Platform Agent"
+	}
+	if agentName != nil && *agentName != "" {
+		return *agentName
+	}
+	return "Device Agent"
+}
+
 // InterrogationJob represents a job for the API response
 type InterrogationJob struct {
-	ID               uuid.UUID              `json:"id"`
-	TenantID         uuid.UUID              `json:"tenant_id"`
-	JobType          string                 `json:"job_type"`
-	Status           string                 `json:"status"`
-	DeviceID         *uuid.UUID             `json:"device_id,omitempty"`
-	DeviceName       *string                `json:"device_name,omitempty"`
-	DeviceType       *string                `json:"device_type,omitempty"`
-	IntegrationID    *uuid.UUID             `json:"integration_id,omitempty"`
-	IntegrationName  *string                `json:"integration_name,omitempty"`
-	CloudProvider    *string                `json:"cloud_provider,omitempty"`
-	StartedAt        *time.Time             `json:"started_at,omitempty"`
-	CompletedAt      *time.Time             `json:"completed_at,omitempty"`
-	ErrorMessage     *string                `json:"error_message,omitempty"`
-	Progress         *int                   `json:"progress,omitempty"`
-	AssetsDiscovered *int                   `json:"assets_discovered,omitempty"`
-	DurationSeconds  *int                   `json:"duration_seconds,omitempty"`
-	Metadata         map[string]interface{} `json:"metadata,omitempty"`
-	CreatedAt        time.Time              `json:"created_at"`
-	UpdatedAt        time.Time              `json:"updated_at"`
+	ID               uuid.UUID  `json:"id"`
+	TenantID         uuid.UUID  `json:"tenant_id"`
+	JobType          string     `json:"job_type"`
+	Status           string     `json:"status"`
+	DeviceID         *uuid.UUID `json:"device_id,omitempty"`
+	DeviceName       *string    `json:"device_name,omitempty"`
+	DeviceType       *string    `json:"device_type,omitempty"`
+	IntegrationID    *uuid.UUID `json:"integration_id,omitempty"`
+	IntegrationName  *string    `json:"integration_name,omitempty"`
+	CloudProvider    *string    `json:"cloud_provider,omitempty"`
+	StartedAt        *time.Time `json:"started_at,omitempty"`
+	CompletedAt      *time.Time `json:"completed_at,omitempty"`
+	ErrorMessage     *string    `json:"error_message,omitempty"`
+	Progress         *int       `json:"progress,omitempty"`
+	AssetsDiscovered *int       `json:"assets_discovered,omitempty"`
+	// AgentID is device_jobs.agent_id — nil means the in-cluster platform agent
+	// executed the job rather than a named device agent.
+	AgentID *uuid.UUID `json:"agent_id,omitempty"`
+	// Executor is the human-readable resolution of AgentID: "Platform Agent" or
+	// the executing device agent's name. Always populated so the Jobs page and
+	// job detail modal can show attribution without duplicating the fallback
+	// logic client-side (see M-9: a completed job otherwise has no row on
+	// Sensors & Agents that owns it, so "Never run" on that agent looks
+	// contradicted by a job nothing on screen claims).
+	Executor        string                 `json:"executor"`
+	DurationSeconds *int                   `json:"duration_seconds,omitempty"`
+	Metadata        map[string]interface{} `json:"metadata,omitempty"`
+	CreatedAt       time.Time              `json:"created_at"`
+	UpdatedAt       time.Time              `json:"updated_at"`
 }
 
 // AdminInterrogationJob is the cross-tenant view of an interrogation job for the

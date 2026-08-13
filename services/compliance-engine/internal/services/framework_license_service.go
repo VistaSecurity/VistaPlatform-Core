@@ -314,11 +314,17 @@ func (s *FrameworkLicenseService) ListAllTenantSubscriptionsForAdmin(tenantID uu
 // Platform default framework is ALWAYS included regardless of license status.
 func (s *FrameworkLicenseService) GetAvailableFrameworks(tenantID uuid.UUID) ([]models.AvailableFrameworkResponse, error) {
 	publishedQuery := `
-		SELECT id, code, name, version, description, organization, status,
-		       is_platform_default, published_at, published_by, created_by, created_at, updated_at
-		FROM platform_frameworks
-		WHERE status = 'published'
-		ORDER BY is_platform_default DESC, published_at DESC, name
+		SELECT f.id, f.code, f.name, f.version, f.description, f.organization, f.status,
+		       f.is_platform_default, f.published_at, f.published_by, f.created_by, f.created_at, f.updated_at,
+		       COALESCE(c.controls_count, 0) as controls_count
+		FROM platform_frameworks f
+		LEFT JOIN (
+			SELECT framework_id, COUNT(*) as controls_count
+			FROM platform_framework_controls
+			GROUP BY framework_id
+		) c ON c.framework_id = f.id
+		WHERE f.status = 'published'
+		ORDER BY f.is_platform_default DESC, f.published_at DESC, f.name
 	`
 
 	var allFrameworks []models.PlatformFramework
@@ -388,6 +394,37 @@ func (s *FrameworkLicenseService) GetAvailableFrameworks(tenantID uuid.UUID) ([]
 		scoreMap[row.FrameworkID] = row
 	}
 
+	// Raw open-findings count per framework — any control with at least one
+	// ACTIVE, non-suppressed finding, regardless of severity. Deliberately NOT
+	// severity-collapsed like tenant_framework_scores.controls_failing (see
+	// AvailableFrameworkResponse.OpenFindingsControls doc), so a framework whose
+	// only open findings are Low severity doesn't preview as "0 failing" while
+	// /findings/by-control shows real exposures.
+	openFindingsMap := make(map[uuid.UUID]int)
+	type openFindingsRow struct {
+		FrameworkID uuid.UUID `db:"framework_id"`
+		Count       int       `db:"count"`
+	}
+	var openFindings []openFindingsRow
+	err = tx.Select(&openFindings, `
+		SELECT pfc.framework_id AS framework_id, COUNT(DISTINCT cf.control_id) AS count
+		FROM compliance_findings cf
+		JOIN platform_framework_controls pfc ON pfc.id = cf.control_id
+		WHERE cf.tenant_id = $1
+		  AND cf.detection_state = 'ACTIVE'
+		  AND (cf.workflow_status <> 'SUPPRESSED' OR cf.workflow_status IS NULL)
+		GROUP BY pfc.framework_id
+	`, tenantID)
+	if err != nil && err != sql.ErrNoRows {
+		errStr := err.Error()
+		if !strings.Contains(errStr, "does not exist") && !strings.Contains(errStr, "relation") {
+			return nil, fmt.Errorf("failed to get open findings per framework: %w", err)
+		}
+	}
+	for _, row := range openFindings {
+		openFindingsMap[row.FrameworkID] = row.Count
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit tx: %w", err)
 	}
@@ -422,6 +459,10 @@ func (s *FrameworkLicenseService) GetAvailableFrameworks(tenantID uuid.UUID) ([]
 			entry.PreviewScore = &score
 			entry.ControlsPassing = &passing
 			entry.ControlsFailing = &failing
+		}
+		if count, ok := openFindingsMap[framework.ID]; ok {
+			c := count
+			entry.OpenFindingsControls = &c
 		}
 		available = append(available, entry)
 	}

@@ -82,13 +82,17 @@ func TestIntegration_FreeFrameworksActivateAtCapZero(t *testing.T) {
 		}
 	}
 
-	// Six free activations later, the tenant has consumed no cap at all.
+	// Six free activations later, GetComplianceFrameworkUsage's `current` is
+	// tenant-truth (every active license, free or paid — see its doc comment),
+	// so it reports all 6. The cap itself is untouched: cap enforcement runs
+	// through countActiveFrameworkSubscriptions/CheckComplianceFrameworkLimit,
+	// asserted below, which still excludes free frameworks (CMP-6).
 	current, _, err := svc.GetComplianceFrameworkUsage(tenantID)
 	if err != nil {
 		t.Fatalf("GetComplianceFrameworkUsage after activations: %v", err)
 	}
-	if current != 0 {
-		t.Errorf("free activations consumed %d of the cap, want 0", current)
+	if current != len(FreeFrameworkCodes) {
+		t.Errorf("active framework licenses after 6 free activations = %d, want %d", current, len(FreeFrameworkCodes))
 	}
 
 	// The cap still means something: a paid/regulated catalog entry is blocked.

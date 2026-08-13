@@ -106,7 +106,7 @@ func parseQUICInitialWithDecrypt(data []byte, srcIP, dstIP string, srcPort, dstP
 			}
 
 			disc := makeQUICDiscovery(srcIP, dstIP, dstPort, sensorID, versionStr, metadata)
-			disc.Version = versionStr + " (" + tlsVer + ")"
+			disc.Version = formatQUICVersion(versionStr, tlsVer)
 			disc.Confidence = 0.95
 			return disc
 		}
@@ -116,6 +116,19 @@ func parseQUICInitialWithDecrypt(data []byte, srcIP, dstIP string, srcPort, dstP
 
 	log.Printf("QUIC Initial packet detected from %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
 	return makeQUICDiscovery(srcIP, dstIP, dstPort, sensorID, versionStr, metadata)
+}
+
+// formatQUICVersion builds the discovery's displayed Version string. It only
+// appends the "(TLS x.y)" suffix when a TLS version was actually resolved —
+// tlsVersionName() returns "" for an unrecognized/absent supported_versions
+// extension, and an earlier unconditional append produced the literal string
+// "QUIC v1 ()" (#L-1: empty-paren artifact surfaced in the Inventory
+// connections lens).
+func formatQUICVersion(versionStr, tlsVer string) string {
+	if tlsVer == "" {
+		return versionStr
+	}
+	return versionStr + " (" + tlsVer + ")"
 }
 
 func makeQUICDiscovery(srcIP, dstIP string, dstPort int, sensorID, version string, metadata map[string]interface{}) *models.CryptoDiscovery {
