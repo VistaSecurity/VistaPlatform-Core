@@ -8,7 +8,7 @@ RUN apk add --no-cache ca-certificates tzdata git
 
 # Explicitly enable workspace mode
 ENV GOWORK=/workspace/go.work
-ENV GOTOOLCHAIN=local
+ENV GOTOOLCHAIN=go1.26.6
 
 # Copy workspace files in correct order
 COPY go.work ./

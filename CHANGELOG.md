@@ -7,11 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.1] - 2026-08-14
+## [0.6.2] - 2026-08-14
 
-> 0.6.0 was tagged but never released: every Go image build failed on the
-> builder-image pin described under Security below. No 0.6.0 GitHub release or
-> chart was published. 0.6.1 is that release with the build fixed.
+> 0.6.0 and 0.6.1 were tagged but never released — every Go image build failed
+> on the toolchain issue described under Security below. Neither published a
+> GitHub release, chart or backend image. 0.6.2 is that release with the build
+> fixed.
 
 ### Added
 
@@ -81,16 +82,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`net/http`), GO-2026-6088 (`encoding/xml`), GO-2026-5972 (`encoding/asn1`) and
   GO-2026-5026 (`net/http`/IDNA).
 
-- **Service Dockerfiles pin the builder to `golang:1.26.6-alpine`.** They
-  previously used the floating `golang:1.26-alpine` minor tag on the assumption
-  that it resolves to the latest 1.26.x patch. It does not resolve immediately:
-  when `go.work` moved to 1.26.6, that tag was still serving 1.26.5, and because
-  the Dockerfiles deliberately set `ENV GOTOOLCHAIN=local` for hermetic builds,
-  the image could not provision the required toolchain — **every Core image build
-  failed** with `go.work requires go >= 1.26.6 (running go 1.26.5;
-  GOTOOLCHAIN=local)`. All 64 builder images now name the exact patch, and
-  `validate-dockerfiles.sh` fails a builder tag that is on the right minor line
-  but not the exact patch `go.work` requires.
+- **Image builds pin `GOTOOLCHAIN` to the exact `go.work` patch instead of
+  `local`.** The Dockerfiles set `ENV GOTOOLCHAIN=local` for hermetic builds,
+  which means "use whatever patch the base image ships." When `go.work` moved to
+  1.26.6 and the base still shipped 1.26.5, **every Core image build failed**
+  with `go.work requires go >= 1.26.6 (running go 1.26.5; GOTOOLCHAIN=local)`.
+
+  Pinning the base image is not sufficient on its own — `release-core.yml`
+  overrides `GO_BUILDER_IMAGE` via `--build-arg`, and the Docker Hardened Images
+  registry publishes no exact-patch tag, only a floating minor one. The 62
+  workspace-building Dockerfiles now set `ENV GOTOOLCHAIN=go1.26.6`, which
+  provisions the required toolchain whichever base is substituted and still
+  refuses a 1.27 bump (`auto` would follow one). The builder ARG defaults are
+  pinned too, as defence in depth. `validate-dockerfiles.sh` now fails a
+  workspace-building Dockerfile whose `GOTOOLCHAIN` is not the exact `go.work`
+  patch — `local` and `auto` are both rejected, mutation-verified.
 
 - **`GOTOOLCHAIN` is pinned to the exact `go.work` version instead of `local`.**
   `local` blocked 1.27 (correct) but also refused to provision the *sanctioned*
