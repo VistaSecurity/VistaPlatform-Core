@@ -4,12 +4,31 @@ The Asset Approval Workflow allows tenants to review and approve/deny assets dis
 
 ## Overview
 
-When assets are discovered (via discovery jobs or sensors), they can be:
-1. **Automatically processed** (sensor discoveries) or **imported** (discovery jobs) with `pending_approval` or `monitoring` status
-2. **Auto-approved** based on network segment rules (sensor discoveries only)
-3. **Reviewed** by security teams (if pending approval)
+Every discovered asset takes the same path, whatever found it:
+1. **Automatically processed** — discovery jobs, sensors and cloud discovery all
+   feed one pipeline. There is no import step.
+2. **Auto-approved** if, and only if, the asset is on a network segment with
+   auto-approve enabled
+3. **Reviewed** by security teams (everything else)
 4. **Approved** to move to `monitoring` status
 5. **Denied** to suppress from rediscovery
+
+## The one auto-approval rule
+
+An asset is auto-approved **only** when it falls inside a network segment you
+defined with **auto-approve enabled** (Settings → Infrastructure → Network
+Segments). That toggle is off by default, and it is the only control that skips
+the approval queue.
+
+Nothing else promotes an asset. Creating one by hand, importing a spreadsheet,
+pulling from a CMDB, or running a discovery scan all land in **Discovery →
+Approvals** unless the address is on an auto-approving segment — in which case
+all of them go straight to `monitoring`. The rule does not depend on how the
+asset was found.
+
+The one deliberate exception is **elevating an external connection** (Inventory
+→ Connections → Elevate): that is an explicit, confirmed click on a specific
+endpoint, so the click is the approval and the asset is created as `monitoring`.
 
 ## Certificates and crypto configurations are deferred until approval
 
@@ -32,10 +51,10 @@ to the queue whenever assets are waiting.
 ### 1. Asset Discovery
 
 Assets are discovered through:
-- **Discovery jobs** (`POST /api/v1/inventory-service/discovery/jobs`) - Manual review and import required
+- **Discovery jobs** (`POST /api/v1/inventory-service/discovery/jobs`) - **Automatically processed** by `discovery-processor-service`
 - **Network sensors** (automatic discovery) - **Automatically processed** by `discovery-processor-service`
 - **Cloud discovery** (`POST /api/v1/device-interrogation-service/cloud/discover`) - **Automatically processed** by `discovery-processor-service`
-- Manual import
+- Manual creation, spreadsheet import and CMDB pull - approval evaluated the same way
 
 **Sensor Discoveries:**
 - Automatically processed within seconds of submission
@@ -54,29 +73,25 @@ Assets are discovered through:
 - No manual import required
 
 **Discovery Jobs:**
-- Results require manual review and import
-- User selects findings to import
-- Can use auto-approve option during import
+- Findings flow into the same pipeline as sensor discoveries, server-side
+- Network segment classification applied automatically
+- Auto-approval rules evaluated automatically
+- Assets created with `monitoring` (if on an auto-approving segment) or `pending_approval` status
+- No manual import required — the Discover wizard's results step reports where
+  the findings went and links to Discovery → Approvals
 
-### 2. Import with Approval
+### 2. Where the findings went
 
-When importing discovery results:
+The Discover wizard's final step reports the split — how many were
+auto-approved, how many are awaiting approval, and how many the pipeline is
+still processing — and links to the Approvals queue. It is a report, not a
+decision: no client chooses an asset's approval status.
 
-**UI:** Discovery Results → Import Selected
-
-**API:** `POST /api/v1/inventory-service/discovery/jobs/:id/import`
-
-**Options:**
-- **Auto-approve**: Assets are immediately set to `monitoring` status
-- **Require Approval**: Assets are set to `pending_approval` status (default)
-
-**Request Body:**
-```json
-{
-  "findings": ["finding-uuid-1", "finding-uuid-2"],
-  "auto_approve": false
-}
-```
+Two counts appear because they answer different questions. **Found** is what the
+scan saw; the split is what reached your inventory. They can differ: external
+endpoints are recorded under Inventory → Connections rather than as assets, and
+a finding with no resolvable address cannot be anchored to one. The wizard says
+so rather than presenting one number as if it answered both.
 
 ### 3. Review Pending Assets
 
@@ -169,7 +184,7 @@ Cloud Discoveries:
                     monitoring or denied
 
 Discovery Jobs:
-  discovered → [manual import] → pending_approval (or monitoring if auto-approved)
+  discovered → pending_approval (or monitoring if on an auto-approve segment)
                               ↓
                          [manual review]
                               ↓

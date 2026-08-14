@@ -39,11 +39,22 @@ RUN npm run build -w frontend-v2
 # 1.26.3, which Trivy still flags (CVE-2026-27145/-42504/-42507). Rebuild the
 # Caddy binary ourselves on the repo's Go 1.26.6 toolchain so the runtime carries
 # stdlib 1.26.6 (also clears GO-2026-5856/CVE-2026-42505). Pinned to Caddy v2.11.4
-# (its own CVE fix, and its go.mod already pulls patched x/crypto/x/net/go-jose);
-# GOTOOLCHAIN=local honors the repo's Go-1.26-only rule (no auto-download of a
-# newer toolchain).
+# (its own CVE fix, and its go.mod already pulls patched x/crypto/x/net/go-jose).
+#
+# GOTOOLCHAIN names the EXACT patch, for the same reason the service Dockerfiles
+# do — but note the reason is NOT go.work compatibility. This stage compiles an
+# unrelated module, so go.work's floor never applies and the build cannot fail
+# here; it just silently produces a binary on whatever patch the base ships.
+# release-core.yml overrides GO_BUILDER_IMAGE with a FLOATING tag
+# (dhi.io/golang:1.26-alpine3.24-dev, or golang:1.26-alpine without Docker Hub
+# creds), so `local` meant "whatever that tag serves today" — which was still
+# 1.26.5 well after 1.26.6 shipped. That is exactly what happened: the published
+# web-ui/admin-ui images carried a Caddy binary on stdlib 1.26.5 with
+# CVE-2026-39821 and CVE-2026-46600, while every backend came out clean, because
+# the backends pin and this stage did not. An exact pin provisions 1.26.6
+# regardless of which base CI substitutes, and still refuses 1.27.
 FROM ${GO_BUILDER_IMAGE} AS caddybuild
-ENV GOTOOLCHAIN=local CGO_ENABLED=0
+ENV GOTOOLCHAIN=go1.26.6 CGO_ENABLED=0
 RUN go install github.com/caddyserver/caddy/v2/cmd/caddy@v2.11.4
 
 # ---- runtime: Caddy static server (mirrors web-ui/Dockerfile.prod) ----

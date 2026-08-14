@@ -8,15 +8,25 @@ Discovery allows tenants to:
 - Scan networks for cryptographic configurations (TLS, SSH, IPSec, VPN)
 - Interrogate network devices directly (Fortinet, Cisco, F5, etc.)
 - Discover cloud resources via provider APIs (AWS, Azure, GCP)
-- **Automatically process all discoveries** through unified pipeline (sensor and cloud discoveries)
-- Review discovery results before importing (for discovery jobs)
+- **Automatically process all discoveries** through one pipeline (discovery jobs, sensors and cloud alike)
+- Review what a job found, with a report of where each finding went
 - Approve or deny discovered assets
 - Automatically classify assets into network segments (see [Operational Context](./operational-context.md))
-- **Auto-approve discoveries** based on network segment rules (sensor and cloud discoveries)
+- **Auto-approve discoveries** on network segments with auto-approve enabled — the only rule that skips the approval queue
 - Link assets to parent devices (one device → many assets)
 
 **Unified Processing Pipeline:**
-All discovery sources (sensor discoveries and cloud discoveries) now flow through the same unified `sensor_discoveries` pipeline. The `discovery-processor-service` automatically processes both sensor and cloud discoveries, applies network segment classification, evaluates auto-approval rules, and creates assets with appropriate status (`monitoring` or `pending_approval`).
+Every discovery source — discovery jobs, sensors and cloud discovery — flows
+through the same `sensor_discoveries` pipeline. The `discovery-processor-service`
+classifies each discovery, evaluates the auto-approval rules and creates the
+asset as `monitoring` or `pending_approval`. Nothing is imported from a browser,
+and no client chooses an asset's approval status.
+
+**One auto-approval rule.** An asset is auto-approved only when it is on a
+network segment you defined with auto-approve enabled (Settings →
+Infrastructure). That is the whole rule, and it applies to every path into
+inventory — scans, sensors, cloud, manual creation, spreadsheet import and CMDB
+pull. See [Asset Approval](./asset-approval.md).
 
 **Deployable sensor efficiency:** Tenant administrators can set an **observation rest period** (default one hour) so passive sensors do not re-send the same endpoint observation on every connection. Configure under **Organization Settings → Infrastructure → Sensor Configuration**. The setting is exposed to sensors as `dedup_ttl_minutes` in the discovery capabilities and as part of the tenant capture defaults.
 
@@ -47,7 +57,7 @@ Create a discovery job with target networks, protocols, and ports, OR interrogat
 - Integration ID: UUID of cloud provider integration
 - Resource types: `["alb", "elb", "nlb", "api_gateway", "cloudfront", "kms", "s3", "rds"]` (AWS), `["application_gateway", "load_balancer", "key_vault", "storage_account", "sql_database"]` (Azure), or `["load_balancer", "ssl_proxy", "kms", "storage", "cloudsql"]` (GCP) — covering TLS front ends, key-management inventory, and at-rest encryption
 - Regions: AWS regions to scan (optional, uses integration default)
-- **Note:** Cloud discoveries are automatically written to `sensor_discoveries` and processed by `discovery-processor-service` - no manual import required
+- **Note:** Cloud discoveries are automatically written to `sensor_discoveries` and processed by `discovery-processor-service`
 - **Certificate Extraction:** For publicly accessible cloud endpoints, the platform performs a **TLS handshake** to extract full certificate chains. For AWS resources, certificates are enriched with ACM metadata (ARN, renewal eligibility). Private endpoints fall back to API-only metadata.
 
 ### 2. Monitor Job Progress
@@ -67,7 +77,8 @@ Monitor discovery job status and progress.
 
 ### 3. Review Results
 
-Review discovery findings before importing.
+Review what the job found. The findings are already on their way to inventory —
+this step is a record of the run, not a decision point.
 
 **UI:** Results table shows:
 - Hostname
@@ -79,24 +90,23 @@ Review discovery findings before importing.
 
 **API:** `GET /api/v2/inventory-service/discovery/jobs/:id/results`
 
-### 4. Import Results
+### 4. Where the findings went
 
-Import discovery results as assets.
+The wizard's results step reports the split — "N found · X auto-approved · Y
+awaiting approval" — and links to **Discovery → Approvals**. There is no import
+step and nothing to click to move findings into inventory; that already happened
+server-side.
 
-**UI:** Click "Import Selected" or "Import All"
-
-**API:** `POST /api/v2/inventory-service/discovery/jobs/:id/import`
-
-**Options:**
-- Select specific findings to import
-- Auto-approve: Automatically approve imported assets (skips approval workflow)
-- Asset status: Set initial status (`monitoring` or `pending_approval`)
-
-**Note:** Sensor discoveries are **automatically processed** by the `discovery-processor-service` - no manual import required. See [Sensor Discovery Processing](#sensor-discovery-processing) below.
+The two numbers are reported separately on purpose. **Found** is what the scan
+saw. The split is what reached your inventory. They can differ: connections to
+external third parties are recorded under **Inventory → Connections** rather than
+as assets, a finding with no resolvable address cannot be anchored to one, and
+processing is asynchronous, so a count may still be settling when the scan
+finishes.
 
 ### 5. Asset Approval
 
-Review and approve/deny imported assets.
+Review and approve/deny discovered assets.
 
 **UI:** Assets appear in "Pending Approval" section
 
@@ -105,7 +115,7 @@ Review and approve/deny imported assets.
 - `POST /api/v2/inventory-service/assets/deny` - Deny assets
 
 **Asset Status Flow:**
-1. `pending_approval` - After import (if not auto-approved)
+1. `pending_approval` - Unless the asset is on an auto-approve segment
 2. `monitoring` - After approval
 3. `denied` - After denial (suppressed from rediscovery)
 
@@ -161,11 +171,13 @@ Discovery jobs are processed by the `cluster-sensor-service`:
 2. **Job Processing**: `cluster-sensor-service` distributes work to available sensors
 3. **Result Collection**: Sensors submit findings to `cluster-sensor-service`
 4. **Result Retrieval**: `inventory-service` retrieves results from `cluster-sensor-service`
-5. **Manual Import**: User reviews and imports results via UI
+5. **Ingestion**: `cluster-sensor-service` also mirrors every finding into the
+   `sensor_discoveries` queue, where `discovery-processor-service` classifies it,
+   evaluates the auto-approval rules and materializes the asset
 
 ## Network Space Classification
 
-After importing discovery results, assets can be automatically classified into network spaces based on IP address matching:
+Discovered assets can be automatically classified into network spaces based on IP address matching:
 
 **UI:** Network Spaces → Classify Assets
 
@@ -209,7 +221,7 @@ See [Asset Lifecycle Management](./asset-lifecycle-management.md) for more detai
 ## Best Practices
 
 1. **Start Small**: Begin with small target ranges to test discovery
-2. **Review Results**: Always review results before importing
+2. **Review Results**: Check the results step's split — what was found versus what reached inventory
 3. **Network Spaces**: Set up network spaces before discovery for automatic classification
 4. **Approval Workflow**: Use approval workflow for production environments
 5. **Scheduled Discovery**: Set up recurring discovery jobs for continuous monitoring
@@ -247,12 +259,15 @@ See [Asset Lifecycle Management](./asset-lifecycle-management.md) for more detai
 - Verify sensors are active and healthy
 - Check network connectivity
 
-### Import Fails
+### Findings Do Not Appear in Inventory
 
-- Verify asset data format
-- Check for duplicate assets
-- Review asset approval workflow settings
-- Check database connection
+- Check **Discovery → Approvals** first: unless the address is on a network
+  segment with auto-approve enabled, the asset is waiting there by design
+- Connections to external third parties are recorded under **Inventory →
+  Connections**, not as assets
+- Findings with no resolvable IP address cannot be turned into an asset
+- Processing is asynchronous — the results step reports how many are still being
+  processed
 
 ## Related Documentation
 

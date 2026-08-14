@@ -84,6 +84,31 @@ export function addressTooltip(a: AgentFleetRow): string {
     .join(' · ');
 }
 
+/**
+ * Platform-managed rows are the tenant's per-workspace HANDLE to an in-cluster
+ * service every tenant shares — not something they deployed, and not theirs to
+ * remove. Deleting one does not stop the service: it severs this workspace's
+ * attribution target, after which their interrogation and scheduled-scan results
+ * stop reaching inventory with no error anywhere.
+ *
+ * The predicate mirrors the server guard exactly (sensor-manager's
+ * models.Sensor.IsPlatformManaged): `platform === 'platform'` — the sentinel the
+ * provisioning trigger and cluster-sensor auto-registration both stamp, and
+ * already how the admin Fleet view and billing identify these rows — OR the
+ * `system` tag, which is what the interrogation pipeline's own sensor lookup
+ * selects on. Either marker alone is enough, so a row missing one is still
+ * recognised. `profile` is deliberately not consulted: `discovery` and
+ * `device_interrogation` are legitimate values for a customer-deployed sensor,
+ * and blocking those would be the same bug pointed the other way.
+ *
+ * Hiding the button is a courtesy, not the control — the server refuses the
+ * request with 403 regardless of what the client offers.
+ */
+export function isPlatformManaged(row: { platform?: string | null; tags?: string[] | null }): boolean {
+  if (row.platform === 'platform') return true;
+  return (row.tags ?? []).includes('system');
+}
+
 export function hostSummary(a: AgentFleetRow): { primary: string; extra: string } {
   const addrs = a.addresses ?? [];
   const primary = a.ip_address ?? addrs.find((x) => x.is_primary)?.address ?? addrs[0]?.address ?? null;

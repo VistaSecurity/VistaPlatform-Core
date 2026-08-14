@@ -75,6 +75,24 @@ Findings we particularly want:
   those are yours to set. Report them if the *chart defaults* are unsafe.
 - Automated scanner output with no demonstrated impact.
 
+## Known design tradeoffs
+
+These are deliberate, and visible in the source. We would rather state them here
+than have you spend an afternoon rediscovering them and filing a report we close
+as known. If you can show impact beyond what is described, we very much want it.
+
+- **Token revocation fails open.** The revocation denylist is backed by Redis. If
+  it is unreachable, the check is skipped and the request proceeds, with a
+  warning logged. A revoked token therefore stays usable for the duration of a
+  Redis outage. The alternative — failing closed — turns a cache outage into a
+  total authentication outage, which we judged worse for self-hosted operators.
+- **Service-to-service requests have a replay window.** Internal calls are signed
+  with HMAC-SHA256 over the method, path, query, body hash, timestamp and tenant.
+  The nonce is signed entropy, not a dedup key: it is never recorded, so an exact
+  replay of a captured internal request succeeds until its timestamp ages out of
+  the ±5 minute clock-skew window. Enabling `serviceMtls` puts the whole mesh
+  behind mutual TLS, which is the mitigation we recommend and run ourselves.
+
 ## Supported versions
 
 Security fixes land on the latest minor release. If you are running something

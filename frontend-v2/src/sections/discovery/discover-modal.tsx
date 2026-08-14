@@ -1,13 +1,20 @@
-// Discover Assets wizard — the "scan targets for crypto assets" flow old web-ui
-// had (DiscoverAssetsWizard), restored on the now-contracted inventory-service
-// /discovery/* endpoints (POST /discovery/jobs → poll GET /discovery/jobs/{id}
-// → GET .../results → POST .../import). Composes the shared Modal primitive.
+// Discover Assets wizard — the "scan targets for crypto assets" flow, on the
+// contracted inventory-service /discovery/* endpoints (POST /discovery/jobs →
+// poll GET /discovery/jobs/{id} → GET .../results). Composes the shared Modal
+// primitive.
+//
+// There is deliberately NO import step. Findings reach inventory server-side:
+// cluster-sensor mirrors every job's findings into the same ingestion queue the
+// sensors feed, and the pipeline evaluates the tenant's segment auto-approval
+// rules. The wizard reports where they landed; it does not decide it.
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useNavigate } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { inventoryComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { Icon, Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
+import { describeMaterialization, type Materialization } from './discover-summary';
 
 // ─── Finding detail helpers ───────────────────────────────────────────────────
 
@@ -325,15 +332,44 @@ const EXEC_MODES: { value: string; label: string }[] = [
   { value: 'sensors', label: 'Sensors — tenant-deployed' },
 ];
 
+// Reports where a job's findings went. The wording is built by
+// describeMaterialization (pure, unit-tested) — see discover-summary.ts for why
+// the two numbers are reported separately.
+function MaterializationSummary({ count, m }: { count: number; m?: Materialization }) {
+  const tones: Record<string, string> = {
+    neutral: 'var(--app-t2)',
+    ok: 'var(--app-ok)',
+    warn: 'var(--warn)',
+    muted: 'var(--app-t3)',
+  };
+  const summary = describeMaterialization(count, m);
+  return (
+    <div style={{ fontSize: 12.5, marginBottom: 10 }}>
+      <div>
+        {summary.parts.map((part, i) => (
+          <span key={i}>
+            {i > 0 && <span style={{ color: 'var(--app-t3)' }}> · </span>}
+            <span style={{ color: tones[part.tone] }}>{part.text}</span>
+          </span>
+        ))}
+      </div>
+      <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 4 }}>{summary.note}</div>
+      <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 4 }}>
+        Click any row to inspect certificate and cipher details.
+      </div>
+    </div>
+  );
+}
+
 const TERMINAL = ['completed', 'success', 'failed', 'error', 'cancelled'];
 
-type Phase = 'configure' | 'running' | 'results' | 'imported';
+type Phase = 'configure' | 'running' | 'results';
 
 export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const qc = useQueryClient();
+  const nav = useNavigate();
   const [phase, setPhase] = useState<Phase>('configure');
   const [jobId, setJobId] = useState<string | null>(null);
-  const [importedCount, setImportedCount] = useState(0);
   const [expandedSet, setExpandedSet] = useState<Set<number>>(new Set());
 
   const toggleExpand = (i: number) =>
@@ -354,7 +390,6 @@ export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose:
     if (open) {
       setPhase('configure');
       setJobId(null);
-      setImportedCount(0);
       setExpandedSet(new Set());
       setTargets('');
       setProtocols(['TLS']);
@@ -398,34 +433,25 @@ export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose:
     if (phase === 'running' && status && TERMINAL.includes(status)) setPhase('results');
   }, [status, phase]);
 
-  // Fetch findings once the job finishes.
+  // Fetch findings once the job finishes. Ingestion is asynchronous, so keep
+  // polling while the queue still holds rows the pipeline hasn't dispositioned —
+  // that is what lets the split below settle without the user doing anything.
   const resultsQ = useQuery({
     queryKey: ['discovery', 'job-results', jobId],
     enabled: open && phase === 'results' && !!jobId,
+    refetchInterval: (q) => (q.state.data?.materialization?.awaiting_processing ? 3000 : false),
     queryFn: async () => {
       const { data, error } = await clients.inventory.GET('/discovery/jobs/{id}/results', { params: { path: { id: jobId! } } });
       if (error || !data) throw new Error('Failed to load findings');
-      return (data.findings ?? []) as DiscoveryFinding[];
-    },
-  });
-  const findings = resultsQ.data ?? [];
-
-  const importM = useMutation({
-    mutationFn: async () => {
-      const { data, error } = await clients.inventory.POST('/discovery/jobs/{id}/import', {
-        params: { path: { id: jobId! } },
-        body: { findings, asset_status: 'pending_approval' },
-      });
-      if (error || !data) throw new Error('Failed to import findings');
-      return data.imported;
-    },
-    onSuccess: (n) => {
-      setImportedCount(n);
-      setPhase('imported');
-      qc.invalidateQueries({ queryKey: ['discovery'] });
       qc.invalidateQueries({ queryKey: ['inventory'] });
+      return {
+        findings: (data.findings ?? []) as DiscoveryFinding[],
+        materialization: data.materialization as Materialization | undefined,
+      };
     },
   });
+  const findings = resultsQ.data?.findings ?? [];
+  const materialization = resultsQ.data?.materialization;
 
   const cancelM = useMutation({
     mutationFn: async () => {
@@ -438,10 +464,9 @@ export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose:
     },
   });
 
-  const busy = create.isPending || importM.isPending || cancelM.isPending;
+  const busy = create.isPending || cancelM.isPending;
   const err =
     (create.error as Error | undefined)?.message ||
-    (importM.error as Error | undefined)?.message ||
     (jobQ.error as Error | undefined)?.message ||
     (resultsQ.error as Error | undefined)?.message ||
     null;
@@ -463,15 +488,16 @@ export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose:
       </button>
     );
     primary = <button className="ui-btn" onClick={onClose}>Run in background</button>;
-  } else if (phase === 'results') {
-    primary = (
-      <button className="ui-btn accent" disabled={findings.length === 0 || importM.isPending} onClick={() => importM.mutate()}>
-        {importM.isPending ? 'Importing…' : findings.length ? `Import ${findings.length} finding${findings.length === 1 ? '' : 's'}` : 'Nothing to import'}
-      </button>
-    );
-    secondary = <button className="ui-btn" onClick={onClose} disabled={importM.isPending}>Close</button>;
   } else {
+    // Results is terminal: the findings are already on their way to inventory.
     primary = <button className="ui-btn accent" onClick={onClose}>Done</button>;
+    if ((materialization?.pending_approval ?? 0) > 0) {
+      secondary = (
+        <button className="ui-btn" onClick={() => { onClose(); nav('/discovery/approvals'); }}>
+          Go to Approvals
+        </button>
+      );
+    }
   }
 
   return (
@@ -484,7 +510,7 @@ export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose:
       icon="radar"
       eyebrow="Discovery"
       title="Discover assets"
-      description="Scan targets for cryptographic assets, then import the findings into your inventory for approval."
+      description="Scan targets for cryptographic assets. Findings flow into your inventory automatically — hosts on an auto-approve network segment are monitored straight away, everything else waits in Approvals."
       primary={primary}
       secondary={secondary}
       footerNote={err ? <span style={{ color: 'var(--danger-text)' }}>{err}</span> : undefined}
@@ -557,10 +583,7 @@ export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose:
             </div>
           ) : (
             <>
-              <div style={{ fontSize: 12.5, color: 'var(--app-t2)', marginBottom: 10 }}>
-                Found {findings.length} finding{findings.length === 1 ? '' : 's'}.{' '}
-                Click any row to inspect certificate and cipher details before importing.
-              </div>
+              <MaterializationSummary count={findings.length} m={materialization} />
               <div className="panel" style={{ borderRadius: 10, maxHeight: 320, overflowY: 'auto' }}>
                 {findings.slice(0, 50).map((f, i) => {
                   const expanded = expandedSet.has(i);
@@ -615,17 +638,6 @@ export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose:
         </div>
       )}
 
-      {phase === 'imported' && (
-        <div style={{ padding: '24px 4px', textAlign: 'center' }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--app-t1)' }}>
-            Imported {importedCount} item{importedCount === 1 ? '' : 's'}
-          </div>
-          <div style={{ fontSize: 12.5, color: 'var(--app-t3)', marginTop: 6 }}>
-            Internal assets await review in Discovery → Approvals. 3rd-party (external)
-            targets land in Inventory → Connections.
-          </div>
-        </div>
-      )}
     </Modal>
   );
 }

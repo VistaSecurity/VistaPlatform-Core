@@ -52,6 +52,41 @@ type Sensor struct {
 	Addresses []AgentAddress `json:"addresses,omitempty" db:"-"`
 }
 
+// IsPlatformManaged reports whether this row is a platform-managed sensor — the
+// tenant's per-workspace identity handle to an in-cluster service shared by
+// every tenant, not a customer deployment.
+//
+// Two markers, ORed rather than ANDed, because either alone already identifies
+// the row and requiring both would let a partially-stamped row slip through:
+//
+//   - platform = "platform" — the sentinel `create_system_sensors_for_tenant`
+//     and cluster-sensor-service's auto-registration both stamp. Already the
+//     codebase's definition of a platform sensor: the admin Fleet view derives
+//     is_platform_sensor from it, and billing excludes it from purchased
+//     capacity by it.
+//   - the "system" tag — what result_processor's lookupSystemSensor selects on.
+//     Including it makes this guard a superset of that selector, so no row the
+//     interrogation pipeline can depend on is deletable.
+//
+// The `profile` values ("discovery", "device_interrogation") are deliberately
+// NOT part of the test: they are legitimate values for a customer-deployed
+// sensor, and keying on them would block deletions a tenant is entitled to make
+// — the same bug pointed the other way.
+func (s *Sensor) IsPlatformManaged() bool {
+	if s == nil {
+		return false
+	}
+	if s.Platform == "platform" {
+		return true
+	}
+	for _, t := range s.Tags {
+		if t == "system" {
+			return true
+		}
+	}
+	return false
+}
+
 // AgentAddress is one IP recorded against an agent, as returned to the UI.
 type AgentAddress struct {
 	InterfaceName string `json:"interface_name"`

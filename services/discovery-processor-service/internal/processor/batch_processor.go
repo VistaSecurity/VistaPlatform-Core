@@ -12,10 +12,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
-	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/approval"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/client"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/converter"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/approval"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
@@ -29,7 +29,7 @@ var ErrNoValidFindings = errors.New("no valid findings to import")
 type BatchProcessor struct {
 	db              *sqlx.DB
 	converter       *converter.SensorDiscoveryConverter
-	approvalService *approval.AutoApprovalService
+	approvalService *approval.Service
 	inventoryClient *client.InventoryClient
 }
 
@@ -37,7 +37,7 @@ type BatchProcessor struct {
 func NewBatchProcessor(
 	db *sqlx.DB,
 	converter *converter.SensorDiscoveryConverter,
-	approvalService *approval.AutoApprovalService,
+	approvalService *approval.Service,
 	inventoryClient *client.InventoryClient,
 ) *BatchProcessor {
 	return &BatchProcessor{
@@ -169,7 +169,7 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) error 
 
 		// Evaluate auto-approval rules for managed assets against the
 		// batch-scoped rule set loaded above.
-		autoApprove, ruleID, err := p.approvalService.EvaluateAutoApprovalWithRules(rules, discovery, classification)
+		autoApprove, ruleID, err := p.approvalService.EvaluateAutoApprovalWithRules(rules, discovery.ApprovalInput(), classification)
 		if err != nil {
 			fmt.Printf("Warning: failed to evaluate auto-approval for discovery %s: %v\n", discovery.ID, err)
 		}

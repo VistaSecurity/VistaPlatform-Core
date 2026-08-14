@@ -1755,7 +1755,8 @@ export interface paths {
          *     `targets` is required (1–1000 entries). Gated by the `discovery.create`
          *     permission. Returns 202 with the created job (`{ "job": {...} }`); poll
          *     `GET /discovery/jobs/{id}` for status and `GET /discovery/jobs/{id}/results`
-         *     for findings.
+         *     for findings and their materialization split. Findings flow into
+         *     inventory server-side; there is nothing for the client to import.
          */
         post: operations["createDiscoveryJob"];
         delete?: never;
@@ -1807,29 +1808,6 @@ export interface paths {
         get: operations["getDiscoveryJobResults"];
         put?: never;
         post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/discovery/jobs/{id}/import": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Import selected findings as infrastructure assets
-         * @description Ingests the chosen findings into the asset inventory. By default new
-         *     assets land as `pending_approval` (the Approvals queue); pass
-         *     `asset_status: monitoring` or `auto_approve: true` to skip approval.
-         *     Gated by the `discovery.create` permission.
-         */
-        post: operations["importDiscoveryJobResults"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3470,9 +3448,9 @@ export interface components {
             [key: string]: unknown;
         };
         /**
-         * @description A single discovered finding. Mirrors services.IngestFinding (the import
-         *     body shape); results proxied from cluster-sensor-service may carry extra
-         *     fields, hence additionalProperties.
+         * @description A single discovered finding. Mirrors services.IngestFinding; results
+         *     proxied from cluster-sensor-service may carry extra fields, hence
+         *     additionalProperties.
          */
         DiscoveryFinding: {
             hostname?: string | null;
@@ -3496,27 +3474,44 @@ export interface components {
         /**
          * @description Findings for a job, proxied verbatim from cluster-sensor-service
          *     (`{ "findings": [...] }` plus any additive upstream fields).
+         *
+         *     `findings` is what the job SAW; `materialization` is what became of it
+         *     once mirrored into the ingestion queue. They answer different questions
+         *     and can legitimately disagree — a third-party endpoint is recorded as a
+         *     connection rather than an asset, and processing is asynchronous — so
+         *     both are reported, separately labelled, rather than as one number.
          */
         DiscoveryJobResults: {
             findings?: components["schemas"]["DiscoveryFinding"][];
+            materialization?: components["schemas"]["DiscoveryMaterialization"];
         } & {
             [key: string]: unknown;
         };
         /**
-         * @description Body for POST /discovery/jobs/{id}/import. `findings` is required. By
-         *     default assets land as `pending_approval`; `asset_status` or
-         *     `auto_approve` override that.
+         * @description What became of a job's findings after they left the job record. Omitted
+         *     entirely when the counts could not be read, so absent means "unknown",
+         *     not "zero".
          */
-        ImportDiscoveryFindingsRequest: {
-            findings: components["schemas"]["DiscoveryFinding"][];
-            /** @description If true, imported assets become `monitoring` (skip approval). */
-            auto_approve?: boolean;
-            /** @description `monitoring` or `pending_approval` (default). */
-            asset_status?: string;
-        };
-        /** @description Import result — the count of findings ingested. */
-        ImportDiscoveryFindingsResponse: {
-            imported: number;
+        DiscoveryMaterialization: {
+            /** @description Findings recorded by the job itself. */
+            findings?: number;
+            /**
+             * @description Findings mirrored into the ingestion queue. Lower than `findings`
+             *     when a finding had no resolved IP to anchor on.
+             */
+            queued?: number;
+            /**
+             * @description Queue rows an auto-approval rule matched — the asset went straight to
+             *     monitoring. Auto-approval has exactly one gate: the asset is on a
+             *     network segment with auto-approve enabled.
+             */
+            auto_approved?: number;
+            /** @description Queue rows no rule matched — the asset is in Discovery → Approvals. */
+            pending_approval?: number;
+            /** @description Queue rows the pipeline has not dispositioned yet. */
+            awaiting_processing?: number;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * @description Discovery scanning features available to the tenant. Defaults to all
@@ -6410,36 +6405,6 @@ export interface operations {
                     "application/json": components["schemas"]["LegacyError"];
                 };
             };
-        };
-    };
-    importDiscoveryJobResults: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Discovery job UUID. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ImportDiscoveryFindingsRequest"];
-            };
-        };
-        responses: {
-            /** @description Findings imported. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ImportDiscoveryFindingsResponse"];
-                };
-            };
-            400: components["responses"]["LegacyBadRequest"];
-            401: components["responses"]["LegacyUnauthorized"];
-            500: components["responses"]["LegacyServerError"];
         };
     };
     cancelDiscoveryJob: {

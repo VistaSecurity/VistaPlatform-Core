@@ -2,10 +2,8 @@ package approval
 
 import (
 	"encoding/json"
-	"reflect"
 
 	"github.com/google/uuid"
-	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/models"
 )
 
 // RuleEvaluator evaluates auto-approval rules against discoveries
@@ -17,7 +15,7 @@ func NewRuleEvaluator() *RuleEvaluator {
 }
 
 // EvaluateRule checks if a discovery matches the rule conditions
-func (e *RuleEvaluator) EvaluateRule(rule *models.AutoApprovalRule, discovery *models.SensorDiscovery, classification *models.NetworkClassification) (bool, error) {
+func (e *RuleEvaluator) EvaluateRule(rule *Rule, discovery Discovery, classification *Classification) (bool, error) {
 	if !rule.IsActive {
 		return false, nil
 	}
@@ -61,7 +59,7 @@ func (e *RuleEvaluator) EvaluateRule(rule *models.AutoApprovalRule, discovery *m
 
 	// Check minimum confidence
 	if minConf, ok := conditions["min_confidence"].(float64); ok {
-		if discovery.Confidence < float64(minConf) {
+		if discovery.Confidence < minConf {
 			return false, nil
 		}
 	}
@@ -101,60 +99,9 @@ func (e *RuleEvaluator) EvaluateRule(rule *models.AutoApprovalRule, discovery *m
 	return true, nil
 }
 
-// getValue safely extracts a value from a map
-func getValue(m map[string]interface{}, key string) (interface{}, bool) {
-	val, ok := m[key]
-	return val, ok
-}
-
-// getStringValue safely extracts a string value from a map
-func getStringValue(m map[string]interface{}, key string) (string, bool) {
-	val, ok := m[key]
-	if !ok {
-		return "", false
-	}
-	str, ok := val.(string)
-	return str, ok
-}
-
-// getFloatValue safely extracts a float64 value from a map
-func getFloatValue(m map[string]interface{}, key string) (float64, bool) {
-	val, ok := m[key]
-	if !ok {
-		return 0, false
-	}
-
-	// Handle both float64 and int types
-	switch v := val.(type) {
-	case float64:
-		return v, true
-	case int:
-		return float64(v), true
-	case int64:
-		return float64(v), true
-	default:
-		// Try to convert via reflection
-		rv := reflect.ValueOf(val)
-		if rv.CanConvert(reflect.TypeOf(float64(0))) {
-			return rv.Convert(reflect.TypeOf(float64(0))).Float(), true
-		}
-		return 0, false
-	}
-}
-
-// getBoolValue safely extracts a bool value from a map
-func getBoolValue(m map[string]interface{}, key string) (bool, bool) {
-	val, ok := m[key]
-	if !ok {
-		return false, false
-	}
-	b, ok := val.(bool)
-	return b, ok
-}
-
-// getDiscoverySource determines the origin of a sensor_discovery entry
+// getDiscoverySource determines the origin of a discovery
 // by inspecting its metadata for "discovery_method": "cloud_api"
-func getDiscoverySource(discovery *models.SensorDiscovery) string {
+func getDiscoverySource(discovery Discovery) string {
 	if len(discovery.Metadata) == 0 {
 		return "sensor_discovery"
 	}

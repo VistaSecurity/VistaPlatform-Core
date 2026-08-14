@@ -7,27 +7,25 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
-	"github.com/jmoiron/sqlx"
-	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
-// AutoApprovalService handles auto-approval logic for discoveries
-type AutoApprovalService struct {
-	db            *sqlx.DB
+// Service handles auto-approval logic for discoveries
+type Service struct {
+	db            *sql.DB
 	ruleEvaluator *RuleEvaluator
 }
 
-// NewAutoApprovalService creates a new auto-approval service
-func NewAutoApprovalService(db *sqlx.DB) *AutoApprovalService {
-	return &AutoApprovalService{
+// NewService creates a new auto-approval service
+func NewService(db *sql.DB) *Service {
+	return &Service{
 		db:            db,
 		ruleEvaluator: NewRuleEvaluator(),
 	}
 }
 
 // GetActiveRulesForTenant retrieves all active auto-approval rules for a tenant
-func (s *AutoApprovalService) GetActiveRulesForTenant(tenantID uuid.UUID) ([]*models.AutoApprovalRule, error) {
+func (s *Service) GetActiveRulesForTenant(tenantID uuid.UUID) ([]*Rule, error) {
 	query := `
 		SELECT id, tenant_id, name, description, conditions, is_active, created_by, created_at, updated_at
 		FROM discovery_auto_approval_rules
@@ -41,8 +39,8 @@ func (s *AutoApprovalService) GetActiveRulesForTenant(tenantID uuid.UUID) ([]*mo
 	// This method is not called with a ctx (the approval/converter layers don't
 	// thread one), so use context.Background() to match existing patterns.
 	ctx := context.Background()
-	var rules []*models.AutoApprovalRule
-	err := shareddatabase.WithTenantTx(ctx, s.db.DB, tenantID, func(tx *sql.Tx) error {
+	var rules []*Rule
+	err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
 		rows, qErr := tx.QueryContext(ctx, query, tenantID)
 		if qErr != nil {
 			return fmt.Errorf("failed to query auto-approval rules: %w", qErr)
@@ -50,7 +48,7 @@ func (s *AutoApprovalService) GetActiveRulesForTenant(tenantID uuid.UUID) ([]*mo
 		defer func() { _ = rows.Close() }()
 
 		for rows.Next() {
-			var rule models.AutoApprovalRule
+			var rule Rule
 			var conditionsJSON []byte
 
 			if scanErr := rows.Scan(
@@ -92,9 +90,9 @@ func (s *AutoApprovalService) GetActiveRulesForTenant(tenantID uuid.UUID) ([]*mo
 // Prefer EvaluateAutoApprovalWithRules when evaluating a whole batch: this
 // convenience form re-reads the tenant's rules (a fresh WithTenantTx round-trip)
 // on every call, which is an N+1 across a batch.
-func (s *AutoApprovalService) EvaluateAutoApproval(
-	discovery *models.SensorDiscovery,
-	classification *models.NetworkClassification,
+func (s *Service) EvaluateAutoApproval(
+	discovery Discovery,
+	classification *Classification,
 ) (bool, *uuid.UUID, error) {
 	// Third-party public connections must never enter the asset approval pipeline.
 	if classification.Ownership == "third_party" {
@@ -113,10 +111,10 @@ func (s *AutoApprovalService) EvaluateAutoApproval(
 // already-loaded rule set. Rules are per-tenant and do not change mid-batch, so
 // the batch processor loads them once per (tenant, batch) and calls this for
 // every discovery — one query per batch instead of one query per discovery.
-func (s *AutoApprovalService) EvaluateAutoApprovalWithRules(
-	rules []*models.AutoApprovalRule,
-	discovery *models.SensorDiscovery,
-	classification *models.NetworkClassification,
+func (s *Service) EvaluateAutoApprovalWithRules(
+	rules []*Rule,
+	discovery Discovery,
+	classification *Classification,
 ) (bool, *uuid.UUID, error) {
 	// Third-party public connections must never enter the asset approval pipeline.
 	if classification.Ownership == "third_party" {

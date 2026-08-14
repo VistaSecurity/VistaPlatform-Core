@@ -12,6 +12,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
+	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -234,8 +235,62 @@ func (h *DiscoveryHandler) GetJobResults(c *gin.Context) {
 	c.Data(resp.StatusCode, "application/json", body)
 }
 
-// ImportJobResults handles POST /api/v1/inventory/discovery/jobs/:id/import
-func (h *DiscoveryHandler) ImportJobResults(c *gin.Context) {
+// ingestFindingsBody is the wire shape of the internal ingestion transport.
+//
+// Two-phase bind: findings arrive as raw JSON and are mapped through the typed
+// ClusterSensorFinding adapter, because cluster-sensor-service emits a shape that
+// differs from IngestFinding ("data" vs "raw_data", "resolved_ip" vs
+// "ip_address", crypto fields nested in "data"); the adapter normalises it in one
+// tested place (see services/discovery_ingest_adapter.go).
+//
+// There is deliberately NO auto_approve field. It used to exist and be honoured,
+// which is how a tenant-facing caller could promote its own assets.
+type ingestFindingsBody struct {
+	Findings []json.RawMessage `json:"findings"`
+	// AssetStatus carries discovery-processor's already-evaluated decision.
+	AssetStatus *string `json:"asset_status,omitempty"`
+}
+
+// resolveIngestedAssetStatus turns the transported status into the one this
+// service acts on.
+//
+// Default deny. Only "monitoring" — the outcome of an auto-approval rule
+// discovery-processor matched before this call — moves off pending_approval;
+// anything else falls back rather than being trusted verbatim, so the transport
+// cannot introduce a status of its own.
+func resolveIngestedAssetStatus(supplied *string) string {
+	if supplied != nil && *supplied == "monitoring" {
+		return "monitoring"
+	}
+	return "pending_approval"
+}
+
+// IngestPipelineFindings handles POST /api/v1/inventory-service/discovery/jobs/:id/import.
+//
+// INTERNAL ONLY. This is the transport discovery-processor-service uses to hand
+// inventory-service a batch of findings it has ALREADY classified and run the
+// tenant's segment auto-approval rules over (see batch_processor.go) — the
+// asset_status in the body is that server-side decision in flight between two
+// services, not a caller's request.
+//
+// It used to double as a tenant-facing endpoint: the Discover wizard fetched a
+// job's results into the browser and POSTed them back, and the body's
+// `auto_approve` / `asset_status` were honoured for that caller too — so anyone
+// holding discovery.create could post `auto_approve: true` and inject assets
+// straight to `monitoring`, bypassing the tenant's own approval policy. The
+// wizard path is gone (findings are mirrored server-side now) and this handler
+// rejects anything that is not an HMAC-verified internal service call.
+//
+// `auto_approve` is no longer read at all, from any caller.
+func (h *DiscoveryHandler) IngestPipelineFindings(c *gin.Context) {
+	// The gateway exposes /api/v1/inventory-service/* wholesale, so this route is
+	// reachable from a browser. The guard — not the route table — is what makes it
+	// internal.
+	if !sharedmw.IsInternalCall(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "internal_only"})
+		return
+	}
+
 	tenantIDVal, _ := c.Get("tenantID")
 
 	// Two-phase bind: accept findings as raw JSON, then map each through the
@@ -243,11 +298,7 @@ func (h *DiscoveryHandler) ImportJobResults(c *gin.Context) {
 	// shape that differs from IngestFinding ("data" vs "raw_data", "resolved_ip"
 	// vs "ip_address", crypto fields nested in "data"); the adapter normalises
 	// it in one tested place (see services/discovery_ingest_adapter.go).
-	var rawBody struct {
-		Findings    []json.RawMessage `json:"findings"`
-		AutoApprove *bool             `json:"auto_approve,omitempty"`
-		AssetStatus *string           `json:"asset_status,omitempty"`
-	}
+	var rawBody ingestFindingsBody
 	if err := c.ShouldBindJSON(&rawBody); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request"})
 		return
@@ -257,7 +308,7 @@ func (h *DiscoveryHandler) ImportJobResults(c *gin.Context) {
 	for _, raw := range rawBody.Findings {
 		var csf services.ClusterSensorFinding
 		if err := json.Unmarshal(raw, &csf); err != nil {
-			log.Printf("[DiscoveryHandler] ImportJobResults: skipping malformed finding: %v", err)
+			log.Printf("[DiscoveryHandler] IngestPipelineFindings: skipping malformed finding: %v", err)
 			continue
 		}
 		findings = append(findings, csf.ToIngestFinding())
@@ -270,29 +321,23 @@ func (h *DiscoveryHandler) ImportJobResults(c *gin.Context) {
 		return
 	}
 
-	log.Printf("[DiscoveryHandler] ImportJobResults: Received %d findings to import for job %s", len(findings), c.Param("id"))
+	log.Printf("[DiscoveryHandler] IngestPipelineFindings: received %d findings for batch %s", len(findings), c.Param("id"))
 	if len(findings) > 0 {
 		log.Printf("[DiscoveryHandler] First finding sample: hostname=%v, ip_address=%v, port=%v, protocol=%v, cipher_suite=%v",
 			findings[0].Hostname, findings[0].IPAddress, findings[0].Port,
 			findings[0].Protocol, findings[0].CipherSuite)
 	}
 
-	// Determine asset_status: use provided AssetStatus, else AutoApprove, else default to "pending_approval"
-	assetStatus := "pending_approval"
-	if rawBody.AssetStatus != nil {
-		assetStatus = *rawBody.AssetStatus
-	} else if rawBody.AutoApprove != nil && *rawBody.AutoApprove {
-		assetStatus = "monitoring"
-	}
+	assetStatus := resolveIngestedAssetStatus(rawBody.AssetStatus)
 
 	imported, err := h.assets.IngestFindings(tenantUUID, findings, assetStatus)
 	if err != nil {
-		log.Printf("[DiscoveryHandler] ImportJobResults failed: %v", err)
+		log.Printf("[DiscoveryHandler] IngestPipelineFindings failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "ingest_failed"})
 		return
 	}
 
-	log.Printf("[DiscoveryHandler] ImportJobResults: Successfully imported %d findings", imported)
+	log.Printf("[DiscoveryHandler] IngestPipelineFindings: ingested %d findings (status=%s)", imported, assetStatus)
 
 	// Log audit event
 	jobIDStr := c.Param("id")

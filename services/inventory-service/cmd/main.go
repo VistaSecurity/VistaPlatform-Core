@@ -298,7 +298,12 @@ func main() {
 		api.POST("/inventory-service/discovery/jobs", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryCreate), discoveryHandler.CreateJob)
 		api.GET("/inventory-service/discovery/jobs/:id", discoveryHandler.GetJob)
 		api.GET("/inventory-service/discovery/jobs/:id/results", discoveryHandler.GetJobResults)
-		api.POST("/inventory-service/discovery/jobs/:id/import", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryCreate), discoveryHandler.ImportJobResults)
+		// INTERNAL ONLY — discovery-processor-service's ingestion transport. The
+		// handler rejects anything that is not an HMAC-verified internal service
+		// call, so no tenant permission gates it (an internal call carries the
+		// "system" userID sentinel, not a user with permissions). Not in the
+		// OpenAPI contract; no browser calls it.
+		api.POST("/inventory-service/discovery/jobs/:id/import", discoveryHandler.IngestPipelineFindings)
 		api.POST("/inventory-service/discovery/jobs/:id/cancel", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryUpdate), discoveryHandler.CancelJob)
 		api.POST("/inventory-service/discovery/jobs/:id/rerun", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryCreate), discoveryHandler.RerunJob)
 
@@ -348,10 +353,8 @@ func main() {
 		api.PUT("/discovery/capabilities", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryManage), discoveryHandler.UpdateCapabilities)
 		api.OPTIONS("/discovery/jobs", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 		api.POST("/discovery/jobs", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryCreate), discoveryHandler.CreateJob)
-		// Specific routes first (with /results, /import, etc.)
+		// Specific routes first (with /results, /cancel, etc.)
 		api.GET("/discovery/jobs/:id/results", discoveryHandler.GetJobResults)
-		api.OPTIONS("/discovery/jobs/:id/import", func(c *gin.Context) { c.Status(http.StatusNoContent) })
-		api.POST("/discovery/jobs/:id/import", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryCreate), discoveryHandler.ImportJobResults)
 		api.OPTIONS("/discovery/jobs/:id/cancel", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 		api.POST("/discovery/jobs/:id/cancel", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryUpdate), discoveryHandler.CancelJob)
 		api.OPTIONS("/discovery/jobs/:id/rerun", func(c *gin.Context) { c.Status(http.StatusNoContent) })
@@ -547,7 +550,6 @@ func main() {
 		apiv2.POST("/inventory-service/discovery/jobs", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryCreate), discoveryHandler.CreateJob)
 		apiv2.GET("/inventory-service/discovery/jobs/:id", discoveryHandler.GetJob)
 		apiv2.GET("/inventory-service/discovery/jobs/:id/results", discoveryHandler.GetJobResults)
-		apiv2.POST("/inventory-service/discovery/jobs/:id/import", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryCreate), discoveryHandler.ImportJobResults)
 		apiv2.POST("/inventory-service/discovery/jobs/:id/cancel", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryUpdate), discoveryHandler.CancelJob)
 		apiv2.POST("/inventory-service/discovery/jobs/:id/rerun", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryCreate), discoveryHandler.RerunJob)
 

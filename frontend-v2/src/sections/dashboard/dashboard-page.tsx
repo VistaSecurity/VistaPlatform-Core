@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router';
 import { clients } from '../../lib/clients';
 import { Icon, LevelBar, LevelDot, MiniBar, RiskGauge, levelFromScore, riskColor, LEVEL_MIN } from '../../components/ui';
 import { PostureTrendChart } from '../../components/posture-trend-chart';
-import { getDashboardPqcMetric } from './dashboard-metrics';
+import { DASHBOARD_COMPLIANCE_FINDINGS_ROUTE, getDashboardPqcMetric } from './dashboard-metrics';
 
 // Dashboard — the command center, ported to the mock's four layers (Dashboard.jsx):
 // cinematic hero, "needs attention" triage strip, lifecycle pipeline, supporting
@@ -155,7 +155,7 @@ export function DashboardPage() {
   }
 
   const attention = [
-    { id: 'crit', count: crit, label: 'Critical findings', sub: 'across all assets', icon: 'circle-alert', tone: RED, route: '/risk-compliance/findings' },
+    { id: 'crit', count: crit, label: 'Critical findings', sub: 'across all assets', icon: 'circle-alert', tone: RED, route: DASHBOARD_COMPLIANCE_FINDINGS_ROUTE },
     { id: 'high', count: high, label: 'High-risk assets', sub: `risk score ≥ ${LEVEL_MIN.High}`, icon: 'server', tone: 'var(--danger-soft)', route: '/inventory?lens=infrastructure' },
     { id: 'exp', count: expSoon, label: 'Certs expiring', sub: 'within 30 days', icon: 'file-badge', tone: ORANGE, route: '/inventory?lens=certificate' },
     { id: 'unk', count: unknown, label: 'Unscored assets', sub: 'no risk signal yet', icon: 'search', tone: 'var(--warn)', route: '/inventory?lens=infrastructure' },
@@ -318,7 +318,7 @@ export function DashboardPage() {
             }
             stats={[['Assets', total.toLocaleString(), null], ['Unscored', String(unknown), null]]} />
           <Connector />
-          <Stage icon="shield-check" accent="var(--accent)" title="Risk & Compliance" hero={crit.toLocaleString()} heroColor="var(--danger-soft)" caption="critical findings" onClick={() => nav('/risk-compliance/findings')}
+          <Stage icon="shield-check" accent="var(--accent)" title="Risk & Compliance" hero={crit.toLocaleString()} heroColor="var(--danger-soft)" caption="critical findings" onClick={() => nav(DASHBOARD_COMPLIANCE_FINDINGS_ROUTE)}
             viz={
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', fontSize: 11, color: 'var(--app-t3)' }}>
                 <LevelDot level="High" size={7} />{high} high-risk assets in scope

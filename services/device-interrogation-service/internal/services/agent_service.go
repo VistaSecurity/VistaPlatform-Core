@@ -27,6 +27,11 @@ var ErrAgentIDConflict = errors.New("agent id already exists")
 // ErrAgentNotFound means no registered (non-deleted) device agent matches the id.
 var ErrAgentNotFound = errors.New("agent not found")
 
+// ErrPlatformAgentProtected means the delete targeted the in-cluster platform
+// agent's per-tenant row (platform='platform'), which is not the tenant's to
+// remove.
+var ErrPlatformAgentProtected = errors.New("platform-managed agents cannot be deleted")
+
 // ErrJobTenantMismatch means a job does not belong to the acting agent's tenant.
 var ErrJobTenantMismatch = errors.New("job does not belong to agent tenant")
 
@@ -359,6 +364,26 @@ func (s *AgentService) DeleteAgent(ctx context.Context, tenantID, agentID uuid.U
 	// WithTenantTx sets app.tenant_id; every statement also carries an explicit
 	// tenant_id filter as the primary control.
 	return shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
+		// The in-cluster platform agent auto-registers a row per tenant
+		// (handlers/auto_registration.go stamps platform='platform'). It is the
+		// tenant's handle to a shared service, not a deployment they own —
+		// deleting it removes it from their fleet view and stops its heartbeat
+		// row being theirs, while the service keeps running. Refused for the same
+		// reason the platform sensor rows are: same class of row, same silence.
+		var platform string
+		if err := tx.QueryRowContext(ctx, `
+			SELECT platform FROM device_agents
+			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+			agentID, tenantID).Scan(&platform); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrAgentNotFound
+			}
+			return fmt.Errorf("failed to load agent for deletion: %w", err)
+		}
+		if platform == "platform" {
+			return ErrPlatformAgentProtected
+		}
+
 		res, err := tx.ExecContext(ctx, `
 			UPDATE device_agents
 			SET deleted_at = NOW(), updated_at = NOW()

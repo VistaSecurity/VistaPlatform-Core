@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { profileLabel, jobsSummary, hostSummary, addressTooltip } from './agent-fleet';
+import { profileLabel, jobsSummary, hostSummary, addressTooltip, isPlatformManaged } from './agent-fleet';
 
 // A discovery agent used to be rendered through the sensor table, which had no
 // column for any of this — so every one of these values existed in the database
@@ -140,5 +140,42 @@ describe('addressTooltip', () => {
   it('is empty when there is nothing to show, so the caller can omit the attribute', () => {
     expect(addressTooltip({ job_count: 0, addresses: [] })).toBe('');
     expect(addressTooltip({ job_count: 0 })).toBe('');
+  });
+});
+
+describe('isPlatformManaged', () => {
+  // Both polarities matter equally. A false negative offers a delete button that
+  // silently cuts this workspace's discovery results off from inventory; a false
+  // positive takes away a deletion the tenant is entitled to make. The predicate
+  // mirrors the server guard (models.Sensor.IsPlatformManaged) exactly.
+
+  it('recognises the rows the provisioning trigger creates', () => {
+    expect(isPlatformManaged({
+      platform: 'platform',
+      tags: ['system', 'platform', 'device_interrogation'],
+    })).toBe(true);
+    expect(isPlatformManaged({
+      platform: 'platform',
+      tags: ['system', 'platform', 'discovery'],
+    })).toBe(true);
+  });
+
+  it('recognises a row carrying only ONE of the two markers', () => {
+    // ORed, not ANDed: either marker alone identifies the row, so a partially
+    // stamped row cannot slip past the guard.
+    expect(isPlatformManaged({ platform: 'platform', tags: [] })).toBe(true);
+    expect(isPlatformManaged({ platform: 'linux', tags: ['system'] })).toBe(true);
+  });
+
+  it('leaves an ordinary customer-deployed sensor deletable', () => {
+    expect(isPlatformManaged({ platform: 'linux', tags: ['edge', 'dc1'] })).toBe(false);
+    expect(isPlatformManaged({ platform: 'windows', tags: [] })).toBe(false);
+    expect(isPlatformManaged({})).toBe(false);
+    expect(isPlatformManaged({ platform: null, tags: null })).toBe(false);
+  });
+
+  it('does not key on profile — those values are legitimate for a tenant sensor', () => {
+    expect(isPlatformManaged({ platform: 'linux', tags: ['discovery'] })).toBe(false);
+    expect(isPlatformManaged({ platform: 'darwin', tags: ['device_interrogation'] })).toBe(false);
   });
 });

@@ -7,6 +7,17 @@ render_macros: false
 **Date:** December 9, 2025  
 **Status:** ✅ Fully Resolved - All Issues Fixed and Tested
 
+> **Reading note (2026-08).** The rule this page states — *auto-approval is per
+> network segment (Settings → Infrastructure) and is off by default* — is
+> current, and now applies to **every** path into inventory: discovery jobs,
+> sensors, cloud, manual creation, spreadsheet import and CMDB pull.
+>
+> What is historical is the **import step**. The transcripts below show findings
+> being imported from the Discovery Results screen; that step no longer exists.
+> A job's findings reach inventory server-side, and no API accepts a
+> caller-supplied approval status. See
+> [Asset Approval](../../features/asset-approval.md).
+
 ## Issues Reported
 
 ### 1. Assets Visible Before Approval

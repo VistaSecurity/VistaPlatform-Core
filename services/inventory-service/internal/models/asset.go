@@ -223,7 +223,11 @@ type AssetInput struct {
 	Tags            map[string]interface{} `json:"tags"`
 	Metadata        map[string]interface{} `json:"metadata"`
 	AssetOwnership  *string                `json:"asset_ownership"`
-	AssetStatus     *string                `json:"asset_status"`
+	// AssetStatus applies to UPDATES only. Asset CREATION ignores it: a new
+	// asset's approval status is evaluated server-side from the tenant's network
+	// segments (AssetService.evaluateAssetApproval), so no request body can
+	// promote an asset to `monitoring` past the approval queue.
+	AssetStatus *string `json:"asset_status"`
 }
 
 // AssetFacetBucket represents a bucket for asset facets

@@ -461,14 +461,25 @@ func (jp *JobProcessor) processTarget(job *models.DiscoveryJob, target *models.D
 		log.Printf("Found %d open ports for target %s", len(findings), expandedTarget)
 	}
 
-	// Active Scan (): jobs created by the inventory Active Scan flow carry
-	// result_sink="sensor_discoveries". When set, ALSO mirror each finding into
-	// sensor_discoveries so the discovery-processor → IngestFindings pipeline matches the
-	// existing asset by IP/port and catalogs its crypto. Additive — the discovery_findings
-	// write below is unchanged for the traditional discovery-wizard workflow.
-	mirrorToSensorDiscoveries := false
-	if sink, ok := probeOpts["result_sink"].(string); ok && sink == "sensor_discoveries" {
-		mirrorToSensorDiscoveries = true
+	// Every discovery job's findings are written to BOTH sinks, unconditionally:
+	//
+	//   discovery_findings  — the job's inspection record ("what did this run see?")
+	//   sensor_discoveries  — the ingestion queue every sensor already feeds, from
+	//                         which discovery-processor classifies, evaluates the
+	//                         tenant's segment auto-approval rules, and materializes
+	//                         inventory.
+	//
+	// The mirror used to be gated on a probe-option result sink, which only Active
+	// Scan ever set — so a wizard-created job produced findings
+	// that reached inventory only if a browser POSTed them back. That client-side
+	// round-trip is gone; the mirror is the only path, and it is the same one for
+	// every job.
+	//
+	// Provenance is carried in the mirrored row's metadata (discovery_source), not
+	// by which jobs get mirrored.
+	activeScan := false
+	if v, ok := probeOpts["active_scan"].(bool); ok {
+		activeScan = v
 	}
 
 	// Store findings
@@ -482,11 +493,9 @@ func (jp *JobProcessor) processTarget(job *models.DiscoveryJob, target *models.D
 			continue
 		}
 
-		if mirrorToSensorDiscoveries {
-			if err := jp.mirrorFindingToSensorDiscoveries(job, &finding); err != nil {
-				log.Printf("[ActiveScan] failed to mirror finding to sensor_discoveries (job %s, %s:%d): %v",
-					job.ID, finding.ResolvedIP, finding.Port, err)
-			}
+		if err := jp.mirrorFindingToSensorDiscoveries(job, &finding, activeScan); err != nil {
+			log.Printf("[JobProcessor] failed to mirror finding to sensor_discoveries (job %s, %s:%d): %v",
+				job.ID, finding.ResolvedIP, finding.Port, err)
 		}
 	}
 
@@ -591,21 +600,40 @@ func (jp *JobProcessor) storeFinding(finding *models.DiscoveryFinding) error {
 	return nil
 }
 
-// mirrorFindingToSensorDiscoveries writes an active-scan finding into sensor_discoveries
-// () so it flows through the unified discovery-processor → IngestFindings pipeline
-// and updates the matching asset's crypto. finding.Data already carries the canonical
-// certificate/cipher metadata (the shared TLS prober produces it), so we pass it through
-// as the discovery metadata, tagged with discovery_source=active_scan.
-func (jp *JobProcessor) mirrorFindingToSensorDiscoveries(job *models.DiscoveryJob, finding *models.DiscoveryFinding) error {
+// mirrorMetadata builds the metadata envelope of a mirrored sensor_discoveries row:
+// the finding's own probe data plus a provenance stamp. Pure, so the stamp is
+// unit-tested directly.
+//
+// The stamp is the ONLY thing activeScan decides. It is not a routing switch —
+// every discovery job's findings are mirrored.
+func mirrorMetadata(data map[string]interface{}, activeScan bool) map[string]interface{} {
+	meta := make(map[string]interface{}, len(data)+1)
+	for k, v := range data {
+		meta[k] = v
+	}
+	if activeScan {
+		meta["discovery_source"] = "active_scan"
+	} else {
+		meta["discovery_source"] = "discovery_job"
+	}
+	return meta
+}
+
+// mirrorFindingToSensorDiscoveries writes a discovery-job finding into sensor_discoveries
+// so it flows through the unified discovery-processor → IngestFindings pipeline, which
+// classifies it, evaluates the tenant's segment auto-approval rules and materializes the
+// asset. finding.Data already carries the canonical certificate/cipher metadata (the shared
+// TLS prober produces it), so we pass it through as the discovery metadata.
+//
+// activeScan only selects the provenance stamp (discovery_source), which is what the UI
+// reads to tell "re-scan of a known asset" from "wizard discovery". It does NOT decide
+// whether the mirror happens — every job is mirrored.
+func (jp *JobProcessor) mirrorFindingToSensorDiscoveries(job *models.DiscoveryJob, finding *models.DiscoveryFinding, activeScan bool) error {
 	if finding.ResolvedIP == "" {
 		return nil // sensor_discoveries.dest_ip is NOT NULL — nothing to anchor on
 	}
 
-	meta := make(map[string]interface{}, len(finding.Data)+1)
-	for k, v := range finding.Data {
-		meta[k] = v
-	}
-	meta["discovery_source"] = "active_scan"
+	meta := mirrorMetadata(finding.Data, activeScan)
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
 		return fmt.Errorf("marshal metadata: %w", err)

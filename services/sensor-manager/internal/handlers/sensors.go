@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
+	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/services"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
@@ -215,6 +217,14 @@ func (h *Handler) DeleteSensor(c *gin.Context) {
 	}
 
 	if err := h.sensorServiceV2.DeleteSensor(c.Request.Context(), sensor.ID, tenantID); err != nil {
+		// A protected platform sensor is a refusal, not a server fault, and the
+		// reason has to reach the user: they clicked delete and nothing happened.
+		if errors.Is(err, services.ErrPlatformSensorProtected) {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "This is a platform-managed sensor and cannot be deleted. It is your workspace's handle to the shared in-cluster discovery service; removing it would stop discovery results reaching your inventory.",
+			})
+			return
+		}
 		h.logErr(c, err, "delete sensor", sensor.ID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return

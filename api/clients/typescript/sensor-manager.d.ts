@@ -91,6 +91,11 @@ export interface paths {
         /**
          * Soft-delete a sensor
          * @description Soft-deletes the sensor. Gated by the `sensors.delete` permission.
+         *
+         *     Platform-managed sensors are refused with 403: those rows are the
+         *     tenant's handle to the in-cluster services shared by all tenants, and
+         *     removing one silently stops discovery results reaching that tenant's
+         *     inventory.
          */
         delete: operations["deleteSensor"];
         options?: never;
@@ -1350,6 +1355,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
             500: components["responses"]["LegacyServerError"];
         };
     };

@@ -176,9 +176,10 @@ func (s *RevalidationService) CreateRevalidationJob(tenantID uuid.UUID, userID u
 // assets. Unlike stale revalidation, it (1) approves the targeted assets
 // (pending_approval → monitoring) so the discovery pipeline extracts their crypto
 // instead of deferring it, (2) stamps scan freshness (last_scanned_at / last_scan_status),
-// and (3) dispatches an active TLS probe whose findings are routed into sensor_discoveries
-// (result_sink option) — so the normal discovery-processor → IngestFindings pipeline
-// matches each asset by IP/port and catalogs its certificates and cipher configs.
+// and (3) dispatches an active TLS probe. Its findings reach sensor_discoveries the same
+// way every discovery job's do (cluster-sensor mirrors unconditionally), so the normal
+// discovery-processor → IngestFindings pipeline matches each asset by IP/port and catalogs
+// its certificates and cipher configs.
 // Returns the dispatched job ID and the number of assets actually scanned.
 func (s *RevalidationService) CreateActiveScanJob(tenantID uuid.UUID, userID uuid.UUID, assetIDs []uuid.UUID, authHeader string) (string, int, error) {
 	if len(assetIDs) == 0 {
@@ -215,17 +216,12 @@ func (s *RevalidationService) CreateActiveScanJob(tenantID uuid.UUID, userID uui
 			continue
 		}
 
-		// result_sink routes cluster-sensor findings into sensor_discoveries so
-		// the asset pipeline catalogs the crypto.
 		job, e := s.discoveryService.CreateJob(tenantID.String(), userID.String(), models.CreateDiscoveryJobInput{
 			Targets:       batch.targets,
 			ExecutionMode: "async",
 			Protocols:     batch.protocols,
 			Ports:         batch.ports,
-			Options: map[string]interface{}{
-				"result_sink": "sensor_discoveries",
-				"active_scan": true,
-			},
+			Options:       activeScanJobOptions(),
 		}, authHeader)
 		if e != nil {
 			// Restore the pre-scan freshness so the UI doesn't show a stuck

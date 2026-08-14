@@ -46,6 +46,32 @@ type CreateDiscoveryJobRequest struct {
 	OTProbeProtocols []string `json:"ot_probe_protocols,omitempty"`
 }
 
+// DiscoveryMaterialization reports what became of a job's findings AFTER they
+// left the job record — i.e. how many reached the ingestion queue
+// (sensor_discoveries) and how the tenant's segment auto-approval rules
+// dispositioned them.
+//
+// It exists because "findings" and "assets" are two different questions and one
+// number cannot honestly answer both (F7): a job can record N findings and add
+// zero assets — third-party endpoints route to external_connections, findings
+// with no resolved IP cannot be anchored, and processing is asynchronous, so
+// immediately after a job completes the queue may not have been drained yet.
+// AwaitingProcessing is that last case, reported explicitly rather than folded
+// into a zero.
+type DiscoveryMaterialization struct {
+	// Findings recorded by the job itself (rows in discovery_findings).
+	Findings int `json:"findings"`
+	// Findings mirrored into the ingestion queue (rows in sensor_discoveries).
+	// Lower than Findings when a finding had no resolved IP to anchor on.
+	Queued int `json:"queued"`
+	// Queue rows an auto-approval rule matched — assets went straight to monitoring.
+	AutoApproved int `json:"auto_approved"`
+	// Queue rows no rule matched — assets are in Discovery → Approvals.
+	PendingApproval int `json:"pending_approval"`
+	// Queue rows the pipeline has not dispositioned yet.
+	AwaitingProcessing int `json:"awaiting_processing"`
+}
+
 // DiscoveryResultsResponse represents the response for discovery results
 type DiscoveryResultsResponse struct {
 	JobID      string                   `json:"job_id"`
@@ -60,6 +86,9 @@ type DiscoveryResultsResponse struct {
 	Page       int                      `json:"page"`
 	PageSize   int                      `json:"page_size"`
 	Errors     []string                 `json:"errors"`
+	// Materialization is omitted (not zeroed) when the counts could not be read,
+	// so a consumer can tell "nothing materialized" from "we don't know".
+	Materialization *DiscoveryMaterialization `json:"materialization,omitempty"`
 }
 
 // AlertConfigRequest represents a request to configure alerts

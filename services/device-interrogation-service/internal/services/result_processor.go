@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"sort"
@@ -100,20 +101,6 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 		s.updateDeviceIdentity(ctx, deviceJob.TenantID, *deviceJob.DeviceID, result.Assets[0])
 	}
 
-	// Look up the tenant's platform system sensor once. Device interrogation
-	// findings are additionally published into sensor_discoveries under it so
-	// they flow through the unified discovery pipeline (network classification +
-	// auto-approval + auto-import), the same path the cloud discovery flow uses.
-	// uuid.Nil means no system sensor is provisioned for this tenant — we then
-	// fall back to discovery_findings only (the prior behaviour). Cloud jobs
-	// (IntegrationID set) already write sensor_discoveries in the router and must
-	// not be double-written here.
-	var systemSensorID uuid.UUID
-	batchID := discoveryJobID.String()
-	if deviceJob.IntegrationID == nil {
-		systemSensorID = s.lookupSystemSensor(ctx, deviceJob.TenantID)
-	}
-
 	// Record what actually happens to each asset so the outcome is visible in
 	// the UI rather than only on this process's stdout.
 	//
@@ -130,6 +117,27 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 			fmt.Printf("Warning: %v\n", err)
 		}
 	}()
+
+	// Look up the tenant's platform system sensor once. Device interrogation
+	// findings are additionally published into sensor_discoveries under it so
+	// they flow through the unified discovery pipeline (network classification +
+	// auto-approval + auto-import), the same path the cloud discovery flow uses.
+	// Cloud jobs (IntegrationID set) already write sensor_discoveries in the
+	// router and must not be double-written here.
+	//
+	// A missing row used to fall back to discovery_findings only. That fallback
+	// is gone: nothing downstream reads discovery_findings into inventory, so it
+	// converted a broken invariant into "the job succeeded and produced nothing
+	// a user will ever see" — on a timer, because scheduled scans run this same
+	// path. The job now FAILS, with the reason on the job itself.
+	var systemSensorID uuid.UUID
+	batchID := discoveryJobID.String()
+	if deviceJob.IntegrationID == nil {
+		systemSensorID, err = s.lookupSystemSensor(ctx, deviceJob.TenantID)
+		if err != nil {
+			return s.failMissingPlatformSensor(ctx, jobQueue, jobID, deviceJob, result, steps, err)
+		}
+	}
 
 	// Process each discovered asset
 	for _, asset := range result.Assets {
@@ -237,7 +245,10 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 				steps.ok(targetInput, StageSensorDiscovery)
 			}
 		} else {
-			steps.skip(targetInput, StageSensorDiscovery, "tenant has no platform system sensor provisioned")
+			// Only reachable for cloud jobs now — the router already wrote their
+			// sensor_discoveries row, and a missing platform sensor on the
+			// interrogation path fails the job before this loop runs.
+			steps.skip(targetInput, StageSensorDiscovery, "cloud discovery writes sensor_discoveries upstream")
 		}
 	}
 
@@ -254,6 +265,41 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 	}
 
 	return nil
+}
+
+// failMissingPlatformSensor turns a broken platform-sensor invariant into a
+// visible job failure.
+//
+// Three surfaces, matching how the neighbouring failures in this file report:
+// the device job's status + error_message (what the Discovery → Jobs list
+// shows), the persisted processing log's `fatal` (what the job detail modal
+// shows, written by the caller's deferred persist), and stdout for the operator
+// tailing logs. The message names the fix, because the person who sees it is a
+// tenant user who cannot be expected to infer "a database trigger did not run".
+func (s *ResultProcessor) failMissingPlatformSensor(
+	ctx context.Context,
+	jobQueue *JobQueueService,
+	jobID uuid.UUID,
+	deviceJob *models.DeviceJob,
+	result *models.JobResult,
+	steps *ProcessingLog,
+	cause error,
+) error {
+	reason := fmt.Sprintf(
+		"platform device-interrogation sensor is missing for this tenant (%s), so interrogation results cannot reach inventory. "+
+			"The platform sensor rows are created for every tenant automatically; if one was deleted, contact your platform administrator to restore it. (%v)",
+		deviceJob.TenantID, cause,
+	)
+	steps.Fatal = reason
+	fmt.Printf("ERROR: device job %s: %s\n", jobID, reason)
+
+	// `result` is passed back verbatim: UpdateJobStatus REWRITES device_jobs.results
+	// on a failed status, so handing it nil would blank the agent's payload — the
+	// evidence of what the run actually found — while marking the job failed.
+	if err := jobQueue.UpdateJobStatus(ctx, jobID, models.JobStatusFailed, result, &reason); err != nil {
+		fmt.Printf("Warning: failed to mark device job %s failed after missing platform sensor: %v\n", jobID, err)
+	}
+	return fmt.Errorf("%s: %w", reason, cause)
 }
 
 // countDiscoveryFindings returns how many findings a discovery job already
@@ -461,11 +507,24 @@ func mergeCertFlags(dst, flags map[string]interface{}, ocspStatus, ocspDetail st
 	}
 }
 
+// ErrNoPlatformSensor is returned when a tenant has no live platform device
+// interrogation sensor row. It is a BROKEN INVARIANT, not a missing optional
+// prerequisite: `create_system_sensors_on_tenant_create` gives every tenant an
+// identity row for the shared in-cluster agent at tenant creation, so its
+// absence means the row was deleted, or the trigger did not run. Callers must
+// surface it, never degrade past it — see ProcessJobResults.
+var ErrNoPlatformSensor = errors.New("tenant has no platform device-interrogation sensor")
+
 // lookupSystemSensor returns the tenant's platform "device_interrogation" system
-// sensor id, or uuid.Nil if none is provisioned (caller falls back to
-// discovery_findings only). This is the same sensor the cloud discovery path
-// writes sensor_discoveries under.
-func (s *ResultProcessor) lookupSystemSensor(ctx context.Context, tenantID uuid.UUID) uuid.UUID {
+// sensor id. This is the same sensor the cloud discovery path writes
+// sensor_discoveries under.
+//
+// Returns ErrNoPlatformSensor when no live row matches. `deleted_at IS NULL` is
+// part of the predicate rather than an afterthought: `sensors` soft-deletes, so
+// without it a tenant who removed the row kept getting its id back and every
+// interrogated asset was attributed to a sensor the user had deleted — wrong
+// rather than absent, which is why the nil branch was almost never observed.
+func (s *ResultProcessor) lookupSystemSensor(ctx context.Context, tenantID uuid.UUID) (uuid.UUID, error) {
 	// RLS-scoped read on `sensors`: WithTenantTx sets app.tenant_id; the explicit
 	// WHERE tenant_id = $1 is kept as the primary control.
 	var id uuid.UUID
@@ -473,15 +532,16 @@ func (s *ResultProcessor) lookupSystemSensor(ctx context.Context, tenantID uuid.
 		return tx.QueryRowContext(ctx, `
 			SELECT id FROM sensors
 			WHERE tenant_id = $1 AND profile = 'device_interrogation' AND 'system' = ANY(tags)
+			  AND deleted_at IS NULL
 			LIMIT 1`, tenantID).Scan(&id)
 	})
 	if err != nil {
-		if err != sql.ErrNoRows {
-			fmt.Printf("Warning: failed to look up system sensor for tenant %s: %v\n", tenantID, err)
+		if errors.Is(err, sql.ErrNoRows) {
+			return uuid.Nil, ErrNoPlatformSensor
 		}
-		return uuid.Nil
+		return uuid.Nil, fmt.Errorf("failed to look up platform system sensor for tenant %s: %w", tenantID, err)
 	}
-	return id
+	return id, nil
 }
 
 // writeSensorDiscovery publishes a single interrogated asset into the

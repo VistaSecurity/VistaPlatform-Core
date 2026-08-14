@@ -147,18 +147,13 @@ func TestListImpersonationAudit(t *testing.T) {
 	assertEqual(t, http.StatusInternalServerError, w.Code)
 }
 
-// Integration test for the full impersonation flow
-func TestImpersonationFlowIntegration(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	// This would be a more comprehensive test that:
-	// 1. Starts impersonation
-	// 2. Verifies token is valid
-	// 3. Stops impersonation
-	// 4. Verifies token is revoked
-	// 5. Checks audit logs
-
-	// For now, this is a placeholder for future integration tests
-	// that would require a real database and Redis instance
-	t.Skip("Integration test requires real database and Redis")
-}
+// NOTE: there is no end-to-end impersonation test (start → token valid → stop →
+// token revoked → audit row). A `TestImpersonationFlowIntegration` used to stand
+// here, but its body was an unconditional t.Skip() with no assertions — it could
+// not fail, and it made `grep` report impersonation coverage that did not exist.
+// Removed rather than left in place, so the gap is visible.
+//
+// Writing it for real means the testdb harness plus Redis: use testdb.Connect(t)
+// + testdb.NewTenant(t, db), name it TestIntegration_* so it runs in the nightly
+// (see docsv4/internal/developer/standards/DB_INTEGRATION_TESTS.md), and assert
+// the stop path actually lands the token on the revocation denylist.

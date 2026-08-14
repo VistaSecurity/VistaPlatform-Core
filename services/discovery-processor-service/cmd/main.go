@@ -12,12 +12,12 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
-	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/approval"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/client"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/converter"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/processor"
+	"github.com/vistasecurity/vistaplatform/shared/approval"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	"github.com/vistasecurity/vistaplatform/shared/version"
@@ -57,7 +57,7 @@ func main() {
 
 	// Initialize services
 	converter := converter.NewSensorDiscoveryConverter()
-	approvalService := approval.NewAutoApprovalService(db.DB)
+	approvalService := approval.NewService(db.DB.DB)
 	inventoryClient, err := client.NewInventoryClient(cfg)
 	if err != nil {
 		log.Fatalf("Failed to create inventory client: %v", err)

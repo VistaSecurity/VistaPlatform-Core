@@ -213,9 +213,65 @@ func TestVerify_AcceptsLegacySignatureWithQueryString(t *testing.T) {
 	req.Header.Set(HeaderBodyHash, bodyHash)
 	req.Header.Set(HeaderSignature, sig)
 
-	verifier := NewVerifier(testSecret)
+	// Opt-in only. The fallback is off by default now, so a verifier that wants
+	// rolling-upgrade compatibility has to ask for it.
+	verifier := NewVerifierWithLegacyQuery(testSecret, true)
 	if !verifier.Verify(newVerifyCtx(t, req)) {
 		t.Fatal("verifier rejected a legacy-format signature for a query-carrying request — breaks rolling upgrade")
+	}
+
+	// Same request, default verifier → rejected.
+	if NewVerifierWithLegacyQuery(testSecret, false).Verify(newVerifyCtx(t, req)) {
+		t.Fatal("legacy-format signature accepted with the fallback disabled")
+	}
+}
+
+// The reason the fallback is off by default.
+//
+// The legacy message omits the query string entirely, so a signature captured
+// from a request that carried NO query also validates for that same method,
+// path, body and timestamp with ANY query string appended. Nothing here forges
+// a signature — it replays a genuine one, which is what an attacker who can
+// observe one internal call actually has, and the ±5m skew window plus the
+// absence of nonce dedup gives them time to use it.
+func TestVerify_RejectsCapturedNoQuerySignatureReplayedWithQuery(t *testing.T) {
+	signer := NewSigner(testSecret)
+
+	// A legitimate, correctly-signed internal call with no query string.
+	captured := httptest.NewRequest(http.MethodGet, "/api/v1/foo", nil)
+	signer.SignRequest(captured)
+
+	// Replay it verbatim — same headers, same signature — but append query
+	// parameters of the attacker's choosing.
+	replayed := httptest.NewRequest(http.MethodGet, "/api/v1/foo?tenant_id=victim&limit=100000", nil)
+	for _, h := range []string{HeaderServiceCall, HeaderTimestamp, HeaderNonce, HeaderBodyHash, HeaderSignature} {
+		replayed.Header.Set(h, captured.Header.Get(h))
+	}
+
+	if NewVerifierWithLegacyQuery(testSecret, false).Verify(newVerifyCtx(t, replayed)) {
+		t.Fatal("captured no-query signature verified with attacker-chosen query params appended")
+	}
+
+	// And with the fallback enabled it DOES verify — which is the cost of
+	// turning it on, stated here so nobody re-enables it by default believing
+	// it is free.
+	if !NewVerifierWithLegacyQuery(testSecret, true).Verify(newVerifyCtx(t, replayed)) {
+		t.Fatal("expected the legacy fallback to accept this replay; if it no longer does, the fallback's risk note is stale")
+	}
+}
+
+// The env var is the only thing that flips the default, so pin that wiring.
+func TestNewVerifier_LegacyQueryDefaultsOffAndHonorsEnv(t *testing.T) {
+	if NewVerifier(testSecret).allowLegacyQuery {
+		t.Fatal("legacy query fallback is on with the env var unset — it must default off")
+	}
+	t.Setenv(LegacyQuerySignatureEnv, "true")
+	if !NewVerifier(testSecret).allowLegacyQuery {
+		t.Fatalf("%s=true did not enable the legacy fallback", LegacyQuerySignatureEnv)
+	}
+	t.Setenv(LegacyQuerySignatureEnv, "nonsense")
+	if NewVerifier(testSecret).allowLegacyQuery {
+		t.Fatal("an unrecognized value enabled the legacy fallback; only true/1/yes should")
 	}
 }
 

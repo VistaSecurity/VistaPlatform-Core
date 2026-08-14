@@ -52,11 +52,13 @@ func TestIntegration_Ingest_PopulatesComponentColumnsAndLinks(t *testing.T) {
 
 	protoVersion := "TLS 1.2"
 	suite := "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
-	svc.processDiscoveryCryptoData(tenant, asset, IngestFinding{
+	if err := svc.processDiscoveryCryptoData(tenant, asset, IngestFinding{
 		Protocol:        "TLS",
 		ProtocolVersion: &protoVersion,
 		CipherSuite:     &suite,
-	}, nil, nil, nil)
+	}, nil, nil, nil); err != nil {
+		t.Fatalf("processDiscoveryCryptoData: %v", err)
+	}
 
 	var symmetric, hash, kex, sig *string
 	if err := svc.db.QueryRow(`
@@ -134,10 +136,12 @@ func TestIntegration_Ingest_UnknownAlgorithmIsNotFabricated(t *testing.T) {
 	}
 
 	suite := "TLS_ECDHE_RSA_WITH_CAMELLIA_256_CBC_SHA384"
-	svc.processDiscoveryCryptoData(tenant, asset, IngestFinding{
+	if err := svc.processDiscoveryCryptoData(tenant, asset, IngestFinding{
 		Protocol:    "TLS",
 		CipherSuite: &suite,
-	}, nil, nil, nil)
+	}, nil, nil, nil); err != nil {
+		t.Fatalf("processDiscoveryCryptoData: %v", err)
+	}
 
 	var after int
 	if err := svc.db.QueryRow(`SELECT count(*) FROM algorithms`).Scan(&after); err != nil {
@@ -167,10 +171,12 @@ func TestIntegration_Ingest_StaticSuiteResolvesToNoForwardSecrecy(t *testing.T) 
 	for _, tc := range cases {
 		t.Run(tc.suite, func(t *testing.T) {
 			suite := tc.suite
-			svc.processDiscoveryCryptoData(tenant, asset, IngestFinding{
+			if err := svc.processDiscoveryCryptoData(tenant, asset, IngestFinding{
 				Protocol:    "TLS",
 				CipherSuite: &suite,
-			}, nil, nil, nil)
+			}, nil, nil, nil); err != nil {
+				t.Fatalf("processDiscoveryCryptoData: %v", err)
+			}
 
 			var code string
 			if err := svc.db.QueryRow(`

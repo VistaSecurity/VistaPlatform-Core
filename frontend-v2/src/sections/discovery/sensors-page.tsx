@@ -5,7 +5,7 @@ import { DTable, CellMono, CellTxt, PageWrap, queryNote, sensorOnline, relTime }
 import { useSensors, useDiscoveryCounts, useDeviceAgents } from './queries';
 import { RegisterSensorModal, DeleteSensorModal, DeleteAgentModal, PendingRegistrationsSection } from './sensor-modals';
 import { SensorDetailDrawer } from './sensor-detail-drawer';
-import { profileLabel, jobsSummary, hostSummary, addressTooltip } from './agent-fleet';
+import { profileLabel, jobsSummary, hostSummary, addressTooltip, isPlatformManaged } from './agent-fleet';
 
 // Discovery → Sensors & Agents. TWO tables, because a sensor and a discovery
 // agent are two different things:
@@ -114,16 +114,25 @@ export function SensorsPage() {
                 <CellMono v={s.version ? 'v' + s.version : '—'} c="var(--app-t3)" />
                 <StatusCell status={s.status} online={on} />
                 <span style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                  <PermissionGate permission={TENANT_PERMISSIONS.sensors.delete} fallback={<span />}>
-                    <button
-                      className="ui-btn sm ghost"
-                      style={{ color: 'var(--danger-text)', flex: 'none', padding: '0 7px' }}
-                      title="Delete sensor"
-                      onClick={(e) => { e.stopPropagation(); setToDelete({ id: s.id, name: s.name }); }}
-                    >
-                      <Icon name="x" size={13} />
-                    </button>
-                  </PermissionGate>
+                  {/* A platform sensor is this workspace's handle to a shared
+                      in-cluster service — deleting it silently cuts discovery
+                      results off from inventory, so the action isn't offered.
+                      The server refuses it too (403); this only stops the user
+                      being invited to break their own pipeline. */}
+                  {isPlatformManaged(s) ? (
+                    <PlatformLockCell />
+                  ) : (
+                    <PermissionGate permission={TENANT_PERMISSIONS.sensors.delete} fallback={<span />}>
+                      <button
+                        className="ui-btn sm ghost"
+                        style={{ color: 'var(--danger-text)', flex: 'none', padding: '0 7px' }}
+                        title="Delete sensor"
+                        onClick={(e) => { e.stopPropagation(); setToDelete({ id: s.id, name: s.name }); }}
+                      >
+                        <Icon name="x" size={13} />
+                      </button>
+                    </PermissionGate>
+                  )}
                 </span>
               </>
             );
@@ -183,16 +192,20 @@ export function SensorsPage() {
                     {/* discovery.manage, not sensors.delete: the endpoint behind
                         this is device-interrogation-service's, gated the same as
                         its other destructive routes. */}
-                    <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage} fallback={<span />}>
-                      <button
-                        className="ui-btn sm ghost"
-                        style={{ color: 'var(--danger-text)', flex: 'none', padding: '0 7px' }}
-                        title="Delete agent"
-                        onClick={(e) => { e.stopPropagation(); setAgentToDelete({ id: a.id, name: a.name || `agent-${a.id.slice(0, 8)}` }); }}
-                      >
-                        <Icon name="x" size={13} />
-                      </button>
-                    </PermissionGate>
+                    {isPlatformManaged(a) ? (
+                      <PlatformLockCell />
+                    ) : (
+                      <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage} fallback={<span />}>
+                        <button
+                          className="ui-btn sm ghost"
+                          style={{ color: 'var(--danger-text)', flex: 'none', padding: '0 7px' }}
+                          title="Delete agent"
+                          onClick={(e) => { e.stopPropagation(); setAgentToDelete({ id: a.id, name: a.name || `agent-${a.id.slice(0, 8)}` }); }}
+                        >
+                          <Icon name="x" size={13} />
+                        </button>
+                      </PermissionGate>
+                    )}
                   </span>
                 </>
               );
@@ -212,6 +225,20 @@ export function SensorsPage() {
 }
 
 // Shared status cell — both fleets use the same online/pending/offline colouring.
+// What the delete column shows for a platform-managed row. A lock rather than a
+// blank cell: the absence of the button should read as "this one is different",
+// not as a rendering gap, and the tooltip says why.
+function PlatformLockCell() {
+  return (
+    <span
+      title="Platform-managed — provided by Vista Platform and shared by all tenants. It cannot be deleted."
+      style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', color: 'var(--app-t3)', padding: '0 9px' }}
+    >
+      <Icon name="lock" size={12} />
+    </span>
+  );
+}
+
 function StatusCell({ status, online }: { status?: string | null; online: boolean }) {
   return (
     <span style={{ textAlign: 'right', fontSize: 11.5, fontWeight: 600, color: online ? 'var(--ok)' : status === 'pending' ? 'var(--warn)' : 'var(--danger)' }}>

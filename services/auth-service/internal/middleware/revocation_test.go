@@ -90,8 +90,14 @@ func TestRequireNotRevoked(t *testing.T) {
 	}
 }
 
-func TestRequireNotRevokedWithRealRedis(t *testing.T) {
-	// This test would use a real Redis instance for integration testing
-	// Skip in unit tests, run in integration test suite
-	t.Skip("Integration test - requires real Redis instance")
-}
+// NOTE: RequireNotRevoked is exercised above against a stubbed checker only —
+// nothing here covers it against a real Redis, and in particular nothing covers
+// the FAIL-OPEN branch (a denylist outage allows the request through, by design;
+// see shared/middleware/auth.go). A `TestRequireNotRevokedWithRealRedis` used to
+// stand here, but its body was an unconditional t.Skip() with no assertions, so
+// it could not fail and it disguised the gap. Removed rather than left in place.
+//
+// The branch worth pinning when this is written for real: with Redis
+// unreachable, the middleware allows the request AND logs the fail-open warning
+// — so that a future refactor cannot silently turn a documented, deliberate
+// fail-open into an undocumented one.

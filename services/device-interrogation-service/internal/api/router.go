@@ -355,6 +355,12 @@ func deleteAgentHandler(db, bypassDB *sql.DB, redis *redis.Client) gin.HandlerFu
 				c.JSON(http.StatusNotFound, gin.H{"error": "Agent not found"})
 				return
 			}
+			if errors.Is(err, services.ErrPlatformAgentProtected) {
+				c.JSON(http.StatusForbidden, gin.H{
+					"error": "This is a platform-managed agent and cannot be deleted. It is your workspace's handle to the shared in-cluster interrogation service.",
+				})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 			return
 		}

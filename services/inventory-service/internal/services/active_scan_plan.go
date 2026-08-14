@@ -227,3 +227,21 @@ func planActiveScanBatches(assets []activeScanAsset) []activeScanBatch {
 	}
 	return out
 }
+
+// activeScanJobOptions builds the probe options an Active Scan job carries.
+//
+// It deliberately does NOT carry result_sink="sensor_discoveries". That option
+// used to be what routed a job's findings into the ingestion queue, and Active
+// Scan was the only caller that ever set it — so every other discovery job's
+// findings never reached inventory without a browser posting them back.
+// cluster-sensor now mirrors EVERY job unconditionally, which makes the option
+// inert, so it is gone rather than left as a switch that no longer switches
+// anything.
+//
+// active_scan survives because it still does something: it stamps provenance
+// (discovery_source) on the mirrored rows. It does not gate the mirror.
+func activeScanJobOptions() map[string]interface{} {
+	return map[string]interface{}{
+		"active_scan": true,
+	}
+}

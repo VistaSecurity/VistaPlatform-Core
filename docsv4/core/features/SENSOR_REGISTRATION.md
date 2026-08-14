@@ -59,7 +59,12 @@ Every tenant automatically has access to two **System Sensors** that are provide
 System sensors are visually distinguished in the Sensor Management UI:
 - **Blue/Indigo Background**: System sensor rows have a distinct background color
 - **"System" Type Badge**: Instead of "network" or "endpoint", system sensors show a "System" badge
-- **No Delete Button**: System sensors cannot be deleted by tenants
+- **No Delete Button**: System sensors cannot be deleted by tenants. The API enforces
+  this too — a delete against a platform-managed sensor (or the platform interrogation
+  agent) is refused with `403`, not merely hidden in the UI. The row is the tenant's
+  handle to a shared in-cluster service; removing it would silently stop interrogation
+  and scheduled-scan results reaching that tenant's inventory while the service kept
+  running for everyone else.
 - **Platform Banner**: The sensor details view shows a banner indicating it's a platform-managed sensor
 - **Hidden Certificate Info**: Certificate details are hidden as system sensors use platform-level authentication
 

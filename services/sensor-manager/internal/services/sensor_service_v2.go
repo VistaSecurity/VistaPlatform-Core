@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -141,8 +142,30 @@ func (s *SensorServiceV2) UpdateSensorStatus(ctx context.Context, id, tenantID u
 	return nil
 }
 
+// ErrPlatformSensorProtected is returned when a delete targets a
+// platform-managed sensor row.
+var ErrPlatformSensorProtected = errors.New("platform-managed sensors cannot be deleted")
+
 // DeleteSensor soft deletes a sensor, scoped to tenantID.
+//
+// Platform-managed rows are refused. Deleting one does not stop the shared
+// in-cluster service or affect any other tenant — it severs THIS tenant's handle
+// to it, after which their interrogation and scheduled-scan results have no
+// attribution target and go nowhere, silently, while the service keeps running
+// for everyone else. One click, one workspace's discovery pipeline broken.
+//
+// This is the authoritative guard. The UI also stops offering the action (see
+// frontend-v2 sensors-page), but a hidden button is a convenience, not a
+// control: the endpoint is reachable directly.
 func (s *SensorServiceV2) DeleteSensor(ctx context.Context, id, tenantID uuid.UUID) error {
+	sensor, err := s.repo.GetSensorByIDForTenant(ctx, id, tenantID)
+	if err != nil {
+		return fmt.Errorf("failed to delete sensor: %w", err)
+	}
+	if sensor.IsPlatformManaged() {
+		return ErrPlatformSensorProtected
+	}
+
 	if err := s.repo.DeleteSensor(ctx, id, tenantID); err != nil {
 		return fmt.Errorf("failed to delete sensor: %w", err)
 	}

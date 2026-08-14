@@ -57,7 +57,13 @@ type ProcessingLog struct {
 	// zero when a dozen findings landed, and it is not credited with a clean
 	// success either, because the payload plainly does not describe the run.
 	ExistingFindings int
-	steps            []ProcessingStep
+	// Fatal is set when processing aborted before it could run per-asset steps —
+	// today, a missing platform device-interrogation sensor. It is separate from
+	// a failed step because it is not per-asset: nothing was attempted, so no
+	// step failed, and without it the summary would be all-zero and
+	// indistinguishable from "there was nothing to do".
+	Fatal string
+	steps []ProcessingStep
 }
 
 func (p *ProcessingLog) record(target, stage, status, detail string) {
@@ -138,7 +144,7 @@ func (p *ProcessingLog) Summary() map[string]interface{} {
 	discOK, discFailed, discSkipped := p.counts(StageSensorDiscovery)
 	targetsOK, targetsFailed, _ := p.counts(StageDiscoveryTarget)
 
-	return map[string]interface{}{
+	summary := map[string]interface{}{
 		"assets_received":        p.AssetsReceived,
 		"discovery_job_id":       p.DiscoveryJobID,
 		"targets_created":        targetsOK,
@@ -155,6 +161,10 @@ func (p *ProcessingLog) Summary() map[string]interface{} {
 		"steps":                  p.steps,
 		"processing_finished_at": time.Now().UTC().Format(time.RFC3339),
 	}
+	if p.Fatal != "" {
+		summary["fatal"] = p.Fatal
+	}
+	return summary
 }
 
 // fullyMaterialized is the "nothing to see here" claim, and it has to be hard to
@@ -168,6 +178,9 @@ func (p *ProcessingLog) Summary() map[string]interface{} {
 // materialized results this processor never saw — the run is real, the report of
 // it is not, and the flag must say so.
 func (p *ProcessingLog) fullyMaterialized(findingsFailed, discFailed, targetsFailed int) bool {
+	if p.Fatal != "" {
+		return false
+	}
 	if findingsFailed != 0 || discFailed != 0 || targetsFailed != 0 {
 		return false
 	}

@@ -18,8 +18,10 @@ tags:
     web-ui/src/services/cmdb-api.ts. Settings → Integrations.'
 - name: discovery
   description: 'Active-discovery jobs — scan targets (IPs/CIDRs/hostnames) for
-    crypto assets, poll status, fetch findings, and import them into inventory;
-    plus the tenant capability policy. UI consumer: frontend-v2 Discovery →
+    crypto assets and poll status/findings, plus the tenant capability policy.
+    Findings reach inventory server-side (cluster-sensor mirrors them into the
+    ingestion queue every sensor feeds) — there is no client-side import step,
+    and no API accepts an approval status. UI consumer: frontend-v2 Discovery →
     Discover assets wizard.'
 - name: certificates
   description: 'X.509 certificate inventory — read, chain rebuild, and the write
@@ -2870,7 +2872,8 @@ paths:
         `targets` is required (1–1000 entries). Gated by the `discovery.create`
         permission. Returns 202 with the created job (`{ "job": {...} }`); poll
         `GET /discovery/jobs/{id}` for status and `GET /discovery/jobs/{id}/results`
-        for findings.
+        for findings and their materialization split. Findings flow into
+        inventory server-side; there is nothing for the client to import.
       requestBody:
         required: true
         content:
@@ -2985,44 +2988,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/LegacyError'
-  /discovery/jobs/{id}/import:
-    post:
-      operationId: importDiscoveryJobResults
-      tags:
-      - discovery
-      summary: Import selected findings as infrastructure assets
-      description: |
-        Ingests the chosen findings into the asset inventory. By default new
-        assets land as `pending_approval` (the Approvals queue); pass
-        `asset_status: monitoring` or `auto_approve: true` to skip approval.
-        Gated by the `discovery.create` permission.
-      parameters:
-      - name: id
-        in: path
-        required: true
-        description: Discovery job UUID.
-        schema:
-          type: string
-          format: uuid
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ImportDiscoveryFindingsRequest'
-      responses:
-        '200':
-          description: Findings imported.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ImportDiscoveryFindingsResponse'
-        '400':
-          $ref: '#/components/responses/LegacyBadRequest'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
   /discovery/jobs/{id}/cancel:
     post:
       operationId: cancelDiscoveryJob
@@ -6497,9 +6462,9 @@ components:
       type: object
       additionalProperties: true
       description: |
-        A single discovered finding. Mirrors services.IngestFinding (the import
-        body shape); results proxied from cluster-sensor-service may carry extra
-        fields, hence additionalProperties.
+        A single discovered finding. Mirrors services.IngestFinding; results
+        proxied from cluster-sensor-service may carry extra fields, hence
+        additionalProperties.
       properties:
         hostname:
           type:
@@ -6554,40 +6519,47 @@ components:
       description: |
         Findings for a job, proxied verbatim from cluster-sensor-service
         (`{ "findings": [...] }` plus any additive upstream fields).
+
+        `findings` is what the job SAW; `materialization` is what became of it
+        once mirrored into the ingestion queue. They answer different questions
+        and can legitimately disagree — a third-party endpoint is recorded as a
+        connection rather than an asset, and processing is asynchronous — so
+        both are reported, separately labelled, rather than as one number.
       properties:
         findings:
           type: array
           items:
             $ref: '#/components/schemas/DiscoveryFinding'
-    ImportDiscoveryFindingsRequest:
+        materialization:
+          $ref: '#/components/schemas/DiscoveryMaterialization'
+    DiscoveryMaterialization:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       description: |
-        Body for POST /discovery/jobs/{id}/import. `findings` is required. By
-        default assets land as `pending_approval`; `asset_status` or
-        `auto_approve` override that.
-      required:
-      - findings
+        What became of a job's findings after they left the job record. Omitted
+        entirely when the counts could not be read, so absent means "unknown",
+        not "zero".
       properties:
         findings:
-          type: array
-          items:
-            $ref: '#/components/schemas/DiscoveryFinding'
-        auto_approve:
-          type: boolean
-          description: If true, imported assets become `monitoring` (skip approval).
-        asset_status:
-          type: string
-          description: '`monitoring` or `pending_approval` (default).'
-    ImportDiscoveryFindingsResponse:
-      type: object
-      additionalProperties: false
-      description: Import result — the count of findings ingested.
-      required:
-      - imported
-      properties:
-        imported:
           type: integer
+          description: Findings recorded by the job itself.
+        queued:
+          type: integer
+          description: |
+            Findings mirrored into the ingestion queue. Lower than `findings`
+            when a finding had no resolved IP to anchor on.
+        auto_approved:
+          type: integer
+          description: |
+            Queue rows an auto-approval rule matched — the asset went straight to
+            monitoring. Auto-approval has exactly one gate: the asset is on a
+            network segment with auto-approve enabled.
+        pending_approval:
+          type: integer
+          description: Queue rows no rule matched — the asset is in Discovery → Approvals.
+        awaiting_processing:
+          type: integer
+          description: Queue rows the pipeline has not dispositioned yet.
     DiscoveryCapabilities:
       type: object
       additionalProperties: true

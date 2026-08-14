@@ -175,14 +175,59 @@ func (s *Signer) SignRequest(req *http.Request) {
 	req.Header.Set(HeaderSignature, sig)
 }
 
+// LegacyQuerySignatureEnv opts back in to accepting signatures produced by the
+// pre-SEC-2 signer, which never covered the query string.
+//
+// It exists for one situation: a rolling upgrade in which not-yet-upgraded pods
+// are still signing the old way. Set it to "true"/"1" for the duration of that
+// rollout and unset it afterwards.
+//
+// It defaults to OFF because leaving the fallback permanently on measurably
+// weakens the signature. When the verifier accepts a query-omitted message, a
+// signature captured from a request that carried NO query string also validates
+// for that same method, path, body and timestamp with ANY query string appended
+// — the attacker chooses the parameters. Compose that with the replay window
+// documented on Verify (the nonce is signed entropy, never recorded, so an exact
+// replay succeeds until it ages out of the ±5m skew) and one observed internal
+// call becomes a five-minute window to re-issue it with different query
+// parameters. SEC-2 folded the query into the message precisely to stop that;
+// an always-on compatibility path hands it back.
+const LegacyQuerySignatureEnv = "SERVICEAUTH_ALLOW_LEGACY_QUERY_SIGNATURE"
+
 // Verifier validates inbound signed requests.
 type Verifier struct {
 	secret []byte
+	// allowLegacyQuery accepts the pre-SEC-2 query-omitted message shape.
+	// Resolved once at construction from LegacyQuerySignatureEnv.
+	allowLegacyQuery bool
 }
 
 // NewVerifier creates a verifier with the given shared secret.
+//
+// Whether the pre-SEC-2 fallback is accepted is read from
+// LegacyQuerySignatureEnv here, once, rather than per request — so a verifier's
+// behavior cannot change under it mid-process.
 func NewVerifier(secret string) *Verifier {
-	return &Verifier{secret: []byte(secret)}
+	return &Verifier{
+		secret:           []byte(secret),
+		allowLegacyQuery: legacyQueryAllowedFromEnv(),
+	}
+}
+
+// NewVerifierWithLegacyQuery is NewVerifier with the fallback set explicitly,
+// ignoring the environment. For tests, and for a caller that wants the decision
+// in code rather than in deployment config.
+func NewVerifierWithLegacyQuery(secret string, allowLegacyQuery bool) *Verifier {
+	return &Verifier{secret: []byte(secret), allowLegacyQuery: allowLegacyQuery}
+}
+
+func legacyQueryAllowedFromEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(LegacyQuerySignatureEnv))) {
+	case "true", "1", "yes":
+		return true
+	default:
+		return false
+	}
 }
 
 // Verify checks that an inbound Gin request has a valid HMAC signature
@@ -253,7 +298,11 @@ func (v *Verifier) Verify(c *gin.Context) bool {
 	// query string already produce the legacy message on the first attempt
 	// (buildMessage omits the query segment when query == ""), so no
 	// fallback branch is needed — or possible — for them.
-	if !matched && query != "" {
+	//
+	// OFF unless LegacyQuerySignatureEnv is set: accepting the query-omitted
+	// shape means a captured no-query signature validates with any query string
+	// appended. See LegacyQuerySignatureEnv for the full reasoning.
+	if !matched && query != "" && v.allowLegacyQuery {
 		matchedQuery = ""
 		legacyMessage := buildMessage(c.Request.Method, c.Request.URL.Path, "", tsStr, nonce, bodyHash, tenantID)
 		legacyMac := hmac.New(sha256.New, v.secret)

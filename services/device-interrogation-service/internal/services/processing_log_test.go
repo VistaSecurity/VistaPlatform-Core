@@ -79,6 +79,35 @@ func TestProcessingLog_FailedStepIsNeverFullyMaterialized(t *testing.T) {
 	}
 }
 
+// TestProcessingLog_FatalIsVisibleAndSinksTheFlag pins the RC3 surface.
+//
+// A run that aborts before any per-asset work fails NO step, so without the
+// fatal field the summary is all-zero and reads exactly like "there was nothing
+// to do" — which is the silent degradation this change exists to remove. The
+// reason has to be in the persisted summary (the job detail modal reads it) and
+// the clean-success flag has to be false.
+func TestProcessingLog_FatalIsVisibleAndSinksTheFlag(t *testing.T) {
+	p := &ProcessingLog{AssetsReceived: 3, DiscoveryJobID: "job-1"}
+	p.Fatal = "platform device-interrogation sensor is missing for this tenant"
+
+	s := p.Summary()
+	if s["fatal"] != p.Fatal {
+		t.Errorf("fatal = %v, want %q", s["fatal"], p.Fatal)
+	}
+	if s["fully_materialized"] != false {
+		t.Errorf("fully_materialized = %v, want false", s["fully_materialized"])
+	}
+
+	// And it must not appear at all on a healthy run — an always-present empty
+	// key would train readers to ignore it.
+	clean := &ProcessingLog{AssetsReceived: 1, DiscoveryJobID: "job-2"}
+	clean.ok("a.example.net", StageDiscoveryTarget)
+	clean.ok("a.example.net", StageDiscoveryFinding)
+	if _, ok := clean.Summary()["fatal"]; ok {
+		t.Error("fatal key present on a clean run")
+	}
+}
+
 type errFake struct{}
 
 func (errFake) Error() string { return "boom" }

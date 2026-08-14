@@ -464,12 +464,52 @@ func (s *DiscoveryService) GetJobResults(jobID string, page, pageSize int) (*mod
 	}
 
 	return &models.DiscoveryResultsResponse{
-		JobID:    jobID,
-		Findings: findings,
-		Total:    total,
-		Page:     page,
-		PageSize: pageSize,
+		JobID:           jobID,
+		Findings:        findings,
+		Total:           total,
+		Page:            page,
+		PageSize:        pageSize,
+		Materialization: s.getJobMaterialization(jobID, total),
 	}, nil
+}
+
+// getJobMaterialization counts what became of the job's findings once they were
+// mirrored into the ingestion queue.
+//
+// `total` (rows in discovery_findings) and the queue counts answer different
+// questions, so they are reported side by side under distinct names rather than
+// as one "results" number that silently means whichever the reader assumes.
+//
+// Returns nil — not a zeroed struct — when the counts cannot be read, so a
+// consumer can distinguish "nothing materialized" from "unknown".
+func (s *DiscoveryService) getJobMaterialization(jobID string, total int) *models.DiscoveryMaterialization {
+	// RLS: cross-tenant — runs on the bypass role, keyed by batch_id (the job id
+	// the mirror stamps), consistent with the rest of this service's job reads.
+	var row struct {
+		Queued             int `db:"queued"`
+		AutoApproved       int `db:"auto_approved"`
+		PendingApproval    int `db:"pending_approval"`
+		AwaitingProcessing int `db:"awaiting_processing"`
+	}
+	err := s.bypassDB.Get(&row, `
+		SELECT
+			COUNT(*)                                                                                  AS queued,
+			COUNT(*) FILTER (WHERE processed_at IS NOT NULL AND approval_status = 'auto_approved')    AS auto_approved,
+			COUNT(*) FILTER (WHERE processed_at IS NOT NULL AND approval_status <> 'auto_approved')   AS pending_approval,
+			COUNT(*) FILTER (WHERE processed_at IS NULL)                                              AS awaiting_processing
+		FROM sensor_discoveries
+		WHERE batch_id = $1`, jobID)
+	if err != nil {
+		log.Printf("[DiscoveryService] getJobMaterialization: failed to count queue rows for job %s: %v", jobID, err)
+		return nil
+	}
+	return &models.DiscoveryMaterialization{
+		Findings:           total,
+		Queued:             row.Queued,
+		AutoApproved:       row.AutoApproved,
+		PendingApproval:    row.PendingApproval,
+		AwaitingProcessing: row.AwaitingProcessing,
+	}
 }
 
 // GetJobs retrieves discovery jobs with pagination and filtering

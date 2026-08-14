@@ -27,6 +27,11 @@ export type DashboardPqcMetric = {
   unclassified: number;
 };
 
+// The dashboard's critical-finding count comes from compliance-engine, while
+// /risk-compliance/findings defaults to the crypto-risk lens. Keep the route
+// explicit so click-through lands in the same finding universe it counted.
+export const DASHBOARD_COMPLIANCE_FINDINGS_ROUTE = '/risk-compliance/findings?lens=framework';
+
 export function getDashboardPqcMetric(progress: PqcProgressRollup | null | undefined): DashboardPqcMetric {
   const adoptionPercent = progress?.pqc_percentage ?? 0;
   const pqcReadyOnly = progress?.pqc_ready ?? 0;

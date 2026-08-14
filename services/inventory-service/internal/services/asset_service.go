@@ -29,6 +29,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/events"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/approval"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	shareddb "github.com/vistasecurity/vistaplatform/shared/database"
 	sharedevents "github.com/vistasecurity/vistaplatform/shared/events"
@@ -651,9 +652,13 @@ func (s *AssetService) IngestFindings(tenantID uuid.UUID, findings []IngestFindi
 				Tags:            mergedTags,
 				Metadata:        discoverySourceMetadata(f),
 				AssetOwnership:  &ownership,
-				AssetStatus:     ptrString(status),
 			}
-			asset, createErr := s.CreateAsset(tenantID, input)
+			// createAssetWithStatus, not CreateAsset: `status` is the decision
+			// discovery-processor already reached by evaluating this tenant's
+			// segment auto-approval rules against the classified discovery.
+			// Re-deriving it here would evaluate the rules twice and could
+			// disagree with what the pipeline recorded on the discovery row.
+			asset, createErr := s.createAssetWithStatus(tenantID, input, status)
 			if createErr != nil {
 				return inserted, fmt.Errorf("failed to upsert asset: %w", createErr)
 			}
@@ -852,8 +857,14 @@ func (s *AssetService) IngestFindings(tenantID uuid.UUID, findings []IngestFindi
 			continue
 		}
 
-		// Extract and process certificate chain from discovery finding
-		s.processDiscoveryCryptoData(tenantID, assetID, f, &lifecycleRiskChanged, &lifecycleCryptoAdded, &lifecycleCertExpiring)
+		// Extract and process certificate chain from discovery finding.
+		// Deliberately not propagated: this is a per-finding loop over a whole
+		// ingest batch, and one finding whose certificates or crypto rows fail to
+		// materialize must not abort the remaining findings. Logged rather than
+		// dropped so a silently half-materialized batch is still visible.
+		if err := s.processDiscoveryCryptoData(tenantID, assetID, f, &lifecycleRiskChanged, &lifecycleCryptoAdded, &lifecycleCertExpiring); err != nil {
+			log.Printf("[AssetService] IngestFindings: materializing crypto data for asset %s failed (batch continues): %v", assetID, err)
+		}
 	}
 
 	// Refresh operational materialized views (location summary, remediation queue)
@@ -1091,20 +1102,24 @@ func (s *AssetService) ElevateExternalConnection(tenantID, connID uuid.UUID) (*m
 	}
 
 	ownership := "third_party"
-	monitoring := "monitoring"
 	input := models.AssetInput{
 		Hostname:       conn.DestHostname,
 		IPAddress:      &conn.DestIP,
 		Port:           &conn.DestPort,
 		AssetType:      "server",
 		AssetOwnership: &ownership,
-		AssetStatus:    &monitoring,
 		Metadata: map[string]interface{}{
 			"source":                      "connection_elevation",
 			"elevated_from_connection_id": conn.ID.String(),
 		},
 	}
-	asset, err := s.CreateAsset(tenantID, input)
+	// Elevation creates the asset as `monitoring` deliberately, and this is the
+	// one place a status is asserted rather than evaluated: elevating is an
+	// explicit, permission-gated, confirmed click on a specific connection — the
+	// click IS the approval. Queuing it would ask the user to approve their own
+	// deliberate action. It is not a caller-supplied status: nothing in the
+	// request body reaches this value.
+	asset, err := s.createAssetWithStatus(tenantID, input, "monitoring")
 	if err != nil {
 		return nil, fmt.Errorf("create managed asset from connection %s: %w", conn.ID, err)
 	}
@@ -1117,7 +1132,14 @@ func (s *AssetService) ElevateExternalConnection(tenantID, connID uuid.UUID) (*m
 		var lifecycleRiskChanged []*events.AssetRiskChangedPayload
 		var lifecycleCryptoAdded []*events.CryptoConfigurationAddedPayload
 		var lifecycleCertExpiring []*events.CertificateExpiringPayload
-		s.processDiscoveryCryptoData(tenantID, asset.ID, f, &lifecycleRiskChanged, &lifecycleCryptoAdded, &lifecycleCertExpiring)
+		// Non-fatal, same rationale as the MarkElevated back-link below: the
+		// managed asset already exists and is the caller's return value, so a
+		// failed cert materialization is repairable (re-ingest re-materializes)
+		// and must not turn a successful elevation into an error. Surfaced, not
+		// swallowed.
+		if err := s.processDiscoveryCryptoData(tenantID, asset.ID, f, &lifecycleRiskChanged, &lifecycleCryptoAdded, &lifecycleCertExpiring); err != nil {
+			log.Printf("[AssetService] ElevateExternalConnection: asset %s created but materializing certificate from connection %s failed: %v", asset.ID, conn.ID, err)
+		}
 	}
 
 	if err := s.externalConnectionsSvc.MarkElevated(tenantID, conn.ID, asset.ID); err != nil {
@@ -1651,9 +1673,72 @@ func (s *AssetService) DenyAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, user
 	})
 }
 
+// evaluateAssetApproval decides a new asset's approval status server-side.
+//
+// Auto-approval has exactly one gate: the asset is on a user-defined network
+// segment with auto-approve enabled. Those segments generate the rows in
+// discovery_auto_approval_rules (ManageAutoApprovalRules); shared/approval
+// evaluates them, and it is the same evaluation the sensor pipeline runs — one
+// implementation of the rule, not two.
+//
+// Default deny: anything that cannot be resolved to a matching, auto-approving
+// segment — no segment service wired, a lookup error, no matching segment, a
+// non-internal address — lands in Discovery → Approvals.
+func (s *AssetService) evaluateAssetApproval(tenantID uuid.UUID, ipAddress, hostname *string) string {
+	const pending = "pending_approval"
+	if s.networkSegmentService == nil {
+		return pending
+	}
+	seg, err := s.networkSegmentService.GetSegmentForIP(tenantID, ipAddress, hostname)
+	if err != nil || seg == nil {
+		return pending
+	}
+	ownership, err := s.networkSegmentService.ClassifyAsset(tenantID, ipAddress, hostname, nil)
+	if err != nil {
+		return pending
+	}
+	segID := seg.ID
+	segName := seg.Name
+	classification := &approval.Classification{
+		Ownership:   ownership,
+		Type:        seg.NetworkType,
+		SegmentID:   &segID,
+		SegmentName: &segName,
+	}
+	// Metadata is deliberately nil: no metadata means "not a cloud discovery",
+	// which is what a manually created or CMDB-pulled asset is. Confidence 1.0 —
+	// the asset was asserted by a user or an authoritative system of record, not
+	// inferred from an observation.
+	autoApprove, _, err := approval.NewService(s.db.DB.DB).EvaluateAutoApproval(
+		approval.Discovery{TenantID: tenantID, Confidence: 1.0},
+		classification,
+	)
+	if err != nil || !autoApprove {
+		return pending
+	}
+	return "monitoring"
+}
+
 // CreateAsset inserts a new asset for the tenant and returns the created record.
 // Validates required fields and defaults JSONB maps to empty objects to avoid NULLs.
+//
+// The approval status is decided HERE, by evaluateAssetApproval, and
+// input.AssetStatus is ignored. It used to be honoured verbatim, which made the
+// tenant's own approval policy advisory on every caller-facing path that reaches
+// this function — manual create (POST /assets), spreadsheet bulk import and CMDB
+// pull (both via BulkCreateAssets). Callers that hold a status the server already
+// evaluated — the discovery ingestion pipeline — use createAssetWithStatus.
 func (s *AssetService) CreateAsset(tenantID uuid.UUID, input models.AssetInput) (*models.Asset, error) {
+	return s.createAssetWithStatus(tenantID, input, s.evaluateAssetApproval(tenantID, input.IPAddress, input.Hostname))
+}
+
+// createAssetWithStatus is CreateAsset with the approval decision already made.
+//
+// The ONLY legitimate caller is the discovery ingestion path (IngestFindings),
+// which receives a status that discovery-processor-service produced by running
+// the same segment auto-approval rules over the classified discovery. It is
+// unexported so no handler can reach it.
+func (s *AssetService) createAssetWithStatus(tenantID uuid.UUID, input models.AssetInput, assetStatus string) (*models.Asset, error) {
 	// Validate minimal requirements
 	if input.AssetType == "" {
 		return nil, fmt.Errorf("asset_type is required")
@@ -1687,9 +1772,8 @@ func (s *AssetService) CreateAsset(tenantID uuid.UUID, input models.AssetInput) 
 		assetOwnership = ownership
 	}
 
-	assetStatus := "pending_approval"
-	if input.AssetStatus != nil && *input.AssetStatus != "" {
-		assetStatus = *input.AssetStatus
+	if assetStatus == "" {
+		assetStatus = "pending_approval"
 	}
 
 	insert := `

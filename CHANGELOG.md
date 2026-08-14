@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-08-14
+
+> 0.6.0 and 0.6.1 were tagged but never released (builder-toolchain failures);
+> 0.6.2 built all 18 images but its chart job could not start, so no chart or
+> GitHub release was published and its **frontend images shipped a Caddy binary
+> on Go 1.26.5**. 0.6.3 is the first release of this line, with that fixed.
+
+### Security
+
+- **The published frontend images shipped a Caddy binary on Go 1.26.5**, carrying
+  `CVE-2026-39821` (privilege escalation via Punycode label processing) and
+  `CVE-2026-46600` (DoS via DNS record parsing) — while every backend image at the
+  same tag scanned clean. The frontends' `caddybuild` stage set
+  `ENV GOTOOLCHAIN=local`, and `release-core.yml` overrides `GO_BUILDER_IMAGE`
+  with a *floating* tag (`golang:1.26-alpine`), which was still serving 1.26.5.
+  `validate-dockerfiles.sh` exempted these stages on the reasoning that they
+  compile an unrelated module, so go.work's floor does not apply — true, and
+  exactly why the problem was invisible: nothing could fail the build, only a scan
+  of the published image showed it. Both frontends now pin the exact patch, and
+  the validator's exemption now covers any stage compiling a Go binary that is
+  `COPY`ed into a shipped runtime. Verified by building on a `golang:1.26.5-alpine`
+  base: `GOTOOLCHAIN=local` reproduces a `go1.26.5` binary, the pin yields
+  `go1.26.6`.
+
+  The remaining `web-ui` findings are upstream and not fixable here: the pinned
+  `caddy:2-alpine` digest is the current one and is still Alpine 3.23.5
+  (`c-ares`, `curl`/`libcurl`), and Caddy v2.11.4 is the latest release, so its
+  `x/net`, `x/text` and `grpc` CVEs have no version to bump to.
+
+- **Service-to-service signature verification no longer accepts the pre-SEC-2,
+  query-omitted message shape by default.** The rolling-upgrade fallback was
+  ungated and permanent, which meant a signature captured from a request carrying
+  *no* query string also validated for that same method, path, body and timestamp
+  with **any** query string appended. Combined with the replay window the code
+  already documents (the nonce is signed entropy, never recorded, so an exact
+  replay succeeds until it ages out of the ±5m skew), one observed internal call
+  became a five-minute window to re-issue it with attacker-chosen query
+  parameters — undoing the hardening SEC-2 added. The fallback is now opt-in via
+  `SERVICEAUTH_ALLOW_LEGACY_QUERY_SIGNATURE`, for the duration of a rollout only.
+  A test replays a genuine captured signature to pin the behaviour in both
+  polarities.
+
+- **`SECURITY.md` now states two deliberate tradeoffs** rather than leaving
+  researchers to rediscover them: token revocation fails open when the Redis
+  denylist is unreachable, and internal calls have a ±5m replay window.
+
+- **An asset's approval status is no longer supplied by the caller**.
+  `CreateAsset` took `input.AssetStatus` verbatim, so a request could ask to be
+  `monitoring` and get it — on manual create, spreadsheet import and CMDB pull
+  alike (all three reach the same function) — and the discovery import endpoint
+  honoured `auto_approve: true` from anyone holding `discovery.create`. The
+  tenant's own approval policy was therefore advisory: bypassable by callers who
+  supplied a status, and inapplicable to those who did not, since an asset on an
+  auto-approve segment still queued. Approval is now evaluated server-side from
+  the tenant's network segments through `shared/approval` on every ingestion
+  path, `auto_approve` is gone from the wire, and the ingestion endpoint rejects
+  any caller that is not an HMAC-verified internal service. Auto-approval has
+  exactly one gate, unchanged and still off by default: the asset is on a network
+  segment with auto-approve enabled.
+
+### Changed
+
+- **A discovery scan's findings reach inventory without a browser in the loop**
+ . `cluster-sensor-service` mirrored a job's findings into the ingestion
+  queue only when the job carried a `result_sink` probe option, which exactly one
+  caller (Active Scan) ever set. Every other job's findings reached inventory
+  only if the Discover wizard was still open to fetch them and POST them back —
+  close the wizard and they were stranded, with no control anywhere to recover
+  them. The mirror is now unconditional and the wizard's import step is gone; the
+  results step reports where the findings went ("N found · X auto-approved · Y
+  awaiting approval") and links to Discovery → Approvals. The now-inert
+  `result_sink` option was retired rather than left as a switch that no longer
+  switches anything.
+
+- **A job's find count and its inventory outcome are reported as two numbers, not
+  one.** Job progress counts `discovery_findings` while inventory materializes
+  from `sensor_discoveries`, so a job could honestly report N findings and add
+  zero assets with nothing reconciling the two. `GET
+  /discovery/jobs/{id}/results` now carries a `materialization` block (queued /
+  auto_approved / pending_approval / awaiting_processing) alongside the find
+  count. It is omitted rather than zeroed when it cannot be read, so absent means
+  "unknown" rather than "nothing".
+
+### Removed
+
+- **`POST /api/v1/inventory-service/discovery/jobs/{id}/import` is no longer a
+  tenant API** and is out of the OpenAPI contract and the generated TypeScript
+  client. It survives as an internal service-to-service transport only (see
+  Security above). The only consumer was our own Discover wizard.
+
+- Removed two tests whose entire body was an unconditional `t.Skip()` — one on the
+  impersonation flow, one on revocation against a real Redis. Neither had any
+  assertions, so neither could fail, and both made `grep` report coverage of
+  auth-critical paths that did not exist. Replaced with notes recording what a
+  real test would need to assert, so the gap is visible instead of disguised.
+
 ## [0.6.2] - 2026-08-14
 
 > 0.6.0 and 0.6.1 were tagged but never released — every Go image build failed

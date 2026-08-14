@@ -222,6 +222,52 @@ func TestIntegration_DeleteAgent_UnknownAndRepeated(t *testing.T) {
 	}
 }
 
+// TestIntegration_DeleteAgent_ProtectsPlatformAgent covers the device_agents
+// twin of the platform-sensor guard (RC3 /).
+//
+// The in-cluster platform agent auto-registers a row per tenant with
+// platform='platform' (handlers/auto_registration.go). It is the tenant's handle
+// to a service they share with every other tenant, not something they deployed —
+// removing it takes the shared worker out of their fleet view and orphans what
+// it reports, while the process keeps running for everyone else.
+//
+// Both polarities: the platform row is refused, an ordinary enrolled agent is
+// not. An over-strict guard here would make every agent undeletable, which is
+// the same bug pointed the other way.
+func TestIntegration_DeleteAgent_ProtectsPlatformAgent(t *testing.T) {
+	owner := testdb.Connect(t)
+	app := testdb.ConnectAsAppRole(t, owner)
+	tenant := testdb.NewTenant(t, owner)
+	ctx := context.Background()
+
+	svc := newRLSAgentService(app, owner)
+
+	platformID := uuid.New()
+	if _, err := owner.Exec(`
+		INSERT INTO device_agents (id, tenant_id, registration_key, name, platform, profile, version, status)
+		VALUES ($1, $2, '', 'Platform Device Interrogation Agent', 'platform', 'device_interrogation', 'system', 'active')`,
+		platformID, tenant); err != nil {
+		t.Fatalf("seed platform agent: %v", err)
+	}
+
+	if err := svc.DeleteAgent(ctx, tenant, platformID); !errors.Is(err, ErrPlatformAgentProtected) {
+		t.Fatalf("DeleteAgent(platform agent) = %v, want ErrPlatformAgentProtected", err)
+	}
+	var deletedAt sql.NullTime
+	if err := owner.QueryRow(`SELECT deleted_at FROM device_agents WHERE id = $1`, platformID).Scan(&deletedAt); err != nil {
+		t.Fatalf("re-read platform agent: %v", err)
+	}
+	if deletedAt.Valid {
+		t.Error("platform agent was soft-deleted despite the guard")
+	}
+
+	// Opposite polarity — an operator-enrolled agent still deletes.
+	ordinary := enrollAgent(t, owner, tenant)
+	if err := svc.DeleteAgent(ctx, tenant, ordinary); err != nil {
+		t.Fatalf("ordinary agent must still be deletable, got %v", err)
+	}
+}
+
 // TestIntegration_DeletedAgentGetsNoWork is the fail-closed proof for the case
 // the UI warns about: the binary keeps running on the operator's host and keeps
 // polling with a certificate that is still on disk.

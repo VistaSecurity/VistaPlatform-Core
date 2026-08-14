@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { getDashboardPqcMetric } from './dashboard-metrics';
+import { DASHBOARD_COMPLIANCE_FINDINGS_ROUTE, getDashboardPqcMetric } from './dashboard-metrics';
+
+describe('dashboard findings links', () => {
+  it('deep-links compliance-derived finding counts to the compliance lens', () => {
+    expect(DASHBOARD_COMPLIANCE_FINDINGS_ROUTE).toBe('/risk-compliance/findings?lens=framework');
+  });
+});
 
 describe('dashboard PQC metric', () => {
   it('uses inventory PQC adoption rather than a framework-style score, and keeps needsMigration/unclassified separate', () => {

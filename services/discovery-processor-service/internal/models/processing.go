@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/shared/approval"
 )
 
 // SensorDiscovery represents a row from sensor_discoveries table
@@ -38,34 +39,20 @@ type ProcessingStatus struct {
 	CompletedAt    *time.Time
 }
 
-// AutoApprovalRule represents a rule for auto-approving discoveries
-type AutoApprovalRule struct {
-	ID          uuid.UUID              `db:"id"`
-	TenantID    uuid.UUID              `db:"tenant_id"`
-	Name        string                 `db:"name"`
-	Description string                 `db:"description"`
-	Conditions  map[string]interface{} `db:"conditions"` // JSONB
-	IsActive    bool                   `db:"is_active"`
-	CreatedBy   uuid.UUID              `db:"created_by"`
-	CreatedAt   time.Time              `db:"created_at"`
-	UpdatedAt   time.Time              `db:"updated_at"`
-}
+// AutoApprovalRule is the shared auto-approval rule type. The rule model and
+// its evaluation moved to shared/approval so every ingestion path evaluates one
+// implementation; the alias keeps this package's existing name usable.
+type AutoApprovalRule = approval.Rule
 
-// NetworkClassification represents the network space/segment classification result.
-//
-// Ownership has three values:
-//   - "internal"    — IP belongs to a known tenant network segment
-//   - "third_party" — IP is a public internet address outside any registered segment
-//   - "unknown"     — IP is RFC 1918 private but not in any registered segment
-//     (may be an unregistered internal subnet)
-//
-// Only "third_party" discoveries are routed to the external connections path.
-// "unknown" private addresses still go through the managed asset pipeline.
-type NetworkClassification struct {
-	Ownership   string     // "internal", "third_party", "unknown"
-	Type        string     // "private", "public"
-	SpaceID     *uuid.UUID // legacy
-	SpaceName   *string    // legacy
-	SegmentID   *uuid.UUID
-	SegmentName *string
+// NetworkClassification is the shared classification type (see
+// shared/approval.Classification for the meaning of each Ownership value).
+type NetworkClassification = approval.Classification
+
+// ApprovalInput projects the fields the shared auto-approval evaluator reads.
+func (d *SensorDiscovery) ApprovalInput() approval.Discovery {
+	return approval.Discovery{
+		TenantID:   d.TenantID,
+		Confidence: d.Confidence,
+		Metadata:   d.Metadata,
+	}
 }

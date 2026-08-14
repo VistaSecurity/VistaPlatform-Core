@@ -245,6 +245,10 @@ export interface paths {
          *     routes in this service. RLS-isolated on `device_agents`: another tenant's
          *     agent id is answered 404, identically to an unknown id.
          *
+         *     The in-cluster platform agent's per-tenant row (`platform = 'platform'`)
+         *     is refused with 403: it is the tenant's handle to a service shared by all
+         *     tenants, not an agent they deployed.
+         *
          *     This does NOT uninstall the agent binary, which keeps running on the
          *     operator's host. It fails closed regardless: every agent-outbound path
          *     resolves the agent with `deleted_at IS NULL`, so a deleted agent's polls
