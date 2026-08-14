@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.0] - 2026-08-14
+## [0.6.1] - 2026-08-14
+
+> 0.6.0 was tagged but never released: every Go image build failed on the
+> builder-image pin described under Security below. No 0.6.0 GitHub release or
+> chart was published. 0.6.1 is that release with the build fixed.
 
 ### Added
 
@@ -75,9 +79,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   called stdlib vulnerabilities that were failing the `govulncheck` gate on every
   PR: GO-2026-6218 (`net/url`), GO-2026-6090 (`crypto/tls`), GO-2026-6089
   (`net/http`), GO-2026-6088 (`encoding/xml`), GO-2026-5972 (`encoding/asn1`) and
-  GO-2026-5026 (`net/http`/IDNA). Service Dockerfiles are unaffected — they build
-  from the floating `golang:1.26-alpine` minor tag, which already resolves to the
-  latest 1.26.x patch.
+  GO-2026-5026 (`net/http`/IDNA).
+
+- **Service Dockerfiles pin the builder to `golang:1.26.6-alpine`.** They
+  previously used the floating `golang:1.26-alpine` minor tag on the assumption
+  that it resolves to the latest 1.26.x patch. It does not resolve immediately:
+  when `go.work` moved to 1.26.6, that tag was still serving 1.26.5, and because
+  the Dockerfiles deliberately set `ENV GOTOOLCHAIN=local` for hermetic builds,
+  the image could not provision the required toolchain — **every Core image build
+  failed** with `go.work requires go >= 1.26.6 (running go 1.26.5;
+  GOTOOLCHAIN=local)`. All 64 builder images now name the exact patch, and
+  `validate-dockerfiles.sh` fails a builder tag that is on the right minor line
+  but not the exact patch `go.work` requires.
 
 - **`GOTOOLCHAIN` is pinned to the exact `go.work` version instead of `local`.**
   `local` blocked 1.27 (correct) but also refused to provision the *sanctioned*

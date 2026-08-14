@@ -11,7 +11,7 @@
 # relative /api/* paths (see api/clients/typescript/client.ts), so the UI is
 # same-origin with the API behind Traefik in every environment — zero API config.
 ARG NODE_BUILDER=node:24-alpine
-ARG GO_BUILDER_IMAGE=golang:1.26-alpine
+ARG GO_BUILDER_IMAGE=golang:1.26.6-alpine
 FROM ${NODE_BUILDER} AS builder
 WORKDIR /repo
 

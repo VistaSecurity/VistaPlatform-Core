@@ -1,5 +1,5 @@
 # Production Dockerfile for discovery-processor-service
-ARG GO_BUILDER_IMAGE=golang:1.26-alpine
+ARG GO_BUILDER_IMAGE=golang:1.26.6-alpine
 ARG RUNTIME_IMAGE=alpine:3.24.1
 FROM ${GO_BUILDER_IMAGE} AS builder
 
