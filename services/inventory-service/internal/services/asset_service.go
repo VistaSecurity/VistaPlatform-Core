@@ -1328,7 +1328,7 @@ func (s *AssetService) processDiscoveryCryptoData(
 	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		_, e := tx.Exec(
 			insertCrypto,
-			cryptoID, tenantID, assetID, protocol, f.ProtocolVersion, f.CipherSuite,
+			cryptoID, tenantID, assetID, protocol, derived.ProtocolVersion, f.CipherSuite,
 			derived.Hash, f.KeySize, primaryCertID, sensor, rawJSON,
 			derived.KeyExchange, derived.Signature, derived.Symmetric,
 		)

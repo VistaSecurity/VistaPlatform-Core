@@ -35,18 +35,18 @@ Use admin UI → Settings → Notifications to configure channels.
 The retention worker runs via `jobs.LogRetentionJob` on the monitoring-service process. Adjust `LOG_RETENTION_INTERVAL_HOURS` if needed.
 
 ## Validation Workflow
-Run `make validate-logging` (or `./scripts/validate-logging.sh`) to ensure:
-1. Required env vars are set
-2. Core logging tables exist (`platform_log_metadata`, `platform_log_access_audit`, `platform_log_retention_jobs`)
+There is no bundled validation script — check both things by hand before enabling logging:
 
-Example:
+1. Required env vars are set (`S3_LOG_BUCKET`, `S3_REGION`, `S3_KMS_KEY_ID`, `ENABLE_INCIDENT_HOOKS`, `LOG_RETENTION_INTERVAL_HOURS`).
+2. Core logging tables exist (`platform_log_metadata`, `platform_log_access_audit`, `platform_log_retention_jobs`):
+
 ```bash
-export DATABASE_URL=postgres://crypto_user:crypto_pass_dev@localhost:5432/crypto_inventory?sslmode=disable
-make validate-logging
+docker compose exec postgres psql -U crypto_user -d crypto_inventory -c \
+  "\dt platform_log_metadata platform_log_access_audit platform_log_retention_jobs"
 ```
 
 ## Deployment Notes
-1. Apply migrations `scripts/database/19-compliance-logging-schema.sql` before enabling logging.
+1. These tables are part of `scripts/database/schema.sql` (there is no separate migration file — the schema is applied as a whole; see [Database Migrations](../deployment/database-migrations.md)). Confirm they're present before enabling logging.
 2. Ensure monitoring-service IAM role has access to the S3 log bucket and KMS key.
 3. Verify retention job logs (`monitoring-service` container) to confirm archival/deletion runs.
 4. Confirm incident notifications reach Slack/PagerDuty as expected before enabling in production.

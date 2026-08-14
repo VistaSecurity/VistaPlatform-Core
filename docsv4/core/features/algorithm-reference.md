@@ -21,6 +21,14 @@ The tab opens on the full catalogue, sorted with the highest-risk algorithms fir
 
 Each row shows the algorithm's family, type, strength, deprecation status, whether it's post-quantum, and a risk score (0–100, higher is worse).
 
+**Protocol-specific spellings.** Where a protocol names its algorithms on the
+wire, the catalogue uses that exact name so a finding matches what you would
+type into the server's configuration. SSH is the clearest example — search for
+`ssh-`, `hmac-`, `curve25519` or `@openssh.com` and you'll find the SSH host
+key, MAC and key exchange algorithms under the names `sshd_config` uses
+(`ssh-ed25519`, `diffie-hellman-group14-sha1`, `aes256-gcm@openssh.com`).
+Protocol-independent entries (`AES256`, `SHA256`, `Ed25519`) sit alongside them.
+
 ### Open an algorithm for the full assessment
 
 Click any row to open a detail panel with:

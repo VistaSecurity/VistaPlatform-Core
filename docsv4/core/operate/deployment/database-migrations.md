@@ -12,7 +12,7 @@ This guide explains how database schema is managed for the crypto inventory plat
 
 **Single Source of Truth Approach:**
 
-All database schema and core seed data is maintained in two primary files, with an optional third file for demo data:
+All database schema and seed data is maintained in two files:
 
 - **`scripts/database/schema.sql`** – Consolidated schema file (manually maintained)
   - Contains all schema definitions: extensions, types, tables, indexes, functions, RLS policies, etc.
@@ -20,22 +20,16 @@ All database schema and core seed data is maintained in two primary files, with 
   - Used for new database initialization in all environments
   - Idempotent – safe to run on existing databases (uses `CREATE TABLE IF NOT EXISTS`, etc.)
 
-- **`scripts/database/seed_core.sql`** – Core platform configuration seed (manually maintained)
-  - Contains environment-agnostic configuration:
-    - Platform admin users (`platform_users`)
-    - Measurement templates (`measurement_templates`)
-    - Platform compliance frameworks and controls (`platform_frameworks`, `platform_framework_controls`, `control_measurements`)
+- **`scripts/database/seed.sql`** – Core platform seed data (manually maintained)
+  - Contains platform admin users (`platform_users`), subscription tiers, measurement templates, and the free compliance frameworks (`platform_frameworks`, `platform_framework_controls`, `control_measurements`)
   - **Manually maintained** – edit this file when core configuration changes are needed
-  - Applied explicitly by scripts in all environments (dev, smoke, prod); not mounted into `docker-entrypoint-initdb.d`.
+  - Applied automatically by Postgres's own init mechanism, immediately after `schema.sql`, in every environment
 
-- **`scripts/database/seed.sql`** – Dev/demo seed data (manually maintained)
-  - Contains demo/test data: tenants, demo users, large asset sets, legacy backfills, etc.
-  - **Development-only** – used to populate rich demo data in dev environments
-  - Not used in production, and not required for smoke tests
+For re-seeding an *existing* database idempotently (e.g. after a partial apply), `scripts/apply_core_seed.sh` re-runs `seed.sql` via `docker exec` with dependency checks.
 
 **Archived Files:**
 
-Individual migration files have been archived to `scripts/database/archive/` for historical reference. All schema changes should now be made directly to `schema.sql`.
+Individual per-feature migration files have been consolidated into `schema.sql` and removed — there is no directory of historical migration files to consult. All schema changes should now be made directly to `schema.sql`.
 
 ### Schema File Structure
 
@@ -106,14 +100,15 @@ For more details, see `scripts/database/README.md` and `docsv4/development/data-
   ```yaml
   volumes:
     - ./scripts/database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
-    - ./scripts/database/critical-tables.sql:/docker-entrypoint-initdb.d/03-critical-tables.sql
+    - ./scripts/database/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql
   ```
 
-- Core and demo seeds are applied **by scripts**, not by the container entrypoint:
-  - `scripts/database/seed_core.sql` – applied explicitly by `scripts/session-init.sh`
-  - `scripts/database/seed.sql` – applied explicitly (and non-blockingly) by `scripts/session-init.sh` for dev/demo data
+- Both files are applied automatically by Postgres's own init mechanism on first
+  startup — the container runs every `.sql` file it finds under
+  `docker-entrypoint-initdb.d/` in filename order, so `01-schema.sql` runs before
+  `02-seed.sql`. No script drives this; nothing else runs at startup.
 
-The consolidated `schema.sql` file contains all schema definitions and is applied automatically when PostgreSQL initializes a new database. Core configuration is then layered on via `seed_core.sql`, followed by optional demo data from `seed.sql`.
+The consolidated `schema.sql` file contains all schema definitions and is applied automatically when PostgreSQL initializes a new database. Platform admin users, subscription tiers, measurement templates and the free compliance frameworks are then loaded from `seed.sql`.
 
 **Existing Databases (Manual):**
 
@@ -160,14 +155,7 @@ For RDS deployments, migrations must be applied manually via `psql` or AWS RDS Q
 
 #### Apply Schema
 
-**Recommended: Use the migration script**
-
-```bash
-# Use the provided script (handles connection and verification)
-./scripts/apply-rds-migrations.sh prod
-```
-
-**Manual: Apply schema.sql directly**
+**Apply schema.sql directly** — there is no bundled RDS migration script in this repository; apply the schema with `psql` as shown below.
 
 ```bash
 # Set connection details
@@ -296,8 +284,7 @@ When you need to make schema changes:
    ```
 
 3. **Apply to existing databases**
-   - The schema is idempotent, so you can run it on existing databases
-   - Or use the RDS migration script: `./scripts/apply-rds-migrations.sh <env>`
+   - The schema is idempotent, so you can run it on existing databases with `psql -f scripts/database/schema.sql` (see the RDS section above for connecting to a managed Postgres instance)
 
 ### Schema Structure (for reference)
 

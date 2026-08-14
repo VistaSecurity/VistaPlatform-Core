@@ -116,3 +116,36 @@ func TestParseNmapOutputSurvivesUnresolvableTarget(t *testing.T) {
 		t.Error("want a dns_resolution_error explaining the failure")
 	}
 }
+
+// TestValidateNmapTargetRejectsHostPort pins the contract that makes a
+// "host:port" scan target fatal: nmap is given one host and a separate -p port
+// list, so a colon is an illegal character and the whole target is dropped.
+// Callers must send a bare host and carry the port in the job's Ports field.
+// (Addresses below are RFC 5737 documentation ranges.)
+func TestValidateNmapTargetRejectsHostPort(t *testing.T) {
+	rejected := []string{
+		"192.0.2.10:443",
+		"192.0.2.10:22",
+		"host.example.com:8443",
+		"[2001:db8::1]:443",
+		"-oN/tmp/pwn",   // option injection
+		"host;rm -rf /", // shell metacharacter
+		"",
+	}
+	for _, target := range rejected {
+		t.Run(target, func(t *testing.T) {
+			if err := validateNmapTarget(target); err == nil {
+				t.Errorf("validateNmapTarget(%q) = nil, want an error", target)
+			}
+		})
+	}
+
+	accepted := []string{"192.0.2.10", "198.51.100.7", "host.example.com", "2001:db8::1"}
+	for _, target := range accepted {
+		t.Run(target, func(t *testing.T) {
+			if err := validateNmapTarget(target); err != nil {
+				t.Errorf("validateNmapTarget(%q) = %v, want nil", target, err)
+			}
+		})
+	}
+}

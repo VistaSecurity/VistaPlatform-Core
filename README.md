@@ -128,6 +128,18 @@ the first account creates the organization.
 **[INSTALL.md](INSTALL.md)** covers all three paths — laptop, single VM, and a
 real cluster with your own certificates — plus how to verify the images.
 
+## Downloads
+
+Prebuilt sensor and device-agent binaries for Linux, Windows, and macOS,
+container images, and the Helm chart are all published on every release — see
+**[Downloads in INSTALL.md](INSTALL.md#downloads)** for the OS/arch table and
+verification commands. In short:
+
+- **Sensor / device agent**: [latest GitHub release](https://github.com/VistaSecurity/VistaPlatform-Core/releases/latest)
+  (the sensor asset is named `crypto-sensor-*`, a historical name — same binary)
+- **Container images**: `ghcr.io/vistasecurity/<service>:<version>` — GHCR, not Docker Hub
+- **Helm chart**: `oci://ghcr.io/vistasecurity/vistaplatform`
+
 ## Architecture
 
 Sixteen Go services behind an API gateway, two React frontends, PostgreSQL 17

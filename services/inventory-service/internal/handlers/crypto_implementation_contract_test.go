@@ -17,6 +17,7 @@ package handlers
 //   GET    /crypto-configurations
 //   GET    /crypto-configurations/{id}
 //   GET    /crypto-configurations/{id}/remediation
+//   GET    /crypto-configurations/{id}/components
 //   GET    /remediation/algorithm/{code}
 //   GET    /asset-certificate-links
 //
@@ -25,8 +26,10 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,13 +44,15 @@ import (
 // stubCryptoConfigStore satisfies the cryptoConfigStore interface used by
 // CryptoImplementationHandler.
 type stubCryptoConfigStore struct {
-	list      []models.CryptoImplementation
-	total     int
-	listErr   error
-	getResult *models.CryptoImplementation
-	getErr    error
-	links     []models.AssetCertificateLink
-	linksErr  error
+	list       []models.CryptoImplementation
+	total      int
+	listErr    error
+	getResult  *models.CryptoImplementation
+	getErr     error
+	links      []models.AssetCertificateLink
+	linksErr   error
+	components []models.CryptoComponentAssessment
+	compErr    error
 }
 
 func (s *stubCryptoConfigStore) GetCryptoImplementations(_ uuid.UUID, _ models.CryptoImplementationFilters) ([]models.CryptoImplementation, int, error) {
@@ -58,6 +63,9 @@ func (s *stubCryptoConfigStore) GetCryptoImplementationByID(_, _ uuid.UUID) (*mo
 }
 func (s *stubCryptoConfigStore) GetAssetCertificateLinks(_ uuid.UUID, _ []uuid.UUID, _ []uuid.UUID) ([]models.AssetCertificateLink, error) {
 	return s.links, s.linksErr
+}
+func (s *stubCryptoConfigStore) GetCryptoImplementationComponents(_, _ uuid.UUID) ([]models.CryptoComponentAssessment, error) {
+	return s.components, s.compErr
 }
 
 // stubRemediationStore satisfies the remediationStore interface used by
@@ -100,8 +108,42 @@ func newCryptoConfigEngine(crypto *stubCryptoConfigStore, remediation *stubRemed
 	grp.GET("/inventory-service/crypto-configurations/:id", ch.GetCryptoImplementationByID)
 	grp.GET("/inventory-service/crypto-configurations/:id/remediation", rh.GetRemediationForCryptoImplementation)
 	grp.GET("/inventory-service/remediation/algorithm/:code", rh.GetRemediationByAlgorithm)
+	grp.GET("/inventory-service/crypto-configurations/:id/components", ch.GetCryptoImplementationComponents)
 	grp.GET("/inventory-service/asset-certificate-links", ch.GetAssetCertificateLinks)
 	return r
+}
+
+// sampleComponents is a realistic two-component explanation: an OBSERVED weak
+// key exchange that sets the score, and an OFFERED-only cipher. Deliberately
+// includes one entry with no migration guidance and no alternatives, so the
+// spec's optional/empty handling is exercised rather than assumed.
+func sampleComponents() []models.CryptoComponentAssessment {
+	return models.AnnotateComponentAssessments([]models.CryptoComponentAssessment{
+		{
+			AlgorithmType:           "key_exchange",
+			IsInferred:              false,
+			AlgorithmID:             uuid.New(),
+			Code:                    "diffie-hellman-group1-sha1",
+			Name:                    "Diffie-Hellman Group 1 (SHA-1)",
+			Category:                "key_exchange",
+			Strength:                "weak",
+			DeprecationStatus:       "obsolete",
+			RiskScore:               82,
+			MigrationGuidance:       strPtr("Disable group1; prefer curve25519-sha256."),
+			RecommendedAlternatives: []string{"curve25519-sha256"},
+		},
+		{
+			AlgorithmType:     "symmetric",
+			IsInferred:        true,
+			AlgorithmID:       uuid.New(),
+			Code:              "3des-cbc",
+			Name:              "Triple DES (CBC)",
+			Category:          "symmetric",
+			Strength:          "weak",
+			DeprecationStatus: "deprecated",
+			RiskScore:         70,
+		},
+	})
 }
 
 // sampleCryptoConfig populates the unconditional fields (matching the
@@ -302,6 +344,87 @@ func TestContract_GetCryptoConfigurationRemediation_400_badID(t *testing.T) {
 	w := do(eng, http.MethodGet, "/api/v2/inventory-service/crypto-configurations/not-a-uuid/remediation", nil)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+func TestContract_GetCryptoConfigurationComponents_200(t *testing.T) {
+	sv := loadSpec(t)
+	eng := newCryptoConfigEngine(&stubCryptoConfigStore{components: sampleComponents()}, &stubRemediationStore{})
+	w := do(eng, http.MethodGet, "/api/v2/inventory-service/crypto-configurations/"+aUUID+"/components", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "CryptoComponentAssessmentListResponse", w.Body.Bytes())
+
+	var body struct {
+		Components []struct {
+			Code       string `json:"code"`
+			RiskLevel  string `json:"risk_level"`
+			SetsScore  bool   `json:"sets_score"`
+			IsInferred bool   `json:"is_inferred"`
+			Alts       []string
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(body.Components) != 2 {
+		t.Fatalf("components = %d, want 2", len(body.Components))
+	}
+	// Worst first, and exactly one score-setter — the marker the drawer uses to
+	// name "the algorithm that caused this".
+	if !body.Components[0].SetsScore || body.Components[1].SetsScore {
+		t.Fatalf("sets_score should be true on the FIRST (worst) component only, got %+v", body.Components)
+	}
+	// Banded server-side from the canonical ladder: 82 -> High, 70 -> High.
+	if body.Components[0].RiskLevel != "High" {
+		t.Fatalf("risk_level for 82 = %q, want High", body.Components[0].RiskLevel)
+	}
+	// The observed/offered split must survive serialization — it is the whole point.
+	if body.Components[0].IsInferred || !body.Components[1].IsInferred {
+		t.Fatalf("is_inferred lost in transit: %+v", body.Components)
+	}
+}
+
+// Not-assessed is a 200 with an empty array, NOT a 404 and NOT an error. The
+// distinction is load-bearing: score 0 / no components means "we could not
+// assess this", which must never be rendered as a clean bill of health.
+func TestContract_GetCryptoConfigurationComponents_200_notAssessed(t *testing.T) {
+	sv := loadSpec(t)
+	eng := newCryptoConfigEngine(&stubCryptoConfigStore{components: nil}, &stubRemediationStore{})
+	w := do(eng, http.MethodGet, "/api/v2/inventory-service/crypto-configurations/"+aUUID+"/components", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "CryptoComponentAssessmentListResponse", w.Body.Bytes())
+	// A nil slice must serialize as [] rather than null: `null` invites a
+	// consumer to treat it as "unknown" and silently skip the not-assessed
+	// branch, which is exactly the honesty this endpoint is protecting.
+	if got := w.Body.String(); !strings.Contains(got, `"components":[]`) {
+		t.Fatalf("empty components must serialize as [], got %s", got)
+	}
+}
+
+func TestContract_GetCryptoConfigurationComponents_400_badID(t *testing.T) {
+	sv := loadSpec(t)
+	eng := newCryptoConfigEngine(&stubCryptoConfigStore{}, &stubRemediationStore{})
+	w := do(eng, http.MethodGet, "/api/v2/inventory-service/crypto-configurations/not-a-uuid/components", nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+// A failed lookup must be a 500, distinguishable from "not assessed". Reporting
+// a DB error as an empty (= unassessed) list would launder an outage into a
+// verdict about the customer's crypto.
+func TestContract_GetCryptoConfigurationComponents_500(t *testing.T) {
+	sv := loadSpec(t)
+	eng := newCryptoConfigEngine(&stubCryptoConfigStore{compErr: io.EOF}, &stubRemediationStore{})
+	w := do(eng, http.MethodGet, "/api/v2/inventory-service/crypto-configurations/"+aUUID+"/components", nil)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
 }

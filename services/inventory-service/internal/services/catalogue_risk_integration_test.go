@@ -142,6 +142,15 @@ func TestIntegration_CatalogueRisk_ScoreFollowsTheCatalogue(t *testing.T) {
 		t.Fatalf("baseline score = %d, want 15 (AES256 strong/current)", before)
 	}
 
+	// `algorithms` is GLOBAL reference data — testdb.NewTenant's CASCADE cleanup
+	// does not undo an edit to it, so this test used to leave AES256 permanently
+	// re-assessed for every later test in the package. Restore it.
+	t.Cleanup(func() {
+		if _, err := f.db.Exec(`UPDATE algorithms SET risk_score = 15, strength = 'strong', deprecation_status = 'current' WHERE code = 'AES256'`); err != nil {
+			t.Errorf("restore catalogue row: %v", err)
+		}
+	})
+
 	// A reviewer re-assesses AES256 in the catalogue.
 	if _, err := f.db.Exec(`UPDATE algorithms SET risk_score = 88, strength = 'weak', deprecation_status = 'deprecated' WHERE code = 'AES256'`); err != nil {
 		t.Fatalf("update catalogue: %v", err)

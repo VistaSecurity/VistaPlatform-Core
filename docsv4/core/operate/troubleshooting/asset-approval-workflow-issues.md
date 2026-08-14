@@ -61,7 +61,7 @@ render_macros: false
 ## Solutions Implemented
 
 ### Solution 1: Database Migration
-**File:** `scripts/database/11-asset-status-migration.sql`
+**File:** now folded into `scripts/database/schema.sql` (there is no separate migration file — see [Database Migrations](../deployment/database-migrations.md)).
 
 Added migration script to:
 - Add `asset_status` column to `network_assets` table if it doesn't exist
@@ -187,7 +187,7 @@ const pendingApprovalCount = pendingApprovalResponse?.pagination?.total || 0;
    - **Impact:** Enables querying pending approval assets via API
 
 ### End-to-End Testing Results
-**Test Script:** `scripts/test-discovery-e2e-with-data.sh`
+**Test Script:** an internal end-to-end test script (not included in this repository); the results below are recorded for reference.
 
 **All Tests Passed:**
 - ✅ Authentication successful
@@ -214,11 +214,10 @@ const pendingApprovalCount = pendingApprovalResponse?.pagination?.total || 0;
 - `services/inventory-service/internal/services/asset_service.go` - IngestFindings and GetAssets fixes
 - `services/inventory-service/cmd/main.go` - Route ordering fix
 - `web-ui/src/pages/assets-page.tsx` - Pending count badge
-- `scripts/database/11-asset-status-migration.sql` - Database migration
+- Database migration, now part of `scripts/database/schema.sql`
 
 ### Testing & Verification
-- `scripts/test-discovery-e2e.sh` - Basic end-to-end test
-- `scripts/test-discovery-e2e-with-data.sh` - Comprehensive test with test data
+- Internal end-to-end test scripts (not included in this repository)
 
 
 ## Resolution Status

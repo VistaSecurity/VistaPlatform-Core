@@ -7,6 +7,119 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-14
+
+### Added
+
+- **SSH assets are now scored.** Until now every SSH configuration reached risk
+  scoring with nothing linked and stayed at 0 — "not assessed" — no matter how
+  weak it was: the sensor captured SSH banners and full KEXINIT algorithm lists,
+  but nothing mapped them onto crypto-configuration components, and the algorithm
+  catalogue carried no SSH rows at all. This release adds **54 catalogue entries**
+  (protocol versions, key exchanges, ciphers, MACs and host-key types, each with a
+  cited assessment — CVE-2001-0361 for SSH-1, Logjam for `diffie-hellman-group1-sha1`,
+  Sweet32 and SP 800-131A for `3des-cbc`, RFC 8332 / OpenSSH 8.8 for `ssh-rsa`) and
+  maps observations onto them. A modern server (Ed25519 + Curve25519 + AES-GCM)
+  scores **20 (Low)**; a legacy one (`ssh-rsa` + `dh-group1-sha1` + `3des-cbc` +
+  `hmac-md5`) scores **82 (High)**.
+
+  Where a capture saw both sides of the handshake, the negotiated algorithm is
+  *derived* per RFC 4253 §7.1 (first client entry also on the server's list) rather
+  than guessed from the server's preference — the two genuinely differ. Algorithms a
+  server merely **offers** are recorded as inferred and do raise the score, because
+  they are reachable by any client that asks for them; the component columns carry
+  only measured values, so compliance predicates never fire on something that did
+  not happen. **Expect SSH assets that previously showed no score to now show one.**
+
+- **"Why this score" in the crypto-configuration drawer.** The platform already
+  computed a citable reason for every score — `"diffie-hellman-group1-sha1 is weak
+  and obsolete (catalogue risk 82)"` — and wrote it only to a server log. The drawer
+  now names the component that set the score, shows each component's catalogue
+  assessment and migration guidance, and marks whether it was **observed in use** or
+  **offered only**, via a new `GET /crypto-configurations/{id}/components` (,
+  closes). Explanations are recomputed from the catalogue rather than stored,
+  so editing a catalogue row changes the explanation with no stale copy to
+  invalidate.
+
+### Fixed
+
+- **Active Scan was a silent no-op for most assets, and never scanned SSH.** It
+  built scan targets as `host:port`, which nothing downstream accepts — the
+  in-cluster scanner rejects `:` as an illegal nmap character and the standalone
+  sensor tries to DNS-resolve the whole string — so targets were dropped with only a
+  log line while the asset had *already* been stamped `monitoring` with a fresh
+  `last_scanned_at` and reported as scanned. It also hardcoded `Protocols: ["TLS"]`
+  on ports 443/8443, so a host on port 22 was never probed even though both
+  runtimes have had SSH probers all along. Targets are now bare hosts with the port
+  travelling in the job's port list, protocols are derived from the asset's recorded
+  configurations (falling back to well-known-port inference), assets are grouped by
+  scan shape so widening coverage does not multiply probe work, and an asset whose
+  scan never dispatches has its previous scan freshness **restored** rather than
+  blanked.
+
+- **Infrastructure lens rows show what they used to show again.** The rebuilt tenant
+  UI had reduced the row to a risk chip, hostname, certificate count and a bare
+  score; the one remaining sub-line was empty for sensor-discovered assets, so rows
+  looked blank. Restored to the eight-segment Tier-1 spec — identity, location and
+  environment, service, risk, crypto summary with per-protocol badges and a
+  configuration count, certificates, and relative last-seen — with graceful
+  degradation at narrow widths. The list endpoint now returns
+  `crypto_implementation_count` and a per-protocol summary so badges render from one
+  request instead of a per-row query.
+
+### Security
+
+- **Go toolchain bumped 1.26.5 → 1.26.6** across every `go.mod`/`go.work`, the
+  pinned `GO_VERSION` in CI/nightly/images/snyk/api-contract, nightly's
+  `golang:1.26.6-bookworm` container, and `tools/qa-platform/run.sh`. Closes six
+  called stdlib vulnerabilities that were failing the `govulncheck` gate on every
+  PR: GO-2026-6218 (`net/url`), GO-2026-6090 (`crypto/tls`), GO-2026-6089
+  (`net/http`), GO-2026-6088 (`encoding/xml`), GO-2026-5972 (`encoding/asn1`) and
+  GO-2026-5026 (`net/http`/IDNA). Service Dockerfiles are unaffected — they build
+  from the floating `golang:1.26-alpine` minor tag, which already resolves to the
+  latest 1.26.x patch.
+
+- **`GOTOOLCHAIN` is pinned to the exact `go.work` version instead of `local`.**
+  `local` blocked 1.27 (correct) but also refused to provision the *sanctioned*
+  patch, so the 1.26.6 bump broke every Go-touching make target — and `make
+  session-init`, the documented bootstrap for a fresh clone — on any machine
+  without that exact toolchain installed. `auto` is not the answer either: it was
+  observed emitting `go: downloading go1.27.0`. An exact pin keeps the tripwire and
+  provisions automatically. A second assertion (`GO_POLICY_LINE`) rejects a
+  `go.work` that leaves the 1.26 line, so the pin cannot be walked forward by
+  editing one file, and no path degrades to `auto`.
+
+### Internal
+
+These do not change product behaviour, but they restored trust in the checks that
+guard it.
+
+- **CI could report a green PR while running zero test jobs.** Change detection used
+  a shallow clone plus a fail-safe that tested whether the base-SHA *variable* was
+  empty rather than whether the base commit was *reachable*. When `main` moved
+  between a PR being opened and its gate running, `git diff` failed to stderr, the
+  changed-file list came back empty, every matrix job's condition evaluated false,
+  and the run went green having tested nothing — most likely precisely during an
+  active merge sequence. Now reachability is verified and the base fetched on
+  demand, with fail-open as a last resort; 24 assertions cover both polarities. The
+  same shape in `deploy-smoke.yml` was fixed too.
+
+- **Seven guards that reported success while checking nothing.** `make audit` piped
+  its registry audit through `| cat`, so the recipe's exit status was always `cat`'s
+  — it printed `AUDIT FAIL` and succeeded, and the pre-commit hook inherited the
+  blindness (two real failures were hiding behind it). `make enforce`
+  announced completion after printing failures and counted absent linters as passes.
+  The Dockerfile Go-version check had matched **zero files** since Dockerfiles moved
+  to `ARG GO_BUILDER_IMAGE`, so Critical Rule #1 had no mechanical enforcement at
+  all; it now checks 64 Dockerfiles. `session-init.sh` and `dev-dashboard.sh` tested
+  `>= 1.26` where the policy is `== 1.26`, calling 1.27 "OK". The public-tree
+  export's build gate skipped silently when Go was absent. The image vulnerability
+  scan always reported 0 CRITICAL / 0 HIGH because it grepped `^CRITICAL` against
+  Trivy's table output. Every repair is mutation-tested in both directions.
+
+- **Inert-guard audit** — 14 findings, 12 proved by mutation, recorded at
+  `docsv4/internal/operations/INERT_GUARD_AUDIT.md`.
+
 ## [0.5.8] - 2026-08-13
 
 ### Fixed

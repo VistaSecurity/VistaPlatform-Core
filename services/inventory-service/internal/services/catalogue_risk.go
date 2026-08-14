@@ -66,6 +66,12 @@ func (c catalogueRiskContribution) Reason() string {
 // (MAX): a service is only as strong as its weakest negotiated component, so an
 // AES-256 cipher does not offset an RC4 fallback or a TLS 1.0 protocol version.
 //
+// Inferred links count. For TLS that means a component derived from the suite
+// name; for SSH it means an algorithm the server OFFERS but did not negotiate
+// (see ssh_ingest.go). Both belong in the score: an offered weak algorithm is
+// reachable by any client that asks for it, so a server's posture is its worst
+// reachable option, not merely its last observed one.
+//
 // Returns ok=false when nothing is linked — meaning "not assessed", which is
 // deliberately distinct from "assessed as safe". Callers keep the score at 0 in
 // that case so the Informational band continues to mean unassessed.

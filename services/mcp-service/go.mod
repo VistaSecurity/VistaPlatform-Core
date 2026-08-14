@@ -1,6 +1,6 @@
 module github.com/vistasecurity/vistaplatform/mcp-service
 
-go 1.26.5
+go 1.26.6
 
 replace github.com/vistasecurity/vistaplatform/shared => ../../shared
 

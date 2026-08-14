@@ -16,21 +16,22 @@ All services are registered in `standards/service-registry.yaml`. The registry i
 
 **⚠️ CRITICAL**: Never edit `docker-compose.yml` or `docker-compose.prod.yml` directly. Always edit the service registry and run `make registry-first` to regenerate.
 
-## Development Environment
+## Development / Local Evaluation (Docker Compose)
 
 ### Startup
 
-**Full Session Startup:**
+**Quickstart:**
 ```bash
-./start-session.sh
+./scripts/bootstrap-env.sh
+docker compose up -d
 ```
 
-This script:
-1. Generates `.env` if missing
-2. Runs session initialization
-3. Starts all services via `scripts/start-all-services.sh`
+`docker compose` automatically loads `docker-compose.override.yml` alongside
+`docker-compose.yml`, which is what makes this a single command — see
+[INSTALL.md](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/INSTALL.md)
+for the full walkthrough.
 
-**Manual Startup:**
+**Manual, staged Startup** (useful when debugging a specific service):
 ```bash
 # 1. Start infrastructure
 docker compose up -d postgres redis nats influxdb
@@ -47,7 +48,7 @@ docker compose up -d auth-service inventory-service compliance-engine \
 
 # 4. Start API gateway (before frontend so UIs can reach the API)
 docker compose up -d api-gateway
-# The API gateway serves both v1 and v2; Traefik config is generated from the registry per environment (dev, ec2-smoke, prod).
+# The API gateway serves both v1 and v2; Traefik config is generated from the registry.
 
 # 5. Start frontend
 docker compose up -d web-ui admin-ui
@@ -61,126 +62,56 @@ docker compose up -d web-ui admin-ui
 
 ### Shutdown
 
-**Graceful Shutdown:**
-```bash
-./scripts/stop-all-services.sh
-```
-
-**Complete Cleanup (removes all data):**
-```bash
-./scripts/cleanup-docker.sh --dev
-```
-
 **Manual Shutdown:**
 ```bash
 docker compose down
 ```
 
+**Complete Cleanup (removes all data):**
+```bash
+docker compose down -v
+# or, if you need the volumes' host-side artifacts cleaned too:
+./scripts/clean-all-volumes.sh
+```
+
 ### Service Validation
 
-After startup, validate all services:
+After startup, validate all services — there is no bundled validation script:
 ```bash
-./scripts/validate-services.sh
+docker compose ps
+curl -sf http://localhost:8080/api/v1/auth-service/health
+curl -sf http://localhost:3000  # web UI
+curl -sf http://localhost:3006  # admin UI
 ```
 
 This checks:
-- Infrastructure health
-- Backend service health endpoints
-- Frontend accessibility
-- API Gateway functionality
+- All containers report `Up`/`healthy` in `docker compose ps`
+- API Gateway routes through to a backend health endpoint
+- Frontend accessibility (web UI and admin UI)
 
-## Smoke Test Environment
+## Production Environment (Kubernetes)
 
-### Startup
+There is no `docker-compose.prod.yml` or EC2-based production path in this
+repository — production installs use the Helm chart
+(`charts/vistaplatform/`) against any Kubernetes cluster. See
+[INSTALL.md](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/INSTALL.md#run-it)
+("Run it") for the quick path, or [Service-mesh mTLS](./security/service-mesh-mtls.md)
+for staging internal mTLS on an existing production cluster.
 
-**Using Deployment Script:**
-```bash
-./scripts/deploy-smoke.sh
-```
-
-**Manual Startup:**
-```bash
-# 1. Generate environment
-./scripts/generate-ec2-smoke-env.sh
-
-# 2. Start infrastructure
-docker compose -f docker-compose.ec2-smoke.yml --env-file .env.ec2-smoke up -d postgres redis nats
-
-# 3. Wait for database
-sleep 15
-
-# 4. Start all services
-docker compose -f docker-compose.ec2-smoke.yml --env-file .env.ec2-smoke up -d
-```
-
-### Shutdown
+### Startup / Shutdown
 
 ```bash
-docker compose -f docker-compose.ec2-smoke.yml --env-file .env.ec2-smoke down
+helm install vista oci://ghcr.io/vistasecurity/vistaplatform \
+  --namespace vista --create-namespace --wait
+
+helm uninstall vista --namespace vista
 ```
 
 ### Service Validation
 
 ```bash
-# Check service health
-docker compose -f docker-compose.ec2-smoke.yml ps
-
-# Check logs
-docker compose -f docker-compose.ec2-smoke.yml logs notification-service
-```
-
-## Production Environment
-
-### Startup
-
-**Using EC2 Services Script:**
-```bash
-./scripts/ec2-services.sh start
-```
-
-**Manual Startup:**
-```bash
-# 1. Load environment
-source .env.prod
-
-# 2. Start infrastructure
-docker compose -f docker-compose.prod.yml --env-file .env.prod up -d postgres redis nats
-
-# 3. Wait for database
-sleep 15
-
-# 4. Start all services
-docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
-```
-
-### Shutdown
-
-**Graceful Shutdown:**
-```bash
-./scripts/ec2-services.sh stop
-```
-
-**Manual Shutdown:**
-```bash
-docker compose -f docker-compose.prod.yml --env-file .env.prod down
-```
-
-**Emergency Shutdown:**
-```bash
-./scripts/ec2-services.sh emergency
-```
-
-### Service Validation
-
-```bash
-# Check all services
-./scripts/ec2-services.sh status
-
-# Check health
-./scripts/ec2-services.sh health
-
-# View logs
-./scripts/ec2-services.sh logs notification-service
+kubectl -n vista get pods
+kubectl -n vista logs deployment/notification-service
 ```
 
 ## Service Dependencies
@@ -316,5 +247,5 @@ curl http://localhost:8097/health
 
 ## Related Documentation
 
-- [Service Validation](../../../scripts/validate-services.sh) - Validation script
+- [Service Validation](#service-validation) - manual validation commands above (there is no bundled validation script)
 - [Notification Provider Integration Guide](operations/notification-providers.md) - Third-party integration setup

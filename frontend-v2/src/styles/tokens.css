@@ -169,3 +169,34 @@ body {
   box-shadow: var(--app-shadow); display: flex; flex-direction: column; width: 100%; max-height: 86vh;
   animation: vmodalIn .24s cubic-bezier(.2,.8,.2,1) both; overflow: hidden; }
 @media (prefers-reduced-motion: reduce) { .vmodal-scrim, .vmodal { animation-duration: .01ms; } }
+
+/* ---------- Inventory · Infrastructure lens row (Tier-1 dense grid) ----------
+   Eight segments in source order:
+     caret+risk · Identity · Location · Service · Risk · Crypto · Certs · Status
+   plus a fixed 34px trailing cell for the "open the asset drawer" button, which
+   is always present (it is the row's only drill-through, not a segment).
+   Cells marked .infra-md / .infra-lg / .infra-xl are display:none below their
+   breakpoint, which removes them from grid auto-flow entirely; the template at
+   each breakpoint declares exactly the visible column count, so source-order
+   auto-placement keeps the header and the rows aligned. Visibility schedule:
+     base → caret · Identity · Risk · Status                (4 cols)
+     md+  → + Crypto · Certs                                (6 cols)
+     lg+  → + Location                                      (7 cols)
+     xl+  → + Service                                       (8 cols)
+   Media queries (not a JS resize listener) so the row costs nothing to render
+   and degrades correctly before first paint.                                  */
+.infra-grid { display: grid; align-items: center; gap: 12px; padding: 0 16px;
+  grid-template-columns: 52px minmax(0, 1fr) 76px 108px 34px; }
+.infra-md, .infra-lg, .infra-xl { display: none; }
+@media (min-width: 900px) {
+  .infra-grid { grid-template-columns: 52px minmax(0, 1fr) 76px minmax(0, 1.15fr) 58px 108px 34px; }
+  .infra-md { display: flex; }
+}
+@media (min-width: 1180px) {
+  .infra-grid { grid-template-columns: 52px minmax(0, 1fr) minmax(0, 0.95fr) 76px minmax(0, 1.15fr) 58px 108px 34px; }
+  .infra-lg { display: block; }
+}
+@media (min-width: 1420px) {
+  .infra-grid { grid-template-columns: 52px minmax(0, 1fr) minmax(0, 0.95fr) minmax(0, 0.8fr) 76px minmax(0, 1.15fr) 58px 108px 34px; }
+  .infra-xl { display: block; }
+}

@@ -100,25 +100,26 @@ Contact support or refer to the updated [Device Interrogation User Guide](./devi
 
 ## Database Migrations Applied
 
-The following migrations were applied to support this feature:
+The following changes were made to support this feature. There is no migration
+runner in this project — each is folded directly into
+[`scripts/database/schema.sql`](../../../scripts/database/schema.sql), which is
+applied as a whole (see [Database Migrations](../operate/deployment/database-migrations.md)).
+They're listed here for historical reference only; there are no separate
+migration files to run.
 
-### Migration 54: Add Device Credentials
-**File:** `scripts/database/migrations/54-add-device-credentials.sql`
+### Add Device Credentials
 
 Adds `username` and `password` columns to `devices` table for embedded credentials.
 
-### Migration 55: Update Integration Constraints
-**File:** `scripts/database/migrations/55-update-integrations-constraints.sql`
+### Update Integration Constraints
 
 Updates `platform_integrations` table to enforce cloud-only integration types, removing network device types.
 
-### Migration 56: Migrate Device Credentials
-**File:** `scripts/database/migrations/56-migrate-device-credentials.sql`
+### Migrate Device Credentials
 
 One-time data migration copying credentials from `platform_integrations.config` to `devices` table for existing network devices.
 
-### Migration 57: Add Device Jobs Updated At
-**File:** `scripts/database/migrations/57-add-device-jobs-updated-at.sql`
+### Add Device Jobs Updated At
 
 Adds `updated_at` timestamp column to `device_jobs` table with automatic update trigger.
 

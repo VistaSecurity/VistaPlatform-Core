@@ -964,6 +964,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/crypto-configurations/{id}/components": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Crypto configuration UUID (`crypto_implementations.id` in storage). */
+                id: components["parameters"]["CryptoConfigurationId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Explain a crypto configuration's risk score, component by component
+         * @description Returns the algorithm-catalogue assessment of every component linked to this configuration (`crypto_implementation_algorithms` joined to `algorithms`), ordered worst-first, wrapped under `components`. Drives the "Why this score" panel in the inventory crypto-configuration drawer.
+         *
+         *     Computed on read, not stored: the catalogue is meant to be edited by a platform admin, so a persisted copy of the reasoning would silently go stale against the row it cites.
+         *
+         *     Each entry carries `algorithm_type` (the junction role), the catalogue assessment (`strength`, `deprecation_status`, `risk_score`, `risk_level`, `migration_guidance`, `recommended_alternatives`), and two computed markers:
+         *
+         *     * `is_inferred` — `false` means the component was OBSERVED in use (for SSH, derived per RFC 4253 §7.1 from both KEXINIT name-lists); `true` means the server merely OFFERS it and this session did not negotiate it, or (for TLS) that it was derived from the suite name. Both raise the score, because a reachable weak option is a real weakness — but they are different findings and consumers must render them differently.
+         *     * `sets_score` — marks the worst component, the one worst-component-wins selected. Exactly one entry carries it when the list is non-empty.
+         *
+         *     `risk_level` is banded SERVER-SIDE from `models.RiskBands` so no consumer re-derives the ladder.
+         *
+         *     **An empty `components` array means NOT ASSESSED** — nothing on this configuration resolved against the catalogue. It is not a 404 and not an error, and it MUST NOT be presented as a clean bill of health; score 0 has always meant unassessed and so does an empty list.
+         */
+        get: operations["getCryptoConfigurationComponents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/crypto-configurations/{id}/remediation": {
         parameters: {
             query?: never;
@@ -2439,6 +2473,14 @@ export interface components {
             }[];
             highest_risk?: number;
             certificate_count?: number;
+            /** @description Number of live crypto configurations on the asset. Present on the LIST response so the Inventory row can show an "N cfg" count without a per-row query. */
+            crypto_implementation_count?: number;
+            /** @description Per-protocol rollup of the asset's crypto configurations, one entry per distinct protocol, ordered by count descending. Present on the LIST response so the Infrastructure lens can render protocol badges from one request. `max_risk_score` follows the platform convention that 0 means NOT ASSESSED, not "safe". */
+            protocol_summary?: {
+                protocol: string;
+                count: number;
+                max_risk_score: number;
+            }[];
         };
         /** @description CURRENT pagination block embedded under the `pagination` key by the list endpoint (shared/api.PaginationMeta). Pre-ADR-0002; distinct from the go-forward `Pagination` schema below. */
         PaginationMeta: {
@@ -3188,6 +3230,46 @@ export interface components {
         /** @description CURRENT single-resource envelope for GET /crypto-configurations/{id}. Pre-ADR-0002: the resource is wrapped under the `crypto_implementation` key (storage-era name retained). */
         CryptoImplementationResponse: {
             crypto_implementation: components["schemas"]["CryptoImplementation"];
+        };
+        /** @description One catalogue-resolved component of a crypto configuration, with the assessment that explains the configuration's risk score (models.CryptoComponentAssessment). */
+        CryptoComponentAssessment: {
+            /**
+             * @description The junction role this algorithm plays on the configuration.
+             * @enum {string}
+             */
+            algorithm_type: "protocol_version" | "cipher_suite" | "key_exchange" | "signature" | "symmetric" | "hash";
+            /** @description `false` = observed in use; `true` = offered by the server but not negotiated in the observed session (or, for TLS, derived from the suite name). */
+            is_inferred: boolean;
+            /**
+             * Format: uuid
+             * @description The `algorithms` catalogue row this assessment comes from.
+             */
+            algorithm_id: string;
+            code: string;
+            name: string;
+            category: string;
+            /** @description Catalogue strength (weak / acceptable / strong / recommended). Empty string when the catalogue row does not record one. */
+            strength: string;
+            /** @description Catalogue deprecation status. Empty string when unrecorded. */
+            deprecation_status: string;
+            /** @description The catalogue row's 0-100 risk score. */
+            risk_score: number;
+            /**
+             * @description The score banded with the canonical ladder (models.RiskBands). Computed server-side — do not re-derive.
+             * @enum {string}
+             */
+            risk_level: "Critical" | "High" | "Medium" | "Low" | "Informational";
+            /** @description Catalogue migration guidance. Omitted when the row records none. */
+            migration_guidance?: string;
+            /** @description Catalogue-recommended replacements. Always present; empty means none recorded (not "unknown"). */
+            recommended_alternatives: string[];
+            is_pqc: boolean;
+            /** @description True on the worst component — the one worst-component-wins selected. Exactly one entry per non-empty list. */
+            sets_score: boolean;
+        };
+        /** @description List envelope for GET /crypto-configurations/{id}/components — `{ "components": [...] }`. An EMPTY array means NOT ASSESSED, never "assessed clean". */
+        CryptoComponentAssessmentListResponse: {
+            components: components["schemas"]["CryptoComponentAssessment"][];
         };
         /** @description A single weakness contributing to the configuration's overall risk. `type` is the dimension that triggered it (`protocol` / `cipher` / `hash` / `key_size`); `code` is the algorithm or protocol identifier the catalog matched (e.g. `TLS 1.0`, `RC4`). */
         RemediationIssue: {
@@ -5100,6 +5182,32 @@ export interface operations {
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
             404: components["responses"]["LegacyNotFound"];
+        };
+    };
+    getCryptoConfigurationComponents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Crypto configuration UUID (`crypto_implementations.id` in storage). */
+                id: components["parameters"]["CryptoConfigurationId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The configuration's catalogue-assessed components, worst first. May be empty (= not assessed). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CryptoComponentAssessmentListResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
         };
     };
     getCryptoConfigurationRemediation: {

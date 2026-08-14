@@ -216,14 +216,9 @@ const algorithmColumns = `id, code, category, subcategory, name, description,
 	classical_security_level, nist_quantum_security_level, parameter_set_identifier,
 	curve`
 
-// prefixColumns adds a table alias to each column in a comma-separated column list.
-func prefixColumns(alias, columns string) string {
-	parts := strings.Split(columns, ",")
-	for i, p := range parts {
-		parts[i] = alias + "." + strings.TrimSpace(p)
-	}
-	return strings.Join(parts, ", ")
-}
+// prefixColumns was removed with its only caller,
+// GetAlgorithmsByImplementation — the sole query that needed the algorithms
+// column list aliased for a join.
 
 // scanner is implemented by both *sql.Row and *sql.Rows.
 type scanner interface {
@@ -706,18 +701,13 @@ func (s *AlgorithmService) LinkAlgorithmToImplementation(
 	return nil
 }
 
-// GetAlgorithmsByImplementation retrieves all algorithms linked to a crypto implementation
-func (s *AlgorithmService) GetAlgorithmsByImplementation(implID uuid.UUID) ([]Algorithm, error) {
-	return s.queryAlgorithms(
-		fmt.Sprintf(`SELECT %s
-			FROM algorithms a
-			JOIN crypto_implementation_algorithms cia ON a.id = cia.algorithm_id
-			WHERE cia.crypto_implementation_id = $1
-			ORDER BY cia.algorithm_type, a.risk_score DESC`,
-			prefixColumns("a", algorithmColumns)),
-		implID,
-	)
-}
+// GetAlgorithmsByImplementation was removed. It read the same junction as
+// CryptoImplementationService.GetCryptoImplementationComponents but dropped
+// algorithm_type and is_inferred — the two fields that make a score
+// explainable — and it had no callers for as long as it existed. Keeping a
+// second, lossier reader of the same join is how two opinions start. Use
+// GetCryptoImplementationComponents (crypto_component_assessments.go); it is
+// tenant-scoped, which this was not.
 
 // GetAlgorithmsByCategory retrieves all algorithms in a category
 func (s *AlgorithmService) GetAlgorithmsByCategory(category string) ([]Algorithm, error) {

@@ -2,7 +2,7 @@
 
 Vista cryptographic asset inventory and compliance platform — Helm chart for RKE2 / Kubernetes.
 
-This chart is delivered to customers as a signed OCI artifact at `oci://docker.io/vistasecurity/vistaplatform`. The customer-facing deployment guide lives at `docsv4/core/operate/deployment/rke2-v1/deployment-guide.md`. **If you're a customer, start there**, not here.
+This chart is delivered to Core users as a signed OCI artifact at `oci://ghcr.io/vistasecurity/vistaplatform` (commercial customers pull the same chart shape from `oci://docker.io/vistasecurity/vistaplatform`). The customer-facing install walkthrough is `INSTALL.md` at the repository root; internal service-mesh mTLS staging detail is at `docsv4/core/operate/security/service-mesh-mtls.md`. **If you're installing this chart, start there**, not here.
 
 ## Quick install
 
@@ -52,7 +52,7 @@ See `examples/values-customer.yaml.example` (bundled with this chart) for the fu
 - NetworkPolicies, schema-migration Job, helm-test smoke check
 - Hardened pod security defaults (non-root, read-only FS, dropped caps, RuntimeDefault seccomp, no SA token mount)
 
-Resource counts by HA / minimal profile, see `docsv4/core/operate/deployment/rke2-v1/deployment-guide.md` Appendix A.
+Resource counts by HA / minimal profile — see `values-ha.yaml` / `values-minimal.yaml` in this directory.
 
 ## v1 limitations to flag with customers
 

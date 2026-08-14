@@ -1,6 +1,6 @@
 module github.com/vistasecurity/vistaplatform/pcap-processor
 
-go 1.26.5
+go 1.26.6
 
 require (
 	github.com/vistasecurity/vistaplatform/shared v0.0.0

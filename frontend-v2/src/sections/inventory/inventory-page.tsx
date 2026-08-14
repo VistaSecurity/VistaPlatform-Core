@@ -5,7 +5,7 @@ import toast from 'react-hot-toast';
 import type { Asset } from '@vistasecurity/api-contract';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
-import { Icon, Modal, RiskChip, LevelDot, levelFromScore } from '../../components/ui';
+import { Icon, Modal, RiskChip, LevelDot, levelFromScore, riskColor } from '../../components/ui';
 import { findLens } from './lenses';
 import { AssetDrawer, CertDrawer, ConfigDrawer, KeyDrawer, type Certificate, type CryptoConfig, type Key, type OpenAsset, type OpenCert, type OpenConfig, type OpenKey } from './drawers';
 import { AssetFormModal } from './asset-form-modal';
@@ -14,6 +14,8 @@ import { StaleRowActions, StaleBulkBar } from './bulk-actions';
 import {
   type Strength, STRENGTH_META, STRENGTH_OPTS, ENV_OPTS, RISK_OPTS, configStrength,
   segmentForAsset, stripInetMask, stripEmptyParens, keyAlgorithmLabel,
+  assetIdentity, assetLocation, assetService, assetRisk, protocolBadges,
+  configCount, certCount, assetStatusBadge, relativeTime,
 } from './lens-helpers';
 
 // Inventory — lens-based view. One backend dataset reshaped by angle. The active
@@ -502,7 +504,12 @@ export function InventoryPage() {
           : 'No assets discovered yet.';
       return <Center icon="inbox" tone="var(--app-t3)" title="Nothing here" message={emptyMsg} />;
     }
-    return assets.map((a) => <AssetGroup key={a.id} asset={a} openConfig={openConfig} openAsset={openAsset} />);
+    return (
+      <>
+        <InfraHeader />
+        {assets.map((a) => <AssetGroup key={a.id} asset={a} openConfig={openConfig} openAsset={openAsset} />)}
+      </>
+    );
   };
 
   return (
@@ -621,14 +628,54 @@ export function InventoryPage() {
 }
 
 // ---- infrastructure accordion group -------------------------------------
+// Sticky header for the Infrastructure lens. Column visibility mirrors the row
+// exactly (same .infra-* classes), so a hidden segment takes its heading with it.
+function InfraHeader() {
+  return (
+    <div className="infra-grid" style={{ height: 34, borderBottom: '1px solid var(--app-border2)', position: 'sticky', top: 0, background: 'var(--app-panel)', zIndex: 1 }}>
+      <span />
+      <span className="eyebrow-app">Identity</span>
+      <span className="eyebrow-app infra-lg">Location</span>
+      <span className="eyebrow-app infra-xl">Service</span>
+      <span className="eyebrow-app">Risk</span>
+      <span className="eyebrow-app infra-md">Crypto</span>
+      <span className="eyebrow-app infra-md">Certs</span>
+      <span className="eyebrow-app">Status</span>
+      <span />
+    </div>
+  );
+}
+
+// Environment is a deployment-context label, not a severity — but production
+// carries more consequence than a lab, so it gets the louder tone.
+const ENV_TONE = (env: string): string => {
+  const e = env.toLowerCase();
+  if (e.startsWith('prod')) return 'var(--warn-strong)';
+  if (e.startsWith('stag') || e.startsWith('uat')) return 'var(--warn)';
+  return 'var(--neutral)';
+};
+
 function AssetGroup({ asset, openConfig, openAsset }: { asset: Asset; openConfig: OpenConfig; openAsset: OpenAsset }) {
   const a = asset as Record<string, unknown> & Asset;
   const [open, setOpen] = useState(false);
-  const risk = typeof a.risk_score === 'number' ? a.risk_score : 0;
-  const riskLevel = asset.risk_level || levelFromScore(risk);
-  const certCount = typeof a.certificate_count === 'number' ? a.certificate_count : 0;
+
+  // Every segment below is derived by a pure helper in lens-helpers.ts so the
+  // "field the service doesn't know" cases are unit-tested rather than eyeballed.
+  const ident = assetIdentity(a);
+  const loc = assetLocation(a);
+  const svc = assetService(a);
+  const risk = assetRisk(a);
+  // 2 badges + a "+N" marker: three badges plus the count overflow the Crypto
+  // cell once the grid narrows to its md template.
+  const { badges, overflow } = protocolBadges(a, 2);
+  const cfgN = configCount(a);
+  const certN = certCount(a);
+  const status = assetStatusBadge(a);
 
   // Children lazy-load on first expand; same query key as AssetDrawer → cache reuse.
+  // NOTE: this stays `enabled: open`. The row's protocol badges come from the
+  // list payload's protocol_summary precisely so this query is NOT needed to
+  // paint a row — enabling it eagerly would fire one request per visible row.
   const childrenQ = useQuery({
     queryKey: ['asset-configs', a.id],
     queryFn: async () => {
@@ -639,23 +686,87 @@ function AssetGroup({ asset, openConfig, openAsset }: { asset: Asset; openConfig
     enabled: open,
   });
   const kids = childrenQ.data ?? [];
-  const sub = [a.asset_type, a.operating_system, a.network_segment_name || a.business_unit].filter(Boolean).join(' · ');
 
   return (
     <div>
-      <div className="row-hover" style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', padding: '11px 16px', borderTop: '1px solid var(--app-border)', background: 'var(--app-panel2)' }}>
-        <button onClick={() => setOpen((o) => !o)} style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1, minWidth: 0, border: 'none', background: 'transparent', cursor: 'pointer', textAlign: 'left', padding: 0 }}>
-          <Icon name="chevron-right" size={15} style={{ flex: 'none', color: 'var(--app-t3)', transition: 'transform .18s ease', transform: open ? 'rotate(90deg)' : 'none' }} />
-          <RiskChip level={riskLevel} size={24} />
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{(a.hostname as string) || '—'}</div>
-            <div style={{ fontSize: 11.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{sub || (a.ip_address as string) || ''}</div>
-          </div>
+      <div className="row-hover infra-grid" style={{ minHeight: 48, borderTop: '1px solid var(--app-border)', background: 'var(--app-panel2)' }}>
+        {/* 1 · caret + risk chip. The chip is the at-a-glance severity; its
+            title says "not assessed" when nothing resolved, so a grey
+            Informational chip never reads as a clean bill of health. */}
+        <button
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+          aria-label={`${open ? 'Collapse' : 'Expand'} ${ident.primary}`}
+          title={risk.title}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 6, border: 'none', background: 'transparent', cursor: 'pointer', padding: 0 }}
+        >
+          <Icon name="chevron-right" size={14} style={{ flex: 'none', color: 'var(--app-t3)', transition: 'transform .18s ease', transform: open ? 'rotate(90deg)' : 'none' }} />
+          <RiskChip level={risk.level} size={22} />
         </button>
-        <span className="mono" style={{ fontSize: 11.5, color: 'var(--app-t3)', flex: 'none' }}>{certCount ? `${certCount} cert${certCount === 1 ? '' : 's'}` : ''}</span>
-        <span className="mono" style={{ fontSize: 12, color: 'var(--app-t2)', flex: 'none', minWidth: 28, textAlign: 'right' }}>{risk || '—'}</span>
-        <button onClick={() => openAsset(a.id as string, a)} title="Asset details" className="ui-btn sm ghost" style={{ flex: 'none', height: 28, padding: '0 9px' }}>
-          <Icon name="circle-alert" size={14} />Details
+
+        {/* 2 · Identity */}
+        <button onClick={() => setOpen((o) => !o)} style={{ minWidth: 0, border: 'none', background: 'transparent', cursor: 'pointer', textAlign: 'left', padding: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={ident.primary}>{ident.primary}</div>
+          {ident.secondary && (
+            <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={ident.secondary}>{ident.secondary}</div>
+          )}
+        </button>
+
+        {/* 3 · Location (lg+). Neither known → ONE em dash, not a stack of two. */}
+        <div className="infra-lg" style={{ minWidth: 0 }}>
+          {loc.environment && (
+            <span style={{ fontSize: 10.5, fontWeight: 700, color: ENV_TONE(loc.environment), background: `color-mix(in srgb, ${ENV_TONE(loc.environment)} 12%, transparent)`, borderRadius: 6, padding: '1px 7px', textTransform: 'capitalize' }}>{loc.environment}</span>
+          )}
+          {(loc.path || !loc.environment) && (
+            <div style={{ fontSize: 11, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: loc.environment ? 2 : 0 }} title={loc.path ?? 'No environment, segment or business unit recorded'}>{loc.path ?? '—'}</div>
+          )}
+        </div>
+
+        {/* 4 · Service (xl+) */}
+        <div className="infra-xl" style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 12, color: svc.name ? 'var(--app-t2)' : 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={svc.name ?? 'Service not identified'}>{svc.name ?? '—'}</div>
+          {svc.version && <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>{svc.version}</div>}
+        </div>
+
+        {/* 5 · Risk. Score 0 = NOT ASSESSED, shown as '—' plus an explicit
+            caption — never as a low/green result. */}
+        <div style={{ minWidth: 0, textAlign: 'right' }} title={risk.title}>
+          <div className="mono" style={{ fontSize: 13, fontWeight: 600, color: risk.assessed ? riskColor(risk.level) : 'var(--app-t3)' }}>{risk.label}</div>
+          <div style={{ fontSize: 10, color: 'var(--app-t3)', whiteSpace: 'nowrap' }}>{risk.assessed ? risk.level : 'not assessed'}</div>
+        </div>
+
+        {/* 6 · Crypto summary (md+): protocol badges + configuration count. */}
+        <div className="infra-md" style={{ alignItems: 'center', gap: 5, minWidth: 0, flexWrap: 'nowrap', overflow: 'hidden' }}>
+          {badges.map((b) => (
+            <span key={b.label} title={b.title} className="mono" style={{ fontSize: 10.5, fontWeight: 700, flex: 'none', color: b.assessed ? riskColor(b.level) : 'var(--app-t3)', background: b.assessed ? `color-mix(in srgb, ${riskColor(b.level)} 12%, transparent)` : 'var(--app-track)', borderRadius: 6, padding: '1px 6px' }}>{b.label}</span>
+          ))}
+          {overflow > 0 && <span className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', flex: 'none' }} title={`${overflow} more protocol${overflow === 1 ? '' : 's'} — expand the row to see them`}>+{overflow}</span>}
+          {/* An explicit zero reads as a bug ("0 cfg"); say what it means instead.
+              A NULL count (service didn't send one) shows nothing at all. */}
+          {cfgN === 0 && badges.length === 0
+            ? <span style={{ fontSize: 10.5, color: 'var(--app-t3)', flex: 'none' }}>no crypto seen</span>
+            : cfgN != null && (
+              <span className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', flex: 'none', marginLeft: badges.length ? 2 : 0 }} title={`${cfgN} crypto configuration${cfgN === 1 ? '' : 's'} on this asset`}>{cfgN} cfg</span>
+            )}
+        </div>
+
+        {/* 7 · Certs (md+) */}
+        <div className="infra-md" style={{ alignItems: 'center', gap: 4 }} title={`${certN} certificate${certN === 1 ? '' : 's'} on this asset`}>
+          <Icon name="file-badge" size={13} style={{ color: certN > 0 ? 'var(--accent)' : 'var(--app-t3)' }} />
+          <span className="mono" style={{ fontSize: 11.5, color: certN > 0 ? 'var(--app-t2)' : 'var(--app-t3)' }}>{certN}</span>
+        </div>
+
+        {/* 8 · Status + relative last-seen */}
+        <div style={{ minWidth: 0, textAlign: 'right' }}>
+          {status && (
+            <span style={{ fontSize: 10, fontWeight: 700, color: status.tone, background: `color-mix(in srgb, ${status.tone} 12%, transparent)`, borderRadius: 6, padding: '1px 6px', textTransform: 'capitalize' }}>{status.text}</span>
+          )}
+          <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', marginTop: status ? 2 : 0 }} title={a.last_seen_at ? `Last seen ${a.last_seen_at as string}` : 'Never seen'}>{relativeTime(a.last_seen_at as string | undefined)}</div>
+        </div>
+
+        {/* drill-through to the asset drawer */}
+        <button onClick={() => openAsset(a.id as string, a)} title="Asset details" className="ui-btn sm ghost icon" style={{ width: 30, height: 28, padding: 0, justifySelf: 'end' }}>
+          <Icon name="circle-alert" size={14} />
         </button>
       </div>
       {open && (

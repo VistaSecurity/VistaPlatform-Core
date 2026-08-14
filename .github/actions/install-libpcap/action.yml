@@ -35,7 +35,7 @@ runs:
           exit 0
         fi
 
-        # Containers (nightly's test-backend runs in golang:1.26.5-bookworm) are
+        # Containers (nightly's test-backend runs in golang:1.26.6-bookworm) are
         # root and have their own filesystem, so no sudo and no host contention.
         SUDO=""
         if [ "$(id -u)" -ne 0 ]; then SUDO="sudo"; fi

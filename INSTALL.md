@@ -32,7 +32,14 @@ Then open **http://localhost:3000** and sign up. The first account you create
 becomes the administrator of a new organization.
 
 The first run builds ~18 images and applies the database schema, so give it a
-few minutes. `docker compose ps` will show 29 containers when it's ready.
+few minutes. `docker compose ps` will show 28 containers when it's ready.
+
+mTLS between services is enabled by default in `docker-compose.yml` for
+production parity, but `docker-compose.override.yml` — which `docker compose`
+loads automatically alongside it, no flags needed — turns it back off for this
+path, so the empty `service-certs/` directories Docker creates for the
+bind mounts are never read. If you deliberately re-enable it
+(`USE_MTLS=true`), generate real certificates first: `./scripts/generate-service-ca.sh && ./scripts/generate-service-certificates.sh` (needs Postgres up and `ENCRYPTION_MASTER_KEY` set, both already true after the commands above).
 
 **Don't skip `bootstrap-env.sh`.** `env.example` ships readable placeholders so
 the file is easy to follow — and those placeholders are published in this
@@ -206,8 +213,15 @@ platform:
 
 Full detail on the internal-mTLS options — what each toggle covers, how to
 stage them across upgrades, and how to run against a managed PostgreSQL — is in
-§5E of
-[`docsv4/core/operate/deployment/rke2-v1/deployment-guide.md`](docsv4/core/operate/deployment/rke2-v1/deployment-guide.md).
+[`docsv4/core/operate/security/service-mesh-mtls.md`](docsv4/core/operate/security/service-mesh-mtls.md).
+
+**Issuing your edge certificate from an internal or corporate CA** (instead of
+`tls.mode: certManager` against a public issuer) means pods calling back into
+that hostname from inside the cluster won't trust it by default — see
+[`docsv4/core/operate/security/internal-ca.md`](docsv4/core/operate/security/internal-ca.md)
+for the supported way to fix that (mounting the CA bundle), and why
+`insecureSkipVerify` on a synthetic check isn't the answer for anything but a
+lab cluster.
 
 ### One thing worth knowing before you upgrade
 
@@ -246,6 +260,86 @@ prints this command, filled in for the version you have, at the end of
 Because these images are built from the public source with no obfuscation, you
 can also just rebuild a tag yourself and compare. That is the point of shipping
 them this way.
+
+---
+
+## Downloads
+
+Everything below is published by the same workflow,
+[`.github/workflows/release-core.yml`](.github/workflows/release-core.yml), on
+every tagged Core release. Nothing here is pinned to a version number — this
+doc is meant to outlive any one release — so follow the links rather than
+guessing a URL.
+
+### Sensor and device-agent binaries
+
+The [**latest release**](https://github.com/VistaSecurity/VistaPlatform-Core/releases/latest)
+attaches pre-built binaries for both agents, for every platform below, named
+`<binary>-<os>-<arch>-<version>` (`.exe` on Windows). Pick the file that
+matches your OS and architecture:
+
+| OS | Arch | Sensor asset | Device-agent asset |
+|---|---|---|---|
+| Linux | x86_64 | `crypto-sensor-linux-amd64-<version>` | `device-agent-linux-amd64-<version>` |
+| Linux | ARM64 | `crypto-sensor-linux-arm64-<version>` | `device-agent-linux-arm64-<version>` |
+| macOS | Intel | `crypto-sensor-darwin-amd64-<version>` | `device-agent-darwin-amd64-<version>` |
+| macOS | Apple Silicon | `crypto-sensor-darwin-arm64-<version>` | `device-agent-darwin-arm64-<version>` |
+| Windows | x86_64 | `crypto-sensor-windows-amd64-<version>.exe` | `device-agent-windows-amd64-<version>.exe` |
+| Windows | x86 (386) | `crypto-sensor-windows-386-<version>.exe` | — |
+
+> **The sensor's asset name is `crypto-sensor-*`, not `sensor-*`** — a
+> historical name from before the product settled on calling it "the sensor."
+> It's the same binary; if you downloaded `crypto-sensor-linux-amd64-<version>`
+> you have the right file, not the wrong one.
+
+The sensor is dynamically linked against libpcap and needs it installed
+first — `apt install libpcap0.8` (Debian/Ubuntu), `dnf install libpcap`
+(RHEL/Fedora), already present on macOS, or [Npcap](https://npcap.com/) on
+Windows. The device agent is statically linked and needs nothing extra.
+
+Deploying one: [sensor registration](docsv4/core/features/SENSOR_REGISTRATION.md) ·
+[device-agent deployment](docsv4/core/operate/deployment/device-agent-deployment.md).
+
+**Prefer to build it yourself?** `make build-sensor` / `make sensor-all-platforms`
+and `make build-device-agent` / `make device-agent-all-platforms` build the
+same binaries from this checkout — see
+[the top-level README](README.md#architecture) for the toolchain.
+
+#### Verifying a downloaded binary
+
+Every release attaches a `SHA256SUMS` file covering all of them, signed with
+cosign (keyless OIDC — no key to trust, same as the images above):
+
+```bash
+cosign verify-blob SHA256SUMS \
+  --signature SHA256SUMS.sig --certificate SHA256SUMS.pem \
+  --certificate-identity-regexp 'https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+sha256sum -c SHA256SUMS
+```
+
+### Container images
+
+Every backend and frontend image is built from this public source and
+published to **GHCR**: `ghcr.io/vistasecurity/<service>:<version>` — e.g.
+`ghcr.io/vistasecurity/auth-service:<version>`, `ghcr.io/vistasecurity/web-ui:<version>`.
+Not Docker Hub: `docker.io/vistasecurity` carries the separate *commercial*
+image line, built from different (obfuscated) source under a different
+Dockerfile — that is not what a Core install pulls, and Core's chart never
+points at it. Every image is built with an SBOM attestation
+(`docker/build-push-action`'s `sbom: true`, inspectable with
+`docker buildx imagetools inspect`) and cosign-signed — see
+[Verifying what you're running](#verifying-what-youre-running) above for the
+verify command.
+
+### Helm chart
+
+```
+oci://ghcr.io/vistasecurity/vistaplatform
+```
+
+covered throughout this document — see [Run it](#run-it) above for the install
+command and a minimal `values.yaml`.
 
 ---
 

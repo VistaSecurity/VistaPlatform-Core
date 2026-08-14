@@ -2,8 +2,17 @@ import { useQuery } from '@tanstack/react-query';
 import type { Asset, inventoryComponents } from '@vistasecurity/api-contract';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
-import { DrawerCloseBtn as CloseBtn, DrawerShell, Icon, MetaRow, RiskChip, RiskGauge, SectionLabel, levelFromScore } from '../../components/ui';
+import { DrawerCloseBtn as CloseBtn, DrawerShell, Icon, LevelDot, MetaRow, RiskChip, RiskGauge, SectionLabel, levelFromScore, riskColor } from '../../components/ui';
 import { DeleteAssetButton, RestoreAssetButton, ScanAssetButton } from './bulk-actions';
+import {
+  PROVENANCE_LABEL,
+  PROVENANCE_TITLE,
+  componentTypeLabel,
+  explainRisk,
+  provenanceOf,
+  verdictOf,
+  type CryptoComponent,
+} from './risk-explanation';
 
 export type CryptoConfig = inventoryComponents['schemas']['CryptoImplementation'];
 export type Certificate = inventoryComponents['schemas']['Certificate'];
@@ -24,7 +33,8 @@ export function ConfigDrawer({ config, onOpenAsset, onOpenCert, onClose, active 
   config: CryptoConfig; onOpenAsset?: OpenAsset; onOpenCert?: OpenCert; onClose: () => void; active?: boolean; depth?: number;
 }) {
   const c = config as Record<string, unknown> & CryptoConfig;
-  const level = (c.risk_level as string) || levelFromScore(typeof c.risk_score === 'number' ? c.risk_score : 0);
+  const score = typeof c.risk_score === 'number' && Number.isFinite(c.risk_score) ? c.risk_score : 0;
+  const level = (c.risk_level as string) || levelFromScore(score);
   const assetId = c.asset_id as string | undefined;
   const certId = c.certificate_id as string | undefined;
   return (
@@ -78,12 +88,166 @@ export function ConfigDrawer({ config, onOpenAsset, onOpenCert, onClose, active 
           <MetaRow k="Certificate" v={certId ? 'present' : '—'} />
         )}
         <SectionLabel icon="activity">Assessment</SectionLabel>
-        <MetaRow k="Risk score" v={typeof c.risk_score === 'number' ? c.risk_score : null} mono />
-        <MetaRow k="Risk level" v={level} />
+        {/* Score 0 means NOT ASSESSED, not safe — same house pattern as the
+            Inventory row (#1340): an em dash plus an explicit caption, never a
+            bare "0" that reads as a clean bill of health. */}
+        <MetaRow k="Risk score" v={score > 0 ? score : '—'} mono />
+        <MetaRow k="Risk level" v={score > 0 ? level : 'not assessed'} />
         <MetaRow k="Discovery" v={c.discovery_method as string} />
         <MetaRow k="Last verified" v={(c.last_verified_at as string)?.slice(0, 10)} mono />
+        <WhyThisScore configId={c.id as string} score={score} />
       </div>
     </DrawerShell>
+  );
+}
+
+// ---- "Why this score" ----------------------------------------------------
+// The panel this whole slice exists for. The backend has always been able to
+// name the catalogue row behind a score — it wrote the reasoning to a log line
+// and showed the user a bare number. This reads the same join back.
+//
+// Three things it must get right, all of them honesty properties:
+//   * an empty component list is NOT ASSESSED, never "no risk factors found";
+//   * observed and offered-only must be unmistakably different on screen —
+//     different words, different icon, different tone, not colour alone;
+//   * banding comes from the API (models.RiskBands). Nothing here re-derives it.
+function WhyThisScore({ configId, score }: { configId?: string; score: number }) {
+  const q = useQuery({
+    queryKey: ['config-components', configId],
+    enabled: !!configId,
+    queryFn: async () => {
+      const { data, error } = await clients.inventory.GET('/crypto-configurations/{id}/components', {
+        params: { path: { id: configId! } },
+      });
+      if (error || !data) throw new Error('Failed to load assessment');
+      return data.components ?? [];
+    },
+  });
+
+  if (!configId) return null;
+
+  return (
+    <>
+      <SectionLabel icon="search">Why this score</SectionLabel>
+      {q.isLoading ? (
+        <div style={{ fontSize: 12.5, color: 'var(--app-t3)', padding: '8px 0' }}>Loading assessment…</div>
+      ) : q.isError ? (
+        // Explicitly NOT the not-assessed copy: a failed request is our problem,
+        // and reporting it as "not assessed" would launder an outage into a
+        // statement about the customer's crypto.
+        <div style={{ fontSize: 12.5, color: 'var(--warn)', padding: '8px 0' }}>
+          Couldn't load the assessment for this configuration.
+        </div>
+      ) : (
+        <RiskExplanationPanel components={q.data} score={score} />
+      )}
+    </>
+  );
+}
+
+function RiskExplanationPanel({ components, score }: { components?: CryptoComponent[]; score: number }) {
+  const x = explainRisk(components, score);
+
+  if (!x.assessed) {
+    return (
+      <div style={{ display: 'flex', gap: 9, padding: '10px 11px', marginTop: 6, borderRadius: 9, border: '1px solid var(--app-border2)', background: 'var(--app-panel2)' }}>
+        <Icon name="circle-help" size={14} style={{ color: 'var(--neutral)', flex: 'none', marginTop: 1 }} />
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)' }}>{x.headline}</div>
+          <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 3, lineHeight: 1.45 }}>{x.caption}</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ paddingTop: 6 }}>
+      <div style={{ fontSize: 11.5, color: 'var(--app-t3)', lineHeight: 1.45, marginBottom: 8 }}>
+        The score is the worst component — a configuration is only as strong as what it negotiates.
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {x.components.map((c) => (
+          <ComponentCard key={`${c.algorithm_type}-${c.algorithm_id}`} c={c} />
+        ))}
+      </div>
+      {x.unexplainedRemainder != null && (
+        <div style={{ display: 'flex', gap: 7, marginTop: 9, fontSize: 11.5, color: 'var(--app-t3)', lineHeight: 1.45 }}>
+          <Icon name="info" size={12} style={{ flex: 'none', marginTop: 2 }} />
+          <span>
+            The stored score ({score}) is higher than any component above. The remainder comes from checks the
+            per-algorithm catalogue can't express — chiefly key size — so it isn't attributable to a single catalogue entry.
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// One component. The observed/offered marker is the load-bearing part: it uses
+// a different WORD, a different ICON and a different tone, so the distinction
+// survives greyscale, colour-blindness and a screenshot.
+function ComponentCard({ c }: { c: CryptoComponent }) {
+  const prov = provenanceOf(c);
+  const offered = prov === 'offered';
+  const verdict = verdictOf(c);
+  const alts = Array.isArray(c.recommended_alternatives) ? c.recommended_alternatives : [];
+  return (
+    <div
+      style={{
+        padding: '9px 11px',
+        borderRadius: 9,
+        border: `1px solid ${c.sets_score ? 'var(--accent)' : 'var(--app-border)'}`,
+        background: 'var(--app-panel2)',
+        // Offered-only components are visually recessed AND dashed on the left
+        // edge, so a glance separates "this is happening" from "this could".
+        borderLeft: offered ? '3px dashed var(--app-t3)' : `3px solid ${riskColor(c.risk_level ?? 'Informational')}`,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <LevelDot level={c.risk_level ?? 'Informational'} />
+        <span className="mono" style={{ fontSize: 12.5, color: 'var(--app-t1)', fontWeight: 600, wordBreak: 'break-all' }}>{c.code}</span>
+        {c.sets_score && (
+          <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.07em', textTransform: 'uppercase', color: 'var(--accent)', border: '1px solid var(--accent)', borderRadius: 40, padding: '1px 7px' }}>
+            sets the score
+          </span>
+        )}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, flexWrap: 'wrap', fontSize: 11.5, color: 'var(--app-t3)' }}>
+        <span>{componentTypeLabel(c.algorithm_type)}</span>
+        <span>·</span>
+        <span className="mono">risk {c.risk_score} ({c.risk_level})</span>
+        {verdict && (<><span>·</span><span>{verdict}</span></>)}
+      </div>
+      {/* Provenance marker. Tone is deliberately the informational ACCENT, not a
+          severity colour: how we learned about a component says nothing about
+          how risky it is, and painting "observed" amber made a strong,
+          low-risk component look like a warning. Severity stays where it
+          belongs — the dot and the card's left edge. */}
+      <div
+        title={PROVENANCE_TITLE[prov]}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 5, marginTop: 6,
+          fontSize: 10.5, fontWeight: 600, borderRadius: 40, padding: '2px 8px',
+          color: offered ? 'var(--app-t3)' : 'var(--accent)',
+          background: offered ? 'transparent' : 'color-mix(in srgb, var(--accent) 13%, transparent)',
+          border: offered ? '1px dashed var(--app-border2)' : '1px solid transparent',
+        }}
+      >
+        <Icon name={offered ? 'circle-dashed' : 'eye'} size={11} />
+        {PROVENANCE_LABEL[prov]}
+      </div>
+      {c.sets_score && c.migration_guidance && (
+        <div style={{ fontSize: 11.5, color: 'var(--app-t2)', marginTop: 7, lineHeight: 1.45 }}>{c.migration_guidance}</div>
+      )}
+      {c.sets_score && alts.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 6, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>migrate to</span>
+          {alts.map((a) => (
+            <span key={a} className="mono" style={{ fontSize: 10.5, color: 'var(--ok)', background: 'color-mix(in srgb, var(--ok) 11%, transparent)', borderRadius: 6, padding: '1px 6px' }}>{a}</span>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

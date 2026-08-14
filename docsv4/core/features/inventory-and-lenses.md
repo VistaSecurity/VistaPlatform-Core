@@ -24,6 +24,20 @@ The first group of lenses are the **primary** lenses, always visible in the side
 
 The default landing view. Each row is one **Infrastructure Asset** — a server, load balancer, network device, or other host Vista Platform knows about. Expand an asset to see the **Crypto Configurations** discovered on it (the protocols, cipher suites, and keys it's actually using).
 
+Each row summarises the asset across seven columns:
+
+| Column | What it shows |
+|---|---|
+| **Identity** | Hostname when known, otherwise the address. Below it: the address, asset type and operating system, as far as they're known. |
+| **Location** | Environment badge (production, staging, …) and the network segment or business unit the asset sits in. |
+| **Service** | The identified service and version (for example `nginx` / `v1.25.3`). |
+| **Risk** | The asset's risk score and severity band. A dash with **not assessed** means nothing on the asset has resolved against the algorithm catalogue yet — it is *not* a clean bill of health. |
+| **Crypto** | A badge per protocol found on the asset, coloured by the worst risk seen for that protocol, plus the total number of crypto configurations. A greyed badge is a protocol whose configurations aren't assessed yet. |
+| **Certs** | How many certificates are deployed on the asset. |
+| **Status** | Any abnormal state (pending approval, stale, archived) and when the asset was last seen. |
+
+Anything Vista Platform genuinely doesn't know shows as a dash rather than a guess. On narrower windows the Location, Service, Crypto and Certs columns drop away in that order, so Identity, Risk and Status always stay visible.
+
 **Use it when** you want the asset-centric picture: what do we have, where does it live, and what crypto is running on each thing.
 
 ### Certificates
@@ -78,6 +92,16 @@ Click any row to slide open a **detail drawer** with the full record. Drawers **
 - From an **asset**, expand into its configurations.
 
 This is how you answer "what depends on this?" questions: start anywhere and follow the relationships, with every step you took stacked behind you.
+
+### Why a configuration scored what it did
+
+A crypto configuration's drawer carries a **Why this score** section under its
+Assessment rows. It names the component that set the score, shows each
+component's catalogue assessment, marks whether the component was **observed in
+use** or only **offered, not observed**, and surfaces the catalogue's migration
+guidance for the offending one. When nothing resolved against the catalogue it
+says **not assessed** — which is not the same as safe. See
+[Crypto Risks → Seeing why a configuration scored what it did](./crypto-risks.md#seeing-why-a-configuration-scored-what-it-did).
 
 ## Exporting the current view
 

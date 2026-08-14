@@ -107,10 +107,9 @@ sudo update-alternatives --set go /usr/local/go/bin/go
 **Symptom**: Builds are slower than expected.
 
 **Fix**:
-1. Check cache status: `make dev-dashboard`
-2. Validate cache: `make validate-cache`
-3. Clean cache if needed: `make clean-cache`
-4. Pre-warm cache: `make install-deps`
+1. Validate cache: `make validate-cache`
+2. Clean cache if needed: `docker builder prune -f`
+3. Pre-warm cache: `make install-deps`
 
 ### Docker Cache Issues
 
@@ -131,7 +130,7 @@ sudo update-alternatives --set go /usr/local/go/bin/go
 **Fix**:
 1. Check gateway logs: `docker compose logs api-gateway`
 2. Verify Traefik config: `docker compose exec api-gateway traefik healthcheck`
-3. Check service health: `make health-check`
+3. Check service health: `docker compose ps`
 4. Restart gateway: `docker compose restart api-gateway`
 
 ### CORS Errors
@@ -142,7 +141,7 @@ sudo update-alternatives --set go /usr/local/go/bin/go
 1. Verify API Gateway is running: `curl http://localhost:8080/health`
 2. Check CORS configuration in Traefik dynamic config (`config/traefik/`)
 3. Verify frontend origin matches CORS allowed origins
-4. Run CORS tests: `make test-cors`
+4. `make test-cors` is internal CI tooling and is not in this repository; to check manually, `curl -i -X OPTIONS http://localhost:8080/api/v1/auth-service/health -H "Origin: http://localhost:3000" -H "Access-Control-Request-Method: GET"` and confirm an `Access-Control-Allow-Origin` header comes back
 
 ## Database Issues
 

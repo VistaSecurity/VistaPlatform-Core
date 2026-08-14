@@ -324,10 +324,15 @@ func (s *AssetService) CreateLibrary(tenantID uuid.UUID, input models.CryptoLibr
 // the compliance engine's seeded measurement predicates match these columns
 // literally.
 type derivedCipherColumns struct {
-	KeyExchange *string
-	Signature   *string
-	Symmetric   *string
-	Hash        *string
+	// ProtocolVersion is normally the finding's own protocol_version, passed
+	// through. SSH is the exception: nothing in an SSH finding carries a
+	// protocol_version field, so it is derived from the identification-string
+	// banner here rather than staying NULL.
+	ProtocolVersion *string
+	KeyExchange     *string
+	Signature       *string
+	Symmetric       *string
+	Hash            *string
 }
 
 // deriveCipherComponents fills the component columns of a crypto configuration
@@ -338,8 +343,22 @@ type derivedCipherColumns struct {
 // which is derivable from the suite name. Derivation only fills a gap.
 func (s *AssetService) deriveCipherComponents(f IngestFinding) derivedCipherColumns {
 	out := derivedCipherColumns{
-		KeyExchange: trimmedOrNil(f.KeyExchangeAlgorithm),
-		Hash:        trimmedOrNil(f.HashAlgorithm),
+		ProtocolVersion: trimmedOrNil(f.ProtocolVersion),
+		KeyExchange:     trimmedOrNil(f.KeyExchangeAlgorithm),
+		Hash:            trimmedOrNil(f.HashAlgorithm),
+	}
+
+	// SSH carries its components in raw metadata under names nothing else uses,
+	// so it fills the gaps before the cipher-suite path (which has nothing to
+	// work with for SSH — there is no cipher_suite field). Values the finding
+	// stated explicitly still win: only empty slots are filled.
+	if obs := sshObservationFromFinding(f); obs.Present {
+		sshCols := obs.sshDerivedColumns()
+		fillPtr(&out.ProtocolVersion, sshCols.ProtocolVersion)
+		fillPtr(&out.KeyExchange, sshCols.KeyExchange)
+		fillPtr(&out.Signature, sshCols.Signature)
+		fillPtr(&out.Symmetric, sshCols.Symmetric)
+		fillPtr(&out.Hash, sshCols.Hash)
 	}
 
 	if s.algorithmService == nil || f.CipherSuite == nil || strings.TrimSpace(*f.CipherSuite) == "" {
@@ -368,6 +387,15 @@ func (s *AssetService) deriveCipherComponents(f IngestFinding) derivedCipherColu
 // trimmedOrNil returns nil for a nil or blank string pointer, so a blank
 // finding field is stored as SQL NULL rather than an empty string that would
 // read as "measured, and it is nothing".
+// fillPtr assigns src into *dst only when *dst is still empty, so an
+// explicitly reported value is never overwritten by a derived one.
+func fillPtr(dst **string, src *string) {
+	if *dst != nil || src == nil {
+		return
+	}
+	*dst = src
+}
+
 func trimmedOrNil(s *string) *string {
 	if s == nil || strings.TrimSpace(*s) == "" {
 		return nil
@@ -378,6 +406,11 @@ func trimmedOrNil(s *string) *string {
 
 // classifyAndLinkAlgorithms classifies algorithms from a finding and links them to crypto configuration.
 func (s *AssetService) classifyAndLinkAlgorithms(implID uuid.UUID, finding IngestFinding) {
+	// SSH first: its components come from raw metadata, and linking the
+	// measured ones before anything else means an algorithm that is both
+	// negotiated and merely offered keeps its is_inferred=false row.
+	s.classifyAndLinkSSH(implID, sshObservationFromFinding(finding))
+
 	if finding.ProtocolVersion != nil && *finding.ProtocolVersion != "" {
 		alg, err := s.algorithmService.ClassifyAlgorithm(*finding.ProtocolVersion, "protocol_version")
 		if err == nil && alg != nil {

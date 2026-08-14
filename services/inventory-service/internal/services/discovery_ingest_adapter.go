@@ -13,6 +13,12 @@
 //
 // Both the renamed forms and the IngestFinding-native forms are accepted, so a
 // future cluster-sensor that emits the canonical names keeps working unchanged.
+//
+// SSH is deliberately NOT promoted here. Its components have no TLS-shaped
+// equivalent (a banner, and three KEXINIT name-lists rather than one negotiated
+// cipher suite), so they stay in raw_data and are interpreted by ssh_ingest.go,
+// which needs the whole set at once to tell a negotiated algorithm from an
+// offered one.
 package services
 
 import "encoding/json"

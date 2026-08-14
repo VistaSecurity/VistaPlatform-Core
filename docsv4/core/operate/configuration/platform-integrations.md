@@ -85,8 +85,10 @@ export ENCRYPTION_MASTER_KEY="<generated-key>"
 
 ### Database Schema
 
-The integration schema is automatically created via migration script:
-- `scripts/database/22-platform-integrations-schema.sql`
+The integration schema is part of the consolidated
+[`scripts/database/schema.sql`](../../../../scripts/database/schema.sql) — there
+is no separate migration script (see
+[Database Migrations](../deployment/database-migrations.md)).
 
 This creates:
 - `platform_integrations` - Main integration configuration table

@@ -764,6 +764,49 @@ Create discovery jobs to automatically discover assets:
 3. Click **Create Job**
 4. Job runs and discovers assets
 
+### Active Scan
+
+**Discovery** → **Active Scan** lists the assets in your inventory that have
+never been actively scanned, and lets you probe them on demand instead of
+waiting for a sensor to observe traffic.
+
+1. Navigate to **Discovery** → **Active Scan**
+2. Scan a single asset with **Scan** on its row, or **Scan all** for the whole list
+3. Results flow back through the normal discovery pipeline and appear on the
+   asset within minutes
+
+**What gets probed:**
+
+- **The port on the asset record.** Each asset is probed on the port stored in
+  its inventory entry — so a service on `9443`, `2222`, or any other
+  non-standard port is scanned where it actually listens. Assets with no port
+  recorded fall back to the standard TLS ports (443 and 8443).
+- **The protocols the asset is known to speak.** The scan uses the protocols
+  already recorded on the asset's crypto configurations, plus what its port is
+  well known to speak. An SSH host — port 22, or any port with an SSH
+  configuration on record — gets an SSH key-exchange probe; TLS-bearing assets
+  get a TLS handshake. Assets with nothing on record are probed for TLS.
+
+Scans are grouped by port and protocol behind the scenes, so each asset is
+probed only for what it plausibly runs rather than for every port in the batch.
+
+**Assets that cannot be scanned:** an asset with neither an IP address nor a
+hostname has no address to probe. It is skipped, is *not* marked as scanned, and
+stays on the Active Scan list — add an IP or hostname to its record, then scan
+again.
+
+If a scan fails to dispatch, the affected assets are marked with a failed scan
+status and their previous scan freshness is put back exactly as it was: an asset
+that had never been scanned returns to the Active Scan list, and an asset with
+real scan history keeps that history rather than being reported as never
+scanned. A failed batch is also recorded in the platform logs with the assets it
+covered.
+
+> Active Scan probes assets already in your inventory. It does not sweep address
+> space for unknown hosts. Tenant-wide active-probing policy — including
+> per-segment allow lists — is set under **Organization Settings** →
+> **Infrastructure** → **Sensor Configuration**.
+
 ### Discovery Results
 
 1. Navigate to **Discovery** → **Results**

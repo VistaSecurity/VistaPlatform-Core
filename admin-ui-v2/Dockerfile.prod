@@ -34,11 +34,11 @@ COPY admin-ui-v2/ ./admin-ui-v2/
 RUN npm ci
 RUN npm run build -w admin-ui-v2
 
-# ---- caddy build: compile Caddy on Go 1.26.5 ----
+# ---- caddy build: compile Caddy on Go 1.26.6 ----
 # The stock caddy:2-alpine binary (even at 2.11.4) is compiled with Go stdlib
 # 1.26.3, which Trivy still flags (CVE-2026-27145/-42504/-42507). Rebuild the
-# Caddy binary ourselves on the repo's Go 1.26.5 toolchain so the runtime carries
-# stdlib 1.26.5 (also clears GO-2026-5856/CVE-2026-42505). Pinned to Caddy v2.11.4
+# Caddy binary ourselves on the repo's Go 1.26.6 toolchain so the runtime carries
+# stdlib 1.26.6 (also clears GO-2026-5856/CVE-2026-42505). Pinned to Caddy v2.11.4
 # (its own CVE fix, and its go.mod already pulls patched x/crypto/x/net/go-jose);
 # GOTOOLCHAIN=local honors the repo's Go-1.26-only rule (no auto-download of a
 # newer toolchain).
@@ -52,12 +52,12 @@ RUN go install github.com/caddyserver/caddy/v2/cmd/caddy@v2.11.4
 # clear the Trivy scan findings this base carried: Caddy CVE-2026-52844/52845
 # (fix 2.11.4), the bundled Go x/crypto/x/net/go-jose + stdlib CVEs, and the Alpine
 # OpenSSL CVE-2026-45447 (libssl3/libcrypto3 3.5.7-r0) + curl 8.19.0-r0. The
-# runtime Caddy binary is then replaced with the Go-1.26.5 build above to clear
+# runtime Caddy binary is then replaced with the Go-1.26.6 build above to clear
 # the residual stdlib CVEs. See
 # docsv4/internal/developer/security/2026-07-frontend-caddy-cve-remediation.md.
 FROM caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
 
-# Swap in the Go-1.26.5-compiled Caddy binary (stdlib 1.26.5, patched deps).
+# Swap in the Go-1.26.6-compiled Caddy binary (stdlib 1.26.6, patched deps).
 # Unlike the stock caddy:2-alpine binary, this one carries NO file capabilities,
 # so there is no cap_net_bind_service to strip (we bind 3007, never a privileged
 # port, and the chart's strict containerSecurityContext drops ALL caps anyway).

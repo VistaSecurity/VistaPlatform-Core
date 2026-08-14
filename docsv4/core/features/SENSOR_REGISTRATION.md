@@ -1,5 +1,12 @@
 # Enhanced Sensor Registration & Management Guide
 
+> **Looking for the binary?** The canonical download instructions — the
+> OS/arch table, the GitHub Releases link, and how to verify what you
+> downloaded — live in
+> [Downloads in INSTALL.md](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/INSTALL.md#downloads).
+> This page repeats the sensor-specific parts of that (the exact asset name
+> pattern, the installer script) inline for convenience.
+
 ## Overview
 
 The Vista Platform provides a comprehensive sensor registration and management system that enables administrators to easily deploy and manage network sensors at scale. The enhanced system features simplified registration workflows, mTLS security, binary downloads, and full sensor lifecycle management.

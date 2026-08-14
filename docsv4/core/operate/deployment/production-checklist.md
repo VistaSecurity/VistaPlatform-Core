@@ -10,15 +10,8 @@ Comprehensive checklist for deploying the Crypto Inventory Platform to productio
 
 ### Environment Setup
 
-- [ ] Generate production environment file
-  ```bash
-  # For production:
-  node ./scripts/generate-prod-env.mjs
-  
-  # For smoke test:
-  node ./scripts/generate-ec2-smoke-env.mjs
-  ```
-- [ ] Review and update environment file (`.env.prod` for production, `.env.ec2-smoke` for smoke test) with production values
+- [ ] Generate a `.env` with real secrets: `./scripts/bootstrap-env.sh` (see [INSTALL.md](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/INSTALL.md) — the environment generators referenced by older revisions of this checklist, `generate-prod-env.mjs` and `generate-ec2-smoke-env.mjs`, are internal tooling and are not part of this repository)
+- [ ] Review and update the environment file with production values
 - [ ] Verify all secrets are secure and randomized
 - [ ] Verify `JWT_SECRET` is NOT the dev default (`dev-secret-key-change-in-production`) — auth-service will refuse to start
 - [ ] Verify `INTERNAL_AUTH_SECRET` is NOT the dev default — required for HMAC-signed service-to-service authentication

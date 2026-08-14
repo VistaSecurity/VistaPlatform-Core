@@ -1,6 +1,6 @@
 module github.com/vistasecurity/vistaplatform/device-interrogation-service
 
-go 1.26.5
+go 1.26.6
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.6.0

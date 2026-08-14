@@ -11,16 +11,14 @@ This guide helps you resume development after a reboot or a full Docker cleanup.
 - Repo checked out and up to date on `main`
 
 ## Steps
-1. Start infra, gateway, and services via session initialization:
+1. Start infra, gateway, and services:
    ```bash
-   ./scripts/session-init.sh
+   ./scripts/bootstrap-env.sh   # only writes .env if one doesn't already exist
+   docker compose up -d
    ```
-   This script will:
-   - Validate registry and regenerate configs
-   - Start core infra and API gateway
-   - Build sensor artifacts (Linux amd64 at minimum)
-   - Start all services and UIs
-   - Smoke-test routes and CORS
+   This starts core infra, the API gateway, all backend services, and both UIs.
+   Validate with `docker compose ps` and the health checks in
+   [Startup and Shutdown](../../startup-shutdown.md#service-validation).
 
 2. If sensor binary downloads return 404 in dev, mount artifacts:
    - Ensure `docker-compose.override.yml` exists with:

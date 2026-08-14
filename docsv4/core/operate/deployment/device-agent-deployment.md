@@ -23,13 +23,33 @@ The device agent operates in a hybrid deployment model:
 
 ## Installation
 
+### Getting the binary
+
+Download the `device-agent-<os>-<arch>-<version>` asset matching your
+platform from the
+[latest GitHub release](https://github.com/VistaSecurity/VistaPlatform-Core/releases/latest)
+and verify it against that release's signed `SHA256SUMS` — see
+[Downloads in INSTALL.md](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/INSTALL.md#downloads)
+for the full OS/arch table and the `cosign verify-blob` command. **There is
+no in-product download endpoint** — the platform does not serve agent
+binaries over HTTP, so a `curl`/`Invoke-WebRequest` against the platform
+itself will not work (see "There is no binary-download API" in the
+[sensor registration guide](../../features/SENSOR_REGISTRATION.md), which
+applies to the device agent too).
+
+Prefer to build it yourself? `make build-device-agent` (current platform) or
+`make device-agent-all-platforms` (all six targets) builds the same binary
+from this repository.
+
+The sections below assume you've downloaded the asset for your platform and
+renamed it to `device-agent` (`device-agent.exe` on Windows) for brevity —
+substitute the versioned filename if you'd rather keep it as-is.
+
 ### Linux (AMD64)
 
 ```bash
-# Download the binary
-curl -O https://platform.example.com/api/v1/device-interrogation-service/downloads/agent/linux/amd64
-
-# Make executable
+# after downloading device-agent-linux-amd64-<version> from the release page
+mv device-agent-linux-amd64-<version> device-agent
 chmod +x device-agent
 
 # Run it — with no arguments the agent walks you through setup and then starts
@@ -60,10 +80,8 @@ EOF
 ### Linux (ARM64)
 
 ```bash
-# Download the binary
-curl -O https://platform.example.com/api/v1/device-interrogation-service/downloads/agent/linux/arm64
-
-# Make executable
+# after downloading device-agent-linux-arm64-<version> from the release page
+mv device-agent-linux-arm64-<version> device-agent
 chmod +x device-agent
 
 # Follow same configuration steps as AMD64
@@ -72,8 +90,8 @@ chmod +x device-agent
 ### Windows
 
 ```powershell
-# Download the binary
-Invoke-WebRequest -Uri "https://platform.example.com/api/v1/device-interrogation-service/downloads/agent/windows/amd64" -OutFile "device-agent.exe"
+# after downloading device-agent-windows-amd64-<version>.exe from the release page
+Rename-Item device-agent-windows-amd64-<version>.exe device-agent.exe
 
 # Run it — with no arguments the agent walks you through setup and then starts
 .\device-agent.exe
@@ -95,10 +113,9 @@ verbose: true
 ### macOS
 
 ```bash
-# Download the binary
-curl -O https://platform.example.com/api/v1/device-interrogation-service/downloads/agent/darwin/amd64
-
-# Make executable
+# after downloading device-agent-darwin-amd64-<version> (Intel) or
+# device-agent-darwin-arm64-<version> (Apple Silicon) from the release page
+mv device-agent-darwin-*-<version> device-agent
 chmod +x device-agent
 
 # Follow same configuration steps as Linux
@@ -425,11 +442,11 @@ make device-agent-all-platforms AGENT_VERSION=v0.5.1
 # Upload latest version
 make device-agent-upload
 
-# Upload with specific version tag
-make device-agent-upload-version VERSION=v1.0.0
+# Upload with a specific version tag
+make device-agent-upload DEVICE_AGENT_VERSION=v1.0.0
 
-# Dry run (preview what would be uploaded)
-make device-agent-upload-dry-run
+# Dry run (preview what would be uploaded, without the Makefile's build step)
+go run scripts/upload-device-agent-artifacts.go -artifacts-dir artifacts/device-agent -dry-run
 ```
 
 ### S3 Structure

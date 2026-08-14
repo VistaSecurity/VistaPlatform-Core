@@ -1746,6 +1746,66 @@ paths:
       x-quirks:
       - All GetCryptoImplementationByID errors (DB error, no rows) return 404, not 500.
       - 'The web-ui''s `inventoryApi.getCryptoImplementationById` returns the FULL response body (`{ crypto_implementation: {...} }`) as the result, not the inner object — typed at the call site as `CryptoImplementation`. The shape mismatch is documented in the migration ledger as a UI fix-on-harden.'
+  /crypto-configurations/{id}/components:
+    parameters:
+    - $ref: '#/components/parameters/CryptoConfigurationId'
+    get:
+      operationId: getCryptoConfigurationComponents
+      tags:
+      - crypto-configurations
+      summary: Explain a crypto configuration's risk score, component by component
+      description: >
+        Returns the algorithm-catalogue assessment of every component linked to
+        this configuration (`crypto_implementation_algorithms` joined to
+        `algorithms`), ordered worst-first, wrapped under `components`. Drives
+        the "Why this score" panel in the inventory crypto-configuration drawer.
+
+
+        Computed on read, not stored: the catalogue is meant to be edited by a
+        platform admin, so a persisted copy of the reasoning would silently go
+        stale against the row it cites.
+
+
+        Each entry carries `algorithm_type` (the junction role), the catalogue
+        assessment (`strength`, `deprecation_status`, `risk_score`,
+        `risk_level`, `migration_guidance`, `recommended_alternatives`), and two
+        computed markers:
+
+
+        * `is_inferred` — `false` means the component was OBSERVED in use (for
+        SSH, derived per RFC 4253 §7.1 from both KEXINIT name-lists); `true`
+        means the server merely OFFERS it and this session did not negotiate it,
+        or (for TLS) that it was derived from the suite name. Both raise the
+        score, because a reachable weak option is a real weakness — but they are
+        different findings and consumers must render them differently.
+
+        * `sets_score` — marks the worst component, the one worst-component-wins
+        selected. Exactly one entry carries it when the list is non-empty.
+
+
+        `risk_level` is banded SERVER-SIDE from `models.RiskBands` so no consumer
+        re-derives the ladder.
+
+
+        **An empty `components` array means NOT ASSESSED** — nothing on this
+        configuration resolved against the catalogue. It is not a 404 and not an
+        error, and it MUST NOT be presented as a clean bill of health; score 0
+        has always meant unassessed and so does an empty list.
+      responses:
+        '200':
+          description: The configuration's catalogue-assessed components, worst first. May be empty (= not assessed).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CryptoComponentAssessmentListResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+      x-quirks:
+      - An unknown or other-tenant configuration id returns 200 with an empty `components` array, not 404 — the join is RLS-scoped and simply matches nothing. Consumers cannot distinguish "no such configuration" from "not assessed" here; use GET /crypto-configurations/{id} for existence.
   /crypto-configurations/{id}/remediation:
     parameters:
     - $ref: '#/components/parameters/CryptoConfigurationId'
@@ -4449,6 +4509,30 @@ components:
           type: integer
         certificate_count:
           type: integer
+        crypto_implementation_count:
+          type: integer
+          description: 'Number of live crypto configurations on the asset. Present on the LIST response so the Inventory row can show an "N cfg" count without a per-row query.
+
+            '
+        protocol_summary:
+          type: array
+          description: 'Per-protocol rollup of the asset''s crypto configurations, one entry per distinct protocol, ordered by count descending. Present on the LIST response so the Infrastructure lens can render protocol badges from one request. `max_risk_score` follows the platform convention that 0 means NOT ASSESSED, not "safe".
+
+            '
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - protocol
+            - count
+            - max_risk_score
+            properties:
+              protocol:
+                type: string
+              count:
+                type: integer
+              max_risk_score:
+                type: integer
     PaginationMeta:
       type: object
       additionalProperties: false
@@ -5919,6 +6003,77 @@ components:
       properties:
         crypto_implementation:
           $ref: '#/components/schemas/CryptoImplementation'
+    CryptoComponentAssessment:
+      type: object
+      additionalProperties: false
+      description: >
+        One catalogue-resolved component of a crypto configuration, with the
+        assessment that explains the configuration's risk score
+        (models.CryptoComponentAssessment).
+      required:
+      - algorithm_type
+      - is_inferred
+      - algorithm_id
+      - code
+      - name
+      - category
+      - strength
+      - deprecation_status
+      - risk_score
+      - risk_level
+      - recommended_alternatives
+      - is_pqc
+      - sets_score
+      properties:
+        algorithm_type:
+          type: string
+          description: The junction role this algorithm plays on the configuration.
+          enum: [protocol_version, cipher_suite, key_exchange, signature, symmetric, hash]
+        is_inferred:
+          type: boolean
+          description: '`false` = observed in use; `true` = offered by the server but not negotiated in the observed session (or, for TLS, derived from the suite name).'
+        algorithm_id:
+          type: string
+          format: uuid
+          description: The `algorithms` catalogue row this assessment comes from.
+        code: { type: string }
+        name: { type: string }
+        category: { type: string }
+        strength:
+          type: string
+          description: Catalogue strength (weak / acceptable / strong / recommended). Empty string when the catalogue row does not record one.
+        deprecation_status:
+          type: string
+          description: Catalogue deprecation status. Empty string when unrecorded.
+        risk_score:
+          type: integer
+          description: The catalogue row's 0-100 risk score.
+        risk_level:
+          type: string
+          description: The score banded with the canonical ladder (models.RiskBands). Computed server-side — do not re-derive.
+          enum: [Critical, High, Medium, Low, Informational]
+        migration_guidance:
+          type: string
+          description: Catalogue migration guidance. Omitted when the row records none.
+        recommended_alternatives:
+          type: array
+          description: Catalogue-recommended replacements. Always present; empty means none recorded (not "unknown").
+          items: { type: string }
+        is_pqc: { type: boolean }
+        sets_score:
+          type: boolean
+          description: True on the worst component — the one worst-component-wins selected. Exactly one entry per non-empty list.
+    CryptoComponentAssessmentListResponse:
+      type: object
+      additionalProperties: false
+      description: 'List envelope for GET /crypto-configurations/{id}/components — `{ "components": [...] }`. An EMPTY array means NOT ASSESSED, never "assessed clean".'
+      required:
+      - components
+      properties:
+        components:
+          type: array
+          items:
+            $ref: '#/components/schemas/CryptoComponentAssessment'
     RemediationIssue:
       type: object
       additionalProperties: false

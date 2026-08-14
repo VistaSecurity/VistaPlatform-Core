@@ -55,6 +55,26 @@ type Asset struct {
 	CryptoImplementations       []CryptoImplementation `json:"crypto_implementations,omitempty"`
 	HighestRisk                 *int                   `json:"highest_risk,omitempty"`
 	CertificateCount            *int                   `json:"certificate_count,omitempty"`
+	// CryptoImplementationCount is the number of live crypto configurations on
+	// the asset. Populated by the LIST query so the Inventory row can show an
+	// "N cfg" count without a per-row round trip.
+	CryptoImplementationCount *int `json:"crypto_implementation_count,omitempty"`
+	// ProtocolSummary is a per-protocol rollup of the asset's crypto
+	// configurations (one entry per distinct protocol). It exists so the
+	// Infrastructure lens row can render protocol badges from the LIST payload
+	// instead of firing one child query per visible row.
+	ProtocolSummary []AssetProtocolSummary `json:"protocol_summary,omitempty"`
+}
+
+// AssetProtocolSummary rolls up one protocol observed on an asset.
+//
+// MaxRiskScore follows the same convention as every other score in the
+// platform: 0 means NOT ASSESSED (nothing resolved against the algorithms
+// catalogue), NOT "safe". Consumers must not band 0 as a low-risk claim.
+type AssetProtocolSummary struct {
+	Protocol     string `json:"protocol"`
+	Count        int    `json:"count"`
+	MaxRiskScore int    `json:"max_risk_score"`
 }
 
 // CryptoImplementation represents a cryptographic implementation found on an asset

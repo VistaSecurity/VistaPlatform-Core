@@ -40,6 +40,22 @@ func (s *AssetService) GetAssets(tenantID uuid.UUID, filters models.AssetFilters
 			(SELECT COUNT(DISTINCT ci2.certificate_id)
 			   FROM crypto_implementations ci2
 			  WHERE ci2.asset_id = a.id AND ci2.deleted_at IS NULL) AS certificate_count,
+			COUNT(DISTINCT ci.id) AS crypto_implementation_count,
+			-- Per-protocol rollup for the Inventory row's protocol badges. Kept
+			-- server-side so the list renders badges from ONE request instead of
+			-- a per-row child query (a 50-request waterfall per page).
+			COALESCE((
+				SELECT jsonb_agg(jsonb_build_object(
+				           'protocol', p.protocol, 'count', p.n, 'max_risk_score', p.max_risk)
+				       ORDER BY p.n DESC, p.protocol)
+				  FROM (SELECT ci3.protocol::text AS protocol,
+				               COUNT(*) AS n,
+				               COALESCE(MAX(ci3.risk_score), 0) AS max_risk
+				          FROM crypto_implementations ci3
+				         WHERE ci3.asset_id = a.id AND ci3.deleted_at IS NULL
+				           AND ci3.protocol IS NOT NULL
+				         GROUP BY ci3.protocol) p
+			), '[]'::jsonb)::text AS protocol_summary,
 			COALESCE(MAX(ci.risk_score), 0) as "HighestRisk",
 			` + models.RiskLevelCaseSQL("COALESCE(MAX(ci.risk_score), 0)") + ` as "RiskLevel"
 		FROM network_assets a
@@ -112,6 +128,8 @@ func (s *AssetService) GetAssets(tenantID uuid.UUID, filters models.AssetFilters
 			var asset models.Asset
 			var highestRisk *int
 			var certCount sql.NullInt64
+			var cfgCount sql.NullInt64
+			var protocolSummaryText string
 			var riskLevel string
 			var tagsText, metadataText string
 			if e := rows.Scan(
@@ -123,13 +141,21 @@ func (s *AssetService) GetAssets(tenantID uuid.UUID, filters models.AssetFilters
 				&asset.DeletedAt, &asset.LocationID, &asset.NetworkSegmentID, &asset.NetworkSegmentName,
 				&asset.Site, &asset.Region, &asset.Zone,
 				&asset.ServiceName, &asset.ServiceVersion,
-				&asset.ServiceConfidence, &asset.ServiceIdentificationMethod, &certCount, &highestRisk, &riskLevel,
+				&asset.ServiceConfidence, &asset.ServiceIdentificationMethod, &certCount,
+				&cfgCount, &protocolSummaryText, &highestRisk, &riskLevel,
 			); e != nil {
 				return fmt.Errorf("failed to scan asset: %w", e)
 			}
 			if certCount.Valid {
 				n := int(certCount.Int64)
 				asset.CertificateCount = &n
+			}
+			if cfgCount.Valid {
+				n := int(cfgCount.Int64)
+				asset.CryptoImplementationCount = &n
+			}
+			if protocolSummaryText != "" {
+				_ = json.Unmarshal([]byte(protocolSummaryText), &asset.ProtocolSummary)
 			}
 			if tagsText != "" {
 				_ = json.Unmarshal([]byte(tagsText), &asset.Tags)

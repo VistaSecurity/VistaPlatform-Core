@@ -20,6 +20,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$ROOT"
 
+# Derived GOTOOLCHAIN pin — `local` refuses to provision the sanctioned patch
+# release, so a hardcode here fails the cross-compile on any machine whose
+# installed Go lags go.work. See scripts/lib/go-toolchain.sh.
+source "$SCRIPT_DIR/lib/go-toolchain.sh"
+GO_PIN="$(go_toolchain_pin "$ROOT")"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -68,7 +74,7 @@ mkdir -p bin artifacts/sensor/windows/amd64 artifacts/device-agent/windows/amd64
 # ── Sensor ────────────────────────────────────────────────────────────────────
 if [[ "$BUILD_SENSOR" == true ]]; then
   info "Building sensor (Windows amd64)..."
-  GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+  GOTOOLCHAIN="$GO_PIN" CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
     go build -C sensor $LDFLAGS \
     -o "$ROOT/bin/crypto-sensor-windows-amd64.exe" \
     cmd/main.go
@@ -79,7 +85,7 @@ fi
 # ── Device Agent ──────────────────────────────────────────────────────────────
 if [[ "$BUILD_AGENT" == true ]]; then
   info "Building device-agent (Windows amd64)..."
-  GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+  GOTOOLCHAIN="$GO_PIN" CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
     go build -C device-agent $LDFLAGS \
     -o "$ROOT/bin/device-agent-windows-amd64.exe" \
     ./cmd/main.go

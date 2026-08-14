@@ -274,7 +274,7 @@ services:
       - PLATFORM_CA_CERT_PATH=/app/certs/platform-ca-cert.pem
     ports:
       - "${SENSOR_MANAGER_HOST_PORT:-8085}:8080"
-      - "${SENSOR_MANAGER_TLS_PORT:-8443}:8443"
+      - "${SENSOR_MANAGER_TLS_HOST_PORT:-8443}:8443"
     depends_on:
       postgres:
         condition: service_healthy
@@ -570,7 +570,7 @@ services:
     container_name: crypto-api-gateway
     ports:
       - "${API_GATEWAY_HOST_PORT:-8080}:80"
-      - "8099:8099"  # Traefik Prometheus metrics
+      - "${TRAEFIK_METRICS_HOST_PORT:-8099}:8099"  # Traefik Prometheus metrics
     volumes:
       - ./config/traefik/traefik-development.yaml:/etc/traefik/traefik.yaml:ro
       - ./config/traefik/dynamic-development.yaml:/etc/traefik/dynamic.yaml:ro

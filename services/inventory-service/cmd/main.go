@@ -262,6 +262,7 @@ func main() {
 		api.GET("/inventory-service/crypto-implementations", cryptoImplHandler.GetCryptoImplementations)
 		api.GET("/inventory-service/crypto-implementations/:id", cryptoImplHandler.GetCryptoImplementationByID)
 		api.GET("/inventory-service/crypto-implementations/:id/remediation", remediationHandler.GetRemediationForCryptoImplementation)
+		api.GET("/inventory-service/crypto-implementations/:id/components", cryptoImplHandler.GetCryptoImplementationComponents)
 		// Crypto risks endpoints
 		api.GET("/inventory-service/crypto-risks/summary", cryptoRisksHandler.GetSummary)
 		api.GET("/inventory-service/crypto-risks/export", cryptoRisksHandler.ExportRisks)
@@ -470,6 +471,9 @@ func main() {
 		apiv2.GET("/inventory-service/crypto-configurations", cryptoImplHandler.GetCryptoImplementations)
 		apiv2.GET("/inventory-service/crypto-configurations/:id", cryptoImplHandler.GetCryptoImplementationByID)
 		apiv2.GET("/inventory-service/crypto-configurations/:id/remediation", remediationHandler.GetRemediationForCryptoImplementation)
+		// Per-component catalogue assessment behind the configuration's risk
+		// score — the "why this score" panel in the inventory drawer.
+		apiv2.GET("/inventory-service/crypto-configurations/:id/components", cryptoImplHandler.GetCryptoImplementationComponents)
 
 		// Asset↔Certificate relationship edges (for visualizers and any feature
 		// that needs precise per-asset cert linkage without hydrating

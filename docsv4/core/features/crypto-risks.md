@@ -47,7 +47,7 @@ Click on any severity card to filter the detailed risk list by that severity.
 
 Risks are categorized by type:
 
-- **Protocol Issues**: Outdated TLS/SSL protocol versions
+- **Protocol Issues**: Outdated TLS/SSL protocol versions, and SSH servers still speaking (or falling back to) the obsolete SSH-1 protocol
 - **Algorithm Issues**: Weak or deprecated cipher suites and hash algorithms
 - **Certificate Issues**: Certificate-related problems (expiration, weak signatures)
 - **Key Size Issues**: Insufficient key lengths
@@ -343,6 +343,72 @@ A score of **0 means "not assessed"** — we did not recognise the cryptography 
 use — which is deliberately different from "assessed and found safe". Those
 configurations show as *Informational* and are worth investigating rather than
 assuming clean.
+
+### Seeing why a configuration scored what it did
+
+You do not have to take the number on trust. Open any crypto configuration —
+from **Inventory**, click a row, or open an asset and pick one of its
+configurations — and the drawer's **Why this score** section lists every
+component we resolved against the catalogue, worst first.
+
+For each component you get:
+
+- the **component's role** (protocol version, cipher suite, key exchange,
+  signature, symmetric, hash) and its algorithm code;
+- its **catalogue risk score and severity band**, plus the strength and
+  deprecation status the catalogue records;
+- whether it was **observed in use** or only **offered, not observed** (see the
+  SSH section below — offered algorithms still count);
+- and, on the component that set the score, the catalogue's **migration
+  guidance** and **recommended alternatives**.
+
+The component that set the score is marked **sets the score**. Because the panel
+reads the catalogue live, correcting an assessment in the catalogue changes the
+explanation everywhere it appears — there is no separately stored copy to go
+stale.
+
+Two honest-answer cases to expect:
+
+- **"Not assessed."** If nothing on the configuration resolved against the
+  catalogue, the panel says so plainly. That is not a clean bill of health — it
+  means we did not recognise the cryptography in use and could not judge it.
+- **A score higher than any single component.** When the stored score exceeds
+  every catalogue component, the panel says the remainder comes from checks the
+  per-algorithm catalogue cannot express — chiefly key size — rather than
+  implying the component list is the whole story.
+
+### How SSH services are scored
+
+SSH configurations are scored from the same catalogue as TLS, but SSH tells us
+something TLS does not, so there is one extra distinction worth understanding.
+
+An SSH server advertises **lists** of the key exchange, cipher and MAC
+algorithms it will accept, and then one of each is chosen. We record both, and
+they mean different things:
+
+- **In use** — the protocol version (read from the server's version banner), the
+  host key algorithm the server actually presented, and — when the discovery saw
+  both sides of the handshake — the algorithms the handshake genuinely selected.
+  These are what the crypto configuration's Key Exchange / Signature / Cipher /
+  MAC fields show.
+- **Offered** — everything else on the server's lists, shown as *inferred*. The
+  server did not use it on this connection, but it will accept it.
+
+**Offered algorithms count toward the risk score.** A server that still offers
+`3des-cbc` or `diffie-hellman-group1-sha1` for legacy compatibility scores on
+that offer, even if the connection we observed used something modern — because
+any client can simply ask for the weak option. This matches how SSH auditing
+tools report, and it is why hardening usually means *removing* algorithms from
+the server's configuration rather than changing a preferred one.
+
+Where a discovery only saw one side of the handshake (an active probe, or a
+passive capture that started mid-connection), nothing is recorded as "in use"
+beyond the banner and host key — everything else stays an offer rather than
+being guessed at.
+
+Algorithms are named exactly as SSH names them on the wire (`ssh-ed25519`,
+`curve25519-sha256`, `aes256-gcm@openssh.com`, `hmac-sha2-256-etm@openssh.com`),
+so a finding can be pasted straight into an `sshd_config` audit.
 
 ### Severity Bands
 

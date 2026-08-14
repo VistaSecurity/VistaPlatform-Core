@@ -28,6 +28,7 @@ type cryptoConfigStore interface {
 	GetCryptoImplementations(tenantID uuid.UUID, filters models.CryptoImplementationFilters) ([]models.CryptoImplementation, int, error)
 	GetCryptoImplementationByID(tenantID, id uuid.UUID) (*models.CryptoImplementation, error)
 	GetAssetCertificateLinks(tenantID uuid.UUID, assetIDs []uuid.UUID, certIDs []uuid.UUID) ([]models.AssetCertificateLink, error)
+	GetCryptoImplementationComponents(tenantID, implID uuid.UUID) ([]models.CryptoComponentAssessment, error)
 }
 
 type CryptoImplementationHandler struct {
@@ -171,6 +172,48 @@ func (h *CryptoImplementationHandler) GetCryptoImplementationByID(c *gin.Context
 	}
 
 	c.JSON(http.StatusOK, gin.H{"crypto_implementation": implementation})
+}
+
+// GetCryptoImplementationComponents handles
+// GET /api/v[12]/inventory-service/crypto-configurations/:id/components.
+//
+// Returns the catalogue assessment of every algorithm linked to the
+// configuration, worst first, so the drawer can answer "why is this High?" with
+// the catalogue row that says so instead of a bare number.
+//
+// A 200 with an EMPTY `components` array means NOT ASSESSED — nothing on this
+// configuration resolved against the catalogue. That is deliberately NOT a 404
+// and deliberately not an error: "we could not assess this" is an answer, and
+// conflating it with "assessed clean" is the failure mode this endpoint exists
+// to prevent.
+func (h *CryptoImplementationHandler) GetCryptoImplementationComponents(c *gin.Context) {
+	tenantID, exists := c.Get("tenantID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Tenant ID not found"})
+		return
+	}
+	tenantUUID, ok := tenantID.(uuid.UUID)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
+		return
+	}
+
+	implID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid crypto configuration ID"})
+		return
+	}
+
+	components, err := h.cryptoImplService.GetCryptoImplementationComponents(tenantUUID, implID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve crypto configuration components"})
+		return
+	}
+	if components == nil {
+		components = []models.CryptoComponentAssessment{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"components": components})
 }
 
 // GetAssetCertificateLinks handles GET /api/v2/inventory-service/asset-certificate-links.

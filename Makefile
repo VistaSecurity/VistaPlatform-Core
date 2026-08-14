@@ -9,8 +9,40 @@ export NATS_USER ?= nats_user
 export POSTGRES_USER ?= crypto_user
 export POSTGRES_DB ?= crypto_inventory
 
-# Prevent Go from auto-downloading newer toolchains
-export GOTOOLCHAIN=local
+# --- Go toolchain pin (single-sourced from go.work) -------------------------
+# Critical Rule #1: Go 1.26 ONLY; 1.27+ is forbidden. GOTOOLCHAIN is the only
+# mechanical enforcement of that rule, so it must never silently relax.
+#
+#   GOTOOLCHAIN=local   blocks 1.27 (good) but ALSO refuses to fetch the
+#                       sanctioned patch release, so every Go target breaks on
+#                       any machine whose installed Go lags go.work.
+#   GOTOOLCHAIN=auto    fetches the sanctioned patch (good) but ALSO happily
+#                       downloads 1.27+ — it removes the tripwire entirely.
+#   GOTOOLCHAIN=goX.Y.Z does both: it auto-provisions exactly that toolchain and
+#                       still hard-fails any module requiring a newer one, e.g.
+#                       "go.mod requires go >= 1.27.0 (running go 1.26.6;
+#                        GOTOOLCHAIN=go1.26.6)".
+#
+# The patch version is derived from go.work so there is exactly one place to bump
+# it, but the MAJOR.MINOR line is asserted against the policy below — otherwise a
+# `go.work` edit to 1.27 would move the pin along with it and disarm the guard.
+GO_POLICY_LINE := 1.26
+GO_WORK_VERSION := $(shell awk '/^go /{print $$2; exit}' go.work 2>/dev/null)
+ifeq ($(GO_WORK_VERSION),)
+  # No go.work / no `go` directive: fall back to the fail-CLOSED mode. Never
+  # `auto` — a missing derivation must not quietly drop the 1.27 tripwire.
+  GOTOOLCHAIN_PIN := local
+else ifneq ($(words $(subst ., ,$(GO_WORK_VERSION))),3)
+  # A two-part directive ("go 1.26") would derive `go1.26`, which Go rejects as
+  # "a language version but not a toolchain version". Fail loudly rather than
+  # limp along; the fix is a one-line go.work edit.
+  $(error go.work declares `go $(GO_WORK_VERSION)`, which derives the invalid toolchain name `go$(GO_WORK_VERSION)`. go.work must carry a full X.Y.Z version (e.g. `go $(GO_POLICY_LINE).6`) so GOTOOLCHAIN can be pinned exactly.)
+else ifneq ($(basename $(GO_WORK_VERSION)),$(GO_POLICY_LINE))
+  $(error Critical Rule #1 violation: go.work declares `go $(GO_WORK_VERSION)`, but this project is Go $(GO_POLICY_LINE) ONLY. Revert go.work — do not bump GO_POLICY_LINE to make this pass.)
+else
+  GOTOOLCHAIN_PIN := go$(GO_WORK_VERSION)
+endif
+export GOTOOLCHAIN=$(GOTOOLCHAIN_PIN)
 
 # Prefer Docker Compose V2 plugin; fall back to standalone binary
 DOCKER_COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
@@ -863,41 +895,41 @@ api-contract: ## Spec-first API guardrail (ADR-0001): verify generated TS client
 	fi
 	@echo "✅ Generated client is in sync with the spec."
 	@echo "==> API contract: running Go contract tests (cbom-service/scopes)..."
-	@cd services/cbom-service && GOTOOLCHAIN=local go test ./internal/scopes/ -run Contract
+	@cd services/cbom-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/scopes/ -run Contract
 	@echo "==> API contract: running Go contract tests (cbom-service/cbom-artifacts)..."
-	@cd services/cbom-service && GOTOOLCHAIN=local go test ./internal/cbom/ -run Contract
+	@cd services/cbom-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/cbom/ -run Contract
 	@echo "==> API contract: running Go contract tests (cbom-service EE diff: cbom-comparison)..."
-	@cd services/cbom-service && GOTOOLCHAIN=local sh -c 'if [ -d ee/diff ]; then go test ./ee/diff/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
+	@cd services/cbom-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ee/diff ]; then go test ./ee/diff/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
 	@echo "==> API contract: running Go contract tests (inventory-service/infrastructure-assets + external-connections + asset-lifecycle + crypto-posture + crypto-materials + asset-reads + asset-writes + algorithm-recommendations + crypto-risks-export + asset-hard-delete + location-summary)..."
-	@cd services/inventory-service && GOTOOLCHAIN=local go test ./internal/handlers/ -run Contract
+	@cd services/inventory-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/handlers/ -run Contract
 	@echo "==> API contract: running Go contract tests (inventory-service EE CMDB sync: profiles + test-connection + sync + jobs)..."
-	@cd services/inventory-service && GOTOOLCHAIN=local sh -c 'if [ -d ee/cmdbsync ]; then go test ./ee/cmdbsync/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
+	@cd services/inventory-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ee/cmdbsync ]; then go test ./ee/cmdbsync/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
 	@echo "==> API contract: running Go contract tests (compliance-engine/frameworks + evaluation + findings + alerts + alert-catalog + plans + scenarios + tickets)..."
-	@cd services/compliance-engine && GOTOOLCHAIN=local go test ./internal/handlers/ -run Contract
+	@cd services/compliance-engine && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/handlers/ -run Contract
 	@echo "==> API contract: running Go contract tests (compliance-engine EE policy authoring: custom-policies + controls + measurements)..."
-	@cd services/compliance-engine && GOTOOLCHAIN=local sh -c 'if [ -d ee/policyauthoring ]; then go test ./ee/policyauthoring/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
+	@cd services/compliance-engine && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ee/policyauthoring ]; then go test ./ee/policyauthoring/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
 	@echo "==> API contract: running Go contract tests (auth-service/cross-cutters + platform-config + trial-status + impersonation + tenant-branding + tenant-ui-config + tenant-users + onboarding-reads + onboarding-writes + billing-usage + tenant-billing + tiers)..."
-	@cd services/auth-service && GOTOOLCHAIN=local go test ./internal/api/ -run Contract
+	@cd services/auth-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/api/ -run Contract
 	@echo "==> API contract: running Go contract tests (auth-service EE SSO: tenant-sso + sso-write + sso-update + auth-policy + unlink)..."
-	@cd services/auth-service && GOTOOLCHAIN=local sh -c 'if [ -d ee/sso ]; then go test ./ee/sso/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
+	@cd services/auth-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ee/sso ]; then go test ./ee/sso/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
 	@echo "==> API contract: running Go contract tests (sensor-manager/sensors + admin-settings + config-interfaces + health-history + discoveries + pcap + cert-mgmt)..."
-	@cd services/sensor-manager && GOTOOLCHAIN=local go test ./internal/handlers/ -run Contract
+	@cd services/sensor-manager && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/handlers/ -run Contract
 	@echo "==> API contract: running Go contract tests (audit-service/activity-logs + alert-rules + audit-batch)..."
-	@cd services/audit-service && GOTOOLCHAIN=local go test ./internal/handlers/ -run Contract
+	@cd services/audit-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/handlers/ -run Contract
 	@echo "==> API contract: running Go contract tests (audit-service EE SIEM export: integrations + types + test-connection)..."
-	@cd services/audit-service && GOTOOLCHAIN=local sh -c 'if [ -d ee/siemexport ]; then go test ./ee/siemexport/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
+	@cd services/audit-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ee/siemexport ]; then go test ./ee/siemexport/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
 	@echo "==> API contract: running Go contract tests (device-interrogation-service/jobs + device-action-validation)..."
-	@cd services/device-interrogation-service && GOTOOLCHAIN=local go test ./internal/handlers/ -run Contract
+	@cd services/device-interrogation-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/handlers/ -run Contract
 	@echo "==> API contract: running Go contract tests (notification-service/tenant-channels+rules + platform-channels+rules)..."
-	@cd services/notification-service && GOTOOLCHAIN=local go test ./internal/api/ -run Contract
+	@cd services/notification-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/api/ -run Contract
 	@echo "==> API contract: running Go contract tests (admin-service core: platform-rbac + tiers + security + billable-items + platform-users + platform-user-email + tier-entitlements + storage + platform-settings + system-logs)..."
-	@cd services/admin-service && GOTOOLCHAIN=local go test ./internal/handlers/ -run Contract
+	@cd services/admin-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/handlers/ -run Contract
 	@echo "==> API contract: running Go contract tests (admin-service MSP: tenants + tenant-lifecycle + costs + announcements + maintenance-windows + support-tickets + tenant-stats + dashboard)..."
-	@cd services/admin-service && GOTOOLCHAIN=local sh -c 'if [ -d ee/msp ]; then go test ./ee/msp/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
+	@cd services/admin-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ee/msp ]; then go test ./ee/msp/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
 	@echo "==> API contract: running Go contract tests (admin-service EE billing: my-billing + coupons + billing-analytics + billing-invoices)..."
-	@cd services/admin-service && GOTOOLCHAIN=local sh -c 'if [ -d ee/billingapi ]; then go test ./ee/billingapi/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
+	@cd services/admin-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ee/billingapi ]; then go test ./ee/billingapi/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
 	@echo "==> API contract: running Go contract tests (monitoring-service/status + alerting + trends + gateway + admin-status)..."
-	@cd services/monitoring-service && GOTOOLCHAIN=local go test ./internal/api/ -run Contract
+	@cd services/monitoring-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/api/ -run Contract
 	@echo "✅ Contract tests pass — live handlers conform to the spec."
 
 chart-lint: ## helm lint the chart against values.schema.json (catches schema/template drift the release would otherwise hit)
@@ -936,7 +968,7 @@ lint-workflows:   ## Lint GitHub Actions workflows (context availability, expres
 	@if command -v actionlint >/dev/null 2>&1; then \
 		actionlint .github/workflows/*.yml; \
 	else \
-		GOTOOLCHAIN=local go run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION) .github/workflows/*.yml; \
+		GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION) .github/workflows/*.yml; \
 	fi
 	@echo "✅ workflows lint clean"
 
