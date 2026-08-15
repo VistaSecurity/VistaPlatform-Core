@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
@@ -238,20 +239,39 @@ func cleanFieldName(field string) string {
 	return strings.Title(strings.ToLower(result.String()))
 }
 
-// ExtractAuditMiddleware safely extracts audit middleware from gin context.
-// The parameter should be a *gin.Context or any type with a Get(string) (interface{}, bool) method.
+// ExtractAuditMiddleware safely extracts audit middleware from a gin context.
+// The parameter should be a *gin.Context or any type with a Get method keyed
+// by string or by any.
+//
+// The *gin.Context case is asserted CONCRETELY and first. It used to be
+// duck-typed on `Get(string) (interface{}, bool)` alone, which stopped
+// matching when gin 1.11 widened the signature to `Get(key any)`: from that
+// upgrade on, every caller silently got (nil, false) and skipped its explicit
+// audit entry — no error, no log line, just no record. The two Get shapes
+// below are kept as a fallback for non-gin callers and for gin ≤1.10.
 func ExtractAuditMiddleware(c interface{}) (*Middleware, bool) {
-	// Direct type assertion for *gin.Context-like types via interface
-	type contextGetter interface {
+	if gc, ok := c.(*gin.Context); ok {
+		return middlewareFromValue(gc.Get("audit_middleware"))
+	}
+
+	type stringKeyGetter interface {
 		Get(string) (interface{}, bool)
 	}
-
-	ctx, ok := c.(contextGetter)
-	if !ok {
-		return nil, false
+	type anyKeyGetter interface {
+		Get(interface{}) (interface{}, bool)
 	}
 
-	mw, exists := ctx.Get("audit_middleware")
+	switch ctx := c.(type) {
+	case anyKeyGetter:
+		return middlewareFromValue(ctx.Get("audit_middleware"))
+	case stringKeyGetter:
+		return middlewareFromValue(ctx.Get("audit_middleware"))
+	}
+	return nil, false
+}
+
+// middlewareFromValue narrows a context lookup result to *Middleware.
+func middlewareFromValue(mw interface{}, exists bool) (*Middleware, bool) {
 	if !exists || mw == nil {
 		return nil, false
 	}

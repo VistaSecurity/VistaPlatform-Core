@@ -19,6 +19,7 @@
 // question for a fuller fix).
 import { levelFromScore, type RiskLevel } from '../../components/ui';
 import { sevLevel, sevRank, type BatchFinding } from './model';
+import { normalizeControlStatus } from './control-status';
 import type { AssetFacts } from './queries';
 
 export const UNATTRIBUTED_ROW_KEY = 'Certificates / Configurations';
@@ -28,11 +29,23 @@ export interface GridCol {
   fwId: string;
   name: string;
   fw: string;
+  /** Control status from batch-evaluate; absent/unknown is treated as not-assessed. */
+  status?: string;
+  not_assessed_reason?: string;
 }
 
 export interface GridCell {
   fail: number;
   ratio: number;
+  /**
+   * True when the COLUMN's control was never assessed. Such a cell has
+   * no findings, but it is not clean — it must render muted rather than as the
+   * green check a zero-finding cell gets, or "we didn't check" and "nothing
+   * wrong here" look identical across the whole grid.
+   */
+  notAssessed: boolean;
+  /** Machine-readable reason for the muted cell's tooltip; only set when notAssessed. */
+  notAssessedReason?: string;
 }
 
 export interface GridRow {
@@ -62,6 +75,11 @@ export function buildControlGrid(
 ): GridRow[] {
   if (!facts.size || !cols.length) return [];
 
+  // A control's not-assessed state is a property of the CONTROL, so it applies
+  // to every row's cell in that column — computed once here rather than
+  // re-derived per cell.
+  const colNotAssessed = cols.map((c) => normalizeControlStatus(c.status) === 'NOT_ASSESSED');
+
   const groups = new Map<string, { ids: Set<string>; riskSum: number }>();
   facts.forEach((f, id) => {
     const k = f[dim] || 'unspecified';
@@ -72,9 +90,14 @@ export function buildControlGrid(
   });
 
   const rows: GridRow[] = [...groups.entries()].map(([key, g]) => {
-    const cells = cols.map((ck) => {
+    const cells = cols.map((ck, ci) => {
       const fs = (findingsByControl.get(ck.id) ?? []).filter((f) => g.ids.has(f.asset_id));
-      return { fail: fs.length, ratio: g.ids.size ? Math.min(1, fs.length / g.ids.size) : 0 };
+      return {
+        fail: fs.length,
+        ratio: g.ids.size ? Math.min(1, fs.length / g.ids.size) : 0,
+        notAssessed: colNotAssessed[ci],
+        notAssessedReason: colNotAssessed[ci] ? ck.not_assessed_reason : undefined,
+      };
     });
     const totFail = cells.reduce((sum, c) => sum + c.fail, 0);
     const avg = g.ids.size ? Math.round(g.riskSum / g.ids.size) : 0;
@@ -96,9 +119,14 @@ export function buildControlGrid(
   });
 
   if (unattributedIds.size) {
-    const cells = cols.map((ck) => {
+    const cells = cols.map((ck, ci) => {
       const fs = (findingsByControl.get(ck.id) ?? []).filter((f) => !facts.has(f.asset_id));
-      return { fail: fs.length, ratio: unattributedIds.size ? Math.min(1, fs.length / unattributedIds.size) : 0 };
+      return {
+        fail: fs.length,
+        ratio: unattributedIds.size ? Math.min(1, fs.length / unattributedIds.size) : 0,
+        notAssessed: colNotAssessed[ci],
+        notAssessedReason: colNotAssessed[ci] ? ck.not_assessed_reason : undefined,
+      };
     });
     const totFail = cells.reduce((sum, c) => sum + c.fail, 0);
     const worst = unattributedFindings.reduce<RiskLevel>((acc, f) => {

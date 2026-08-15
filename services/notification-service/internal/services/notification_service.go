@@ -191,10 +191,21 @@ func (s *NotificationService) SendNotification(ctx context.Context, req *models.
 	}
 
 	if len(immediate) == 0 && len(digest) == 0 {
-		s.logger.Printf("No channels configured for alert: source=%s, type=%s, tenant=%v",
-			req.AlertSource, req.AlertType, req.TenantID)
+		s.logger.Printf("No channels configured for alert: source=%s, type=%s, severity=%s, tenant=%v",
+			req.AlertSource, req.AlertType, req.Severity, req.TenantID)
 		history.Status = "sent"
 		history.ChannelsUsed = []string{}
+		// Mark the row so "delivered to nobody" is distinguishable from
+		// "delivered successfully" after the fact. status stays 'sent' (the
+		// valid_notification_status CHECK has no 'suppressed' member, and the
+		// send itself did not fail), but an empty channels_used with status
+		// 'sent' is otherwise indistinguishable from a real delivery, which is
+		// exactly the shape that makes an alerting system look healthy while
+		// reaching nobody. Mirrors the maintenance-window "suppressed" marker.
+		if history.Metadata == nil {
+			history.Metadata = map[string]interface{}{}
+		}
+		history.Metadata["no_matching_channels"] = true
 		if err := s.saveNotificationHistory(ctx, &history); err != nil {
 			s.logger.Printf("Failed to save notification history: %v", err)
 		}
@@ -260,9 +271,10 @@ func (s *NotificationService) SendNotification(ctx context.Context, req *models.
 
 	// Immediate delivery.
 	var channelsUsed []string
+	var failures []ChannelFailure
 	var derr error
 	if len(immediateChannels) > 0 {
-		channelsUsed, derr = s.deliveryService.SendToChannels(ctx, req.TenantID, &history, immediateChannels, req)
+		channelsUsed, failures, derr = s.deliveryService.SendToChannels(ctx, req.TenantID, &history, immediateChannels, req)
 	}
 
 	history.ChannelsUsed = channelsUsed
@@ -287,6 +299,16 @@ func (s *NotificationService) SendNotification(ctx context.Context, req *models.
 
 	if err := s.saveNotificationHistory(ctx, &history); err != nil {
 		s.logger.Printf("Failed to save notification history: %v", err)
+		// notification_delivery_queue.notification_id FKs to notification_history,
+		// so without the history row the retry row cannot be written. Say so
+		// rather than letting the enqueue fail with an opaque FK violation.
+		if len(failures) > 0 {
+			s.logger.Printf("%d failed channel delivery(ies) cannot be queued for retry: history row absent", len(failures))
+		}
+	} else {
+		// Retry only the channels that actually failed — a retry that re-sends
+		// on a channel that already succeeded is worse than the original bug.
+		s.enqueueFailedDeliveries(ctx, req, history.ID, failures)
 	}
 
 	return nil // Don't return error if some channels failed

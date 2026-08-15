@@ -27,6 +27,8 @@ type Config struct {
 	TLSPort            string
 	ServiceCertPath    string
 	ServiceKeyPath     string
+	ClientCertPath     string
+	ClientKeyPath      string
 	PlatformCACertPath string
 }
 
@@ -47,10 +49,15 @@ func Load() *Config {
 		SensorManagerURL:   sharedconfig.PeerServiceURLAuto("SENSOR_MANAGER_URL", "sensor-manager"),
 		Port:               sharedconfig.GetEnv("PORT", "8080"),
 
-		UseMTLS:            sharedconfig.GetEnvAsBool("USE_MTLS", true),
-		TLSPort:            sharedconfig.GetEnv("TLS_PORT", "8443"),
-		ServiceCertPath:    sharedconfig.GetEnv("SERVICE_CERT_PATH", "/app/certs/server-cert.pem"),
-		ServiceKeyPath:     sharedconfig.GetEnv("SERVICE_KEY_PATH", "/app/certs/server-key.pem"),
+		UseMTLS:         sharedconfig.GetEnvAsBool("USE_MTLS", true),
+		TLSPort:         sharedconfig.GetEnv("TLS_PORT", "8443"),
+		ServiceCertPath: sharedconfig.GetEnv("SERVICE_CERT_PATH", "/app/certs/server-cert.pem"),
+		ServiceKeyPath:  sharedconfig.GetEnv("SERVICE_KEY_PATH", "/app/certs/server-key.pem"),
+		// Client material for outbound S2S calls (audit-service on :8443 under
+		// the mesh). Same env names and defaults every other backend uses; the
+		// chart's app ConfigMap sets them when serviceMtls is enabled.
+		ClientCertPath:     sharedconfig.GetEnv("CLIENT_CERT_PATH", "/app/certs/client-cert.pem"),
+		ClientKeyPath:      sharedconfig.GetEnv("CLIENT_KEY_PATH", "/app/certs/client-key.pem"),
 		PlatformCACertPath: sharedconfig.GetEnv("PLATFORM_CA_CERT_PATH", "/app/certs/platform-ca-cert.pem"),
 	}
 }

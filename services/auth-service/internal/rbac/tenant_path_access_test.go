@@ -30,11 +30,19 @@ func (stubRBACStore) GetTenantPermissions(_ uuid.UUID) ([]Permission, error) { r
 func (stubRBACStore) GetUserRoles(_, _ uuid.UUID) ([]Role, error) {
 	return []Role{{Name: "viewer"}}, nil
 }
-func (stubRBACStore) AssignUserRole(_, _, _ uuid.UUID) error                    { return nil }
-func (stubRBACStore) RemoveUserRole(_, _, _ uuid.UUID) error                    { return nil }
-func (stubRBACStore) GetPermissionMatrix(_, _ uuid.UUID) (interface{}, error)   { return nil, nil }
-func (stubRBACStore) UpdateRolePermissions(_, _ uuid.UUID, _ []uuid.UUID) error { return nil }
-func (stubRBACStore) CheckPermission(_, _ uuid.UUID, _ string) (bool, error)    { return true, nil }
+func (stubRBACStore) AssignUserRole(_, _, _, _ uuid.UUID) error { return nil }
+func (stubRBACStore) RemoveUserRole(_, _, _ uuid.UUID) error    { return nil }
+func (stubRBACStore) GetPermissionMatrix(_, _, _ uuid.UUID) (*PermissionMatrix, error) {
+	return &PermissionMatrix{}, nil
+}
+func (stubRBACStore) UpdateRolePermissions(_, _, _ uuid.UUID, _ []uuid.UUID) error { return nil }
+func (stubRBACStore) CreateTenantRole(_, _ uuid.UUID, _ CreateRoleRequest) (*Role, error) {
+	return &Role{}, nil
+}
+func (stubRBACStore) DeleteTenantRole(_, _ uuid.UUID, _ *uuid.UUID) (*DeleteRoleResult, error) {
+	return &DeleteRoleResult{}, nil
+}
+func (stubRBACStore) CheckPermission(_, _ uuid.UUID, _ string) (bool, error) { return true, nil }
 
 // newCtx builds a gin context whose token tenant is `tokenTenant` (as
 // RequireAuth would set it) and whose path params are provided.
@@ -46,6 +54,9 @@ func newCtx(tokenTenant string, params gin.Params) (*gin.Context, *httptest.Resp
 	if tokenTenant != "" {
 		c.Set("tenantID", tokenTenant)
 	}
+	// The role write/matrix handlers also read the acting user id (for the
+	// escalation guard), so RequireAuth's other context key is modelled too.
+	c.Set("userID", uuid.NewString())
 	c.Params = params
 	return c, w
 }
@@ -68,6 +79,8 @@ func TestRBACReadHandlers_RejectCrossTenant(t *testing.T) {
 		// service call (the guard runs ahead of the body parse for the PUT).
 		{"GetPermissionMatrix", h.GetPermissionMatrix, gin.Params{{Key: "tenantId", Value: otherTenant}, {Key: "roleId", Value: uuid.NewString()}}},
 		{"UpdateRolePermissions", h.UpdateRolePermissions, gin.Params{{Key: "tenantId", Value: otherTenant}, {Key: "roleId", Value: uuid.NewString()}}},
+		{"CreateTenantRole", h.CreateTenantRole, gin.Params{{Key: "tenantId", Value: otherTenant}}},
+		{"DeleteTenantRole", h.DeleteTenantRole, gin.Params{{Key: "tenantId", Value: otherTenant}, {Key: "roleId", Value: uuid.NewString()}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

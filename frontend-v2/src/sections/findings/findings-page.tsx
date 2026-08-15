@@ -18,9 +18,10 @@ import { Icon, RiskChip, LevelDot, Pill, byLevel, worstLevel, LEVELS, riskColor,
 import { AssetDrawer } from '../inventory/drawers';
 import { GroupBand, EmptyState, CatChip, ColLabel, Loading } from './bits';
 import { WorkflowActions } from './workflow';
-import { useAllPublishedFrameworks, useBatchEvaluate, useCryptoRisks, useFindingsList, useFrameworkContext, useFrameworkControlNames } from './queries';
+import { useBatchEvaluate, useCryptoRisks, useFindingsList, useFrameworkContext } from './queries';
 import { assetOf, catOf, isOpenWf, issueLabel, sevLevel, sevRank, targetLabel, wfOf, WF_COLOR, WF_LABEL, type ComplianceFinding, type ControlRef, type CryptoRisk } from './model';
 import { DEFAULT_FINDINGS_LENS } from './lenses';
+import { coverageLine, formatScore, normalizeControlStatus, notAssessedReasonText, CONTROL_STATUS_LABEL, NOT_ASSESSED_LABEL } from './control-status';
 
 const GRID = '12px minmax(0,1.7fr) 118px minmax(0,1.5fr) minmax(0,1.25fr) 122px';
 const SEVS: RiskLevel[] = [...LEVELS];
@@ -79,16 +80,12 @@ export function FindingsPage() {
   const frameworkIds = useMemo(() => (ctxQ.data?.status?.frameworks ?? []).map((f) => f.id), [ctxQ.data]);
   const batchQ = useBatchEvaluate(complianceLens ? frameworkIds : undefined);
   const listQ = useFindingsList(complianceLens);
-  // #H-4b: batch-evaluate only covers actively-licensed frameworks, so a finding
-  // against a published-but-unlicensed framework has no entry in controlMeta and
-  // falls into "Other / retired controls" even though the framework is real.
-  // Resolve the gap from the license-independent published-framework detail.
-  const publishedQ = useAllPublishedFrameworks(complianceLens);
-  const unlicensedFrameworkIds = useMemo(() => {
-    const covered = new Set((batchQ.data?.results ?? []).map((r) => r.framework_id));
-    return (publishedQ.data ?? []).map((f) => f.id).filter((id) => !covered.has(id));
-  }, [publishedQ.data, batchQ.data]);
-  const fallbackControlsQ = useFrameworkControlNames(unlicensedFrameworkIds);
+  // The #H-4b fallback that used to resolve names for published-but-unlicensed
+  // frameworks is gone with the finding leak it existed to make legible: the
+  // backend now gates findings to activated frameworks (licensedFindingScopeSQL),
+  // so every finding reaching this page has a batch-evaluate entry. It treated
+  // the symptom — unactivated frameworks showing up as "Other / retired
+  // controls" — by labelling them nicely instead of asking why they were listed.
 
   // ---- crypto-risk stream, filtered ----
   const allRisks = useMemo(() => risksQ.data?.risks ?? [], [risksQ.data]);
@@ -147,21 +144,16 @@ export function FindingsPage() {
     return fwFilter === 'All' ? rs : rs.filter((r) => r.framework_id === fwFilter);
   }, [batchQ.data, fwFilter]);
 
-  // control_id → framework + control meta (from the evaluation structure, plus
-  // the #H-4b fallback for published-but-unlicensed frameworks batch-evaluate skips)
+  // control_id → framework + control meta, from the evaluation structure of the
+  // frameworks the tenant activated — the same set the findings themselves are
+  // now scoped to. "Other / retired controls" is back to meaning what it says:
+  // a control that genuinely no longer maps to a framework.
   const controlMeta = useMemo(() => {
     const m = new Map<string, ControlMeta>();
     (batchQ.data?.results ?? []).forEach((r) =>
       (r.control_breakdown ?? []).forEach((c) => m.set(c.id, { fwId: r.framework_id, fwName: r.framework_name, control: c })));
-    fallbackControlsQ.forEach((q) => {
-      if (!q.data) return;
-      q.data.controls.forEach((c) => {
-        if (m.has(c.id)) return; // batch-evaluate's richer entry wins if present
-        m.set(c.id, { fwId: q.data.fwId, fwName: q.data.fwName, control: c });
-      });
-    });
     return m;
-  }, [batchQ.data, fallbackControlsQ]);
+  }, [batchQ.data]);
 
   // persisted findings (workflow + assignee + joined asset), segment-filtered
   const complianceAll = useMemo(() => {
@@ -363,21 +355,44 @@ export function FindingsPage() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 9 }}>
                   <span className="eyebrow-app" style={{ color: 'var(--accent)' }}>{g.framework_name}</span>
                   <div style={{ flex: 1, height: 1, background: 'var(--app-border)' }} />
-                  <span style={{ fontSize: 11, color: 'var(--app-t3)' }}>{g.controls_passing}/{g.controls_total} passing · score {Math.round(g.score)}</span>
+                  {/* Math.round(null) is 0 — a framework with nothing assessed
+                      used to report "score 0" here, indistinguishable from one
+                      that failed everything (#1369). */}
+                  <span style={{ fontSize: 11, color: 'var(--app-t3)' }}>
+                    {g.controls_passing}/{g.controls_total} passing · score {formatScore(g.score)}
+                    {(() => {
+                      const coverage = coverageLine({ total: g.controls_total, passing: g.controls_passing, failing: g.controls_failing, notAssessed: g.controls_not_assessed });
+                      return coverage ? <> · {coverage}</> : null;
+                    })()}
+                  </span>
                 </div>
                 <div className="panel" style={{ overflow: 'hidden' }}>
                   {ctrls.map((ct, i) => {
                     const ctFindings = complianceFiltered.filter((f) => f.control_id === ct.id);
-                    const failing = ct.status.toLowerCase() !== 'pass' && ct.findings > 0;
+                    // Plain status read. This used to be
+                    // `status !== 'pass' && findings > 0`, which silently
+                    // required BOTH a non-pass status and findings — so a
+                    // Low-severity violation (status 'pass') rendered a green
+                    // check while carrying open findings.
+                    const status = normalizeControlStatus(ct.status);
+                    const failing = status === 'FAIL';
+                    const notAssessed = status === 'NOT_ASSESSED';
+                    const reason = notAssessedReasonText(ct.not_assessed_reason);
+                    const findingCount = ctFindings.length || ct.findings;
                     const expandable = failing && ctFindings.length > 0;
+                    // Not-assessed is muted, NOT a severity colour — it is an
+                    // absence of information, not a middle severity.
+                    const tone = failing ? 'var(--danger)' : notAssessed ? 'var(--app-t3)' : 'var(--ok)';
                     return (
                       <div key={ct.id} style={{ borderTop: i ? '1px solid var(--app-border)' : 'none' }}>
                         <button onClick={() => setOpenCtrl(openCtrl === ct.id ? null : ct.id)} className="row-hover" style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', padding: '12px 16px', border: 'none', background: 'transparent', cursor: expandable ? 'pointer' : 'default', textAlign: 'left' }}>
-                          <span style={{ width: 22, height: 22, borderRadius: 6, flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', background: `color-mix(in srgb, ${failing ? 'var(--danger)' : 'var(--ok)'} 12%, transparent)`, color: failing ? 'var(--danger)' : 'var(--ok)' }}>
-                            <Icon name={failing ? 'x' : 'check'} size={13} />
+                          <span title={notAssessed ? `${NOT_ASSESSED_LABEL} — ${reason}` : CONTROL_STATUS_LABEL[status]}
+                            style={{ width: 22, height: 22, borderRadius: 6, flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', background: `color-mix(in srgb, ${tone} 12%, transparent)`, color: tone }}>
+                            {notAssessed ? <span className="mono" style={{ fontSize: 12, lineHeight: 1 }}>—</span> : <Icon name={failing ? 'x' : 'check'} size={13} />}
                           </span>
                           <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 13, fontWeight: 500, color: 'var(--app-t1)' }}>{ct.name}</div></div>
-                          {failing && <span className="mono" style={{ fontSize: 12, color: 'var(--danger-text)', fontWeight: 700 }}>{ctFindings.length || ct.findings} finding{(ctFindings.length || ct.findings) !== 1 ? 's' : ''}</span>}
+                          {notAssessed && <span title={reason} style={{ fontSize: 11, color: 'var(--app-t3)', fontWeight: 600 }}>{NOT_ASSESSED_LABEL}</span>}
+                          {failing && <span className="mono" style={{ fontSize: 12, color: 'var(--danger-text)', fontWeight: 700 }}>{findingCount} finding{findingCount !== 1 ? 's' : ''}</span>}
                           {expandable && <Icon name={openCtrl === ct.id ? 'chevron-up' : 'chevron-down'} size={15} style={{ color: 'var(--app-t3)' }} />}
                         </button>
                         {openCtrl === ct.id && expandable && (

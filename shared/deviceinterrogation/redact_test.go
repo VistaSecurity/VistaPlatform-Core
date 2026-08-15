@@ -25,6 +25,40 @@ func TestIsSecretFieldName_RedactsRealVendorSecrets(t *testing.T) {
 	}
 }
 
+// The matcher also backstops tenant integration credentials (the
+// inventory-service integrations list runs auth_config through RedactMap), and
+// that domain names its secrets differently from a network device: an
+// integration's credential is as likely to sit under `authorization`, a bare
+// `auth`, or inside a webhook URL as under `api_key`. Those three leaked until
+// the fragment list was extended; this pins them.
+func TestIsSecretFieldName_RedactsIntegrationCredentialNames(t *testing.T) {
+	secret := []string{
+		"authorization", "Authorization", "auth", "AUTH",
+		"webhook_url", "webhook_uri", "slack_webhook", "incoming_webhook",
+		"client_secret", "secret_access_key", "credentials",
+	}
+	for _, name := range secret {
+		if !isSecretFieldName(name) {
+			t.Errorf("field %q should be treated as secret material but was not", name)
+		}
+	}
+}
+
+// `auth` is a whole-name match, never a fragment: these are crypto posture that
+// a fragment rule would have eaten. Guarding the scoping decision, not just its
+// effect.
+func TestIsSecretFieldName_AuthIsWholeNameOnly(t *testing.T) {
+	safe := []string{
+		"auth_type", "auth_style", "auth_method", "authmethod",
+		"authentication", "authentication_algorithm", "authenticated",
+	}
+	for _, name := range safe {
+		if isSecretFieldName(name) {
+			t.Errorf("posture/shape field %q was redacted; `auth` over-matched as a fragment", name)
+		}
+	}
+}
+
 // The inverse polarity: an over-strict scrubber that eats the posture fields is
 // the same bug pointed the other way. These are exactly what we are in business
 // to inventory and they must survive.

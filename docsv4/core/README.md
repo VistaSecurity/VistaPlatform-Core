@@ -41,6 +41,7 @@ Documentation for **tenants** and **tenant admins** — people who use Vista Pla
 - [Network Spaces](./features/network-spaces.md)
 - [Network Assets vs Crypto Configurations](./features/network-assets-vs-crypto-implementations.md)
 - [Operational Context](./features/operational-context.md)
+- [Roles & Permissions](./features/roles-and-permissions.md) — built-in and custom roles, and what each grants
 - [PCAP Ingestion](./features/pcap-ingestion.md)
 - [Spreadsheet Import](./features/spreadsheet-import.md)
 - [Page-Local Exports](./features/page-local-exports.md)

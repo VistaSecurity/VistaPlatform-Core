@@ -44,8 +44,8 @@ export function SSection({ title, desc, action, children, style }: {
   );
 }
 
-export function SCard({ children, style, pad = 20 }: { children?: ReactNode; style?: CSSProperties; pad?: number }) {
-  return <div className="panel" style={{ padding: pad, ...style }}>{children}</div>;
+export function SCard({ children, style, pad = 20, onClick }: { children?: ReactNode; style?: CSSProperties; pad?: number; onClick?: () => void }) {
+  return <div className="panel" style={{ padding: pad, ...style }} onClick={onClick}>{children}</div>;
 }
 
 export function SRow({ label, hint, children, last }: { label: string; hint?: string; children?: ReactNode; last?: boolean }) {

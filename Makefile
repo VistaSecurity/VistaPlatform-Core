@@ -62,6 +62,7 @@ generate: node_modules_check generate-k8s-ingress ## Generate shared docs/config
 	node ./scripts/generate-from-registry.mjs | cat
 	node ./scripts/generate-docker-compose.mjs | cat
 	node ./scripts/generate-alert-registry.mjs | cat
+	node ./scripts/generate-permissions.mjs | cat
 	node ./scripts/generate-edition-matrix.mjs | cat
 	# Note: Environment files (.env, .env.ec2-smoke, .env.prod) are generated
 	# by their respective deployment scripts, not here

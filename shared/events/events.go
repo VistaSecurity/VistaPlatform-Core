@@ -94,6 +94,19 @@ type AuditEvent struct {
 	Duration   int64                  `json:"duration_ms"`
 	Timestamp  time.Time              `json:"timestamp"`
 	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+
+	// EventType/EventCategory/Success carry the fields an explicitly-authored
+	// audit entry sets, which the envelope previously dropped: the consumer then
+	// rebuilt event_type from Action and re-derived success from StatusCode.
+	// For a hand-logged event that carries no HTTP status, StatusCode is 0, so
+	// "success = StatusCode < 400" turned every explicitly-failed entry (a failed
+	// login, most of all) into a SUCCESS on the way through NATS — and lost the
+	// event type any detection rule matches on. All three are omitempty, so an
+	// older publisher's payload decodes unchanged and the consumer falls back to
+	// the derived values.
+	EventType     string `json:"event_type,omitempty"`
+	EventCategory string `json:"event_category,omitempty"`
+	Success       *bool  `json:"success,omitempty"`
 }
 
 // AuditBatchEvent wraps multiple audit entries for batch publishing
@@ -119,6 +132,20 @@ type NotificationEvent struct {
 	Timestamp   time.Time              `json:"timestamp"`
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
 }
+
+// PlatformAlertTenantID is the reserved sentinel tenant that owns
+// platform-track stateful alerts (service_down, metric_threshold,
+// tenant_health_degraded, …). Platform-track alerts are not tenant-scoped, but
+// the alerts table's tenant_id is NOT NULL and RLS-isolated, so platform
+// detectors raise under this well-known sentinel and platform-admin reads scope
+// to it. There is intentionally NO tenants row for this id (alerts.tenant_id has
+// no FK) — it exists only as an RLS partition key. Do not change this value once
+// alerts have been written under it.
+//
+// It lives here, beside AlertRaiseEvent, because producers of the alerts.raise
+// rail live in several services (monitoring-service publishes platform-track
+// raises) and cannot import compliance-engine's internal packages.
+var PlatformAlertTenantID = uuid.MustParse("11111111-1111-1111-1111-111111111111")
 
 // AlertRaiseEvent opens or escalates a stateful alert (subject alerts.raise).
 // The alert engine dedupes on (tenant_id, alert_type, subject_id): no open

@@ -65,7 +65,12 @@ export function ScansPage() {
 
   return (
     <PageWrap title="Scheduled Scans" count={q.isLoading ? '' : schedules.length}>
-      <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage}>
+      {/* Each gate below names the permission its own route enforces
+          (device-interrogation-service/internal/api/router.go): POST /schedules
+          is DiscoveryCreate; PUT /schedules/:id and the enable/disable pair are
+          DiscoveryUpdate; DELETE /schedules/:id and POST /schedules/:id/trigger
+          are DiscoveryManage. */}
+      <PermissionGate permission={TENANT_PERMISSIONS.discovery.create}>
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 14 }}>
           <button className="ui-btn accent" onClick={openCreate}><Icon name="plus" size={13} />New schedule</button>
         </div>
@@ -92,7 +97,7 @@ export function ScansPage() {
                 )}
               </div>
               <PermissionGate
-                permission={TENANT_PERMISSIONS.discovery.manage}
+                permission={TENANT_PERMISSIONS.discovery.update}
                 fallback={<span style={{ fontSize: 11, fontWeight: 600, color: s.is_enabled ? 'var(--accent)' : 'var(--app-t3)', flex: 'none' }}>{s.is_enabled ? 'On' : 'Off'}</span>}
               >
                 <button
@@ -104,21 +109,25 @@ export function ScansPage() {
                   <span style={{ position: 'absolute', top: 2, left: s.is_enabled ? 18 : 2, width: 18, height: 18, borderRadius: 50, background: '#fff', transition: 'left .2s' }} />
                 </button>
               </PermissionGate>
-              <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 'none' }}>
-                  <button
-                    className="ui-btn sm"
-                    onClick={() => trigger.mutate(s.id)}
-                    disabled={trigger.isPending && trigger.variables === s.id}
-                    title="Run this schedule now"
-                  >
-                    <Icon name="activity" size={12} />
-                    {trigger.isPending && trigger.variables === s.id ? 'Running…' : 'Run now'}
-                  </button>
-                  <button className="ui-btn sm ghost" onClick={() => openEdit(s)} title="Edit schedule"><Icon name="wrench" size={13} /></button>
-                  <button className="ui-btn sm ghost" style={{ color: 'var(--danger-text)' }} onClick={() => setDeleting(s)} title="Delete schedule"><Icon name="x" size={13} /></button>
-                </div>
-              </PermissionGate>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 'none' }}>
+                  <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage}>
+                    <button
+                      className="ui-btn sm"
+                      onClick={() => trigger.mutate(s.id)}
+                      disabled={trigger.isPending && trigger.variables === s.id}
+                      title="Run this schedule now"
+                    >
+                      <Icon name="activity" size={12} />
+                      {trigger.isPending && trigger.variables === s.id ? 'Running…' : 'Run now'}
+                    </button>
+                  </PermissionGate>
+                  <PermissionGate permission={TENANT_PERMISSIONS.discovery.update}>
+                    <button className="ui-btn sm ghost" onClick={() => openEdit(s)} title="Edit schedule"><Icon name="wrench" size={13} /></button>
+                  </PermissionGate>
+                  <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage}>
+                    <button className="ui-btn sm ghost" style={{ color: 'var(--danger-text)' }} onClick={() => setDeleting(s)} title="Delete schedule"><Icon name="x" size={13} /></button>
+                  </PermissionGate>
+              </div>
             </div>
           ))}
         </div>

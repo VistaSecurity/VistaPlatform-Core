@@ -112,7 +112,9 @@ export function JobsPage() {
                 <span style={{ textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 5, justifyContent: 'flex-end', fontSize: 11.5, fontWeight: 600, color: m.c }}>
                   <span style={{ width: 6, height: 6, borderRadius: 50, background: m.c }} />{m.l}
                 </span>
-                <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage} fallback={<span />}>
+                {/* discovery.update: device-interrogation-service gates
+                    POST /jobs/:id/retry and /jobs/:id/cancel on DiscoveryUpdate. */}
+                <PermissionGate permission={TENANT_PERMISSIONS.discovery.update} fallback={<span />}>
                   <span style={{ display: 'inline-flex', gap: 4, justifyContent: 'flex-end' }}>
                     {RETRYABLE.has(s) && <RowBtn icon="history" title="Retry job" onClick={() => retry.mutate(j.id)} disabled={busy} />}
                     {CANCELLABLE.has(s) && <RowBtn icon="x-circle" title="Cancel job" onClick={() => cancel.mutate(j.id)} disabled={busy} />}

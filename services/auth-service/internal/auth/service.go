@@ -311,14 +311,20 @@ func (a *AuthService) EnsureDefaultTenantRoles(tenantID uuid.UUID) error {
 }
 
 // assignRolePermissions assigns default permissions to tenant roles for a
-// tenant. The filter logic here MUST match the reconciliation DO block in
-// scripts/database/seed.sql — that block is the path existing tenants take
-// on every helm upgrade, this function is the path new tenants and every
-// ensureTenantRoles() call take. Filter drift would silently give the two
-// cohorts different access.
+// tenant.
 //
-// For each built-in role, stale grants outside the desired set are removed
-// (same predicates as seed.sql), then missing grants are inserted.
+// The filters are NOT written here: they come from roleGrantFilters in
+// role_grants_gen.go, generated from standards/permissions.yaml by
+// scripts/generate-permissions.mjs — the same YAML that generates the
+// reconciliation DO block in scripts/database/seed.sql. seed.sql is the path
+// existing tenants take on every helm upgrade; this function is the path new
+// tenants and every ensureTenantRoles() call take. Filter drift used to be
+// possible (commit 8ada815f lost the 'alerts' resource exactly this way) and
+// would silently give the two cohorts different access; generating both from
+// one source makes it structurally impossible.
+//
+// For each built-in role, stale grants outside the desired set are removed,
+// then missing grants are inserted.
 func (a *AuthService) assignRolePermissions(tenantID uuid.UUID) error {
 	// Reconcile each role with a DELETE-then-INSERT pair inside a single
 	// transaction so a failure (or pod restart) between a role's DELETE and
@@ -328,7 +334,7 @@ func (a *AuthService) assignRolePermissions(tenantID uuid.UUID) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin role-permission reconciliation: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+	defer func() { _ = tx.Rollback() }() // no-op after a successful Commit
 
 	// RLS-scoped: the reconciliation joins against tenant_roles (tenant_isolation
 	// policy) to resolve role IDs, so the tenant context must be set on this tx or
@@ -338,132 +344,25 @@ func (a *AuthService) assignRolePermissions(tenantID uuid.UUID) error {
 		return err
 	}
 
-	// Billing Admin (internal: billing_admin) — billing + visibility into
-	// who has access (users.read) and basic tenant settings (settings.read).
-	_, err = tx.Exec(`
-		DELETE FROM tenant_role_permissions trp
-		USING tenant_roles tr, tenant_permissions tp
-		WHERE trp.role_id = tr.id AND trp.permission_id = tp.id
-		  AND tr.tenant_id = $1 AND tr.name = 'billing_admin' AND tr.is_system_role = true
-		  AND NOT (tp.resource = 'billing' OR tp.name IN ('settings.read', 'users.read'))
-	`, tenantID)
-	if err != nil {
-		return fmt.Errorf("failed to reconcile permissions for billing_admin: %w", err)
-	}
-	_, err = tx.Exec(`
-		INSERT INTO tenant_role_permissions (role_id, permission_id)
-		SELECT tr.id, tp.id
-		FROM tenant_roles tr
-		JOIN tenant_permissions tp ON true
-		WHERE tr.tenant_id = $1 AND tr.name = 'billing_admin'
-		  AND (tp.resource = 'billing' OR tp.name IN ('settings.read', 'users.read'))
-		ON CONFLICT (role_id, permission_id) DO NOTHING
-	`, tenantID)
-	if err != nil {
-		return fmt.Errorf("failed to assign permissions to billing_admin: %w", err)
-	}
-
-	// Tenant Admin — everything except billing.update. Gets billing.read
-	// so they can see invoices, usage, and payment history without
-	// being able to alter payment methods or cancel.
-	_, err = tx.Exec(`
-		DELETE FROM tenant_role_permissions trp
-		USING tenant_roles tr, tenant_permissions tp
-		WHERE trp.role_id = tr.id AND trp.permission_id = tp.id
-		  AND tr.tenant_id = $1 AND tr.name = 'tenant_admin' AND tr.is_system_role = true
-		  AND tp.name = 'billing.update'
-	`, tenantID)
-	if err != nil {
-		return fmt.Errorf("failed to reconcile permissions for tenant_admin: %w", err)
-	}
-	_, err = tx.Exec(`
-		INSERT INTO tenant_role_permissions (role_id, permission_id)
-		SELECT tr.id, tp.id
-		FROM tenant_roles tr
-		JOIN tenant_permissions tp ON true
-		WHERE tr.tenant_id = $1 AND tr.name = 'tenant_admin'
-		  AND tp.name <> 'billing.update'
-		ON CONFLICT (role_id, permission_id) DO NOTHING
-	`, tenantID)
-	if err != nil {
-		return fmt.Errorf("failed to assign permissions to tenant_admin: %w", err)
-	}
-
-	// Security Admin — operational/security scope + users.read +
-	// settings.read for incident response.
-	_, err = tx.Exec(`
-		DELETE FROM tenant_role_permissions trp
-		USING tenant_roles tr, tenant_permissions tp
-		WHERE trp.role_id = tr.id AND trp.permission_id = tp.id
-		  AND tr.tenant_id = $1 AND tr.name = 'security_admin' AND tr.is_system_role = true
-		  AND NOT (tp.resource IN ('assets', 'sensors', 'reports', 'compliance', 'pcap', 'discovery', 'alerts')
-		           OR tp.name IN ('users.read', 'settings.read'))
-	`, tenantID)
-	if err != nil {
-		return fmt.Errorf("failed to reconcile permissions for security_admin: %w", err)
-	}
-	_, err = tx.Exec(`
-		INSERT INTO tenant_role_permissions (role_id, permission_id)
-		SELECT tr.id, tp.id
-		FROM tenant_roles tr
-		JOIN tenant_permissions tp ON true
-		WHERE tr.tenant_id = $1 AND tr.name = 'security_admin'
-		  AND (tp.resource IN ('assets', 'sensors', 'reports', 'compliance', 'pcap', 'discovery', 'alerts')
-		       OR tp.name IN ('users.read', 'settings.read'))
-		ON CONFLICT (role_id, permission_id) DO NOTHING
-	`, tenantID)
-	if err != nil {
-		return fmt.Errorf("failed to assign permissions to security_admin: %w", err)
-	}
-
-	// Viewer — read-only across operational resources (no billing).
-	_, err = tx.Exec(`
-		DELETE FROM tenant_role_permissions trp
-		USING tenant_roles tr, tenant_permissions tp
-		WHERE trp.role_id = tr.id AND trp.permission_id = tp.id
-		  AND tr.tenant_id = $1 AND tr.name = 'viewer' AND tr.is_system_role = true
-		  AND NOT (tp.action = 'read' AND tp.resource <> 'billing')
-	`, tenantID)
-	if err != nil {
-		return fmt.Errorf("failed to reconcile permissions for viewer: %w", err)
-	}
-	_, err = tx.Exec(`
-		INSERT INTO tenant_role_permissions (role_id, permission_id)
-		SELECT tr.id, tp.id
-		FROM tenant_roles tr
-		JOIN tenant_permissions tp ON true
-		WHERE tr.tenant_id = $1 AND tr.name = 'viewer'
-		  AND tp.action = 'read' AND tp.resource <> 'billing'
-		ON CONFLICT (role_id, permission_id) DO NOTHING
-	`, tenantID)
-	if err != nil {
-		return fmt.Errorf("failed to assign permissions to viewer: %w", err)
-	}
-
-	// API User — read-only integration scope across operational data.
-	_, err = tx.Exec(`
-		DELETE FROM tenant_role_permissions trp
-		USING tenant_roles tr, tenant_permissions tp
-		WHERE trp.role_id = tr.id AND trp.permission_id = tp.id
-		  AND tr.tenant_id = $1 AND tr.name = 'api_user' AND tr.is_system_role = true
-		  AND NOT (tp.action = 'read'
-		           AND tp.resource IN ('assets', 'sensors', 'reports', 'compliance', 'discovery', 'pcap'))
-	`, tenantID)
-	if err != nil {
-		return fmt.Errorf("failed to reconcile permissions for api_user: %w", err)
-	}
-	_, err = tx.Exec(`
-		INSERT INTO tenant_role_permissions (role_id, permission_id)
-		SELECT tr.id, tp.id
-		FROM tenant_roles tr
-		JOIN tenant_permissions tp ON true
-		WHERE tr.tenant_id = $1 AND tr.name = 'api_user'
-		  AND tp.action = 'read'
-		  AND tp.resource IN ('assets', 'sensors', 'reports', 'compliance', 'discovery', 'pcap')
-		ON CONFLICT (role_id, permission_id) DO NOTHING
-	`, tenantID)
-	if err != nil {
-		return fmt.Errorf("failed to assign permissions to api_user: %w", err)
+	for _, f := range roleGrantFilters {
+		if _, err := tx.Exec(`
+			DELETE FROM tenant_role_permissions trp
+			USING tenant_roles tr, tenant_permissions tp
+			WHERE trp.role_id = tr.id AND trp.permission_id = tp.id
+			  AND tr.tenant_id = $1 AND tr.name = $2 AND tr.is_system_role = true
+			  AND `+f.Revoke, tenantID, f.Role); err != nil {
+			return fmt.Errorf("failed to reconcile permissions for %s: %w", f.Role, err)
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO tenant_role_permissions (role_id, permission_id)
+			SELECT tr.id, tp.id
+			FROM tenant_roles tr
+			JOIN tenant_permissions tp ON true
+			WHERE tr.tenant_id = $1 AND tr.name = $2
+			  AND `+f.Grant+`
+			ON CONFLICT (role_id, permission_id) DO NOTHING`, tenantID, f.Role); err != nil {
+			return fmt.Errorf("failed to assign permissions to %s: %w", f.Role, err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -1358,7 +1257,11 @@ func (a *AuthService) createTenant(name string) (*models.Tenant, error) {
 //   - an email channel resolving recipients from the tenant_admin role at
 //     send time (no address exists yet at tenant creation)
 //   - "Default critical alerts": all sources, critical+high → in-app + email
-//   - "Default activity feed": all sources, medium+low → in-app only
+//   - "Default activity feed": all sources, medium+low+info → in-app only
+//     (info is not a spare band: asset_limit_approaching opens there at its 80%
+//     rung, billing notifications are emitted there, and NormalizeSeverity
+//     degrades any unrecognized producer severity to it. Leaving it out of the
+//     pack dropped every one of those on the floor, silently.)
 //   - discovery_alert_configs defaults (job_completed / job_failed /
 //     new_findings), fixing the create-time gap left by the one-time backfill
 //     migration
@@ -1384,7 +1287,7 @@ func (a *AuthService) seedDefaultNotificationPack(tenantID uuid.UUID) error {
 			INSERT INTO tenant_notification_rules (tenant_id, rule_name, alert_source, channel_ids, severity_filter, frequency, enabled, priority)
 			VALUES
 			  ($1, 'Default critical alerts', 'all', $2::uuid[], ARRAY['critical','high']::varchar[], 'immediate', true, 100),
-			  ($1, 'Default activity feed',   'all', $3::uuid[], ARRAY['medium','low']::varchar[],   'immediate', true, 50)
+			  ($1, 'Default activity feed',   'all', $3::uuid[], ARRAY['medium','low','info']::varchar[], 'immediate', true, 50)
 		`, tenantID,
 			pq.Array([]string{inAppChannelID.String(), emailChannelID.String()}),
 			pq.Array([]string{inAppChannelID.String()}),

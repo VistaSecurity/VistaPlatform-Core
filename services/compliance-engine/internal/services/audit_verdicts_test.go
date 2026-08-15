@@ -372,26 +372,35 @@ func TestEvaluateMeasurement_SeverityFallsBackToControlBaseline(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// CMP-7 — the live path's status mapping must BE the materialized one
+// CMP-7 / — the live path's status rule must BE the materialized one
 // ---------------------------------------------------------------------------
 
-// The live evaluator maps its worst finding severity through
-// statusForWorstSeverity and lowercases the result (its Status field is
-// lowercase by contract; callers ToUpper it). This pins the mapping the live
-// path now produces against the shared function the materialized rollup uses,
-// so a control whose findings are all Low reads PASS on both sides — the split
-// that made cert-expiry-90-day preview at 100 and summarise at 0.
-func TestLiveControlStatusMatchesMaterializedMapping(t *testing.T) {
-	cases := map[string]string{
-		"":         "pass", // no findings
-		"Low":      "pass",
-		"Med":      "warn",
-		"High":     "fail",
-		"Critical": "fail",
+// Status is decided by whether the control was VIOLATED, at every baseline
+// severity. This replaces the severity-derived mapping (Critical/High → FAIL,
+// Med → WARN, Low → PASS), under which a violated Low-baseline control reported
+// PASS and its findings were invisible to the score.
+//
+// The live evaluator lowercases its Status by contract (callers ToUpper it), so
+// the lowering is pinned here too.
+func TestLiveControlStatusIsDrivenByViolationsNotSeverity(t *testing.T) {
+	if got := strings.ToLower(statusForFindings(false)); got != "pass" {
+		t.Errorf("no findings maps to %q, want pass", got)
 	}
-	for worst, want := range cases {
-		if got := strings.ToLower(statusForWorstSeverity(worst)); got != want {
-			t.Errorf("worst severity %q maps to %q, want %q", worst, got, want)
+	if got := strings.ToLower(statusForFindings(true)); got != "fail" {
+		t.Errorf("a violation maps to %q, want fail", got)
+	}
+
+	// The regression itself: severity no longer participates. A control whose
+	// only finding is Low must FAIL exactly as a Critical one does.
+	for _, severity := range []string{"Low", "Med", "High", "Critical"} {
+		b := frameworkScore([]controlOutcome{{BaselineSeverity: severity, Status: statusForFindings(true)}})
+		if b.Score == nil {
+			t.Errorf("baseline %s: a violated control has no score; it was assessed and it failed", severity)
+		} else if *b.Score != 0 {
+			t.Errorf("baseline %s: a violated control scored %d, want 0 — severity is the weight, not the verdict", severity, *b.Score)
+		}
+		if b.Failing != 1 || b.Passing != 0 {
+			t.Errorf("baseline %s: counts = {passing:%d failing:%d}, want {0 1}", severity, b.Passing, b.Failing)
 		}
 	}
 }

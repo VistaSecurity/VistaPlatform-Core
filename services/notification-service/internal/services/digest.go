@@ -199,7 +199,7 @@ func (s *NotificationService) flushDigestGroup(ctx context.Context, g digestGrou
 		Metadata:         dreq.Metadata,
 		CreatedAt:        time.Now(),
 	}
-	used, derr := s.deliveryService.SendToChannels(ctx, g.tenantID, history, []interface{}{ch}, dreq)
+	used, failures, derr := s.deliveryService.SendToChannels(ctx, g.tenantID, history, []interface{}{ch}, dreq)
 	history.ChannelsUsed = used
 	if derr != nil && len(used) == 0 {
 		history.Status = "failed"
@@ -209,6 +209,10 @@ func (s *NotificationService) flushDigestGroup(ctx context.Context, g digestGrou
 	}
 	if err := s.saveNotificationHistory(ctx, history); err != nil {
 		s.logger.Printf("digest: failed to save history: %v", err)
+	} else {
+		// A failed digest flush is as lost as a failed immediate send — the
+		// batched items are deleted below either way.
+		s.enqueueFailedDeliveries(ctx, dreq, history.ID, failures)
 	}
 
 	// Remove the flushed items. New items that arrived after the SELECT keep

@@ -9,11 +9,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vistasecurity/vistaplatform/mcp-service/internal/auditlog"
 	"github.com/vistasecurity/vistaplatform/mcp-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/mcp-service/internal/platform"
 	"github.com/vistasecurity/vistaplatform/mcp-service/internal/server"
 	"github.com/vistasecurity/vistaplatform/mcp-service/internal/tools"
+	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
+	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 
 	"github.com/gin-gonic/gin"
@@ -37,11 +40,35 @@ func main() {
 		httpc.Timeout = 30 * time.Second
 	}
 
-	exchanger := platform.NewExchanger(cfg.AuthServiceURL, httpc)
+	// Audit: this is the one interface built to hand bulk tenant data to a
+	// non-human consumer, so every tool invocation and every credential
+	// decision is recorded — through the same shared audit path the other
+	// services use, not a store of its own.
+	auditConfig := auditmiddleware.DefaultConfig()
+	auditConfig.ServiceName = "mcp-service"
+	auditConfig.AuditServiceURL = os.Getenv("AUDIT_SERVICE_URL")
+	if auditConfig.AuditServiceURL == "" {
+		auditConfig.AuditServiceURL = sharedconfig.PeerURL("audit-service", cfg.UseMTLS)
+	}
+	auditConfig.Enabled = os.Getenv("AUDIT_LOGGING_ENABLED") != "false"
+	auditConfig.UseMTLS = cfg.UseMTLS
+	auditConfig.ClientCertPath = cfg.ClientCertPath
+	auditConfig.ClientKeyPath = cfg.ClientKeyPath
+	auditConfig.PlatformCACertPath = cfg.PlatformCACertPath
+	if !auditConfig.Enabled {
+		// Turning the record off is a deliberate operator act; it should never
+		// be something a later reader has to infer from an empty audit table.
+		log.Printf("⚠️  AUDIT_LOGGING_ENABLED=false — MCP tool invocations will NOT be recorded")
+	}
+	auditMiddleware := auditmiddleware.NewMiddleware(auditConfig)
+	defer auditMiddleware.Stop()
+	recorder := auditlog.NewRecorder(auditMiddleware)
+
+	exchanger := platform.NewExchanger(cfg.AuthServiceURL, httpc, recorder)
 	client := platform.NewClient(httpc, cfg.InventoryServiceURL, cfg.ComplianceEngineURL, cfg.CBOMServiceURL)
 
-	mcpServer := server.NewMCPServer(&tools.Deps{Client: client})
-	handler := server.NewHandler(mcpServer, exchanger)
+	mcpServer := server.NewMCPServer(&tools.Deps{Client: client, Audit: recorder})
+	handler := server.NewHandler(mcpServer, exchanger, recorder)
 	router := server.NewRouter(handler)
 
 	// Health-only listener on the plain port when mTLS serves the API on 8443

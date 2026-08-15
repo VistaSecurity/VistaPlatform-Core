@@ -15,7 +15,9 @@ export interface StepMeta {
 const STEP_META: Record<string, StepMeta> = {
   define_networks: { route: '/settings/segments', icon: 'link-2', permission: TENANT_PERMISSIONS.settings.read },
   add_locations: { route: '/settings/locations', icon: 'map-pin', permission: TENANT_PERMISSIONS.settings.read },
-  deploy_agent: { route: '/discovery/sensors', icon: 'monitor-smartphone', permission: TENANT_PERMISSIONS.sensors.manage },
+  // sensors.create — matches the gate on the Register button this step links to,
+  // which matches POST /sensors/pending.
+  deploy_agent: { route: '/discovery/sensors', icon: 'monitor-smartphone', permission: TENANT_PERMISSIONS.sensors.create },
 };
 
 // A user "can onboard" (sees the checklist + the dropdown entry) if they can act

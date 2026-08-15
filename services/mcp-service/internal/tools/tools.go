@@ -17,7 +17,9 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
+	"github.com/vistasecurity/vistaplatform/mcp-service/internal/auditlog"
 	"github.com/vistasecurity/vistaplatform/mcp-service/internal/platform"
 
 	"github.com/google/uuid"
@@ -27,6 +29,11 @@ import (
 // Deps carries everything tool handlers need.
 type Deps struct {
 	Client *platform.Client
+	// Audit records every tool invocation to the shared audit path. Reading is
+	// the sensitive act on this surface — it is the one interface built to hand
+	// bulk tenant data to a non-human consumer — so successful reads are logged,
+	// not just failures.
+	Audit *auditlog.Recorder
 }
 
 // pruneKeys are stripped from every tool response — large payload fields
@@ -35,24 +42,64 @@ var pruneKeys = []string{"certificate_pem", "raw_data", "inline_content"}
 
 var errPermission = errors.New("api token lacks the permission required by this tool")
 
-// run wraps a tool body with the permission gate and JSON result encoding.
-func run(ctx context.Context, perm string, body func() (any, error)) (*mcp.CallToolResult, any, error) {
+// run wraps a tool body with the permission gate, JSON result encoding and the
+// audit record.
+//
+// Every exit path below writes an audit record — success, permission refusal
+// and downstream failure alike. The one path that does not is a request with no
+// grant at all, which cannot happen behind the auth middleware and would have
+// no tenant to attribute the record to; the middleware has already recorded the
+// rejected authentication in that case.
+func (d *Deps) run(ctx context.Context, req *mcp.CallToolRequest, perm string, args any, body func() (any, error)) (*mcp.CallToolResult, any, error) {
 	g, ok := platform.GrantFromContext(ctx)
 	if !ok {
 		return nil, nil, platform.ErrUnauthorized
 	}
-	if !g.HasPermission(perm) {
-		return nil, nil, fmt.Errorf("%w: needs %q (token has %v) — mint a token including this permission in Settings → API Tokens", errPermission, perm, g.Permissions)
+
+	// Taken from the request rather than repeated at each call site: a tool
+	// name written down twice is a tool name that eventually disagrees with
+	// itself, and the audit trail is the copy nobody would notice was wrong.
+	tool := "unknown"
+	if req != nil && req.Params != nil && req.Params.Name != "" {
+		tool = req.Params.Name
 	}
-	v, err := body()
-	if err != nil {
+
+	started := time.Now()
+	record := func(tc auditlog.ToolCall) {
+		tc.Tool = tool
+		tc.Permission = perm
+		tc.Identity = g.Identity()
+		tc.Request = platform.RequestContextFrom(ctx)
+		tc.Args = args
+		tc.Duration = time.Since(started)
+		d.Audit.RecordToolCall(ctx, tc)
+	}
+
+	if !g.HasPermission(perm) {
+		err := fmt.Errorf("%w: needs %q (token has %v) — mint a token including this permission in Settings → API Tokens", errPermission, perm, g.Permissions)
+		record(auditlog.ToolCall{Denied: true, Err: err})
 		return nil, nil, err
 	}
+
+	v, err := body()
+	if err != nil {
+		record(auditlog.ToolCall{Err: err})
+		return nil, nil, err
+	}
+
 	v = platform.Prune(v, pruneKeys...)
 	b, err := json.Marshal(v)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to encode result: %w", err)
+		err = fmt.Errorf("failed to encode result: %w", err)
+		record(auditlog.ToolCall{Err: err})
+		return nil, nil, err
 	}
+
+	// Size, never contents: how much of the tenant's inventory this call
+	// handed over is the auditable fact; the inventory itself is not.
+	count, counted := auditlog.CountRecords(v)
+	record(auditlog.ToolCall{ResultBytes: len(b), ResultCount: count, Counted: counted})
+
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: string(b)}},
 	}, nil, nil

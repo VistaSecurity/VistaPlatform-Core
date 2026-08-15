@@ -95,7 +95,12 @@ export function CustomPoliciesPage({ meta }: { meta: SettingsNavItem }) {
   const { data, isLoading, isError } = useTenantFrameworks(enabled);
   const mut = useTenantFrameworkMutations();
   const { hasPermission } = usePermissions();
-  const canManage = hasPermission(TENANT_PERMISSIONS.compliance.manage);
+  // compliance.update, not .manage: the policy-authoring routes
+  // (POST/PUT/DELETE /frameworks/tenant and their controls + measurements) are
+  // all mounted behind RequireTenantPermission(ComplianceUpdate) in
+  // services/compliance-engine/ee/policyauthoring/handlers.go. Gating on
+  // .manage hid controls the route would have allowed.
+  const canManage = hasPermission(TENANT_PERMISSIONS.compliance.update);
   const [modal, setModal] = useState<ModalState>({ kind: 'closed' });
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const policies = data ?? [];
@@ -116,7 +121,7 @@ export function CustomPoliciesPage({ meta }: { meta: SettingsNavItem }) {
     <SPage
       eyebrow="Policies" title="Custom Policies" job={meta.job} maxWidth={1000}
       actions={
-        <PermissionGate permission={TENANT_PERMISSIONS.compliance.manage}>
+        <PermissionGate permission={TENANT_PERMISSIONS.compliance.update}>
           <button className="ui-btn sm accent" onClick={() => setModal({ kind: 'create' })}><Icon name="plus" size={14} />New custom policy</button>
         </PermissionGate>
       }
@@ -149,7 +154,7 @@ export function CustomPoliciesPage({ meta }: { meta: SettingsNavItem }) {
                       {p.controls_count} control{p.controls_count !== 1 ? 's' : ''}{p.description ? ` · ${p.description}` : ''}
                     </div>
                   </div>
-                  <PermissionGate permission={TENANT_PERMISSIONS.compliance.manage}>
+                  <PermissionGate permission={TENANT_PERMISSIONS.compliance.update}>
                     <div style={{ display: 'flex', gap: 8, flex: 'none' }}>
                       <button className="ui-btn sm" onClick={() => setModal({ kind: 'edit', policy: p })}>Edit</button>
                       <button className="ui-btn sm ghost" style={{ color: 'var(--danger-text)' }} title="Delete custom policy" disabled={mut.remove.isPending}

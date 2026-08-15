@@ -32,6 +32,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/approval"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	shareddb "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	sharedevents "github.com/vistasecurity/vistaplatform/shared/events"
 	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
@@ -372,6 +373,42 @@ func (s *AssetService) ListIntegrations(tenantID uuid.UUID) ([]Integration, erro
 		list[i].AuthConfig = decrypted
 	}
 	return list, nil
+}
+
+// ListIntegrationsRedacted is what the HTTP list endpoint serves.
+//
+// ListIntegrations DECRYPTS auth_config, so the raw list carries plaintext
+// third-party credentials (SIEM/CMDB/ITSM API keys, bearer tokens, passwords).
+// A list is a browse surface: nobody browsing their integrations needs the
+// secret back, and returning it means every caller of that route — including a
+// read-only PAT — walks away with the credentials. So the list is redacted
+// unconditionally, independently of the settings.read gate on the route. The
+// gate decides who may look; this decides what looking can ever yield.
+//
+// Non-secret keys (host, username, region, index, auth style, …) survive, so
+// the UI can still show the shape of a connection. The Update flow is
+// unaffected: it takes the new auth_config from the request body and returns
+// the decrypted result of its own write.
+func (s *AssetService) ListIntegrationsRedacted(tenantID uuid.UUID) ([]Integration, error) {
+	list, err := s.ListIntegrations(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range list {
+		list[i].AuthConfig = redactIntegrationAuthConfig(list[i].AuthConfig)
+	}
+	return list, nil
+}
+
+// redactIntegrationAuthConfig replaces secret-looking values by field name,
+// reusing the same matcher that scrubs device-interrogation output
+// (shared/deviceinterrogation.RedactMap) rather than growing a second list of
+// what "looks like a secret" that would drift from the first.
+func redactIntegrationAuthConfig(in shareddb.JSONMap) shareddb.JSONMap {
+	if in == nil {
+		return nil
+	}
+	return shareddb.JSONMap(deviceinterrogation.RedactMap(map[string]interface{}(in)))
 }
 
 func (s *AssetService) CreateIntegration(tenantID uuid.UUID, in Integration) (*Integration, error) {

@@ -63,7 +63,7 @@ func registerInventoryTools(s *mcp.Server, d *Deps) {
 			"Use filters to narrow by environment, risk, certificate expiry or deprecated-crypto usage.",
 		Annotations: readOnly("Query infrastructure assets"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in queryAssetsInput) (*mcp.CallToolResult, any, error) {
-		return run(ctx, "assets.read", func() (any, error) {
+		return d.run(ctx, req, "assets.read", in, func() (any, error) {
 			q := url.Values{}
 			set(q, "search", in.Search)
 			setAll(q, "asset_type", in.AssetType)
@@ -90,7 +90,7 @@ func registerInventoryTools(s *mcp.Server, d *Deps) {
 		Description: "Fetch one infrastructure asset by UUID with full detail, including its crypto configurations and linked certificates.",
 		Annotations: readOnly("Get asset detail"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in getAssetInput) (*mcp.CallToolResult, any, error) {
-		return run(ctx, "assets.read", func() (any, error) {
+		return d.run(ctx, req, "assets.read", in, func() (any, error) {
 			id, err := requireUUID("asset_id", in.AssetID)
 			if err != nil {
 				return nil, err
@@ -105,7 +105,7 @@ func registerInventoryTools(s *mcp.Server, d *Deps) {
 			"PEM bodies are omitted; fingerprints, subjects, validity windows and key parameters are included.",
 		Annotations: readOnly("Query certificates"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in queryCertificatesInput) (*mcp.CallToolResult, any, error) {
-		return run(ctx, "assets.read", func() (any, error) {
+		return d.run(ctx, req, "assets.read", in, func() (any, error) {
 			q := url.Values{}
 			set(q, "search", in.Search)
 			if in.ExpiringDays > 0 {
@@ -131,7 +131,7 @@ func registerInventoryTools(s *mcp.Server, d *Deps) {
 		Description: "List the tenant's discovered cryptographic configurations (protocol, version, cipher suite, key exchange, signature and hash algorithms per asset). Paginated.",
 		Annotations: readOnly("Query crypto configurations"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in queryCryptoConfigurationsInput) (*mcp.CallToolResult, any, error) {
-		return run(ctx, "assets.read", func() (any, error) {
+		return d.run(ctx, req, "assets.read", in, func() (any, error) {
 			q := url.Values{}
 			page, size := clampPage(in.Page, in.PageSize)
 			q.Set("page", page)
@@ -146,7 +146,7 @@ func registerInventoryTools(s *mcp.Server, d *Deps) {
 			"risk score, migration guidance and recommended alternatives. This catalog is the source of truth for whether an algorithm is considered weak or quantum-vulnerable.",
 		Annotations: readOnly("Query algorithm assessments"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in queryAlgorithmsInput) (*mcp.CallToolResult, any, error) {
-		return run(ctx, "assets.read", func() (any, error) {
+		return d.run(ctx, req, "assets.read", in, func() (any, error) {
 			q := url.Values{}
 			set(q, "category", in.Category)
 			set(q, "strength", in.Strength)
@@ -162,7 +162,7 @@ func registerInventoryTools(s *mcp.Server, d *Deps) {
 			"broken down by algorithm family with suggested migration targets.",
 		Annotations: readOnly("Get PQC readiness"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in emptyInput) (*mcp.CallToolResult, any, error) {
-		return run(ctx, "assets.read", func() (any, error) {
+		return d.run(ctx, req, "assets.read", in, func() (any, error) {
 			return d.Client.Get(ctx, d.Client.InventoryURL, "/api/v1/inventory-service/pqc/progress", nil)
 		})
 	})
@@ -172,7 +172,7 @@ func registerInventoryTools(s *mcp.Server, d *Deps) {
 		Description: "Get the tenant's top-line crypto risk posture: asset counts by risk level, total crypto implementations and critical findings.",
 		Annotations: readOnly("Get risk summary"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in emptyInput) (*mcp.CallToolResult, any, error) {
-		return run(ctx, "assets.read", func() (any, error) {
+		return d.run(ctx, req, "assets.read", in, func() (any, error) {
 			return d.Client.Get(ctx, d.Client.InventoryURL, "/api/v1/inventory-service/risk/summary", nil)
 		})
 	})

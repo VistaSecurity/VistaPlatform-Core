@@ -111,7 +111,7 @@ The dashboard provides:
 ### Compliance Metrics
 
 The Compliance Score card shows:
-- **Overall Score**: Percentage of controls passing
+- **Overall Score**: Severity-weighted percentage of **assessed** controls passing (controls that could not be checked are excluded — see [Control results](../features/framework-transparency.md#control-results-pass-fail-and-not-assessed)). Shows **—** if nothing has been assessed yet.
 - **Active Findings**: Number of currently detected violations (red)
 - **Suppressed Findings**: Number of temporarily suppressed findings (yellow)
 - **New Findings**: Findings not yet processed (blue)
@@ -291,6 +291,16 @@ Cards for each ticket category (compliance, certificate, remediation, vulnerabil
 ## Posture: Algorithm Reference & Frameworks
 
 Open **Risk & Compliance → Posture**. Three sub-links appear under it: **Overview**, **Frameworks**, and **Algorithm Reference**. Overview is the standing/score view; the other two let you see exactly *why* the platform rates things the way it does — so a verdict is never a black box.
+
+### Reading a control result
+
+On the Overview control grid — and on each group in **Risk & Compliance → Findings → By Control** — every control shows one of three results:
+
+- **PASS** — the control was checked and nothing in scope violated it.
+- **FAIL** — the control was checked and something violated it. One violation is enough, whatever its severity.
+- **Not assessed** — the control wasn't checked, so no claim is made either way. Hover it to see why: no measurement rule configured, nothing in scope to check, or the check failed.
+
+Severity (Critical / High / Med / Low) rates *how much a failure matters* — it labels each finding and weights the score — but it never decides pass or fail. Scores cover assessed controls only and are shown with a coverage line such as *"8 of 11 controls assessed"*; a framework with nothing assessed shows **—**, never 100%. Full detail in [Viewing Frameworks, Controls & Measurements](../features/framework-transparency.md#control-results-pass-fail-and-not-assessed).
 
 ### Algorithm Reference
 
@@ -1090,7 +1100,7 @@ The Compliance Workspace provides an auditor-focused view of your compliance pos
 3. View compliance summary:
    - Overall compliance score
    - Key performance indicators (KPIs)
-   - Control families with pass/warn/fail counts
+   - Control families with pass / fail / not-assessed counts
    - Individual control status
 
 #### Framework and Assessment Management
@@ -1119,7 +1129,7 @@ The Compliance Workspace provides an auditor-focused view of your compliance pos
 
 **Family Cards:**
 - Click any family card to filter controls to that family
-- View pass/warn/fail counts for each family
+- View pass / fail / not-assessed counts for each family
 - See compliance trend sparklines (7-day trend) showing compliance health over time
 - Selected families are highlighted in blue
 - Use the family filter dropdown in the controls table header for quick filtering

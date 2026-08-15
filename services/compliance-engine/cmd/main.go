@@ -78,6 +78,10 @@ func main() {
 
 	// Initialize metrics service
 	metricsService := services.NewMetricsService()
+	// The evaluator counts not-assessed controls and failed measurement checks
+	// here: excluding a control from the score is only defensible while
+	// the exclusion is visible on /metrics.
+	ruleEvaluator.SetMetrics(metricsService)
 
 	// Initialize handlers
 	complianceHandlers := handlers.NewComplianceHandlers(complianceService, mappingsService)
@@ -127,7 +131,10 @@ func main() {
 
 	// Stateful alert engine: dedupe-on-raise, evidence chain,
 	// ack/snooze/resolve lifecycle, ticket bridge.
-	alertEngine := services.NewAlertEngineService(db, bypassDB, natsClient, ticketService)
+	// mTLS-aware: the engine's NATS-down HTTP fallback to notification-service
+	// must present a client certificate when the service mesh is on.
+	alertEngine := services.NewAlertEngineServiceWithConfig(db, bypassDB, natsClient, ticketService,
+		cfg.UseMTLS, cfg.ClientCertPath, cfg.ClientKeyPath, cfg.PlatformCACertPath)
 	alertHandlers := handlers.NewAlertHandlers(alertEngine)
 
 	// Alert catalog (§8.2): registry types + tenant settings + rung ladders.

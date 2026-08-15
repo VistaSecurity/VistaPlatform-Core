@@ -64,3 +64,41 @@ func TestConvertNotificationEventToRequest_NilTenantIDStaysNil(t *testing.T) {
 		t.Errorf("req.TenantID = %v, want nil for a platform-scoped event", req.TenantID)
 	}
 }
+
+// The platform sentinel is the tenant id platform-track alerts are RAISED
+// under (alerts.tenant_id is NOT NULL and RLS-partitioned), and the alert
+// engine carries it straight through onto notifications.send. Treating it as a
+// real tenant sent every service_down / metric_threshold / tenant_health_degraded
+// notification down the tenant path — where it matched no rules (the sentinel
+// intentionally has no tenants row) and its history INSERT violated
+// notification_history_tenant_id_fkey. The platform pack could never be
+// consulted. It must arrive as a PLATFORM notification.
+func TestConvertNotificationEventToRequest_PlatformSentinelBecomesPlatform(t *testing.T) {
+	ev := &events.NotificationEvent{
+		TenantID:    events.PlatformAlertTenantID,
+		AlertSource: "monitoring",
+		AlertType:   "service_down",
+		Severity:    "critical",
+		Message:     "Service auth-service is failing health checks.",
+	}
+
+	req := convertNotificationEventToRequest(ev)
+
+	if req.TenantID != nil {
+		t.Errorf("req.TenantID = %v, want nil — the platform sentinel is not a tenant, and routing it "+
+			"as one bypasses the platform notification rules entirely", req.TenantID)
+	}
+}
+
+// The other polarity: a real tenant id must NOT be swallowed by the sentinel
+// check, or every tenant notification would route to platform channels.
+func TestConvertNotificationEventToRequest_RealTenantIsNotTreatedAsPlatform(t *testing.T) {
+	tid := uuid.New()
+	ev := &events.NotificationEvent{TenantID: tid, AlertSource: "inventory-service", AlertType: "certificate_expiring"}
+
+	req := convertNotificationEventToRequest(ev)
+
+	if req.TenantID == nil || *req.TenantID != tid {
+		t.Errorf("req.TenantID = %v, want the real tenant %v", req.TenantID, tid)
+	}
+}

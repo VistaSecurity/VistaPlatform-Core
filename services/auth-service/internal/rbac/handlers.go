@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	audithelpers "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 )
 
 // RBACHandlers handles RBAC HTTP requests.
@@ -241,11 +242,104 @@ func (h *RBACHandlers) CheckPermission(c *gin.Context) {
 	c.JSON(http.StatusOK, PermissionCheckResponse{HasPermission: hasPermission})
 }
 
+// actorID returns the authenticated user's id (set by RequireAuth). The role
+// write paths need it for the escalation guard — a caller may only ADD
+// permissions they themselves hold.
+func actorID(c *gin.Context) (uuid.UUID, bool) {
+	id, err := uuid.Parse(c.GetString("userID"))
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
+		return uuid.Nil, false
+	}
+	return id, true
+}
+
+// writeRoleError maps the service's typed refusals onto HTTP. Every branch is a
+// deliberate, distinguishable answer so a UI can react (disable a checkbox, open
+// a reassignment picker) instead of showing a generic failure.
+//
+// Returns false when err is not one of the known refusals, leaving the caller to
+// emit its own 500.
+func writeRoleError(c *gin.Context, err error) bool {
+	var unknownPerms *ErrUnknownPermissions
+	var notHeld *ErrPermissionNotHeld
+	var inUse *ErrRoleInUse
+
+	switch {
+	case errors.Is(err, ErrRoleNotInTenant):
+		c.JSON(http.StatusNotFound, gin.H{"error": "Role not found", "code": "role_not_found"})
+	case errors.Is(err, ErrSystemRoleImmutable):
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "Built-in roles are read-only — their permissions are re-applied on every platform upgrade",
+			"code":  "system_role_immutable",
+		})
+	case errors.Is(err, ErrRoleNameConflict):
+		c.JSON(http.StatusConflict, gin.H{"error": "A role with that name already exists", "code": "role_name_conflict"})
+	case errors.Is(err, ErrInvalidRoleName):
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Role name must be lowercase letters, digits and underscores (2-50 chars)",
+			"code":  "invalid_role_name",
+		})
+	case errors.Is(err, ErrInvalidPermissionID):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "invalid_permission_id"})
+	case errors.Is(err, ErrReassignToSelf):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "reassign_to_self"})
+	case errors.Is(err, ErrRoleReferencedBySSO):
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "This role is used by SSO group mappings or as an SSO default role. Update the SSO configuration first.",
+			"code":  "role_referenced_by_sso",
+		})
+	case errors.As(err, &unknownPerms):
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "One or more permission ids are not in the tenant permission catalogue",
+			"code":  "unknown_permissions",
+		})
+	case errors.As(err, &notHeld):
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":               "You can only grant permissions you hold yourself",
+			"code":                "permission_not_held",
+			"missing_permissions": notHeld.Names,
+		})
+	case errors.As(err, &inUse):
+		c.JSON(http.StatusConflict, gin.H{
+			"error":      "This role is still assigned to users",
+			"code":       "role_in_use",
+			"user_count": inUse.UserCount,
+		})
+	default:
+		return false
+	}
+	return true
+}
+
+// logRoleAudit emits a tenant-role audit event. Best-effort, exactly like the
+// sibling user mutations in internal/api/tenant_user_mutations.go: an audit
+// transport failure must not fail the write the user just made.
+func logRoleAudit(c *gin.Context, eventType, action string, roleID uuid.UUID, roleName string, metadata map[string]interface{}) {
+	rawMW, exists := c.Get("audit_middleware")
+	if !exists {
+		return
+	}
+	mw, ok := rawMW.(*audithelpers.Middleware)
+	if !ok {
+		return
+	}
+	_ = audithelpers.LogWithContext(c.Request.Context(), mw,
+		eventType, "user", action,
+		"tenant_role", roleID.String(), roleName,
+		nil, metadata,
+		audithelpers.AuditMetadata{ResourceName: roleName})
+}
+
 // GetPermissionMatrix handles GET /tenant/:tenantId/roles/:roleId/matrix
 func (h *RBACHandlers) GetPermissionMatrix(c *gin.Context) {
 	// Cross-tenant guard: the :tenantId path must match the caller's
 	// token tenant — the same protection the sibling role handlers enforce.
 	tenantID, ok := requireTenantPathAccess(c)
+	if !ok {
+		return
+	}
+	actor, ok := actorID(c)
 	if !ok {
 		return
 	}
@@ -256,10 +350,9 @@ func (h *RBACHandlers) GetPermissionMatrix(c *gin.Context) {
 		return
 	}
 
-	matrix, err := h.rbacService.GetPermissionMatrix(tenantID, roleID)
+	matrix, err := h.rbacService.GetPermissionMatrix(tenantID, roleID, actor)
 	if err != nil {
-		if errors.Is(err, ErrRoleNotInTenant) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Role not found"})
+		if writeRoleError(c, err) {
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get permission matrix"})
@@ -274,6 +367,10 @@ func (h *RBACHandlers) UpdateRolePermissions(c *gin.Context) {
 	// Cross-tenant guard: the :tenantId path must match the caller's
 	// token tenant before any role rewrite.
 	tenantID, ok := requireTenantPathAccess(c)
+	if !ok {
+		return
+	}
+	actor, ok := actorID(c)
 	if !ok {
 		return
 	}
@@ -306,21 +403,114 @@ func (h *RBACHandlers) UpdateRolePermissions(c *gin.Context) {
 		permissionUUIDs = append(permissionUUIDs, id)
 	}
 
-	if err := h.rbacService.UpdateRolePermissions(tenantID, roleID, permissionUUIDs); err != nil {
-		if errors.Is(err, ErrRoleNotInTenant) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Role not found"})
+	if err := h.rbacService.UpdateRolePermissions(tenantID, roleID, actor, permissionUUIDs); err != nil {
+		if writeRoleError(c, err) {
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update role permissions"})
 		return
 	}
 
+	logRoleAudit(c, "tenant_role.permissions_set", "set_permissions", roleID, "", map[string]interface{}{
+		"permission_ids":   req.PermissionIDs,
+		"permission_count": len(permissionUUIDs),
+	})
+
 	c.JSON(http.StatusOK, gin.H{"role_id": roleID, "updated": len(permissionUUIDs)})
+}
+
+// CreateTenantRole handles POST /tenant/:tenantId/roles — creates a custom role
+// (is_system_role = false) with an optional starting permission set.
+func (h *RBACHandlers) CreateTenantRole(c *gin.Context) {
+	tenantID, ok := requireTenantPathAccess(c)
+	if !ok {
+		return
+	}
+	actor, ok := actorID(c)
+	if !ok {
+		return
+	}
+
+	var req CreateRoleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	role, err := h.rbacService.CreateTenantRole(tenantID, actor, req)
+	if err != nil {
+		if writeRoleError(c, err) {
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create role"})
+		return
+	}
+
+	logRoleAudit(c, "tenant_role.created", "create", role.ID, role.Name, map[string]interface{}{
+		"name":             role.Name,
+		"display_name":     role.DisplayName,
+		"permission_count": role.PermissionCount,
+	})
+
+	c.JSON(http.StatusCreated, gin.H{"role": role})
+}
+
+// DeleteTenantRole handles DELETE /tenant/:tenantId/roles/:roleId.
+//
+// Holders block the delete (409 `role_in_use`) unless `?reassign_to=<roleId>`
+// names where they should go. See DeleteTenantRole in rbac.go for why the
+// reassignment is opt-in rather than automatic.
+func (h *RBACHandlers) DeleteTenantRole(c *gin.Context) {
+	tenantID, ok := requireTenantPathAccess(c)
+	if !ok {
+		return
+	}
+
+	roleID, err := uuid.Parse(c.Param("roleId"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid role ID"})
+		return
+	}
+
+	var reassignTo *uuid.UUID
+	if raw := c.Query("reassign_to"); raw != "" {
+		parsed, err := uuid.Parse(raw)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid reassign_to role ID"})
+			return
+		}
+		reassignTo = &parsed
+	}
+
+	result, err := h.rbacService.DeleteTenantRole(tenantID, roleID, reassignTo)
+	if err != nil {
+		if writeRoleError(c, err) {
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete role"})
+		return
+	}
+
+	logRoleAudit(c, "tenant_role.deleted", "delete", roleID, result.ReassignedToName, map[string]interface{}{
+		"reassigned_users":      result.ReassignedUsers,
+		"reassigned_to_role_id": result.ReassignedToID,
+	})
+
+	c.JSON(http.StatusOK, gin.H{
+		"role_id":               result.RoleID,
+		"reassigned_users":      result.ReassignedUsers,
+		"reassigned_to_role_id": result.ReassignedToID,
+		"message":               "Role deleted",
+	})
 }
 
 // AssignRole handles POST /tenant/:tenantId/users/:userId/roles
 func (h *RBACHandlers) AssignRole(c *gin.Context) {
 	tenantID, ok := requireTenantPathAccess(c)
+	if !ok {
+		return
+	}
+	actor, ok := actorID(c)
 	if !ok {
 		return
 	}
@@ -338,7 +528,10 @@ func (h *RBACHandlers) AssignRole(c *gin.Context) {
 		return
 	}
 
-	if err := h.rbacService.AssignUserRole(tenantID, userID, req.RoleID); err != nil {
+	if err := h.rbacService.AssignUserRole(tenantID, userID, req.RoleID, actor); err != nil {
+		if writeRoleError(c, err) {
+			return
+		}
 		msg := err.Error()
 		if strings.Contains(msg, "not found") {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Role or user not found"})

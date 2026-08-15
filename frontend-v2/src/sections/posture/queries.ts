@@ -63,14 +63,26 @@ export interface AvailableFrameworkRow {
   };
   is_licensed: boolean;
   is_platform_default: boolean;
+  /**
+   * Severity-weighted score over the ASSESSED controls only. Null until the
+   * engine has produced a rollup, AND null once it has if NO control could be
+   * assessed — rendered "—", never 0 and never 100.
+   */
   preview_score?: number | null;
   controls_passing?: number | null;
+  /** Controls with at least one ACTIVE, non-suppressed finding of ANY severity. */
   controls_failing?: number | null;
   /**
-   * Controls with at least one ACTIVE, non-suppressed finding of any severity.
-   * controls_failing is severity-weighted (a control whose worst finding is Low
-   * scores as passing), so this raw count can be higher — the same "has an open
-   * exposure" definition /findings/by-control uses (#H-4/#M-15).
+   * Controls excluded from the score because they could not be evaluated — no
+   * measurement rule configured, nothing in scope, or the check failed.
+   * passing + failing is the assessed subset behind the coverage line.
+   */
+  controls_not_assessed?: number | null;
+  /**
+   * Controls with at least one ACTIVE, non-suppressed finding of any severity —
+   * the same "has an open exposure" definition /findings/by-control uses. Now
+   * equal to controls_failing by construction; the two disagreed only while
+   * status was derived from severity.
    */
   open_findings_controls?: number | null;
 }

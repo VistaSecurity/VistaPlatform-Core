@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -19,14 +18,13 @@ import (
 	"github.com/vistasecurity/vistaplatform/services/resource-tracker-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/services/resource-tracker-service/internal/handlers"
 	"github.com/vistasecurity/vistaplatform/services/resource-tracker-service/internal/jobs"
-	rtmiddleware "github.com/vistasecurity/vistaplatform/services/resource-tracker-service/internal/middleware"
 	"github.com/vistasecurity/vistaplatform/services/resource-tracker-service/internal/repository"
 	"github.com/vistasecurity/vistaplatform/services/resource-tracker-service/internal/service"
 	"github.com/vistasecurity/vistaplatform/services/resource-tracker-service/internal/subscribers"
-	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
+	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 )
 
@@ -157,77 +155,18 @@ func main() {
 	// Initialize handlers
 	resourceHandlers := handlers.NewResourceHandlers(resourceService, awsCostServiceBusiness, logger)
 
-	// Initialize router
-	router := gin.New()
-	router.Use(gin.Logger())
-	router.Use(gin.Recovery())
+	// Audit logging. Which surfaces are audited (and which one is not) is
+	// decided in audit.go — see attachAuditLogging.
+	auditMiddleware := auditmiddleware.NewMiddleware(auditmiddleware.ServiceConfig(
+		"resource-tracker-service",
+		cfg.UseMTLS,
+		cfg.ClientCertPath,
+		cfg.ClientKeyPath,
+		cfg.PlatformCACertPath,
+	))
+	defer auditMiddleware.Stop()
 
-	// Add CORS middleware with origin checking
-	corsOrigins := sharedconfig.GetEnv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5174,http://localhost:3006")
-	allowedOrigins := make(map[string]bool)
-	for _, origin := range strings.Split(corsOrigins, ",") {
-		allowedOrigins[strings.TrimSpace(origin)] = true
-	}
-	router.Use(func(c *gin.Context) {
-		origin := c.GetHeader("Origin")
-		if allowedOrigins[origin] {
-			c.Header("Access-Control-Allow-Origin", origin)
-			c.Header("Access-Control-Allow-Credentials", "true")
-		}
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization")
-
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
-			return
-		}
-
-		c.Next()
-	})
-
-	// Health check endpoint
-	router.GET("/health", resourceHandlers.HealthCheck)
-
-	// Internal routes (HMAC-only, for service-to-service metrics ingestion)
-	internal := router.Group("/api/v1/resource-tracker")
-	internal.Use(rtmiddleware.RequireInternalAuth(cfg.InternalAuthSecret))
-	{
-		internal.POST("/metrics", resourceHandlers.RecordResourceMetrics)
-	}
-
-	// Authenticated API routes (JWT auth required)
-	api := router.Group("/api/v1/resource-tracker")
-	api.Use(rtmiddleware.RequireAuth(cfg.JWTSecret, cfg.InternalAuthSecret))
-	{
-		// Tenant-specific endpoints
-		api.GET("/tenants/:tenantId/usage", resourceHandlers.GetTenantResourceUsage)
-		api.GET("/tenants/:tenantId/trend", resourceHandlers.GetTenantResourceTrend)
-		api.GET("/tenants/:tenantId/cost-trend", resourceHandlers.GetTenantCostTrend)
-		api.GET("/tenants/:tenantId/cost-analysis", resourceHandlers.GenerateCostAnalysis)
-
-		// Platform-wide endpoints (accessible by platform admins only via handler checks)
-		api.GET("/tenants/usage", resourceHandlers.GetAllTenantsResourceUsage)
-		api.GET("/stats", resourceHandlers.GetResourceUsageStats)
-	}
-
-	// Resource-tracker-service namespace routes (for gateway routing)
-	// Internal endpoint for tenant-health-service (HMAC auth)
-	serviceInternal := router.Group("/api/v1/resource-tracker-service")
-	serviceInternal.Use(rtmiddleware.RequireAuth(cfg.JWTSecret, cfg.InternalAuthSecret))
-	{
-		// Tenant resource health endpoints - accessible via internal calls or JWT
-		serviceInternal.GET("/tenant/:id/resource-summary", resourceHandlers.GetTenantResourceHealthSummary)
-
-		// Platform-wide endpoints - MUST come before parameterized routes to avoid route conflicts
-		serviceInternal.GET("/stats", resourceHandlers.GetResourceUsageStats)
-		serviceInternal.GET("/tenants/usage", resourceHandlers.GetAllTenantsResourceUsage)
-
-		// Tenant-specific endpoints - Exposed through gateway (after non-parameterized routes)
-		serviceInternal.GET("/tenants/:tenantId/usage", resourceHandlers.GetTenantResourceUsage)
-		serviceInternal.GET("/tenants/:tenantId/trend", resourceHandlers.GetTenantResourceTrend)
-		serviceInternal.GET("/tenants/:tenantId/cost-trend", resourceHandlers.GetTenantCostTrend)
-		serviceInternal.GET("/tenants/:tenantId/cost-analysis", resourceHandlers.GenerateCostAnalysis)
-	}
+	router := newRouter(cfg, resourceHandlers, auditMiddleware)
 
 	// Initialize NATS subscriber for metrics ingestion (replaces HTTP fallback)
 	var metricsSubscriber *subscribers.MetricsSubscriber

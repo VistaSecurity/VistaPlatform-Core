@@ -136,6 +136,11 @@ func Login(db *sql.DB, jwtSecret string, refreshTokenService *auth.PlatformRefre
 	}
 }
 
+// platformRefreshCookieMaxAge is the lifetime of the platform refresh-token
+// cookie, and hence of the whole platform-admin session. platform_csrf_token
+// shares it — see setPlatformAuthCookies.
+const platformRefreshCookieMaxAge = 7 * 24 * 3600
+
 // setPlatformAuthCookies sets platform_access_token (httpOnly), optional platform_refresh_token
 // (httpOnly), and platform_csrf_token. Using the "platform_" prefix keeps these cookies distinct
 // from the tenant auth-service cookies (access_token / refresh_token / csrf_token) which share
@@ -170,7 +175,7 @@ func setPlatformAuthCookies(c *gin.Context, accessToken string, maxAgeSeconds in
 			Value:    refreshToken,
 			Domain:   cookieDomain,
 			Path:     "/",
-			MaxAge:   7 * 24 * 3600,
+			MaxAge:   platformRefreshCookieMaxAge,
 			HttpOnly: true,
 			Secure:   secure,
 			SameSite: http.SameSiteStrictMode,
@@ -179,13 +184,20 @@ func setPlatformAuthCookies(c *gin.Context, accessToken string, maxAgeSeconds in
 
 	// Session-bound CSRF token: HMAC(access-token jti), so it can't be
 	// replayed across sessions.
+	//
+	// MaxAge tracks the REFRESH token, not the access token: admin-ui reads this
+	// cookie's presence as "a session exists" and only then attempts a silent
+	// refresh on a 401. Tying it to the access token made the signal disappear
+	// exactly when the refresh was due, stranding the user on error cards with no
+	// redirect to sign-in. The cookie authorizes nothing on its own — it is
+	// validated against the current access token's jti/csrf claim.
 	if csrfValue := sharedmw.CSRFTokenForAccessToken(jwtSecret, accessToken); csrfValue != "" {
 		http.SetCookie(c.Writer, &http.Cookie{
 			Name:     "platform_csrf_token",
 			Value:    csrfValue,
 			Domain:   cookieDomain,
 			Path:     "/",
-			MaxAge:   maxAgeSeconds,
+			MaxAge:   platformRefreshCookieMaxAge,
 			HttpOnly: false,
 			Secure:   secure,
 			SameSite: http.SameSiteStrictMode,

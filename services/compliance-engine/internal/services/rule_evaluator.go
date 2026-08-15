@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -20,6 +21,13 @@ import (
 type RuleEvaluator struct {
 	db                   *sqlx.DB
 	measurementExtractor *MeasurementExtractor
+	// metrics is optional (nil in tests and in the single-control entry points
+	// wired without it). It is the counter home for not-assessed controls and
+	// measurement-extraction errors: MetricsService already backs the service's
+	// /metrics endpoint and already carries non-NATS counters (finding upserts),
+	// so an operator can see "this tenant's controls stopped being assessed"
+	// without reading logs.
+	metrics *MetricsService
 }
 
 // NewRuleEvaluator creates a new rule evaluator
@@ -30,14 +38,52 @@ func NewRuleEvaluator(db *sqlx.DB, measurementExtractor *MeasurementExtractor) *
 	}
 }
 
+// SetMetrics attaches the process metrics sink. A setter rather than a
+// constructor argument because NewRuleEvaluator has call sites in three services'
+// worth of tests, and the evaluator must keep working (silently, not crashing)
+// when no sink is attached.
+func (s *RuleEvaluator) SetMetrics(m *MetricsService) { s.metrics = m }
+
+func (s *RuleEvaluator) recordNotAssessed(reason string) {
+	if s.metrics != nil {
+		s.metrics.RecordControlNotAssessed(reason)
+	}
+}
+
 // EvaluationResult represents the result of evaluating a control
 type EvaluationResult struct {
 	ControlID uuid.UUID
-	Status    string // pass, warn, fail
+	Status    string // pass, fail, not_assessed
 	Severity  string // Low, Med, High, Critical
 	Findings  []models.ComplianceFinding
-	Score     int // 0-100
-	Rationale string
+	// Score is nil when the control was NOT assessed. A not-assessed control has
+	// no score — it used to report 100, which is the loudest possible way of
+	// saying "we did not look".
+	Score *int
+	// NotAssessedReason is one of reasonNoMeasurements / reasonNothingInScope /
+	// reasonCheckError, and empty otherwise.
+	NotAssessedReason string
+	Rationale         string
+}
+
+// notAssessed builds the result for a control that could not be evaluated. It is
+// deliberately the ONLY way this file produces a not-assessed result, so every
+// such control is counted where an operator can see it.
+func (s *RuleEvaluator) notAssessed(controlID uuid.UUID, baselineSeverity, reason, rationale string) *EvaluationResult {
+	s.recordNotAssessed(reason)
+	severity := baselineSeverity
+	if severity == "" {
+		severity = "Low"
+	}
+	return &EvaluationResult{
+		ControlID:         controlID,
+		Status:            strings.ToLower(statusNotAssessed),
+		Severity:          severity,
+		Findings:          []models.ComplianceFinding{},
+		Score:             nil,
+		NotAssessedReason: reason,
+		Rationale:         rationale,
+	}
 }
 
 // EvaluateControl evaluates a control against tenant assets using its measurement mappings.
@@ -149,21 +195,18 @@ func (s *RuleEvaluator) evaluateControlCached(tenantID, controlID uuid.UUID, fra
 	}
 
 	if len(measurements) == 0 {
-		// No measurements configured - control passes by default
-		return &EvaluationResult{
-			ControlID: controlID,
-			Status:    "pass",
-			Severity:  "Low",
-			Findings:  []models.ComplianceFinding{},
-			Score:     100,
-			Rationale: "No measurement mappings configured",
-		}, nil
+		//: a control with nothing configured to check has NOT been
+		// assessed. It used to return pass/100, which made a half-authored
+		// framework indistinguishable from a clean one.
+		return s.notAssessed(controlID, baselineSeverity, reasonNoMeasurements,
+			"No measurement mappings configured"), nil
 	}
 
 	var allFindings []models.ComplianceFinding
 	var maxSeverity = "Low"
 	var totalWeight int
 	var passedWeight int
+	var checkErrors int
 
 	// Evaluate each measurement
 	for _, measurement := range measurements {
@@ -171,7 +214,14 @@ func (s *RuleEvaluator) evaluateControlCached(tenantID, controlID uuid.UUID, fra
 		measurementType, ok := typeCache[measurement.MeasurementTypeID]
 		if !ok {
 			if err := s.db.Get(&measurementType, "SELECT code, name, data_type FROM measurement_types WHERE id = $1", measurement.MeasurementTypeID); err != nil {
-				continue // Skip if measurement type not found
+				//: an unreadable measurement type is a failed check, not a
+				// pass. Log AND count it — "not assessed" is only defensible
+				// while the error is observable.
+				checkErrors++
+				s.recordExtractionError()
+				log.Printf("[RuleEvaluator] WARN: control %s measurement %s: measurement type %s unreadable: %v",
+					controlID, measurement.ID, measurement.MeasurementTypeID, err)
+				continue
 			}
 			typeCache[measurement.MeasurementTypeID] = measurementType
 		}
@@ -179,7 +229,11 @@ func (s *RuleEvaluator) evaluateControlCached(tenantID, controlID uuid.UUID, fra
 		// Extract measurements from inventory (memoized by code across the batch)
 		measurementValues, err := getValues(measurementType.Code)
 		if err != nil {
-			continue // Skip if extraction fails
+			checkErrors++
+			s.recordExtractionError()
+			log.Printf("[RuleEvaluator] WARN: control %s measurement %s: extraction of %q failed: %v",
+				controlID, measurement.ID, measurementType.Code, err)
+			continue
 		}
 
 		// Evaluate each measurement value against the rule
@@ -209,39 +263,58 @@ func (s *RuleEvaluator) evaluateControlCached(tenantID, controlID uuid.UUID, fra
 
 	// Calculate status and score.
 	//
-	// The status mapping is NOT re-implemented here: it delegates to
-	// statusForWorstSeverity, the same function the materialized path uses
-	// (loadControlStatuses). Before CMP-7 this branch mapped *any* finding to
-	// at-best WARN, while the materialized path mapped a worst-Low control to
-	// PASS — and since only PASS earns score weight (frameworkScore), the same
-	// tenant+framework read 100 from the preview/materialized path and 0 from
-	// the live path. cert-expiry-90-day, whose findings are all Low, showed
-	// exactly that split.
+	//: status is decided by whether the control was VIOLATED, not by how
+	// severe the violation is rated. Severity remains the scoring weight
+	// (severityToWeight) and nothing else. The previous mapping ran the honest
+	// `len(allFindings) > 0` signal through the control's own severity and threw
+	// it away: a violated Low-baseline control reported PASS, and a Med one
+	// reported WARN, which earned no weight but read as "not failing".
+	//
+	// A control with measurements but no values evaluated (totalWeight == 0) was
+	// NOT assessed: either its extractions errored, or nothing in the tenant's
+	// inventory is in scope for it. Both used to score 100.
 	//
 	// EvaluationResult.Status is lowercase by long-standing contract (callers
-	// ToUpper it — see evaluation_service.go); statusForWorstSeverity returns
-	// the UPPERCASE constants, so it is lowered here.
-	worstSeverity := ""
-	if len(allFindings) > 0 {
-		worstSeverity = maxSeverity
+	// ToUpper it — see evaluation_service.go).
+	if totalWeight == 0 {
+		reason := reasonNothingInScope
+		rationale := fmt.Sprintf("Evaluated %d measurement(s); no values in scope to check", len(measurements))
+		if checkErrors > 0 {
+			reason = reasonCheckError
+			rationale = fmt.Sprintf("Evaluated %d measurement(s); %d check(s) failed", len(measurements), checkErrors)
+		}
+		return s.notAssessed(controlID, baselineSeverity, reason, rationale), nil
 	}
-	status := strings.ToLower(statusForWorstSeverity(worstSeverity))
 
-	score := 100
-	if totalWeight > 0 {
-		score = (passedWeight * 100) / totalWeight
-	}
+	status := strings.ToLower(statusForFindings(len(allFindings) > 0))
+	score := (passedWeight * 100) / totalWeight
 
 	rationale := fmt.Sprintf("Evaluated %d measurement(s), found %d violation(s)", len(measurements), len(allFindings))
+	if checkErrors > 0 {
+		// Partially assessed: some measurements produced values, others errored.
+		// The control still has a verdict, but say so rather than implying the
+		// whole control was checked.
+		rationale = fmt.Sprintf("%s; %d check(s) failed", rationale, checkErrors)
+	}
 
 	return &EvaluationResult{
 		ControlID: controlID,
 		Status:    status,
 		Severity:  maxSeverity,
 		Findings:  allFindings,
-		Score:     score,
+		Score:     &score,
 		Rationale: rationale,
 	}, nil
+}
+
+// recordExtractionError counts a failed measurement check. Paired with the log
+// line at every call site:'s D5 accepts "an error is not a failure" only
+// while the error is both logged and counted — the bare `continue` this replaces
+// discarded it entirely.
+func (s *RuleEvaluator) recordExtractionError() {
+	if s.metrics != nil {
+		s.metrics.RecordMeasurementExtractionError()
+	}
 }
 
 // getControlMeasurements gets all measurement mappings for a control, with the
@@ -290,18 +363,28 @@ func (s *RuleEvaluator) getControlMeasurements(tenantID, controlID uuid.UUID, fr
 			var predicateJSON []byte
 			var overridePredicateJSON []byte
 			var overrideSeverity sql.NullString
+			// cm.severity_override is NULLable and means "no per-measurement
+			// re-rating" — the overwhelmingly common case. Scanning it into
+			// models.ControlMeasurement's plain string errored on every such
+			// row, and the `continue` below then dropped the measurement
+			// entirely: the control silently had nothing to check. Same
+			// swallow-the-error shape is about, one layer down.
+			var severityOverride sql.NullString
 
 			if err := rows.Scan(
 				&m.ID, &m.ControlID, &m.FrameworkType, &m.MeasurementTypeID,
-				&m.RuleType, &predicateJSON, &m.SeverityOverride, &m.Weight,
+				&m.RuleType, &predicateJSON, &severityOverride, &m.Weight,
 				&m.CreatedAt, &m.UpdatedAt,
 				&overridePredicateJSON, &overrideSeverity,
 			); err != nil {
+				log.Printf("[RuleEvaluator] WARN: control %s: unreadable control_measurements row, measurement skipped: %v", controlID, err)
 				continue
 			}
+			m.SeverityOverride = severityOverride.String
 
 			// Unmarshal predicate
 			if err := json.Unmarshal(predicateJSON, &m.Predicate); err != nil {
+				log.Printf("[RuleEvaluator] WARN: control %s measurement %s: undecodable predicate, measurement skipped: %v", controlID, m.ID, err)
 				continue
 			}
 

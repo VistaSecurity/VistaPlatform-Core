@@ -69,6 +69,14 @@ type evaluationStore interface {
 	ResolveControlID(controlIDStr, frameworkIDStr string) (uuid.UUID, error)
 }
 
+func writeFindingNotFound(c *gin.Context, err error) bool {
+	if !errors.Is(err, services.ErrFindingNotFound) {
+		return false
+	}
+	c.JSON(http.StatusNotFound, gin.H{"error": "Finding not found"})
+	return true
+}
+
 // WorkspaceHandlers contains workspace-related handlers
 type WorkspaceHandlers struct {
 	evaluationService evaluationStore
@@ -726,6 +734,9 @@ func (h *WorkspaceHandlers) AssignFindingOwner(c *gin.Context) {
 	// Assign finding
 	err = h.findingsService.AssignFindingOwner(tenantUUID, findingID, assignedToUUID, userUUID, input.Notes)
 	if err != nil {
+		if writeFindingNotFound(c, err) {
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to assign finding owner",
 		})
@@ -754,6 +765,9 @@ func (h *WorkspaceHandlers) UnassignFindingOwner(c *gin.Context) {
 	// Unassign finding
 	err = h.findingsService.UnassignFindingOwner(tenantUUID, findingID)
 	if err != nil {
+		if writeFindingNotFound(c, err) {
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to unassign finding owner",
 		})
@@ -791,6 +805,9 @@ func (h *WorkspaceHandlers) GetEvidenceId(c *gin.Context) {
 	// Get evidence ID using service method
 	evidenceID, evidenceRef, err := h.findingsService.GetEvidenceID(tenantUUID, findingID)
 	if err != nil {
+		if writeFindingNotFound(c, err) {
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to get evidence ID",
 		})
@@ -859,6 +876,9 @@ func (h *WorkspaceHandlers) UpdateFindingWorkflowStatus(c *gin.Context) {
 	// Update workflow status
 	err = h.findingsService.UpdateWorkflowStatus(tenantUUID, findingID, userID, req.WorkflowStatus, req.SuppressionReason, suppressedUntil)
 	if err != nil {
+		if writeFindingNotFound(c, err) {
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to update workflow status",
 		})
@@ -868,6 +888,9 @@ func (h *WorkspaceHandlers) UpdateFindingWorkflowStatus(c *gin.Context) {
 	// Get updated finding
 	finding, err := h.findingsService.GetFinding(tenantUUID, findingID)
 	if err != nil {
+		if writeFindingNotFound(c, err) {
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to get updated finding",
 		})
@@ -896,6 +919,9 @@ func (h *WorkspaceHandlers) GetFindingHistory(c *gin.Context) {
 	// Get history
 	history, err := h.findingsService.GetFindingHistory(tenantUUID, findingID)
 	if err != nil {
+		if writeFindingNotFound(c, err) {
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to get finding history",
 		})

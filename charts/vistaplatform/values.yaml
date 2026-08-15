@@ -527,6 +527,14 @@ backends:
     resources:
       requests: {cpu: 100m, memory: 128Mi}
       limits: {cpu: 300m, memory: 256Mi}
+    extraEnv:
+      # Delivery retry kill switch. Default on; set to "false" to disable BOTH
+      # the enqueue-on-failure and the draining worker, degrading to a single
+      # delivery attempt per channel with no second chance.
+      - {name: NOTIFICATION_DELIVERY_RETRY_ENABLED, value: "true"}
+      # Attempts per (notification, channel) before the delivery is recorded as
+      # a terminal failure. Backoff is 1m, 2m, 4m, … capped at 1h.
+      - {name: NOTIFICATION_DELIVERY_MAX_ATTEMPTS, value: "5"}
     image:
       digest: ""
 

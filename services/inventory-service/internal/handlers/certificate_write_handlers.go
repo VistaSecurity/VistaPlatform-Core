@@ -1,9 +1,9 @@
 package handlers
 
-// Certificate write + search HTTP handlers (). The web-ui Certificate
-// lens (web-ui/src/services/certificates-api.ts) calls create / upload / update
-// / history / search / by-issuer, but those routes were never registered even
-// though CertificateService.CreateCertificate / UpdateCertificate /
+// Certificate write + search HTTP handlers (). The tenant UI's
+// Certificate lens (frontend-v2/src/sections/inventory/) calls create / upload
+// / update / history / search / by-issuer, but those routes were never
+// registered even though CertificateService.CreateCertificate / UpdateCertificate /
 // GetCertificateHistory already existed. These thin handlers wire them up.
 //
 // search + by-issuer reuse GetCertificates (CertificateFilters carries Search +

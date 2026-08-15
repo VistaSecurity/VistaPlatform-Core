@@ -370,16 +370,21 @@ func (s *FrameworkLicenseService) GetAvailableFrameworks(tenantID uuid.UUID) ([]
 
 	// Materialized score rollups (ADR-0014) — present for every published framework
 	// the evaluation engine has scored, activated or not, so cards can preview a score.
+	// Score is NULLable: a framework with no assessed control has no preview
+	// score, and the card shows "—". Scanning it into a plain int would
+	// fail outright, and defaulting it to 0 or 100 would invent a posture claim
+	// on the very screen a prospect uses to compare frameworks (spec D4).
 	type scoreRow struct {
 		FrameworkID uuid.UUID `db:"platform_framework_id"`
-		Score       int       `db:"score"`
+		Score       *int      `db:"score"`
 		Passing     int       `db:"controls_passing"`
 		Failing     int       `db:"controls_failing"`
+		NotAssessed int       `db:"controls_not_assessed"`
 	}
 	scoreMap := make(map[uuid.UUID]scoreRow)
 	var scores []scoreRow
 	err = tx.Select(&scores, `
-		SELECT platform_framework_id, score, controls_passing, controls_failing
+		SELECT platform_framework_id, score, controls_passing, controls_failing, controls_not_assessed
 		FROM tenant_framework_scores
 		WHERE tenant_id = $1
 	`, tenantID)
@@ -455,10 +460,11 @@ func (s *FrameworkLicenseService) GetAvailableFrameworks(tenantID uuid.UUID) ([]
 			IsPlatformDefault: framework.IsPlatformDefault,
 		}
 		if row, ok := scoreMap[framework.ID]; ok {
-			score, passing, failing := row.Score, row.Passing, row.Failing
-			entry.PreviewScore = &score
+			passing, failing, notAssessed := row.Passing, row.Failing, row.NotAssessed
+			entry.PreviewScore = row.Score // nil when nothing was assessed
 			entry.ControlsPassing = &passing
 			entry.ControlsFailing = &failing
+			entry.ControlsNotAssessed = &notAssessed
 		}
 		if count, ok := openFindingsMap[framework.ID]; ok {
 			c := count

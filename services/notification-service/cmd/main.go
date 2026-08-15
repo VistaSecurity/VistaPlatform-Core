@@ -99,6 +99,34 @@ func main() {
 	}()
 	log.Println("Digest flush worker started (1m interval)")
 
+	// Delivery retry worker: re-attempts channel sends that failed, with
+	// exponential backoff and a bounded attempt count, scoped to the individual
+	// failed channel. Kill-switch NOTIFICATION_DELIVERY_RETRY_ENABLED=false
+	// disables both enqueuing and this drain (house pattern, matching
+	// compliance-engine's COMPLIANCE_RECONCILE_WORKER_ENABLED).
+	retryStop := make(chan struct{})
+	if services.DeliveryRetryEnabled() {
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-retryStop:
+					return
+				case <-ticker.C:
+					if n, err := notificationService.RetryDueDeliveries(context.Background()); err != nil {
+						log.Printf("delivery retry error: %v", err)
+					} else if n > 0 {
+						log.Printf("delivery retry redelivered %d notification(s)", n)
+					}
+				}
+			}
+		}()
+		log.Printf("Delivery retry worker started (30s interval, max %d attempts)", services.MaxDeliveryAttempts())
+	} else {
+		log.Println("Delivery retry DISABLED (NOTIFICATION_DELIVERY_RETRY_ENABLED=false); a failed channel send is attempted once and lost")
+	}
+
 	// Retention cleanup worker: age out delivery logs (notification_history +
 	// terminal delivery-queue rows) daily. Disabled if retention <= 0.
 	retentionStop := make(chan struct{})
@@ -145,6 +173,7 @@ func main() {
 	log.Println("Shutting down notification service...")
 
 	close(digestStop)
+	close(retryStop)
 	close(retentionStop)
 
 	// Stop NATS subscribers

@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/monitoring-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/events"
 )
 
 // fakeAlertStore is an in-memory stand-in for the monitoring_alert_history
@@ -242,3 +243,174 @@ var errRecordFailed = &recordError{}
 type recordError struct{}
 
 func (*recordError) Error() string { return "record failed" }
+
+// --- stateful alert rail (alerts.raise / alerts.resolve) ---------------------
+
+// railSinks attaches capturing rail sinks to an evaluator built by
+// newTestEvaluator, mimicking a reachable NATS.
+func railSinks(ae *AlertEvaluator) (*[]events.AlertRaiseEvent, *[]events.AlertResolveEvent) {
+	raises := []events.AlertRaiseEvent{}
+	resolves := []events.AlertResolveEvent{}
+	ae.raise = func(ev events.AlertRaiseEvent) error {
+		raises = append(raises, ev)
+		return nil
+	}
+	ae.resolve = func(ev events.AlertResolveEvent) error {
+		resolves = append(resolves, ev)
+		return nil
+	}
+	return &raises, &resolves
+}
+
+// TestAlertEvaluator_RaisesOnTheAlertRail is the regression test for the
+// orphaned-type defect: metric_threshold was `status: live` in the registry
+// while monitoring-service only wrote monitoring_alert_history and published a
+// notification, so a breached threshold never became a row in `alerts` and never
+// appeared at Remediation → Alerts.
+func TestAlertEvaluator_RaisesOnTheAlertRail(t *testing.T) {
+	th := latencyThreshold()
+	store := &fakeAlertStore{thresholds: []models.AlertThreshold{th}}
+	ae, notifications := newTestEvaluator(store, &fakeMetrics{p95: 300})
+	raises, _ := railSinks(ae)
+
+	if err := ae.evaluateThreshold(context.Background(), th); err != nil {
+		t.Fatalf("evaluateThreshold = %v, want nil", err)
+	}
+
+	if len(*raises) != 1 {
+		t.Fatalf("published %d raises, want 1", len(*raises))
+	}
+	ev := (*raises)[0]
+	if ev.AlertType != "metric_threshold" {
+		t.Errorf("AlertType = %q, want %q", ev.AlertType, "metric_threshold")
+	}
+	if ev.AlertType == th.ThresholdName {
+		t.Errorf("AlertType is the operator-authored threshold name, want the registry id")
+	}
+	if ev.TenantID != events.PlatformAlertTenantID {
+		t.Errorf("TenantID = %s, want the platform sentinel %s", ev.TenantID, events.PlatformAlertTenantID)
+	}
+	if ev.Source != "monitoring" {
+		t.Errorf("Source = %q, want %q", ev.Source, "monitoring")
+	}
+	if ev.SubjectType != "service" {
+		t.Errorf("SubjectType = %q, want %q (registry subject_type)", ev.SubjectType, "service")
+	}
+	if ev.SubjectID == nil || *ev.SubjectID != th.ID {
+		t.Errorf("SubjectID = %v, want the threshold id %s", ev.SubjectID, th.ID)
+	}
+	if ev.Severity != "high" {
+		t.Errorf("Severity = %q, want %q", ev.Severity, "high")
+	}
+	// The alert engine notifies on open; publishing both rails would notify twice.
+	if *notifications != 0 {
+		t.Errorf("sent %d direct notifications alongside the raise, want 0", *notifications)
+	}
+}
+
+// TestAlertEvaluator_RailSubjectIsStableWhileFiring — the engine dedupes on
+// (tenant, alert_type, subject_id), so the subject must not vary per cycle.
+func TestAlertEvaluator_RailSubjectIsStableWhileFiring(t *testing.T) {
+	th := latencyThreshold()
+	store := &fakeAlertStore{thresholds: []models.AlertThreshold{th}}
+	ae, _ := newTestEvaluator(store, &fakeMetrics{p95: 300})
+	raises, _ := railSinks(ae)
+
+	for i := 0; i < 5; i++ {
+		if err := ae.evaluateThreshold(context.Background(), th); err != nil {
+			t.Fatalf("cycle %d: %v", i, err)
+		}
+	}
+	if len(*raises) != 1 {
+		t.Fatalf("published %d raises over 5 cycles, want 1", len(*raises))
+	}
+	if *(*raises)[0].SubjectID != th.ID {
+		t.Fatalf("SubjectID = %s, want the threshold id %s", *(*raises)[0].SubjectID, th.ID)
+	}
+}
+
+// TestAlertEvaluator_ResolvesOnTheAlertRail — the registry declares
+// `auto_resolve: metric recovers` for this type, and the evaluator does observe
+// recovery, so it must publish alerts.resolve for the same subject.
+func TestAlertEvaluator_ResolvesOnTheAlertRail(t *testing.T) {
+	th := latencyThreshold()
+	store := &fakeAlertStore{thresholds: []models.AlertThreshold{th}}
+	metrics := &fakeMetrics{p95: 300}
+	ae, _ := newTestEvaluator(store, metrics)
+	raises, resolves := railSinks(ae)
+
+	if err := ae.evaluateThreshold(context.Background(), th); err != nil {
+		t.Fatalf("breach cycle: %v", err)
+	}
+	metrics.p95 = 50
+	if err := ae.evaluateThreshold(context.Background(), th); err != nil {
+		t.Fatalf("recovery cycle: %v", err)
+	}
+
+	if len(*resolves) != 1 {
+		t.Fatalf("published %d resolves, want 1", len(*resolves))
+	}
+	rv := (*resolves)[0]
+	if rv.AlertType != "metric_threshold" {
+		t.Errorf("AlertType = %q, want %q", rv.AlertType, "metric_threshold")
+	}
+	if rv.SubjectID == nil || *rv.SubjectID != *(*raises)[0].SubjectID {
+		t.Errorf("resolve subject %v does not match the raised subject %v", rv.SubjectID, (*raises)[0].SubjectID)
+	}
+	if rv.TenantID != events.PlatformAlertTenantID {
+		t.Errorf("TenantID = %s, want the platform sentinel", rv.TenantID)
+	}
+
+	// A second clear cycle must not resolve again.
+	if err := ae.evaluateThreshold(context.Background(), th); err != nil {
+		t.Fatalf("second recovery cycle: %v", err)
+	}
+	if len(*resolves) != 1 {
+		t.Fatalf("published %d resolves after a second clear cycle, want 1", len(*resolves))
+	}
+}
+
+// TestAlertEvaluator_RailEscalationKeepsSubject — crossing high → critical must
+// re-raise on the SAME subject so the engine escalates the open alert instead of
+// opening a second one.
+func TestAlertEvaluator_RailEscalationKeepsSubject(t *testing.T) {
+	th := latencyThreshold()
+	store := &fakeAlertStore{thresholds: []models.AlertThreshold{th}}
+	metrics := &fakeMetrics{p95: 300}
+	ae, _ := newTestEvaluator(store, metrics)
+	raises, _ := railSinks(ae)
+
+	if err := ae.evaluateThreshold(context.Background(), th); err != nil {
+		t.Fatalf("warning cycle: %v", err)
+	}
+	metrics.p95 = 900
+	if err := ae.evaluateThreshold(context.Background(), th); err != nil {
+		t.Fatalf("critical cycle: %v", err)
+	}
+
+	if len(*raises) != 2 {
+		t.Fatalf("published %d raises, want 2 (open + escalation)", len(*raises))
+	}
+	if (*raises)[1].Severity != "critical" {
+		t.Fatalf("escalation severity = %q, want critical", (*raises)[1].Severity)
+	}
+	if *(*raises)[1].SubjectID != *(*raises)[0].SubjectID {
+		t.Fatal("escalation changed the subject id — the engine would open a second alert")
+	}
+}
+
+// TestAlertEvaluator_RailUnavailableFallsBackToNotification — a NATS outage must
+// degrade to a notification, never to silence.
+func TestAlertEvaluator_RailUnavailableFallsBackToNotification(t *testing.T) {
+	th := latencyThreshold()
+	store := &fakeAlertStore{thresholds: []models.AlertThreshold{th}}
+	ae, notifications := newTestEvaluator(store, &fakeMetrics{p95: 300})
+	ae.raise = func(events.AlertRaiseEvent) error { return errRecordFailed }
+
+	if err := ae.evaluateThreshold(context.Background(), th); err != nil {
+		t.Fatalf("evaluateThreshold = %v, want nil", err)
+	}
+	if *notifications != 1 {
+		t.Fatalf("sent %d notifications with the rail down, want 1", *notifications)
+	}
+}

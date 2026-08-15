@@ -59,7 +59,7 @@ Tenants browse published frameworks and **activate** the ones relevant to them. 
 **API:** `GET /api/v1/compliance-engine/frameworks/available` (the internal subscribe/activate endpoints retain "subscribe" naming for compatibility; the UI says "Activate"/"Deactivate")
 
 **Available frameworks:**
-- Each card shows a **preview compliance score** — how your current inventory would score against that framework *before* you activate it, so you can see relevance at a glance.
+- Each card shows a **preview compliance score** — how your current inventory would score against that framework *before* you activate it, so you can see relevance at a glance. The preview follows the same rules as a live score: it covers assessed controls only, shows a coverage line, and shows **—** rather than 100% if nothing could be assessed. See [Control results and how the score is computed](./framework-transparency.md#control-results-pass-fail-and-not-assessed).
 - **Activate** to start evaluating: posture, control results, and findings appear in **Risk & Compliance → Posture** shortly after (evaluation runs continuously in the background).
 - **Best Practices** is free for every tenant and is always active; it can't be deactivated.
 - Activation limits are governed by tier; Best Practices doesn't count against the limit.
@@ -168,8 +168,14 @@ Each control has:
 - **Name**: Human-readable name
 - **Description**: Detailed description
 - **Family**: Control family/category
-- **Severity**: High, medium, low
+- **Severity**: Critical, High, Med, or Low
 - **Measurements**: How compliance is measured
+
+> **Severity rates a control, it does not decide the outcome.** A control's
+> result is **PASS** when nothing violated it, **FAIL** when anything did (at any
+> severity), and **Not assessed** when it could not be checked. Severity labels
+> each finding and weights the score (Critical 4× … Low 1×). Full explanation:
+> [Control results and how the score is computed](./framework-transparency.md#control-results-pass-fail-and-not-assessed).
 
 ## Measurement Structure
 

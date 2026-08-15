@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/vistasecurity/vistaplatform/mcp-service/internal/auditlog"
 	"github.com/vistasecurity/vistaplatform/mcp-service/internal/platform"
 	"github.com/vistasecurity/vistaplatform/mcp-service/internal/tools"
 	"github.com/vistasecurity/vistaplatform/shared/version"
@@ -40,22 +41,38 @@ func NewMCPServer(deps *tools.Deps) *mcp.Server {
 // authentication. Stateless JSON mode: every request is self-contained, no
 // session affinity, no SSE — the right shape for a horizontally scaled
 // service behind a gateway.
-func NewHandler(mcpServer *mcp.Server, ex *platform.Exchanger) http.Handler {
+func NewHandler(mcpServer *mcp.Server, ex *platform.Exchanger, rec *auditlog.Recorder) http.Handler {
 	streamable := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return mcpServer },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true},
 	)
-	return authMiddleware(ex, streamable)
+	return authMiddleware(ex, rec, streamable)
 }
 
-func authMiddleware(ex *platform.Exchanger, next http.Handler) http.Handler {
+func authMiddleware(ex *platform.Exchanger, rec *auditlog.Recorder, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Capture provenance before anything else: it is needed by the auth
+		// records below AND by every tool record downstream, which has no
+		// *http.Request to consult.
+		reqCtx := platform.RequestContextOf(r)
+		ctx := platform.WithRequestContext(r.Context(), reqCtx)
+
 		token, ok := bearerToken(r)
 		if !ok {
+			// Recorded here rather than in the exchanger: a malformed bearer
+			// never reaches auth-service, so this is the only place the refusal
+			// is visible at all.
+			rec.RecordAuth(ctx, auditlog.AuthEvent{
+				Outcome: auditlog.OutcomeTokenMissing,
+				Request: reqCtx,
+			})
 			unauthorized(w, "Missing bearer token. Pass a VistaPlatform API token (qvpat_...) in the Authorization header; mint one in Settings → API Tokens.")
 			return
 		}
-		grant, err := ex.Exchange(r.Context(), token)
+		// Exchange records its own outcome — accepted, rejected or backend
+		// failure — because only it can tell a cached grant from a fresh
+		// credential decision.
+		grant, err := ex.Exchange(ctx, token)
 		if err != nil {
 			if err == platform.ErrUnauthorized {
 				unauthorized(w, "Invalid, expired or revoked API token.")
@@ -67,7 +84,7 @@ func authMiddleware(ex *platform.Exchanger, next http.Handler) http.Handler {
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "authentication backend unavailable"})
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(platform.WithGrant(r.Context(), grant)))
+		next.ServeHTTP(w, r.WithContext(platform.WithGrant(ctx, grant)))
 	})
 }
 

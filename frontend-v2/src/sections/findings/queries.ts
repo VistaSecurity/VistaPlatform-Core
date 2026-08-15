@@ -1,14 +1,8 @@
 // Live queries for the Risk & Compliance section. Both Findings and Posture
 // share these (same queryKeys → one fetch per screenful).
-import { useQueries, useQuery } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { clients } from '../../lib/clients';
 import type { ComplianceFinding, CryptoRisk } from './model';
-
-/** id/name for every published framework, licensed or not. */
-export interface PublishedFrameworkSummary {
-  id: string;
-  name: string;
-}
 
 const RISK_PAGE_SIZE = 100; // contract max
 const RISK_PAGE_CAP = 5; // stream is capped at 500 rows for now (mock renders ≤200)
@@ -81,55 +75,6 @@ export function useBatchEvaluate(frameworkIds: string[] | undefined) {
       return data;
     },
     staleTime: 5 * 60_000,
-  });
-}
-
-/**
- * Every published framework (id + name), licensed or not (#H-4b). batch-evaluate
- * only evaluates actively-licensed frameworks, so findings against a
- * published-but-unlicensed framework have nowhere else to resolve a framework
- * name from — without this they fall into "Other / retired controls" even
- * though the framework is real and just not activated.
- */
-export function useAllPublishedFrameworks(enabled: boolean) {
-  return useQuery({
-    queryKey: ['findings', 'all-published-frameworks'],
-    enabled,
-    queryFn: async () => {
-      const { data, error } = await clients.compliance.GET('/frameworks/available', {});
-      if (error || !data) throw new Error('Failed to load published frameworks');
-      return (data.frameworks ?? [])
-        .map((f): PublishedFrameworkSummary => ({ id: f.platform_framework.id, name: f.platform_framework.name }));
-    },
-    staleTime: 5 * 60_000,
-  });
-}
-
-/**
- * Control id → title for a set of published frameworks' controls, regardless of
- * license — GET /frameworks/published/{id} returns full control detail to every
- * tenant (transparency, ADR-0014), unlike batch-evaluate which skips unlicensed
- * frameworks. Used as the #H-4b fallback so unlicensed frameworks' findings can
- * still resolve a control name.
- */
-export function useFrameworkControlNames(frameworkIds: string[]) {
-  return useQueries({
-    queries: frameworkIds.map((id) => ({
-      queryKey: ['findings', 'framework-control-names', id],
-      queryFn: async () => {
-        const { data, error } = await clients.compliance.GET('/frameworks/published/{id}', {
-          params: { path: { id } },
-        });
-        if (error || !data) throw new Error('Failed to load framework controls');
-        const fw = data.framework;
-        return {
-          fwId: id,
-          fwName: fw?.name ?? 'Unknown framework',
-          controls: (fw?.controls ?? []).map((c) => ({ id: c.id, name: c.title })),
-        };
-      },
-      staleTime: 5 * 60_000,
-    })),
   });
 }
 

@@ -466,10 +466,16 @@ func TestIntegration_AssetsForCertificate_ResolvesBothLinkPaths(t *testing.T) {
 // from an unrelated inventory-service crypto-implementation-risk-score count
 // and could disagree with what the Findings page showed for the same tenant.
 func TestIntegration_GetFindingStatistics_SeverityCounts(t *testing.T) {
-	svc, _, tenant := newFindingsServiceIT(t)
+	svc, db, tenant := newFindingsServiceIT(t)
+
+	// The controls must live under a framework the tenant has ACTIVATED:
+	// licensedFindingScopeSQL gates every tenant-facing reader, so findings hung
+	// off bare random control ids belong to no framework and are invisible by
+	// design. Seeding them properly is also closer to what the engine produces.
+	_, newControl := seedPublishedFramework(t, db, tenant, "stats", true)
 
 	withSeverity := func(sev string) *models.ComplianceFinding {
-		c, a := uuid.New(), uuid.New()
+		c, a := newControl(sev), uuid.New()
 		f := activeViolation(c, a)
 		f.Severity = sev
 		mustUpsert(t, svc, tenant, c, a, f, "ACTIVE")
@@ -483,7 +489,7 @@ func TestIntegration_GetFindingStatistics_SeverityCounts(t *testing.T) {
 
 	// An INACTIVE finding must not be counted — SeverityCounts scopes to ACTIVE
 	// only, matching GetFindingsByControl and the Findings page default view.
-	cInactive, aInactive := uuid.New(), uuid.New()
+	cInactive, aInactive := newControl("Critical"), uuid.New()
 	fInactive := activeViolation(cInactive, aInactive)
 	fInactive.Severity = "Critical"
 	mustUpsert(t, svc, tenant, cInactive, aInactive, fInactive, "ACTIVE")

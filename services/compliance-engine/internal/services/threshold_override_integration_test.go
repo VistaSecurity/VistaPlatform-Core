@@ -55,6 +55,14 @@ func newThresholdFixture(t *testing.T) *thresholdFixture {
 		t.Fatalf("load measurement type: %v", err)
 	}
 
+	// newEvalFixture gives every control a default always-passing measurement so
+	// its controls count as ASSESSED. This fixture is about ONE
+	// measurement's predicate, so drop the default rather than score against a
+	// second measurement nobody here is reasoning about.
+	if _, err := db.Exec(`DELETE FROM control_measurements WHERE control_id = $1`, f.critical); err != nil {
+		t.Fatalf("clear default control measurements: %v", err)
+	}
+
 	// Platform predicate: at least 30 days of remaining life.
 	measurementID := uuid.New()
 	if _, err := db.Exec(`
@@ -139,8 +147,11 @@ func TestIntegration_ThresholdOverride_AppliedAtEvaluation(t *testing.T) {
 	if after.Status != "fail" {
 		t.Fatalf("status = %q, want fail (severity_override High)", after.Status)
 	}
-	if after.Score != 0 {
-		t.Fatalf("score = %d, want 0 (the only measurement now violates)", after.Score)
+	if after.Score == nil {
+		t.Fatal("score = nil, want 0 — the control WAS assessed, it just failed")
+	}
+	if *after.Score != 0 {
+		t.Fatalf("score = %d, want 0 (the only measurement now violates)", *after.Score)
 	}
 }
 
@@ -161,15 +172,15 @@ func TestIntegration_ThresholdOverride_SeverityOverrideApplied(t *testing.T) {
 	if res.Findings[0].Severity != "Low" {
 		t.Fatalf("finding severity = %q, want Low (the override re-rates it from High)", res.Findings[0].Severity)
 	}
-	// A worst-Low control PASSES. This test used to expect "warn", which was
-	// the live path's own mapping: it sent every finding to at-best WARN while
-	// the materialized rollup (statusForWorstSeverity) mapped worst-Low to
-	// PASS. Since only PASS earns score weight, the same tenant+framework read
-	// 100 from the preview and 0 from the summary. CMP-7 made the live path
-	// delegate to the shared mapping, so the expectation moves with it — the
-	// severity re-rating below is what this test is really about.
-	if res.Status != "pass" {
-		t.Fatalf("status = %q, want pass (worst severity Low — same mapping the materialized path uses)", res.Status)
+	// A violated control FAILS whatever the severity. This expectation
+	// has now moved twice — "warn" under the live path's own mapping, then
+	// "pass" once it delegated to statusForWorstSeverity — and both were wrong
+	// for the same reason: severity was deciding the verdict. It is the WEIGHT.
+	// The severity re-rating asserted above is what this test is really about,
+	// and it still re-rates: the finding is Low, so the control now contributes
+	// weight 1 rather than 3 to the framework score.
+	if res.Status != "fail" {
+		t.Fatalf("status = %q, want fail — the measurement was violated; severity only sets the weight", res.Status)
 	}
 }
 

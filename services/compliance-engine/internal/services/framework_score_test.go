@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
 )
 
@@ -20,35 +21,113 @@ func TestFrameworkScore_IsSeverityWeightedNotFlat(t *testing.T) {
 		{BaselineSeverity: "Critical", Status: statusFail},
 		{BaselineSeverity: "Low", Status: statusPass},
 	}
-	score, total, passing, failing := frameworkScore(outcomes)
-	if score != 20 {
-		t.Fatalf("score = %d, want 20 (severity-weighted); 50 means flat control counting", score)
+	b := frameworkScore(outcomes)
+	if b.Score == nil {
+		t.Fatal("score = nil, want 20 — both controls were assessed")
 	}
-	if total != 2 || passing != 1 || failing != 1 {
-		t.Fatalf("counts = {total:%d passing:%d failing:%d}, want {2 1 1}", total, passing, failing)
+	if *b.Score != 20 {
+		t.Fatalf("score = %d, want 20 (severity-weighted); 50 means flat control counting", *b.Score)
+	}
+	if b.Total != 2 || b.Passing != 1 || b.Failing != 1 || b.NotAssessed != 0 {
+		t.Fatalf("counts = %+v, want {total:2 passing:1 failing:1 notAssessed:0}", b)
 	}
 }
 
-func TestFrameworkScore_WarnEarnsNoCredit(t *testing.T) {
-	// WARN is not a breach (it never reaches KPISummary.FailingControls) but it
-	// earns no score weight either — matching the live path's long-standing
-	// behaviour, where only PASS accumulated passWeight.
-	score, _, passing, failing := frameworkScore([]controlOutcome{
-		{BaselineSeverity: "High", Status: statusWarn},
-		{BaselineSeverity: "High", Status: statusPass},
+// TestFrameworkScore_LowSeverityViolationDragsTheScore is the headline
+// regression. Before the fix a violated Low-baseline control mapped to
+// PASS, so cert-expiry-90-day reported "score 100, 1/1 controls passing" while
+// carrying two ACTIVE findings.
+func TestFrameworkScore_LowSeverityViolationDragsTheScore(t *testing.T) {
+	b := frameworkScore([]controlOutcome{
+		{BaselineSeverity: "Critical", Status: statusPass},
+		{BaselineSeverity: "Low", Status: statusFail},
 	})
-	if score != 50 {
-		t.Fatalf("score = %d, want 50 (one of two equal-weight controls passing)", score)
+	// Critical passing (weight 4) of a total weight of 5 → 80.
+	if b.Score == nil {
+		t.Fatal("score = nil, want 80 — both controls were assessed")
 	}
-	if passing != 1 || failing != 1 {
-		t.Fatalf("counts = {passing:%d failing:%d}, want {1 1} — failing is the complement of passing", passing, failing)
+	if *b.Score != 80 {
+		t.Fatalf("score = %d, want 80; 100 means a Low violation is still invisible to scoring", *b.Score)
+	}
+	if b.Failing != 1 {
+		t.Fatalf("failing = %d, want 1 — a Low-severity violation is still a violation", b.Failing)
 	}
 }
 
-func TestFrameworkScore_EmptyFrameworkScoresPerfect(t *testing.T) {
-	score, total, passing, failing := frameworkScore(nil)
-	if score != 100 || total != 0 || passing != 0 || failing != 0 {
-		t.Fatalf("got {score:%d total:%d passing:%d failing:%d}, want {100 0 0 0}", score, total, passing, failing)
+// TestFrameworkScore_NotAssessedIsExcludedFromBothSides pins D3: not-assessed
+// controls leave the fraction entirely rather than being counted as passes
+// (which inflates) or failures (which punishes an empty inventory).
+func TestFrameworkScore_NotAssessedIsExcludedFromBothSides(t *testing.T) {
+	b := frameworkScore([]controlOutcome{
+		{BaselineSeverity: "Critical", Status: statusPass},
+		{BaselineSeverity: "Critical", Status: statusFail},
+		{BaselineSeverity: "Critical", Status: statusNotAssessed},
+	})
+	// One of two ASSESSED equal-weight controls passing → 50. Counting the
+	// not-assessed control as a pass gives 67; as a failure, 33.
+	if b.Score == nil {
+		t.Fatal("score = nil, want 50 — two of the three controls were assessed")
+	}
+	if *b.Score != 50 {
+		t.Fatalf("score = %d, want 50 (assessed subset only); 67 counts not-assessed as passing, 33 as failing", *b.Score)
+	}
+	if b.Total != 3 || b.Passing != 1 || b.Failing != 1 || b.NotAssessed != 1 {
+		t.Fatalf("counts = %+v, want {total:3 passing:1 failing:1 notAssessed:1}", b)
+	}
+	if b.Passing+b.Failing+b.NotAssessed != b.Total {
+		t.Fatalf("counts must partition the framework: %+v", b)
+	}
+}
+
+// TestFrameworkScore_ZeroAssessedHasNoScore pins the loudest half of: a
+// framework where nothing could be evaluated reports NO score. Returning 100
+// said "perfectly compliant" when it meant "we did not look"; returning 0 would
+// say "totally non-compliant", which is equally invented.
+func TestFrameworkScore_ZeroAssessedHasNoScore(t *testing.T) {
+	for name, outcomes := range map[string][]controlOutcome{
+		"no controls at all": nil,
+		"every control not assessed": {
+			{BaselineSeverity: "Critical", Status: statusNotAssessed},
+			{BaselineSeverity: "Low", Status: statusNotAssessed},
+		},
+	} {
+		b := frameworkScore(outcomes)
+		if b.Score != nil {
+			t.Errorf("%s: score = %d, want no score (nil) — the UI renders '—'", name, *b.Score)
+		}
+		if b.NotAssessed != len(outcomes) || b.Total != len(outcomes) {
+			t.Errorf("%s: counts = %+v, want all %d controls not assessed", name, b, len(outcomes))
+		}
+	}
+}
+
+// TestFrameworkScore_CoverageWorkedExample pins the exact figure the customer
+// docs publish: 11 controls, 8 assessed (2 Critical + 3 High + 2 Med + 1 Low =
+// weight 22), one High failing → 19/22 = 86%, shown with "8 of 11 controls
+// assessed". If this test moves, the published docs are wrong too.
+func TestFrameworkScore_CoverageWorkedExample(t *testing.T) {
+	var outcomes []controlOutcome
+	add := func(n int, severity, status string) {
+		for i := 0; i < n; i++ {
+			outcomes = append(outcomes, controlOutcome{BaselineSeverity: severity, Status: status})
+		}
+	}
+	add(2, "Critical", statusPass) // weight 4 each
+	add(1, "High", statusFail)     // weight 3 — the one failure
+	add(2, "High", statusPass)     // weight 3 each
+	add(2, "Med", statusPass)      // weight 2 each
+	add(1, "Low", statusPass)      // weight 1
+	add(3, "High", statusNotAssessed)
+
+	b := frameworkScore(outcomes)
+	if b.Score == nil {
+		t.Fatal("score = nil, want 86 — eight controls were assessed")
+	}
+	if *b.Score != 86 {
+		t.Fatalf("score = %d, want 86 (19 of 22 assessed weight)", *b.Score)
+	}
+	if b.Total != 11 || b.Passing+b.Failing != 8 || b.NotAssessed != 3 {
+		t.Fatalf("counts = %+v, want 11 total, 8 assessed, 3 not assessed", b)
 	}
 }
 
@@ -57,29 +136,23 @@ func TestFrameworkScore_AllPassingAndAllFailing(t *testing.T) {
 		{BaselineSeverity: "Critical", Status: statusPass},
 		{BaselineSeverity: "Med", Status: statusPass},
 	}
-	if score, _, _, _ := frameworkScore(all); score != 100 {
-		t.Fatalf("all passing: score = %d, want 100", score)
+	if b := frameworkScore(all); b.Score == nil || *b.Score != 100 {
+		t.Fatalf("all passing: score = %v, want 100", b.Score)
 	}
 	for i := range all {
 		all[i].Status = statusFail
 	}
-	if score, _, _, _ := frameworkScore(all); score != 0 {
-		t.Fatalf("all failing: score = %d, want 0", score)
+	if b := frameworkScore(all); b.Score == nil || *b.Score != 0 {
+		t.Fatalf("all failing: score = %v, want 0", b.Score)
 	}
 }
 
-func TestStatusForWorstSeverity(t *testing.T) {
-	cases := map[string]string{
-		"Critical": statusFail,
-		"High":     statusFail,
-		"Med":      statusWarn,
-		"Low":      statusPass,
-		"":         statusPass, // no findings
+func TestStatusForFindings(t *testing.T) {
+	if got := statusForFindings(true); got != statusFail {
+		t.Errorf("statusForFindings(true) = %q, want %q", got, statusFail)
 	}
-	for severity, want := range cases {
-		if got := statusForWorstSeverity(severity); got != want {
-			t.Errorf("statusForWorstSeverity(%q) = %q, want %q", severity, got, want)
-		}
+	if got := statusForFindings(false); got != statusPass {
+		t.Errorf("statusForFindings(false) = %q, want %q", got, statusPass)
 	}
 }
 
@@ -87,10 +160,43 @@ func TestStatusForWorstSeverity(t *testing.T) {
 // got wrong. ControlSummary.StatusEffective is compared against these values by
 // callers outside this package's tests, so the wire form is part of the contract.
 func TestStatusConstantsAreUppercase(t *testing.T) {
-	for _, s := range []string{statusPass, statusWarn, statusFail} {
-		if s != "PASS" && s != "WARN" && s != "FAIL" {
+	for _, s := range []string{statusPass, statusFail, statusNotAssessed} {
+		if s != "PASS" && s != "FAIL" && s != "NOT_ASSESSED" {
 			t.Fatalf("unexpected status constant %q — statuses travel UPPERCASE", s)
 		}
+	}
+}
+
+// TestNotAssessedReasonsAreDistinct guards the machine-readable reason values
+// the UI switches on to pick its hover sentence.
+func TestNotAssessedReasonsAreDistinct(t *testing.T) {
+	want := map[string]bool{"no_measurements": true, "nothing_in_scope": true, "check_error": true}
+	got := map[string]bool{reasonNoMeasurements: true, reasonNothingInScope: true, reasonCheckError: true}
+	if len(got) != 3 {
+		t.Fatalf("reasons collide: %v", got)
+	}
+	for r := range got {
+		if !want[r] {
+			t.Errorf("unexpected reason value %q — the frontend switches on these strings", r)
+		}
+	}
+}
+
+// TestOutcomesFromAssessments_UnknownControlIsNotAPass pins the other half of the
+// old default: loadControlStatuses seeded every control statusPass, so a control
+// missing from the assessment map silently earned score weight.
+func TestOutcomesFromAssessments_UnknownControlIsNotAPass(t *testing.T) {
+	type ctrl struct {
+		id       uuid.UUID
+		severity string
+	}
+	// A deliberately empty assessment map — nothing is known about the control.
+	outcomes := outcomesFromAssessments([]ctrl{{uuid.New(), "Critical"}},
+		func(c ctrl) uuid.UUID { return c.id },
+		func(c ctrl) string { return c.severity },
+		nil)
+	if len(outcomes) != 1 || outcomes[0].Status != statusNotAssessed {
+		t.Fatalf("unknown control produced %+v, want NOT_ASSESSED — defaulting to PASS is the bug", outcomes)
 	}
 }
 

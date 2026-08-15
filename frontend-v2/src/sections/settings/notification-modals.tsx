@@ -130,6 +130,15 @@ export function ChannelDeleteModal({ channel, open, onClose }: { channel: Channe
 const ALERT_SOURCES = ['all', 'audit', 'billing', 'certificates', 'discovery', 'monitoring', 'platform', 'remediation_plans', 'ticketing'];
 const SEVERITIES = ['critical', 'high', 'medium', 'low'];
 
+// The backend's frequency vocabulary is immediate | digest_hourly |
+// digest_daily | digest_weekly — enforced by the tenant_notification_rules
+// valid_frequency CHECK and by digestWindowMinutes() in the rule engine. This
+// modal used to send the bare string 'digest', which no backend recognizes:
+// the INSERT violated the CHECK and every attempt to create a digest rule
+// failed with a 500. digest_window stays supported as a per-rule override of
+// the named cadence (digestWindowMinutes honors it when > 0).
+export const isDigest = (frequency: string) => frequency.startsWith('digest');
+
 export function RuleModal({ rule, channels, open, onClose }: { rule: Rule | null; channels: Channel[]; open: boolean; onClose: () => void }) {
   const queryClient = useQueryClient();
   const isEdit = !!rule;
@@ -150,7 +159,7 @@ export function RuleModal({ rule, channels, open, onClose }: { rule: Rule | null
         channel_ids: channelIds,
         severity_filter: severities.length ? severities : undefined,
         frequency,
-        digest_window: frequency === 'digest' ? Math.max(1, parseInt(digestWindow, 10) || 60) : undefined,
+        digest_window: isDigest(frequency) ? Math.max(1, parseInt(digestWindow, 10) || 60) : undefined,
       };
       if (isEdit) {
         const { error, response } = await clients.notifications.PUT('/tenant/rules/{id}', {
@@ -215,12 +224,14 @@ export function RuleModal({ rule, channels, open, onClose }: { rule: Rule | null
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <ModalSelect value={frequency} style={{ width: 170 }} onChange={(e) => setFrequency(e.target.value)}>
             <option value="immediate">Immediate</option>
-            <option value="digest">Digest</option>
+            <option value="digest_hourly">Digest — hourly</option>
+            <option value="digest_daily">Digest — daily</option>
+            <option value="digest_weekly">Digest — weekly</option>
           </ModalSelect>
-          {frequency === 'digest' && (
+          {isDigest(frequency) && (
             <>
               <ModalInput value={digestWindow} type="number" min={1} style={{ width: 90 }} onChange={(e) => setDigestWindow(e.target.value)} />
-              <span style={{ fontSize: 12, color: 'var(--app-t3)' }}>minutes per digest window</span>
+              <span style={{ fontSize: 12, color: 'var(--app-t3)' }}>minutes per batch (overrides the cadence above)</span>
             </>
           )}
         </div>

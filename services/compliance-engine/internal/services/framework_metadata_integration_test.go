@@ -69,10 +69,12 @@ func TestIntegration_GetAvailableFrameworks_ControlsCount(t *testing.T) {
 	}
 }
 
-// TestIntegration_GetAvailableFrameworks_OpenFindingsControls pins H-4/M-15: a
-// framework whose only open finding is Low severity scores controls_failing: 0
-// (statusForWorstSeverity treats Low as passing), but open_findings_controls must
-// still report 1 so the preview card never contradicts /findings/by-control.
+// TestIntegration_GetAvailableFrameworks_OpenFindingsControls pins H-4/M-15
+// after removed the severity-derived status that caused the mismatch: a
+// framework whose only open finding is Low severity must now report
+// controls_failing: 1, EQUAL to open_findings_controls. The old expectation
+// (controls_failing 0) was the bug — the preview card claimed nothing was
+// failing while /findings/by-control listed a real open exposure.
 func TestIntegration_GetAvailableFrameworks_OpenFindingsControls(t *testing.T) {
 	f := newEvalFixture(t)
 	f.seedLowFinding(t)
@@ -105,19 +107,24 @@ func TestIntegration_GetAvailableFrameworks_OpenFindingsControls(t *testing.T) {
 	if entry == nil {
 		t.Fatalf("fixture framework %s not present in GetAvailableFrameworks result", f.frameworkID)
 	}
-	if entry.ControlsFailing == nil || *entry.ControlsFailing != 0 {
-		t.Fatalf("controls_failing = %v, want 0 (Low-severity-only findings score as passing)", entry.ControlsFailing)
+	if entry.ControlsFailing == nil || *entry.ControlsFailing != 1 {
+		t.Fatalf("controls_failing = %v, want 1 — a Low-severity violation is still a violation (#1369)", entry.ControlsFailing)
 	}
 	if entry.OpenFindingsControls == nil || *entry.OpenFindingsControls != 1 {
-		t.Fatalf("open_findings_controls = %v, want 1 — the Low-severity finding is a real open "+
-			"exposure even though it doesn't move controls_failing", entry.OpenFindingsControls)
+		t.Fatalf("open_findings_controls = %v, want 1", entry.OpenFindingsControls)
+	}
+	if *entry.ControlsFailing != *entry.OpenFindingsControls {
+		t.Fatalf("controls_failing (%d) and open_findings_controls (%d) must agree now that "+
+			"status is derived from violations rather than severity",
+			*entry.ControlsFailing, *entry.OpenFindingsControls)
 	}
 }
 
 // TestIntegration_FrameworkContext_OpenFindingsControls pins M-6: the posture
 // scorecard (/frameworks/context) must expose the same raw "has an open finding"
-// count as /findings/by-control, alongside the severity-weighted controls_failing
-// that can read lower.
+// count as /findings/by-control. Since the two are equal by construction —
+// the field is kept because they diverged for as long as status came from
+// severity, and a future divergence should be loud.
 func TestIntegration_FrameworkContext_OpenFindingsControls(t *testing.T) {
 	f := newEvalFixture(t)
 	f.seedLowFinding(t)
@@ -143,8 +150,8 @@ func TestIntegration_FrameworkContext_OpenFindingsControls(t *testing.T) {
 	if item == nil {
 		t.Fatalf("fixture framework %s not present in /frameworks/context result", f.frameworkID)
 	}
-	if item.ControlsFailing != 0 {
-		t.Fatalf("controls_failing = %d, want 0 (Low-severity-only findings score as passing)", item.ControlsFailing)
+	if item.ControlsFailing != 1 {
+		t.Fatalf("controls_failing = %d, want 1 — a Low-severity violation is still a violation (#1369)", item.ControlsFailing)
 	}
 	if item.OpenFindingsControls != 1 {
 		t.Fatalf("open_findings_controls = %d, want 1 — the Low-severity finding is a real open "+

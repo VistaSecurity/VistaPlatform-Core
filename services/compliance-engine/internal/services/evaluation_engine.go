@@ -338,18 +338,21 @@ func (s *FindingsService) EvaluateTenantFrameworkScoped(ctx context.Context, ten
 
 // upsertFrameworkScore writes the per-(tenant, framework) score rollup consumed by
 // posture scorecards and the available-framework preview score.
-func (s *FindingsService) upsertFrameworkScore(ctx context.Context, tenantID, frameworkID uuid.UUID, score, total, passing, failing int) error {
+// score is NULLable: a framework with no assessed control has no score, and the
+// column carries that honestly rather than storing 0 or 100.
+func (s *FindingsService) upsertFrameworkScore(ctx context.Context, tenantID, frameworkID uuid.UUID, b scoreBreakdown) error {
 	return shareddatabase.WithTenantTx(ctx, s.db.DB, tenantID, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-		INSERT INTO tenant_framework_scores (tenant_id, platform_framework_id, score, controls_total, controls_passing, controls_failing, computed_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO tenant_framework_scores (tenant_id, platform_framework_id, score, controls_total, controls_passing, controls_failing, controls_not_assessed, computed_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (tenant_id, platform_framework_id) DO UPDATE SET
 			score = EXCLUDED.score,
 			controls_total = EXCLUDED.controls_total,
 			controls_passing = EXCLUDED.controls_passing,
 			controls_failing = EXCLUDED.controls_failing,
+			controls_not_assessed = EXCLUDED.controls_not_assessed,
 			computed_at = EXCLUDED.computed_at
-	`, tenantID, frameworkID, score, total, passing, failing, time.Now())
+	`, tenantID, frameworkID, b.Score, b.Total, b.Passing, b.Failing, b.NotAssessed, time.Now())
 		return err
 	})
 }
@@ -459,23 +462,20 @@ func (s *FindingsService) EvaluateAsset(ctx context.Context, tenantID, assetID u
 // worst ACTIVE, non-suppressed finding, again matching the live path.
 func (s *FindingsService) recomputeFrameworkScore(ctx context.Context, tenantID, frameworkID uuid.UUID, controls []models.Control) error {
 	if len(controls) == 0 {
-		return s.upsertFrameworkScore(ctx, tenantID, frameworkID, 100, 0, 0, 0)
+		// A framework with no controls has nothing to assess: no score, not 100.
+		return s.upsertFrameworkScore(ctx, tenantID, frameworkID, scoreBreakdown{})
 	}
 	controlIDs := make([]uuid.UUID, len(controls))
 	for i, c := range controls {
 		controlIDs[i] = c.ID
 	}
-	statuses, err := loadControlStatuses(ctx, s.db.DB, tenantID, controlIDs)
+	assessments, err := loadControlAssessments(ctx, s.db.DB, tenantID, controlIDs, "platform")
 	if err != nil {
 		return err
 	}
-	outcomes := make([]controlOutcome, 0, len(controls))
-	for _, c := range controls {
-		outcomes = append(outcomes, controlOutcome{
-			BaselineSeverity: c.BaselineSeverity,
-			Status:           statuses[c.ID],
-		})
-	}
-	score, total, passing, failing := frameworkScore(outcomes)
-	return s.upsertFrameworkScore(ctx, tenantID, frameworkID, score, total, passing, failing)
+	outcomes := outcomesFromAssessments(controls,
+		func(c models.Control) uuid.UUID { return c.ID },
+		func(c models.Control) string { return c.BaselineSeverity },
+		assessments)
+	return s.upsertFrameworkScore(ctx, tenantID, frameworkID, frameworkScore(outcomes))
 }

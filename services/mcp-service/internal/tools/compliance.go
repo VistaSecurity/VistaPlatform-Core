@@ -28,7 +28,7 @@ func registerComplianceTools(s *mcp.Server, d *Deps) {
 			"Note: full control detail and evaluation require an active subscription to the framework.",
 		Annotations: readOnly("List compliance frameworks"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in emptyInput) (*mcp.CallToolResult, any, error) {
-		return run(ctx, "compliance.read", func() (any, error) {
+		return d.run(ctx, req, "compliance.read", in, func() (any, error) {
 			frameworks, err := d.Client.Get(ctx, d.Client.ComplianceURL, "/api/v1/compliance-engine/frameworks", nil)
 			if err != nil {
 				return nil, err
@@ -47,7 +47,7 @@ func registerComplianceTools(s *mcp.Server, d *Deps) {
 			"per-family pass/warn/fail rollup and the per-control status list. Use vistaplatform_get_control_findings to drill into a failing control.",
 		Annotations: readOnly("Get compliance summary"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in complianceSummaryInput) (*mcp.CallToolResult, any, error) {
-		return run(ctx, "compliance.read", func() (any, error) {
+		return d.run(ctx, req, "compliance.read", in, func() (any, error) {
 			id, err := requireUUID("framework_id", in.FrameworkID)
 			if err != nil {
 				return nil, err
@@ -66,7 +66,7 @@ func registerComplianceTools(s *mcp.Server, d *Deps) {
 			"(each tied to a concrete asset) and any active overrides.",
 		Annotations: readOnly("Get control findings"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in controlFindingsInput) (*mcp.CallToolResult, any, error) {
-		return run(ctx, "compliance.read", func() (any, error) {
+		return d.run(ctx, req, "compliance.read", in, func() (any, error) {
 			controlID, err := requireUUID("control_id", in.ControlID)
 			if err != nil {
 				return nil, err

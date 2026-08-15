@@ -91,7 +91,19 @@ func convertNotificationEventToRequest(e *events.NotificationEvent) *models.Send
 		NotificationType: "alert",
 	}
 
-	if e.TenantID != uuid.Nil {
+	// uuid.Nil and the platform sentinel BOTH mean "this is a platform
+	// notification" — route it to the platform rules, not to a tenant.
+	//
+	// Platform-track alerts (service_down, metric_threshold,
+	// tenant_health_degraded) are raised under events.PlatformAlertTenantID
+	// because alerts.tenant_id is NOT NULL and RLS-partitioned, and the alert
+	// engine carries that sentinel straight through onto notifications.send.
+	// Passing it on as a real tenant id sent every platform alert down the
+	// TENANT path: GetTenantRulesForAlert for a tenant that intentionally has
+	// no tenants row, which matches nothing — and then the history INSERT
+	// violates notification_history_tenant_id_fkey. So the seeded platform
+	// pack could never be consulted no matter how it was configured.
+	if e.TenantID != uuid.Nil && e.TenantID != events.PlatformAlertTenantID {
 		tid := e.TenantID
 		req.TenantID = &tid
 	}

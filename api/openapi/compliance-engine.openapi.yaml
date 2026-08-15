@@ -3906,6 +3906,11 @@ components:
             $ref: "#/components/schemas/FrameworkStatusDetail"
         overall_score:
           type: number
+          nullable: true
+          description: >
+            Average score across the frameworks that HAVE a score. Null when none
+            of them do — every framework was unscored (nothing assessed), so
+            there is nothing to average. Null renders as "—", never 0 (#1369).
         selected_framework:
           description: The selected framework's status; omitted when none is selected.
           $ref: "#/components/schemas/FrameworkStatusDetail"
@@ -3913,7 +3918,7 @@ components:
     FrameworkStatusItem:
       type: object
       additionalProperties: false
-      required: [id, name, code, version, compliance_percent, controls_total, controls_passing, controls_failing, open_findings_controls, is_default]
+      required: [id, name, code, version, compliance_percent, controls_total, controls_passing, controls_failing, controls_not_assessed, open_findings_controls, is_default]
       properties:
         id:
           type: string
@@ -3925,20 +3930,40 @@ components:
           type: string
         compliance_percent:
           type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
+          description: >-
+            Severity-weighted compliance score over the ASSESSED controls only.
+            null when NO control was assessed — the UI renders "—". Never 0 or
+            100 as a stand-in for "not evaluated".
         controls_total:
           type: integer
+          description: >-
+            All controls in the framework.
+            controls_passing + controls_failing + controls_not_assessed == controls_total.
         controls_passing:
           type: integer
         controls_failing:
           type: integer
+          description: >-
+            Controls with at least one ACTIVE, non-suppressed finding of ANY
+            severity. Severity is the scoring weight, not the pass/fail input.
+        controls_not_assessed:
+          type: integer
+          description: >-
+            Controls that could not be evaluated (no measurements configured,
+            nothing in scope, or the check failed). Excluded from both sides of
+            the score fraction; controls_passing + controls_failing is the
+            assessed subset that "N of M controls assessed" reports.
         open_findings_controls:
           type: integer
           description: >-
             Controls with at least one ACTIVE, non-suppressed finding of any
-            severity. controls_failing is severity-weighted (a control whose
-            worst finding is Low scores as passing), so this raw count can be
-            higher — it's the same "has an open exposure" definition
-            /findings/by-control uses.
+            severity — the same "has an open exposure" definition
+            /findings/by-control uses. Equal to controls_failing by
+            construction; kept as its own field because the two disagreed while
+            status was derived from severity.
         is_default:
           type: boolean
     FrameworkContextStatus:
@@ -3952,6 +3977,10 @@ components:
             $ref: "#/components/schemas/FrameworkStatusItem"
         overall_score:
           type: number
+          nullable: true
+          description: >
+            Null when no framework in the set was scored (nothing assessed).
+            Renders as "—", never 0 (#1369).
     FrameworkSubscriptionInfo:
       type: object
       additionalProperties: false
@@ -4015,6 +4044,12 @@ components:
           enum: [platform, tenant]
         score:
           type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
+          description: >-
+            Severity-weighted score over the ASSESSED controls only; null when
+            nothing was assessed (rendered "—", never 0 or 100).
         summary:
           description: Per-framework summary; the deep summary tree is not pinned in this slice.
           type: ["object", "null"]
@@ -4029,7 +4064,10 @@ components:
         controls:
           type: object
           additionalProperties: false
-          required: [total, passing, failing]
+          description: >-
+            passing + failing + not_assessed == total. The score's denominator is
+            passing + failing (the assessed subset).
+          required: [total, passing, failing, not_assessed]
           properties:
             total:
               type: integer
@@ -4037,6 +4075,12 @@ components:
               type: integer
             failing:
               type: integer
+              description: Controls with at least one ACTIVE, non-suppressed finding of ANY severity.
+            not_assessed:
+              type: integer
+              description: >-
+                Controls that could not be evaluated — no measurements
+                configured, nothing in scope, or the check failed.
         last_evaluated:
           type: string
     EvaluateMultipleResponse:
@@ -4098,6 +4142,21 @@ components:
           type: string
         status:
           type: string
+          enum: [PASS, FAIL, NOT_ASSESSED]
+          description: >-
+            PASS when the control was checked and nothing violated it, FAIL when
+            it has any ACTIVE, non-suppressed finding (of ANY severity),
+            NOT_ASSESSED when it could not be checked. WARN was removed: it was
+            reachable only from a Med baseline severity, earned no score weight,
+            and read as "not failing" while failing the arithmetic.
+        not_assessed_reason:
+          type: string
+          enum: [no_measurements, nothing_in_scope, check_error]
+          description: >-
+            Machine-readable reason, present only when status is NOT_ASSESSED.
+            The UI shows one bucket ("Not assessed") with a different sentence
+            per reason: no measurements configured / nothing in scope to check /
+            check failed.
         severity:
           type: string
         findings:
@@ -4106,7 +4165,7 @@ components:
       type: object
       additionalProperties: false
       description: Batch evaluation result for one framework (services.BatchEvaluateResult).
-      required: [framework_id, framework_name, framework_code, framework_version, score, controls_total, controls_passing, controls_failing, affected_assets]
+      required: [framework_id, framework_name, framework_code, framework_version, score, controls_total, controls_passing, controls_failing, controls_not_assessed, affected_assets]
       properties:
         framework_id:
           type: string
@@ -4118,12 +4177,24 @@ components:
           type: string
         score:
           type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
+          description: >-
+            Severity-weighted score over the ASSESSED controls only; null when
+            nothing was assessed (rendered "—").
         controls_total:
           type: integer
         controls_passing:
           type: integer
         controls_failing:
           type: integer
+          description: Controls with at least one ACTIVE, non-suppressed finding of ANY severity.
+        controls_not_assessed:
+          type: integer
+          description: >-
+            Controls excluded from the score because they could not be
+            evaluated. passing + failing + not_assessed == controls_total.
         affected_assets:
           type: integer
         findings:
@@ -4388,10 +4459,13 @@ components:
           nullable: true
           description: >
             Materialized compliance score (0–100) for this framework against the
-            tenant's current inventory (ADR-0014 evaluation engine). Present for
-            every published framework — activated or not — so a card can show a
-            preview before the tenant activates. Absent/null until the engine has
-            produced a rollup for this tenant+framework.
+            tenant's current inventory (ADR-0014 evaluation engine), computed
+            over the ASSESSED controls only. Present for every published
+            framework — activated or not — so a card can show a preview before
+            the tenant activates. Null until the engine has produced a rollup,
+            AND null once it has if NO control was assessed: a prospect
+            comparing frameworks must see "—", never a 100 that only means
+            "nothing was evaluated".
         controls_passing:
           type: integer
           nullable: true
@@ -4399,17 +4473,27 @@ components:
         controls_failing:
           type: integer
           nullable: true
-          description: Failing control count behind preview_score (null until scored).
+          description: >-
+            Controls with at least one ACTIVE, non-suppressed finding of ANY
+            severity (null until scored). Severity is the scoring weight, not
+            the pass/fail input.
+        controls_not_assessed:
+          type: integer
+          nullable: true
+          description: >-
+            Controls excluded from preview_score because they could not be
+            evaluated — no measurements configured, nothing in scope, or the
+            check failed (null until scored). passing + failing is the assessed
+            subset behind the "N of M controls assessed" coverage line.
         open_findings_controls:
           type: integer
           nullable: true
           description: >-
             Controls with at least one ACTIVE, non-suppressed finding of any
-            severity. controls_failing is severity-weighted (a control whose
-            worst finding is Low scores as passing), so this raw count can be
-            higher — it's the same "has an open exposure" definition
-            /findings/by-control uses. Null until scored, same as
-            controls_failing.
+            severity — the same "has an open exposure" definition
+            /findings/by-control uses. Equal to controls_failing by
+            construction; the two disagreed while status was derived from
+            severity. Null until scored.
 
     DefaultFrameworkDescriptor:
       type: object

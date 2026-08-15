@@ -152,17 +152,25 @@ On **Members** you can:
 Define roles and the access each grants under **Organization Settings → People
 & Access → Roles & Permissions**.
 
-Vista Platform ships built-in roles. Assign each member the narrowest role
-that still lets them do their job. *Full* = view + create + edit + delete;
-*Read* = view only; *None* = no access (navigation and buttons are hidden).
+Vista Platform ships the built-in roles below, and you can **define custom
+roles** of your own when your team doesn't fit them — see
+[Roles and Permissions](../features/roles-and-permissions.md) for creating,
+editing and deleting them. Assign each member the narrowest role that still lets
+them do their job. *Full* = view + create + edit + delete; *Read* = view only;
+*None* = no access (navigation and buttons are hidden).
 
-| Role | Assets | Sensors | Discovery | Compliance | Members | Settings | Billing |
-|------|--------|---------|-----------|------------|---------|----------|---------|
-| **Billing Admin** | None | None | None | None | Read | Read | **Full** |
-| **Tenant Administrator** | Full | Full | Full | Full | Full | Full | Read |
-| **Security Administrator** | Full | Full | Full | Full | Read | Read | None |
-| **Viewer** | Read | Read | Read | Read | Read | Read | None |
-| **API User** | Read | Read | Read | Read | None | None | None |
+| Role | Assets | Sensors | Discovery | Compliance | Members | Settings | Audit | Billing |
+|------|--------|---------|-----------|------------|---------|----------|-------|---------|
+| **Billing Admin** | None | None | None | None | Read | Read | None | **Full** |
+| **Tenant Administrator** | Full | Full | Full | Full | Full | Full | Full | Read |
+| **Security Administrator** | Full | Full | Full | Full | Read | Read | Read | None |
+| **Viewer** | Read | Read | Read | Read | Read | Read | Read | None |
+| **API User** | Read | Read | Read | Read | None | None | None | None |
+
+The **built-in roles cannot be edited or deleted.** Their definitions are
+re-applied on every upgrade, so an edit would be reverted the next time you
+upgraded — the screen shows them read-only rather than letting you make a change
+that would not survive. Custom roles are never touched by that process.
 
 **Choosing a role:**
 
@@ -180,6 +188,13 @@ that still lets them do their job. *Full* = view + create + edit + delete;
 - **Viewer** is read-only across operational data (no billing).
 - **API User** is a read-only role for integrations and service accounts,
   scoped to operational data only (no members, settings, or billing).
+- **A custom role** is the answer when none of the above fits — for example a
+  compliance analyst who should read everything and manage findings but never
+  touch sensors. Pick exactly the permissions the job needs.
+
+> **Audit access.** Every role that can read operational data can also read the
+> audit trail; only Tenant Administrator can change retention policies and audit
+> alert rules. Custom roles can be given either level.
 
 > **CBOM & evidence:** CBOM artifacts and Inventory exports follow operational
 > read access — any role that can read inventory can view and generate them.
@@ -636,9 +651,16 @@ and which is the default.
 - **Risk & Compliance → Posture** — your compliance scores, plus **Framework
   Transparency** and an **Algorithm Reference** for understanding how scores are
   computed and which controls apply.
-- **Risk & Compliance → Findings** — the individual control results
-  (pass / warn / fail) you act on. Create remediation work from a finding;
-  that work lands in **Remediation → Queue**.
+- **Risk & Compliance → Findings** — the individual control results you act on.
+  Use the **By Control** view to see each control's result. Create remediation
+  work from a finding; that work lands in **Remediation → Queue**.
+
+Each control reads **PASS** (checked, nothing violated it), **FAIL** (checked,
+something violated it — at any severity), or **Not assessed** (it could not be
+checked: no measurement rule, nothing in scope, or the check failed). Scores
+cover assessed controls only and come with a coverage line such as *"8 of 11
+controls assessed"*; a framework with nothing assessed shows **—**, never 100%.
+See [Viewing Frameworks, Controls & Measurements](../features/framework-transparency.md#control-results-pass-fail-and-not-assessed).
 
 ### Custom Policies (Enterprise)
 

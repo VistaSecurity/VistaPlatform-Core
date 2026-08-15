@@ -48,9 +48,11 @@ type rbacStore interface {
 	GetTenantRoles(tenantID uuid.UUID) ([]Role, error)
 	GetTenantPermissions(tenantID uuid.UUID) ([]Permission, error)
 	GetUserRoles(tenantID, userID uuid.UUID) ([]Role, error)
-	AssignUserRole(tenantID, userID, roleID uuid.UUID) error
+	AssignUserRole(tenantID, userID, roleID, actorID uuid.UUID) error
 	RemoveUserRole(tenantID, userID, roleID uuid.UUID) error
-	GetPermissionMatrix(tenantID, roleID uuid.UUID) (interface{}, error)
-	UpdateRolePermissions(tenantID, roleID uuid.UUID, permissionIDs []uuid.UUID) error
+	GetPermissionMatrix(tenantID, roleID, actorID uuid.UUID) (*PermissionMatrix, error)
+	UpdateRolePermissions(tenantID, roleID, actorID uuid.UUID, permissionIDs []uuid.UUID) error
+	CreateTenantRole(tenantID, actorID uuid.UUID, req CreateRoleRequest) (*Role, error)
+	DeleteTenantRole(tenantID, roleID uuid.UUID, reassignTo *uuid.UUID) (*DeleteRoleResult, error)
 	CheckPermission(tenantID, userID uuid.UUID, permission string) (bool, error)
 }

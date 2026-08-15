@@ -652,8 +652,10 @@ paths:
       tags: [rbac]
       summary: List the tenant's roles
       description: >
-        Returns the roles defined for the tenant, each with its embedded
-        permissions map. tenantId comes from the path.
+        Returns the roles defined for the tenant — built-in
+        (`is_system_role: true`) first, then custom roles — each with its live
+        permission and holder counts. tenantId comes from the path. Requires
+        `users.manage`.
       responses:
         "200":
           description: The tenant's roles.
@@ -665,6 +667,128 @@ paths:
           $ref: "#/components/responses/LegacyBadRequest"
         "401":
           $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+    post:
+      operationId: createTenantRole
+      tags: [rbac]
+      summary: Create a custom tenant role
+      description: >
+        Creates a tenant-defined role (`is_system_role: false`) with an optional
+        starting permission set. Custom roles are never touched by the platform's
+        role reconciliation, so they survive upgrades. `name` is a stable slug,
+        unique per tenant; when omitted it is derived from `display_name`.
+
+
+        Permission ids must exist in the tenant permission catalogue, and the
+        caller may only grant permissions they hold themselves — see
+        `GET /tenant/{tenantId}/roles/{roleId}/matrix` for the per-permission
+        `grantable` flag. Requires `users.manage`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTenantRoleRequest"
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateTenantRoleResponse"
+        "400":
+          description: >
+            Invalid body, invalid role name (`invalid_role_name`), or a
+            permission id outside the catalogue (`unknown_permissions`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleErrorResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          description: >
+            Tenant access denied, or the caller tried to grant a permission they
+            do not hold (`permission_not_held`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleErrorResponse"
+        "409":
+          description: A role with that name already exists (`role_name_conflict`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleErrorResponse"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /tenant/{tenantId}/roles/{roleId}:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+      - name: roleId
+        in: path
+        required: true
+        description: Role UUID.
+        schema:
+          type: string
+          format: uuid
+    delete:
+      operationId: deleteTenantRole
+      tags: [rbac]
+      summary: Delete a custom tenant role
+      description: >
+        Deletes a tenant-defined role. Built-in roles cannot be deleted
+        (`system_role_immutable`).
+
+
+        If users still hold the role the delete is REFUSED with 409
+        `role_in_use` and the holder count, rather than silently moving people.
+        Pass `reassign_to` to move holders to another role of the same tenant and
+        then delete; users who already hold the target keep their single
+        assignment. A role referenced by SSO group mappings or used as an SSO
+        default role is refused (`role_referenced_by_sso`) because the delete
+        would cascade and silently stop provisioning federated users.
+
+
+        Requires `users.manage`.
+      parameters:
+        - name: reassign_to
+          in: query
+          required: false
+          description: >
+            Role UUID (same tenant) to move current holders to before deleting.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Deleted, with what happened to any holders.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteTenantRoleResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          description: Tenant access denied, or the role is built-in (`system_role_immutable`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleErrorResponse"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "409":
+          description: >
+            The role is still held by users (`role_in_use`, with `user_count`) or
+            referenced by SSO (`role_referenced_by_sso`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleErrorResponse"
         "500":
           $ref: "#/components/responses/LegacyServerError"
 
@@ -790,15 +914,39 @@ paths:
       operationId: getRolePermissionMatrix
       tags: [rbac]
       summary: Get a role's permission matrix
+      description: >
+        Returns the WHOLE tenant permission catalogue (ordered by resource then
+        action) annotated for this role: `granted` says whether the role grants
+        it today, `grantable` says whether the calling user may switch it on.
+        A UI can draw the entire checkbox grid from this one response.
+
+
+        `editable` is false for built-in roles — their grants are re-applied on
+        every platform upgrade, so the matrix is read-only there. Requires
+        `users.manage`.
       responses:
         "200":
-          description: The role's permission matrix (opaque shape — passed through from the service).
+          description: The role's permission matrix.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/PermissionMatrixResponse"
         "400":
           $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          description: Access denied to this tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleErrorResponse"
+        "404":
+          description: No such role in this tenant (`role_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleErrorResponse"
         "500":
           $ref: "#/components/responses/LegacyServerError"
   /tenant/{tenantId}/roles/{roleId}/permissions:
@@ -815,6 +963,20 @@ paths:
       operationId: updateRolePermissions
       tags: [rbac]
       summary: Replace a role's permission set
+      description: >
+        REPLACES the role's grants with `permission_ids` (an empty array clears
+        them all), transactionally.
+
+
+        Built-in roles are read-only (403 `system_role_immutable`) — the platform
+        re-applies their canonical grants on every upgrade, so an accepted edit
+        would be silently reverted.
+
+
+        Two escalation guards: every id must exist in the tenant permission
+        catalogue, and the caller may only ADD permissions they hold themselves.
+        Permissions the role ALREADY grants may be kept even if the caller lacks
+        them, and removals are always allowed. Requires `users.manage`.
       requestBody:
         required: true
         content:
@@ -829,7 +991,31 @@ paths:
               schema:
                 $ref: "#/components/schemas/UpdateRolePermissionsResponse"
         "400":
-          $ref: "#/components/responses/LegacyBadRequest"
+          description: >
+            Invalid body, or a permission id outside the catalogue
+            (`unknown_permissions`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleErrorResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          description: >
+            Tenant access denied, the role is built-in
+            (`system_role_immutable`), or the caller tried to add a permission
+            they do not hold (`permission_not_held`, with
+            `missing_permissions`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleErrorResponse"
+        "404":
+          description: No such role in this tenant (`role_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleErrorResponse"
         "500":
           $ref: "#/components/responses/LegacyServerError"
   /auth/me/preferences/notifications:
@@ -2408,13 +2594,17 @@ components:
       type: object
       additionalProperties: false
       description: >
-        A tenant role (rbac.Role). `permissions` is an embedded map and is
-        required but nullable (it serializes as null when the role carries no
-        permissions map).
+        A tenant role (rbac.Role). `permissions` is a legacy embedded map, always
+        null — no query has ever populated it. Use `permission_count` here and
+        the matrix endpoint for the actual grants.
       required:
         - id
         - name
+        - display_name
         - description
+        - is_system_role
+        - permission_count
+        - user_count
         - permissions
         - created_at
         - updated_at
@@ -2424,8 +2614,23 @@ components:
           format: uuid
         name:
           type: string
+          description: Stable internal slug, unique per tenant.
+        display_name:
+          type: string
         description:
           type: string
+        is_system_role:
+          type: boolean
+          description: >
+            True for the platform's built-in roles. They are READ-ONLY — the
+            platform re-applies their permissions on every upgrade, so create /
+            edit / delete are refused with 403 `system_role_immutable`.
+        permission_count:
+          type: integer
+          description: How many permissions this role currently grants.
+        user_count:
+          type: integer
+          description: How many users currently hold this role (active assignments).
         permissions:
           type: [object, "null"]
           additionalProperties: true
@@ -4118,10 +4323,159 @@ components:
           format: uuid
         updated:
           type: integer
+    MatrixPermission:
+      type: object
+      additionalProperties: false
+      description: >
+        One row of a role's permission matrix: a catalogue entry, whether this
+        role grants it, and whether the calling user may switch it on.
+        `granted && !grantable` is a legitimate state — render it checked but
+        locked; the caller may keep it but could not have added it.
+      required: [id, name, description, resource, action, granted, grantable]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          description: 'Dotted permission name, e.g. `assets.read`.'
+        description:
+          type: string
+        resource:
+          type: string
+          description: 'Grouping key for the matrix UI, e.g. `assets`, `billing`.'
+        action:
+          type: string
+          description: 'e.g. `read`, `update`, `manage`.'
+        granted:
+          type: boolean
+          description: Does this role currently grant the permission?
+        grantable:
+          type: boolean
+          description: >
+            Does the CALLING user hold this permission? False means they may not
+            add it to any role (they may still leave it if `granted`).
     PermissionMatrixResponse:
       type: object
+      additionalProperties: false
+      description: >
+        The full tenant permission catalogue annotated for one role — everything
+        a matrix UI needs in a single response.
+      required:
+        - role_id
+        - role_name
+        - display_name
+        - description
+        - is_system_role
+        - editable
+        - permissions
+        - granted_permission_ids
+      properties:
+        role_id:
+          type: string
+          format: uuid
+        role_name:
+          type: string
+          description: Stable internal slug.
+        display_name:
+          type: string
+        description:
+          type: string
+        is_system_role:
+          type: boolean
+        editable:
+          type: boolean
+          description: >
+            False for built-in roles. Their grants are re-applied by the platform
+            on every upgrade, so writes are refused rather than silently
+            reverted — render the matrix read-only.
+        permissions:
+          type: array
+          description: The WHOLE catalogue, ordered by resource then action.
+          items:
+            $ref: "#/components/schemas/MatrixPermission"
+        granted_permission_ids:
+          type: array
+          description: Convenience view of the current grant set.
+          items:
+            type: string
+            format: uuid
+    CreateTenantRoleRequest:
+      type: object
+      additionalProperties: false
+      description: Body for POST /tenant/{tenantId}/roles.
+      required: [display_name]
+      properties:
+        name:
+          type: string
+          description: >
+            Stable internal slug, unique per tenant, `^[a-z][a-z0-9_]{1,49}$`.
+            Optional — derived from display_name when omitted. Immutable after
+            creation.
+        display_name:
+          type: string
+          description: Human-readable name shown in the UI.
+        description:
+          type: string
+        permission_ids:
+          type: array
+          description: Optional starting grant set. Subject to both escalation guards.
+          items:
+            type: string
+            format: uuid
+    CreateTenantRoleResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for role creation — `{ "role": { ... } }`.'
+      required: [role]
+      properties:
+        role:
+          $ref: "#/components/schemas/Role"
+    DeleteTenantRoleResponse:
+      type: object
+      additionalProperties: false
+      description: >
+        Result of a role deletion. `reassigned_users` is how many holders were
+        moved to `reassigned_to_role_id`; both are 0/null when nobody held the
+        role. Holders who already had the target role are not counted — their
+        assignment to the deleted role was simply dropped.
+      required: [role_id, reassigned_users, reassigned_to_role_id, message]
+      properties:
+        role_id:
+          type: string
+          format: uuid
+        reassigned_users:
+          type: integer
+        reassigned_to_role_id:
+          type: [string, "null"]
+          format: uuid
+        message:
+          type: string
+    RoleErrorResponse:
+      type: object
       additionalProperties: true
-      description: 'Opaque permission matrix for a role — passed through verbatim from the RBAC service (shape not constrained here).'
+      description: >
+        Error envelope for the tenant role endpoints. `code` is the stable,
+        machine-readable discriminator — branch on it, not on `error`. Values:
+        `role_not_found`, `system_role_immutable`, `role_name_conflict`,
+        `invalid_role_name`, `invalid_permission_id`, `reassign_to_self`,
+        `role_referenced_by_sso`, `unknown_permissions`, `permission_not_held`,
+        `role_in_use`.
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Human-readable message, safe to show the user.
+        code:
+          type: string
+        missing_permissions:
+          type: array
+          description: Present on `permission_not_held` — the permissions the caller lacks.
+          items:
+            type: string
+        user_count:
+          type: integer
+          description: Present on `role_in_use` — how many users still hold the role.
 
     # ============================================================
     # /auth login flow (login / logout / refresh)

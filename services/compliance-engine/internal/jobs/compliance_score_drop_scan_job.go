@@ -134,6 +134,10 @@ func (j *ComplianceScoreDropScanJob) scanTenant(ctx context.Context, tenantID uu
 			JOIN tenant_framework_licenses tfl
 			  ON tfl.platform_framework_id = tfs.platform_framework_id AND tfl.tenant_id = tfs.tenant_id
 			WHERE tfs.tenant_id = $1
+			  -- score is NULLable: a framework with no ASSESSED control
+			  -- has no score, so it cannot have dropped. Scanning NULL into an
+			  -- int would also fail outright.
+			  AND tfs.score IS NOT NULL
 			  AND tfl.subscription_status = 'active'
 			  AND (tfl.subscription_expires_at IS NULL OR tfl.subscription_expires_at > NOW())
 		`, tenantID)

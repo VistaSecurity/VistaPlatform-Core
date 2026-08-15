@@ -49,6 +49,12 @@ type AlertEvaluator struct {
 	// notify is the notification sink. Overridable so tests can count
 	// notifications without a notification-service or a NATS server.
 	notify func(req map[string]interface{}) error
+	// raise/resolve are the stateful alert rail sinks (alerts.raise /
+	// alerts.resolve). Nil means the rail is unavailable — the evaluator then
+	// falls back to notifying directly, so a NATS outage degrades to a
+	// notification rather than to silence. Overridable in tests.
+	raise   func(ev events.AlertRaiseEvent) error
+	resolve func(ev events.AlertResolveEvent) error
 }
 
 // NewAlertEvaluator creates a new alert evaluator job
@@ -95,7 +101,109 @@ func NewAlertEvaluator(
 		httpClient:          httpClient,
 	}
 	ae.notify = ae.sendToUnifiedNotificationService
+	if natsClient != nil {
+		ae.raise = func(ev events.AlertRaiseEvent) error {
+			if ae.natsClient == nil || !ae.natsClient.IsConnected() {
+				return fmt.Errorf("NATS unavailable")
+			}
+			return events.PublishJSON(ae.natsClient, events.SubjectAlertsRaise, ev)
+		}
+		ae.resolve = func(ev events.AlertResolveEvent) error {
+			if ae.natsClient == nil || !ae.natsClient.IsConnected() {
+				return fmt.Errorf("NATS unavailable")
+			}
+			return events.PublishJSON(ae.natsClient, events.SubjectAlertsResolve, ev)
+		}
+	}
 	return ae, nil
+}
+
+// metricThresholdAlertType is the registry id (standards/alert-registry.yaml)
+// for a breached monitoring threshold. NOT threshold.ThresholdName — that is
+// operator-authored free text, while alerts.alert_type must be the stable
+// catalog identifier.
+const metricThresholdAlertType = "metric_threshold"
+
+// metricsEvaluationWindow is the snapshot window threshold evaluation reads.
+// It must match a window MetricsAggregator writes rows into for the CURRENT
+// moment — see the comment at the GetServiceMetrics call site.
+const metricsEvaluationWindow = time.Minute
+
+// raiseThresholdAlert publishes the breach onto the stateful alert rail. Returns
+// true when the rail took ownership — the alert engine then dedupes, escalates
+// and fans out the notification itself, so the caller must NOT also notify.
+//
+// The subject is the THRESHOLD, not the service name: a service can carry
+// several thresholds (latency and error-rate), and one alert per service would
+// make "which condition recovered?" unanswerable on resolve. Keying the alert
+// subject to threshold.ID also aligns the rail 1:1 with the evaluator's own
+// fire-once state (GetActiveAlertForThreshold), so the two cannot disagree about
+// what is open. subject_type stays "service" per the registry; the service name
+// travels as the subject label and in metadata.
+func (ae *AlertEvaluator) raiseThresholdAlert(threshold models.AlertThreshold, alert models.AlertHistory,
+	serviceName, severity string, thresholdValue, currentValue float64, serviceStatus string) bool {
+	if ae.raise == nil {
+		return false
+	}
+	subjectID := threshold.ID
+	label := serviceName
+	if label == "" {
+		label = threshold.ThresholdName
+	}
+	if err := ae.raise(events.AlertRaiseEvent{
+		EventID:      uuid.New(),
+		TenantID:     events.PlatformAlertTenantID, // platform-track: sentinel tenant
+		AlertType:    metricThresholdAlertType,
+		Source:       "monitoring",
+		SubjectType:  "service",
+		SubjectID:    &subjectID,
+		SubjectLabel: label,
+		Severity:     severity,
+		Title:        fmt.Sprintf("Threshold breached: %s", threshold.ThresholdName),
+		Message:      *alert.Message,
+		Metadata: map[string]interface{}{
+			"alert_id":            alert.ID.String(),
+			"threshold_id":        threshold.ID.String(),
+			"threshold_name":      threshold.ThresholdName,
+			"metric_type":         threshold.MetricType,
+			"service_name":        serviceName,
+			"threshold_value":     thresholdValue,
+			"actual_value":        currentValue,
+			"comparison_operator": threshold.ComparisonOperator,
+			"service_status":      serviceStatus,
+		},
+		Timestamp: time.Now(),
+	}); err != nil {
+		ae.logger.Printf("alerts.raise publish failed, falling back to notification: %v", err)
+		return false
+	}
+	return true
+}
+
+// resolveThresholdAlert closes the rail alert when the metric recovers — the
+// registry's `auto_resolve: metric recovers` for this type. Best-effort: a
+// failed publish is logged, and the next breach cycle re-raises.
+func (ae *AlertEvaluator) resolveThresholdAlert(threshold models.AlertThreshold, currentValue float64) {
+	if ae.resolve == nil {
+		return
+	}
+	subjectID := threshold.ID
+	if err := ae.resolve(events.AlertResolveEvent{
+		EventID:   uuid.New(),
+		TenantID:  events.PlatformAlertTenantID,
+		AlertType: metricThresholdAlertType,
+		SubjectID: &subjectID,
+		Observation: map[string]interface{}{
+			"observed":       "metric returned within threshold",
+			"threshold_name": threshold.ThresholdName,
+			"metric_type":    threshold.MetricType,
+			"actual_value":   currentValue,
+			"observed_at":    time.Now().Format(time.RFC3339),
+		},
+		Timestamp: time.Now(),
+	}); err != nil {
+		ae.logger.Printf("alerts.resolve publish failed for %s: %v", threshold.ThresholdName, err)
+	}
 }
 
 // Start begins the alert evaluation job
@@ -144,8 +252,19 @@ func (ae *AlertEvaluator) evaluateThreshold(ctx context.Context, threshold model
 		serviceName = *threshold.ServiceName
 	}
 
-	// Get latest metrics snapshot
-	metrics, err := ae.metricsService.GetServiceMetrics(serviceName, time.Hour)
+	// Get latest metrics snapshot.
+	//
+	// The window MUST be one the aggregator actually keeps rows in for the
+	// present moment. This asked for time.Hour, which is unsatisfiable:
+	// GetServiceMetrics filters `window_start >= now - window`, while
+	// aggregateToHourly writes its 3600-second rollup with window_start set to
+	// the PREVIOUS hour — already outside the window at the instant it lands. The
+	// Trend therefore came back empty on every cycle and evaluateThreshold
+	// returned at the len==0 guard below, so no threshold could ever breach.
+	// The 60-second snapshot is written every minute with window_start truncated
+	// to the current minute, so it is both satisfiable and the freshest reading —
+	// which is what threshold alerting wants anyway.
+	metrics, err := ae.metricsService.GetServiceMetrics(serviceName, metricsEvaluationWindow)
 	if err != nil {
 		return fmt.Errorf("failed to get service metrics: %w", err)
 	}
@@ -222,6 +341,9 @@ func (ae *AlertEvaluator) evaluateThreshold(ctx context.Context, threshold model
 			}
 			ae.logger.Printf("Alert resolved: %s (value: %.2f, %d alert(s) closed)",
 				threshold.ThresholdName, *currentValue, n)
+			// The evaluator DOES observe recovery, so the rail alert can be
+			// auto-resolved rather than left open for a human to close.
+			ae.resolveThresholdAlert(threshold, *currentValue)
 		}
 		return nil
 	}
@@ -267,6 +389,15 @@ func (ae *AlertEvaluator) evaluateThreshold(ctx context.Context, threshold model
 
 	ae.logger.Printf("Alert triggered: %s - %s (value: %.2f, threshold: %.2f)",
 		threshold.ThresholdName, severity, *currentValue, *thresholdValue)
+
+	// Prefer the stateful alert rail: the alert engine records the alert in
+	// `alerts` (dedupe/escalation/auto-resolve, visible at Remediation → Alerts)
+	// AND publishes the notification on open/escalation. Publishing both rails
+	// would notify twice for every breach, so the direct notification below is
+	// the fallback for when the rail is unavailable.
+	if ae.raiseThresholdAlert(threshold, alert, serviceName, severity, *thresholdValue, *currentValue, latest.Status) {
+		return nil
+	}
 
 	// Send notification via unified notification service
 	// Determine if this is a tenant or platform alert (platform alerts have no tenant context)

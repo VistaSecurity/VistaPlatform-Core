@@ -48,3 +48,90 @@ export function getDashboardPqcMetric(progress: PqcProgressRollup | null | undef
     unclassified,
   };
 }
+
+// ---- Discovery fleet -------------------------------------------------------
+//
+// The Discovery card counted ONLY the sensor-manager /sensors table, so a
+// tenant running 2 sensors + 2 agents read "3/3 sensors": the registered device
+// agent was missing entirely, and the platform interrogation agent was silently
+// counted as a sensor.
+//
+// Two things have to be right, and they are separate:
+//
+//  1. BOTH FLEETS. Discovery agents live in device-interrogation-service's own
+//     table (GET /agents), not in /sensors. Command Center already combines the
+//     two (M-13); this makes the dashboard agree instead of contradicting it.
+//  2. SENSOR vs AGENT. "Sensor" is used loosely for both, but they are different
+//     things, and the split does not follow the table: the tenant's PLATFORM
+//     interrogation agent is a row in the sensors table (profile
+//     'device_interrogation', sensor_type 'api', seeded per tenant by
+//     create_system_sensors_for_tenant). Classify by profile/type, not by which
+//     endpoint the row came from.
+//
+// Online is "status === active", matching the fleet pages.
+
+/** The subset of a sensor row this module needs. Structural, so it accepts the
+ *  generated API type without importing it. */
+export interface FleetSensorRow {
+  status?: string | null;
+  profile?: string | null;
+  sensor_type?: string | null;
+  tags?: string[] | null;
+}
+
+/** The subset of a device-agent row this module needs. */
+export interface FleetAgentRow {
+  status?: string | null;
+}
+
+export interface FleetCount {
+  online: number;
+  total: number;
+}
+
+export interface DiscoveryFleetMetric {
+  sensors: FleetCount;
+  agents: FleetCount;
+  /** Both fleets together — what the card's hero shows. */
+  all: FleetCount;
+}
+
+function isOnline(row: { status?: string | null }): boolean {
+  return (row.status ?? '').toLowerCase() === 'active';
+}
+
+/**
+ * Is this row from the sensors table actually a discovery AGENT? True for the
+ * platform-managed interrogation agent every tenant is seeded with, and for any
+ * device-agent registration that landed there. Mirrors the predicates the
+ * registration modal (isDeviceAgentProfile) and fleet table already use.
+ */
+export function isAgentRow(row: FleetSensorRow): boolean {
+  const profile = (row.profile ?? '').toLowerCase();
+  const type = (row.sensor_type ?? '').toLowerCase();
+  const tags = (row.tags ?? []).map((t) => t.toLowerCase());
+  return profile === 'device_interrogation' || type === 'api' || tags.includes('device_agent');
+}
+
+export function getDiscoveryFleetMetric(
+  sensorRows: FleetSensorRow[] | null | undefined,
+  agentRows: FleetAgentRow[] | null | undefined,
+): DiscoveryFleetMetric {
+  const rows = sensorRows ?? [];
+  const agentsFromSensorTable = rows.filter(isAgentRow);
+  const sensorsOnly = rows.filter((r) => !isAgentRow(r));
+  const agentsAll = [...agentsFromSensorTable, ...(agentRows ?? [])];
+
+  const count = (xs: { status?: string | null }[]): FleetCount => ({
+    online: xs.filter(isOnline).length,
+    total: xs.length,
+  });
+
+  const sensors = count(sensorsOnly);
+  const agents = count(agentsAll);
+  return {
+    sensors,
+    agents,
+    all: { online: sensors.online + agents.online, total: sensors.total + agents.total },
+  };
+}

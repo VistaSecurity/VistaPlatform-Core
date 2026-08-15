@@ -22,6 +22,7 @@ import (
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
+	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 )
 
 func main() {
@@ -66,18 +67,34 @@ func main() {
 	}
 	defer func() { _ = bypassDB.Close() }()
 
-	// Setup Gin router
-	router := gin.Default()
+	// mTLS posture is needed here (audit-service peer URL + client cert) as
+	// well as by the listener setup further down.
+	useMTLS := sharedconfig.GetEnvAsBool("USE_MTLS", true)
+
+	// Audit logging. Every route below /api/v1/tenant-health-service is a
+	// cross-tenant platform-admin surface: it reads one tenant's health,
+	// alerts, metrics and insights, and POST /calculate writes health scores.
+	// "Which admin looked at (or recalculated) which tenant" is precisely what
+	// an audit trail is for, and this service had none. Volume is low — the
+	// only client is admin-ui-v2 — so no additional skips beyond /health.
+	auditMiddleware := auditmiddleware.NewMiddleware(auditmiddleware.ServiceConfig(
+		"tenant-health-service",
+		useMTLS,
+		sharedconfig.GetEnv("CLIENT_CERT_PATH", "/app/certs/client-cert.pem"),
+		sharedconfig.GetEnv("CLIENT_KEY_PATH", "/app/certs/client-key.pem"),
+		sharedconfig.GetEnv("PLATFORM_CA_CERT_PATH", "/app/certs/platform-ca-cert.pem"),
+	))
+	defer auditMiddleware.Stop()
 
 	// Initialize repository, service, and handlers
 	healthRepo := repository.NewHealthRepository(db, bypassDB)
 	healthService := service.NewHealthService(healthRepo)
 	healthHandlers := handlers.NewHealthHandlers(healthService)
 
-	// Register routes (auth wired inside: platform-admin JWT + platform.health gate)
+	// Setup Gin router (audit logging + routes; see newRouter in router.go)
 	jwtSecret := os.Getenv("JWT_SECRET")
 	internalSecret := os.Getenv("INTERNAL_AUTH_SECRET")
-	healthHandlers.RegisterRoutes(router, jwtSecret, internalSecret, db)
+	router := newRouter(healthHandlers, auditMiddleware, jwtSecret, internalSecret, db)
 
 	// Initialize NATS subscriber for real-time health recalculation
 	var lifecycleSubscriber *subscribers.LifecycleSubscriber
@@ -117,7 +134,6 @@ func main() {
 	// https://<svc>:8443 under mTLS — this service answered "connection
 	// refused" there, reporting as unreachable/degraded on the About page
 	// despite being healthy, and made it unreachable to S2S callers.
-	useMTLS := sharedconfig.GetEnvAsBool("USE_MTLS", true)
 	tlsPort := sharedconfig.GetEnv("TLS_PORT", "8443")
 	serviceCertPath := sharedconfig.GetEnv("SERVICE_CERT_PATH", "/app/certs/server-cert.pem")
 	serviceKeyPath := sharedconfig.GetEnv("SERVICE_KEY_PATH", "/app/certs/server-key.pem")

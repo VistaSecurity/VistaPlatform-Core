@@ -43,16 +43,28 @@ func NewDeliveryService(db *sqlx.DB, cfg *config.Config, emailResolver *email.Em
 	}
 }
 
-// SendToChannels sends a notification to multiple channels
-// Returns list of channel types that were successfully used
+// ChannelFailure records one channel's failed delivery attempt, so the caller
+// can enqueue a retry scoped to THAT channel. Retrying a whole notification
+// would re-send it on channels that already succeeded — worse than the bug
+// being fixed.
+type ChannelFailure struct {
+	ChannelID   uuid.UUID
+	ChannelType string
+	Err         error
+}
+
+// SendToChannels sends a notification to multiple channels.
+// Returns the channel types successfully used, the per-channel failures, and a
+// summary error when every channel failed.
 func (ds *DeliveryService) SendToChannels(
 	ctx context.Context,
 	tenantID *uuid.UUID,
 	history *models.NotificationHistory,
 	channels []interface{},
 	req *models.SendNotificationRequest,
-) ([]string, error) {
+) ([]string, []ChannelFailure, error) {
 	var channelsUsed []string
+	var failures []ChannelFailure
 	var lastErr error
 
 	for _, ch := range channels {
@@ -85,8 +97,10 @@ func (ds *DeliveryService) SendToChannels(
 		// Send to channel
 		err := ds.sendToChannel(ctx, tenantID, channelID, channelType, config, req)
 		if err != nil {
-			ds.logger.Printf("Failed to send to channel %s (%s): %v", channelID, channelType, err)
+			ds.logger.Printf("Failed to send to channel %s (%s, permanent=%t): %v",
+				channelID, channelType, IsPermanentDeliveryFailure(err), err)
 			lastErr = err
+			failures = append(failures, ChannelFailure{ChannelID: channelID, ChannelType: channelType, Err: err})
 			// Continue with other channels
 			continue
 		}
@@ -98,10 +112,28 @@ func (ds *DeliveryService) SendToChannels(
 	}
 
 	if len(channelsUsed) == 0 && lastErr != nil {
-		return channelsUsed, fmt.Errorf("all channels failed: %w", lastErr)
+		return channelsUsed, failures, fmt.Errorf("all channels failed: %w", lastErr)
 	}
 
-	return channelsUsed, nil
+	return channelsUsed, failures, nil
+}
+
+// SendToOneChannel delivers to a single already-loaded channel. This is the
+// retry worker's entry point: it is deliberately scoped to ONE channel so a
+// retry can never re-send on a channel that already succeeded.
+func (ds *DeliveryService) SendToOneChannel(
+	ctx context.Context,
+	tenantID *uuid.UUID,
+	channelID uuid.UUID,
+	channelType string,
+	config map[string]interface{},
+	req *models.SendNotificationRequest,
+) error {
+	if err := ds.sendToChannel(ctx, tenantID, channelID, channelType, config, req); err != nil {
+		return err
+	}
+	ds.updateChannelLastUsed(ctx, tenantID, channelID, channelType)
+	return nil
 }
 
 // sendToChannel sends a notification to a single channel
@@ -127,7 +159,9 @@ func (ds *DeliveryService) sendToChannel(
 	case "in_app":
 		return ds.sendInApp(ctx, tenantID, req)
 	default:
-		return fmt.Errorf("unsupported channel type: %s", channelType)
+		// A channel row whose type we cannot deliver will never become
+		// deliverable by retrying.
+		return permanentf("unsupported channel type: %s", channelType)
 	}
 }
 
@@ -150,17 +184,29 @@ func (ds *DeliveryService) sendEmail(tenantID *uuid.UUID, config map[string]inte
 			recipients = []string{v}
 		}
 	default:
-		return fmt.Errorf("invalid recipients format")
+		return permanentf("invalid recipients format")
 	}
 
 	// Role-based recipients: config.recipient_role names a tenant role whose
 	// active members are resolved at send time (e.g. "tenant_admin"). This is
 	// what lets the seeded default channel work before any address is
 	// configured, and it tracks admin membership as it changes.
-	if role, ok := config["recipient_role"].(string); ok && role != "" && tenantID != nil {
-		roleRecipients, err := ds.resolveRoleRecipients(context.Background(), *tenantID, role)
+	//
+	// A PLATFORM channel (tenantID == nil) names a platform role instead, and
+	// resolves against platform_users / platform_roles. Same reason: the
+	// seeded platform default pack has to exist before any operator address
+	// does. Without this arm the seeded platform email channel would resolve
+	// to zero recipients and fail with "no valid recipients found".
+	if role, ok := config["recipient_role"].(string); ok && role != "" {
+		var roleRecipients []string
+		var err error
+		if tenantID != nil {
+			roleRecipients, err = ds.resolveRoleRecipients(context.Background(), *tenantID, role)
+		} else {
+			roleRecipients, err = ds.resolvePlatformRoleRecipients(context.Background(), role)
+		}
 		if err != nil {
-			ds.logger.Printf("Failed to resolve recipient_role %q for tenant %s: %v", role, tenantID, err)
+			ds.logger.Printf("Failed to resolve recipient_role %q (tenant %v): %v", role, tenantID, err)
 		} else {
 			recipients = append(recipients, roleRecipients...)
 		}
@@ -168,7 +214,7 @@ func (ds *DeliveryService) sendEmail(tenantID *uuid.UUID, config map[string]inte
 
 	recipients = dedupeStrings(recipients)
 	if len(recipients) == 0 {
-		return fmt.Errorf("no valid recipients found")
+		return permanentf("no valid recipients found")
 	}
 
 	// Get email service for tenant or platform
@@ -251,6 +297,41 @@ func (ds *DeliveryService) resolveRoleRecipients(ctx context.Context, tenantID u
 	return emails, nil
 }
 
+// resolvePlatformRoleRecipients returns the emails of active platform users
+// holding the named platform role — the platform-admin counterpart of
+// resolveRoleRecipients. No RLS: platform_users / platform_roles are global
+// tables, so this runs on the plain pool with no tenant context.
+//
+// deleted_at IS NULL and is_active are both required: a deactivated or
+// soft-deleted operator must stop receiving platform alerts the moment they
+// lose access, not at the next time someone remembers to edit the channel.
+func (ds *DeliveryService) resolvePlatformRoleRecipients(ctx context.Context, roleName string) ([]string, error) {
+	query := `
+		SELECT DISTINCT pu.email
+		FROM platform_users pu
+		JOIN platform_roles pr ON pr.id = pu.role_id
+		WHERE pr.name = $1
+		  AND pu.is_active = true
+		  AND pu.deleted_at IS NULL
+		  AND pu.email IS NOT NULL AND pu.email <> ''
+	`
+	rows, err := ds.db.QueryContext(ctx, query, roleName)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var emails []string
+	for rows.Next() {
+		var email string
+		if err := rows.Scan(&email); err != nil {
+			return nil, err
+		}
+		emails = append(emails, email)
+	}
+	return emails, rows.Err()
+}
+
 func dedupeStrings(in []string) []string {
 	seen := make(map[string]struct{}, len(in))
 	out := make([]string, 0, len(in))
@@ -268,11 +349,11 @@ func dedupeStrings(in []string) []string {
 func (ds *DeliveryService) sendSlack(config map[string]interface{}, req *models.SendNotificationRequest) error {
 	webhookURL, ok := config["webhook_url"].(string)
 	if !ok || webhookURL == "" {
-		return fmt.Errorf("slack webhook_url not configured")
+		return permanentf("slack webhook_url not configured")
 	}
 
 	if err := network.ValidateWebhookURL(webhookURL); err != nil {
-		return fmt.Errorf("slack webhook URL rejected: %w", err)
+		return classifyURLRejection("slack webhook URL rejected: %w", err)
 	}
 
 	channel := ""
@@ -341,7 +422,7 @@ func (ds *DeliveryService) sendSlack(config map[string]interface{}, req *models.
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("Slack webhook returned status %d: %s", resp.StatusCode, string(body))
+		return classifyHTTPStatus(resp.StatusCode, "Slack webhook returned status %d: %s", resp.StatusCode, string(body))
 	}
 
 	return nil
@@ -351,11 +432,11 @@ func (ds *DeliveryService) sendSlack(config map[string]interface{}, req *models.
 func (ds *DeliveryService) sendWebhook(config map[string]interface{}, req *models.SendNotificationRequest) error {
 	url, ok := config["url"].(string)
 	if !ok || url == "" {
-		return fmt.Errorf("webhook url not configured")
+		return permanentf("webhook url not configured")
 	}
 
 	if err := network.ValidateWebhookURL(url); err != nil {
-		return fmt.Errorf("webhook URL rejected: %w", err)
+		return classifyURLRejection("webhook URL rejected: %w", err)
 	}
 
 	// Build webhook payload
@@ -418,7 +499,7 @@ func (ds *DeliveryService) sendWebhook(config map[string]interface{}, req *model
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("webhook returned status %d: %s", resp.StatusCode, string(body))
+		return classifyHTTPStatus(resp.StatusCode, "webhook returned status %d: %s", resp.StatusCode, string(body))
 	}
 
 	return nil
@@ -428,7 +509,7 @@ func (ds *DeliveryService) sendWebhook(config map[string]interface{}, req *model
 func (ds *DeliveryService) sendPagerDuty(config map[string]interface{}, req *models.SendNotificationRequest) error {
 	integrationKey, ok := config["integration_key"].(string)
 	if !ok || integrationKey == "" {
-		return fmt.Errorf("pagerduty integration_key not configured")
+		return permanentf("pagerduty integration_key not configured")
 	}
 
 	severityMap := map[string]string{
@@ -475,7 +556,7 @@ func (ds *DeliveryService) sendPagerDuty(config map[string]interface{}, req *mod
 
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("pagerduty notification failed with status %d: %s", resp.StatusCode, string(body))
+		return classifyHTTPStatus(resp.StatusCode, "pagerduty notification failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
 	return nil
@@ -484,7 +565,7 @@ func (ds *DeliveryService) sendPagerDuty(config map[string]interface{}, req *mod
 // sendSMS sends an SMS notification (placeholder for future implementation)
 func (ds *DeliveryService) sendSMS(config map[string]interface{}, req *models.SendNotificationRequest) error {
 	// TODO: Implement SMS delivery
-	return fmt.Errorf("SMS delivery not yet implemented")
+	return permanentf("SMS delivery not yet implemented")
 }
 
 // knownAlertTitles maps a raw AlertType to the human headline shown in the

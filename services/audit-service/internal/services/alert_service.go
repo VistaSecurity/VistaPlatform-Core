@@ -74,14 +74,51 @@ type AlertService struct {
 	rulesMu      sync.RWMutex
 	alertHistory map[uuid.UUID]time.Time // Last alert time per rule for cooldown
 	historyMu    sync.RWMutex
+	// occurrences is the sliding-window tracker backing ThresholdCount /
+	// ThresholdWindow, keyed by rule + tenant + actor.
+	occurrences  map[string][]time.Time
+	occurrenceMu sync.Mutex
 	logger       *log.Logger
 	httpClient   *http.Client
 	natsClient   *events.NATSClient
+	// publishRaise publishes onto the stateful alert rail (alerts.raise). Nil
+	// until a NATS client is wired — a nil sink means "rail unavailable" and the
+	// caller falls back to the direct notification path. Overridable in tests.
+	publishRaise func(events.AlertRaiseEvent) error
+	// notify is the direct notification sink. Overridable so tests can count
+	// notifications without a notification-service or a NATS server.
+	notify func(context.Context, Alert) error
 }
 
-// SetNATSClient wires a NATS client for event-driven notification publishing.
+// SetNATSClient wires a NATS client for event-driven notification publishing
+// and for the stateful alert rail (alerts.raise).
 func (s *AlertService) SetNATSClient(client *events.NATSClient) {
 	s.natsClient = client
+	s.publishRaise = func(ev events.AlertRaiseEvent) error {
+		if s.natsClient == nil || !s.natsClient.IsConnected() {
+			return fmt.Errorf("NATS unavailable")
+		}
+		return events.PublishJSON(s.natsClient, events.SubjectAlertsRaise, ev)
+	}
+}
+
+// failedLoginRuleID is the built-in "Multiple Failed Login Attempts" rule. It is
+// the ONLY audit rule that maps onto a registry alert type: the other built-ins
+// (bulk export, privileged action, security event) have no registry entry, so
+// they keep the notification-only path rather than being blanket-raised under
+// someone else's alert type.
+var failedLoginRuleID = uuid.MustParse("00000001-0001-0001-0001-000000000001")
+
+// alertTypeFailedLoginBurst is the registry id (standards/alert-registry.yaml).
+// NOT the rule name — the rule name is free text a tenant can edit, while
+// alerts.alert_type must be the stable catalog identifier.
+const alertTypeFailedLoginBurst = "failed_login_burst"
+
+// auditRuleAlertTypes maps audit rule ids onto registry alert types. Keyed by
+// rule id (stable) rather than rule name (free text). A custom, DB-authored rule
+// is absent from this map by construction and stays notification-only.
+var auditRuleAlertTypes = map[uuid.UUID]string{
+	failedLoginRuleID: alertTypeFailedLoginBurst,
 }
 
 func NewAlertService(db *sql.DB) *AlertService {
@@ -107,13 +144,15 @@ func NewAlertServiceWithConfig(db *sql.DB, useMTLS bool, clientCertPath, clientK
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
 
-	return &AlertService{
+	s := &AlertService{
 		db:           db,
 		rules:        []AlertRule{},
 		alertHistory: make(map[uuid.UUID]time.Time),
 		logger:       log.New(log.Writer(), "[AlertService] ", log.LstdFlags),
 		httpClient:   httpClient,
 	}
+	s.notify = s.sendToUnifiedNotificationService
+	return s
 }
 
 // LoadRules loads alert rules from database
@@ -131,12 +170,18 @@ func (s *AlertService) LoadRules(ctx context.Context) error {
 func (s *AlertService) getDefaultRules() []AlertRule {
 	return []AlertRule{
 		{
-			ID:          uuid.MustParse("00000001-0001-0001-0001-000000000001"),
+			ID:          failedLoginRuleID,
 			Name:        "Multiple Failed Login Attempts",
 			Description: "Triggers when multiple login failures occur within a short time",
 			Enabled:     true,
 			Conditions: AlertConditions{
-				EventTypes:      []string{"user.login.failed"},
+				// Both spellings. The emitter (auth-service's login handler)
+				// writes "user.login_failed"; the dotted form is what
+				// shared/middleware/audit's constant declares and what
+				// audit-service's own trend analysis queries. Matching only the
+				// dotted form meant this rule never matched a single real failed
+				// login — the substring test cannot bridge `.` and `_`.
+				EventTypes:      []string{"user.login_failed", "user.login.failed"},
 				FailureOnly:     boolPtr(true),
 				ThresholdCount:  5,
 				ThresholdWindow: 5, // 5 failures in 5 minutes
@@ -212,7 +257,16 @@ func (s *AlertService) EvaluateEvent(ctx context.Context, event map[string]inter
 
 		// Check if event matches rule conditions
 		if s.matchesConditions(event, rule.Conditions) {
+			// A rule declaring a burst threshold fires only once the burst
+			// exists. ThresholdCount/ThresholdWindow were declared on the
+			// failed-login rule but never read, so it was a "5 failures in 5
+			// minutes" rule that fired on the FIRST failure.
+			count, reached := s.recordOccurrence(rule, event)
+			if !reached {
+				continue
+			}
 			alert := s.createAlert(rule, event)
+			alert.EventCount = count
 			triggeredAlerts = append(triggeredAlerts, alert)
 
 			// Execute actions
@@ -224,6 +278,66 @@ func (s *AlertService) EvaluateEvent(ctx context.Context, event map[string]inter
 	}
 
 	return triggeredAlerts
+}
+
+// occurrenceKeyCap bounds the sliding-window tracker so a hostile or noisy
+// event stream cannot grow it without limit. When exceeded, the tracker is
+// cleared wholesale: an alerting aid must never become the memory leak that
+// takes the service down.
+const occurrenceKeyCap = 10000
+
+// occurrenceKey scopes a burst window to one rule and one actor, so failures
+// spread across many accounts do not aggregate into a phantom burst against
+// whichever account happened to fail last.
+func occurrenceKey(rule AlertRule, event map[string]interface{}) string {
+	key := rule.ID.String()
+	if tid := tenantIDFromEvent(event); tid != nil {
+		key += "|" + tid.String()
+	}
+	if uid := uuidFromEvent(event, "user_id"); uid != nil {
+		key += "|" + uid.String()
+	}
+	return key
+}
+
+// recordOccurrence registers a matching event against the rule's sliding
+// window and reports the count within the window plus whether the rule's
+// threshold has been reached. A rule with no declared threshold (the majority)
+// fires on every match, as before.
+func (s *AlertService) recordOccurrence(rule AlertRule, event map[string]interface{}) (int, bool) {
+	if rule.Conditions.ThresholdCount <= 1 || rule.Conditions.ThresholdWindow <= 0 {
+		return 1, true
+	}
+
+	key := occurrenceKey(rule, event)
+	window := time.Duration(rule.Conditions.ThresholdWindow) * time.Minute
+	cutoff := time.Now().Add(-window)
+
+	s.occurrenceMu.Lock()
+	defer s.occurrenceMu.Unlock()
+	if s.occurrences == nil {
+		s.occurrences = make(map[string][]time.Time)
+	}
+	if len(s.occurrences) > occurrenceKeyCap {
+		s.occurrences = make(map[string][]time.Time)
+	}
+
+	kept := s.occurrences[key][:0]
+	for _, ts := range s.occurrences[key] {
+		if ts.After(cutoff) {
+			kept = append(kept, ts)
+		}
+	}
+	kept = append(kept, time.Now())
+	s.occurrences[key] = kept
+
+	if len(kept) < rule.Conditions.ThresholdCount {
+		return len(kept), false
+	}
+	// The burst is reported once; the window resets so the next alert needs a
+	// fresh burst rather than re-firing on every subsequent failure.
+	delete(s.occurrences, key)
+	return len(kept), true
 }
 
 // matchesConditions checks if an event matches rule conditions
@@ -304,9 +418,16 @@ func (s *AlertService) createAlert(rule AlertRule, event map[string]interface{})
 
 // executeActions performs alert actions
 func (s *AlertService) executeActions(ctx context.Context, alert Alert, actions []AlertAction) {
-	// Send to unified notification service first
-	if err := s.sendToUnifiedNotificationService(ctx, alert); err != nil {
-		s.logger.Printf("Failed to send alert via unified service: %v", err)
+	// Prefer the stateful alert rail (alerts.raise) for rules that map onto a
+	// registry alert type: the alert engine dedupes, escalates, auto-resolves
+	// AND fans out the notification itself. Publishing both would notify twice
+	// for every burst, so the direct notification is the FALLBACK — used when
+	// the rule has no registry type, when the alert has no tenant, or when the
+	// raise could not be published (NATS down).
+	if !s.raiseRailAlert(alert) && s.notify != nil {
+		if err := s.notify(ctx, alert); err != nil {
+			s.logger.Printf("Failed to send alert via unified service: %v", err)
+		}
 	}
 
 	// Also execute legacy actions for backward compatibility
@@ -370,7 +491,13 @@ func (s *AlertService) sendWebhook(ctx context.Context, alert Alert, config map[
 // Activity logs carry TenantID as *uuid.UUID; tolerate uuid.UUID and string
 // forms as well so alerts stay tenant-scoped regardless of caller shape.
 func tenantIDFromEvent(event map[string]interface{}) *uuid.UUID {
-	raw, ok := event["tenant_id"]
+	return uuidFromEvent(event, "tenant_id")
+}
+
+// uuidFromEvent extracts a uuid-valued key from an activity-log event map,
+// tolerating the *uuid.UUID / uuid.UUID / string shapes callers use.
+func uuidFromEvent(event map[string]interface{}, key string) *uuid.UUID {
+	raw, ok := event[key]
 	if !ok || raw == nil {
 		return nil
 	}
@@ -440,9 +567,67 @@ func (s *AlertService) AcknowledgeAlert(ctx context.Context, alertID uuid.UUID, 
 	return nil
 }
 
-// sendToUnifiedNotificationService sends an alert to the unified notification service.
-// It tries NATS first and falls back to HTTP if NATS is unavailable.
-func (s *AlertService) sendToUnifiedNotificationService(ctx context.Context, alert Alert) error {
+// raiseRailAlert publishes the alert onto the stateful alert rail
+// (alerts.raise) when the triggering rule maps onto a registry alert type.
+// Returns true when the rail took ownership of the alert — the alert engine
+// then persists it in `alerts` (dedupe/escalate/resolve, visible at
+// Remediation → Alerts) and fans out the notification itself.
+//
+// Returns false — leaving the caller to notify directly — when the rule has no
+// registry type, when the alert carries no tenant (the alerts table is
+// tenant-scoped and NOT NULL), or when the publish failed. NATS being down must
+// degrade to a notification, never to silence.
+func (s *AlertService) raiseRailAlert(alert Alert) bool {
+	alertType, mapped := auditRuleAlertTypes[alert.RuleID]
+	if !mapped {
+		return false
+	}
+	if alert.TenantID == nil || *alert.TenantID == uuid.Nil {
+		return false
+	}
+	publish := s.publishRaise
+	if publish == nil {
+		return false
+	}
+
+	// subject_type is `user` in the registry, so the subject is the account the
+	// failed logins were against: one open alert per user, escalating rather
+	// than opening a new alert per detection. A burst against an unknown
+	// account (no user_id resolved) carries a nil subject, which the engine
+	// dedupes as the tenant's single "unknown user" burst — deliberately NOT a
+	// fresh random id per event, which would defeat dedupe entirely.
+	var subjectID *uuid.UUID
+	subjectLabel := "unknown user"
+	if len(alert.SampleEvents) > 0 {
+		if uid := uuidFromEvent(alert.SampleEvents[0], "user_id"); uid != nil {
+			subjectID = uid
+			subjectLabel = uid.String()
+		}
+	}
+
+	if err := publish(events.AlertRaiseEvent{
+		EventID:      uuid.New(),
+		TenantID:     *alert.TenantID,
+		AlertType:    alertType,
+		Source:       "audit",
+		SubjectType:  "user",
+		SubjectID:    subjectID,
+		SubjectLabel: subjectLabel,
+		Severity:     alert.Severity,
+		Title:        alert.RuleName,
+		Message:      alert.Message,
+		Metadata:     alertMetadata(alert),
+		Timestamp:    time.Now(),
+	}); err != nil {
+		s.logger.Printf("alerts.raise publish failed, falling back to notification: %v", err)
+		return false
+	}
+	s.logger.Printf("Audit alert raised on the alert rail: %s (subject=%s)", alertType, subjectLabel)
+	return true
+}
+
+// alertMetadata is the evidence carried on both rails.
+func alertMetadata(alert Alert) map[string]interface{} {
 	metadata := map[string]interface{}{
 		"rule_id":      alert.RuleID.String(),
 		"rule_name":    alert.RuleName,
@@ -453,6 +638,13 @@ func (s *AlertService) sendToUnifiedNotificationService(ctx context.Context, ale
 	if len(alert.SampleEvents) > 0 {
 		metadata["sample_events"] = alert.SampleEvents
 	}
+	return metadata
+}
+
+// sendToUnifiedNotificationService sends an alert to the unified notification service.
+// It tries NATS first and falls back to HTTP if NATS is unavailable.
+func (s *AlertService) sendToUnifiedNotificationService(ctx context.Context, alert Alert) error {
+	metadata := alertMetadata(alert)
 
 	// Try NATS first
 	if s.natsClient != nil && s.natsClient.IsConnected() {

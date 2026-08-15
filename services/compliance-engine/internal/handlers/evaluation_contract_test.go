@@ -108,12 +108,14 @@ const evalBase = "/api/v1/compliance-engine"
 
 // --- sample data -----------------------------------------------------------
 
+func ptr[T any](v T) *T { return &v }
+
 func sampleComplianceScore() *services.ComplianceScoreResponse {
 	return &services.ComplianceScoreResponse{
-		Score:          87.5,
+		Score:          ptr(87.5),
 		FrameworkCount: 1,
 		Frameworks: []services.FrameworkScoreDetail{
-			{ID: uuid.NewString(), Name: "PCI DSS 4.0", Code: "pci-dss-4-0", Version: "4.0", Score: 88, Type: "platform"},
+			{ID: uuid.NewString(), Name: "PCI DSS 4.0", Code: "pci-dss-4-0", Version: "4.0", Score: ptr(88), Type: "platform"},
 		},
 	}
 }
@@ -121,11 +123,11 @@ func sampleComplianceScore() *services.ComplianceScoreResponse {
 func sampleFrameworkStatus() *services.FrameworkStatusResponse {
 	d := services.FrameworkStatusDetail{
 		ID: uuid.NewString(), Name: "PCI DSS 4.0", Code: "pci-dss-4-0", Version: "4.0",
-		CompliancePercent: 88, Type: "platform", IsSelected: true,
+		CompliancePercent: ptr(88), Type: "platform", IsSelected: true,
 	}
 	return &services.FrameworkStatusResponse{
 		Frameworks:        []services.FrameworkStatusDetail{d},
-		OverallScore:      88.0,
+		OverallScore:      ptr(88.0),
 		SelectedFramework: &d,
 	}
 }
@@ -137,14 +139,15 @@ func sampleMultiResult() services.MultiFrameworkEvaluationResult {
 		FrameworkCode:    "pci-dss-4-0",
 		FrameworkVersion: "4.0",
 		FrameworkType:    "platform",
-		Score:            88,
+		Score:            ptr(88),
 		Summary:          nil, // serializes as null; schema allows ["object","null"]
 		AffectedEntities: map[string][]string{"certificates": {uuid.NewString()}},
 		Controls: struct {
-			Total   int `json:"total"`
-			Passing int `json:"passing"`
-			Failing int `json:"failing"`
-		}{Total: 10, Passing: 8, Failing: 2},
+			Total       int `json:"total"`
+			Passing     int `json:"passing"`
+			Failing     int `json:"failing"`
+			NotAssessed int `json:"not_assessed"`
+		}{Total: 10, Passing: 8, Failing: 1, NotAssessed: 1},
 		LastEvaluated: time.Now().UTC().Format(time.RFC3339),
 	}
 }
@@ -157,9 +160,10 @@ func sampleFrameworkContext() *services.FrameworkContextResponse {
 		Status: &services.FrameworkContextStatus{
 			Frameworks: []services.FrameworkStatusItem{{
 				ID: uuid.NewString(), Name: "PCI DSS 4.0", Code: "pci-dss-4-0", Version: "4.0",
-				CompliancePercent: 88, ControlsTotal: 10, ControlsPassing: 8, ControlsFailing: 2, IsDefault: true,
+				CompliancePercent: ptr(88), ControlsTotal: 10, ControlsPassing: 8, ControlsFailing: 1,
+				ControlsNotAssessed: 1, OpenFindingsControls: 1, IsDefault: true,
 			}},
-			OverallScore: 88.0,
+			OverallScore: ptr(88.0),
 		},
 		Subscription: &services.FrameworkSubscriptionInfo{
 			Tier: "enterprise", FrameworkLimit: 10, FrameworksUsed: 2, CanAddMore: true,
@@ -172,8 +176,8 @@ func sampleBatchEvaluate() *services.BatchEvaluateResponse {
 	return &services.BatchEvaluateResponse{
 		Results: []services.BatchEvaluateResult{{
 			FrameworkID: uuid.NewString(), FrameworkName: "PCI DSS 4.0", FrameworkCode: "pci-dss-4-0",
-			FrameworkVersion: "4.0", Score: 88, ControlsTotal: 10, ControlsPassing: 8, ControlsFailing: 2,
-			AffectedAssets: 3,
+			FrameworkVersion: "4.0", Score: ptr(88), ControlsTotal: 10, ControlsPassing: 8, ControlsFailing: 1,
+			ControlsNotAssessed: 1, AffectedAssets: 3,
 		}},
 		LastUpdated: time.Now().UTC().Format(time.RFC3339),
 	}

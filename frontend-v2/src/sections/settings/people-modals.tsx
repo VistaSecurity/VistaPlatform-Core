@@ -22,6 +22,28 @@ function useTenantRoles(tenantId: string | undefined, enabled: boolean) {
   });
 }
 
+/**
+ * `GET /tenant/{id}/roles` requires `users.manage`, but the flows below only
+ * require `users.create` (invite) and `users.manage` (change role). Until
+ * custom roles shipped that gap was unreachable — every permission
+ * combination was one of five seeded roles, and the only role holding
+ * `users.create` also held `users.manage`. A tenant can now build a role with
+ * one and not the other, at which point this query 403s.
+ *
+ * The old fallback rendered `['viewer']` on an empty list, so the invite dialog
+ * silently offered exactly one role and reported nothing wrong — an invitation
+ * sent as the wrong role looks identical to a successful one. Fail loudly
+ * instead: say what is missing and block the action.
+ */
+const ROLES_UNAVAILABLE =
+  'Roles could not be loaded — listing them needs the Manage users permission. Ask a Tenant Administrator to send this invitation, or to grant it.';
+
+function roleFieldHint(isLoading: boolean, isError: boolean): string {
+  if (isError) return ROLES_UNAVAILABLE;
+  if (isLoading) return 'Loading roles…';
+  return 'Determines what they can see and do.';
+}
+
 export function InviteMemberModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const queryClient = useQueryClient();
   const { tenant } = useAuth();
@@ -67,7 +89,7 @@ export function InviteMemberModal({ open, onClose }: { open: boolean; onClose: (
       primary={
         sent
           ? <button className="ui-btn sm accent" onClick={onClose}>Done</button>
-          : <button className="ui-btn sm accent" disabled={!emailOk || mutation.isPending} onClick={() => mutation.mutate()}>
+          : <button className="ui-btn sm accent" disabled={!emailOk || mutation.isPending || roles.length === 0} onClick={() => mutation.mutate()}>
               {mutation.isPending ? 'Sending…' : 'Send invitation'}
             </button>
       }
@@ -83,9 +105,9 @@ export function InviteMemberModal({ open, onClose }: { open: boolean; onClose: (
       <ModalField label="Email address">
         <ModalInput type="email" value={email} data-autofocus placeholder="name@company.com" disabled={!!sent} onChange={(e) => setEmail(e.target.value)} />
       </ModalField>
-      <ModalField label="Role" hint={rolesQ.isLoading ? 'Loading roles…' : 'Determines what they can see and do.'}>
-        <ModalSelect value={role} disabled={!!sent} onChange={(e) => setRole(e.target.value)}>
-          {(roles.length ? roles.map((r) => r.name) : ['viewer']).map((r) => <option key={r} value={r}>{r}</option>)}
+      <ModalField label="Role" hint={roleFieldHint(rolesQ.isLoading, rolesQ.isError)}>
+        <ModalSelect value={role} disabled={!!sent || rolesQ.isError} onChange={(e) => setRole(e.target.value)}>
+          {roles.map((r) => <option key={r.name} value={r.name}>{r.name}</option>)}
         </ModalSelect>
       </ModalField>
       {sent && acceptUrl && (
@@ -157,8 +179,8 @@ export function ChangeRoleModal({ member, open, onClose }: { member: TenantUser;
       secondary={<button className="ui-btn sm" onClick={onClose}>Cancel</button>}
       footerNote={mutation.isError ? <span style={{ color: 'var(--danger-text)' }}>{mutation.error instanceof Error ? mutation.error.message : 'Request failed'}</span> : undefined}
     >
-      <ModalField label="Role" hint={rolesQ.isLoading ? 'Loading roles…' : 'Determines what they can see and do.'}>
-        <ModalSelect value={selected} data-autofocus onChange={(e) => setRoleId(e.target.value)}>
+      <ModalField label="Role" hint={roleFieldHint(rolesQ.isLoading, rolesQ.isError)}>
+        <ModalSelect value={selected} data-autofocus disabled={rolesQ.isError} onChange={(e) => setRoleId(e.target.value)}>
           {roles.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
         </ModalSelect>
       </ModalField>

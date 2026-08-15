@@ -25,6 +25,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
+	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 )
 
@@ -57,21 +58,79 @@ type PcapResult struct {
 	ErrorCount       int               `json:"error_count"`
 }
 
+// AuditSink records one unit of consumer work on the shared audit path.
+// *auditmiddleware.Middleware satisfies it; tests substitute a recorder.
+type AuditSink interface {
+	LogConsumerEvent(ctx context.Context, ev auditmiddleware.ConsumerEvent) error
+}
+
 // Processor handles pcap file processing jobs.
 type Processor struct {
 	db         *sqlx.DB
 	cfg        *config.Config
 	sem        chan struct{}
 	natsClient *events.NATSClient
+	audit      AuditSink
 }
 
 // New creates a new Processor.
-func New(db *sqlx.DB, cfg *config.Config, natsClient *events.NATSClient) *Processor {
+//
+// auditSink may be nil (no audit-service configured); the processor then
+// records nothing rather than failing the job.
+func New(db *sqlx.DB, cfg *config.Config, natsClient *events.NATSClient, auditSink AuditSink) *Processor {
 	return &Processor{
 		db:         db,
 		cfg:        cfg,
 		sem:        make(chan struct{}, cfg.MaxConcurrentJobs),
 		natsClient: natsClient,
+		audit:      auditSink,
+	}
+}
+
+// logJobAudit records the outcome of one PCAP job.
+//
+// pcap-processor ingests a tenant-uploaded capture into sensor_discoveries and
+// on into the crypto inventory. Its only HTTP surface is /health, so the
+// LogRequest middleware every other service mounts has nothing to attach to —
+// every mutation it made was invisible to the audit trail. This is the
+// consumer-path equivalent.
+//
+// Counts only: number of discoveries, packets and parse errors. Never the
+// capture's contents, and never the uploaded filename — the pcap_jobs row
+// already holds that, keyed by the job id recorded here, and a capture's
+// payload is exactly the material CLAUDE.md says not to collect.
+func (p *Processor) logJobAudit(ctx context.Context, job *events.PcapJobEvent, result *PcapResult, started time.Time, errorKind string) {
+	if p.audit == nil {
+		return
+	}
+
+	counts := map[string]int{}
+	eventType := "discovery.pcap.failed"
+	if result != nil {
+		counts["discoveries"] = result.DiscoveryCount
+		counts["packets_processed"] = result.PacketsProcessed
+		counts["parse_errors"] = result.ErrorCount
+		counts["protocols_found"] = len(result.ProtocolsFound)
+		eventType = "discovery.pcap.processed"
+	}
+
+	tenantID := job.TenantID
+	jobID := job.JobID
+	if err := p.audit.LogConsumerEvent(ctx, auditmiddleware.ConsumerEvent{
+		TenantID:      &tenantID,
+		Source:        events.SubjectPcapJobsProcess,
+		Stream:        "PCAP_JOBS",
+		EventCategory: "discovery",
+		EventType:     eventType,
+		Action:        "process",
+		ResourceType:  "pcap_job",
+		ResourceID:    &jobID,
+		Counts:        counts,
+		Duration:      time.Since(started),
+		Success:       errorKind == "",
+		ErrorKind:     errorKind,
+	}); err != nil {
+		log.Printf("[PCAP] Warning: failed to record audit event for job %s: %v", job.JobID, err)
 	}
 }
 
@@ -84,6 +143,8 @@ func (p *Processor) HandlePcapJob(ctx context.Context, msg *nats.Msg) error {
 
 	log.Printf("[PCAP] Processing job %s for tenant %s (file: %s, size: %d bytes)",
 		job.JobID, job.TenantID, job.OriginalFilename, job.FileSizeBytes)
+
+	started := time.Now()
 
 	// Acquire semaphore to respect MaxConcurrentJobs
 	select {
@@ -106,6 +167,7 @@ func (p *Processor) HandlePcapJob(ctx context.Context, msg *nats.Msg) error {
 			log.Printf("[PCAP] Warning: failed to update job %s status to failed: %v", job.JobID, updateErr)
 		}
 		p.cleanupFile(job.FilePath)
+		p.logJobAudit(ctx, &job, nil, started, "process_failed")
 		return fmt.Errorf("process pcap file: %w", err)
 	}
 
@@ -131,6 +193,8 @@ func (p *Processor) HandlePcapJob(ctx context.Context, msg *nats.Msg) error {
 
 	log.Printf("[PCAP] Job %s completed: %d discoveries, %d packets processed, protocols: %v",
 		job.JobID, result.DiscoveryCount, result.PacketsProcessed, result.ProtocolsFound)
+
+	p.logJobAudit(ctx, &job, result, started, "")
 
 	return nil
 }

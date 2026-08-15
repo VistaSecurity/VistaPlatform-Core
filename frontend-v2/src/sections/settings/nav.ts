@@ -57,10 +57,18 @@ export const SETTINGS_NAV: SettingsNavSection[] = [
   ] },
   { section: 'People & Access', items: [
     { key: 'members', label: 'Members', icon: 'users', built: true, permission: TENANT_PERMISSIONS.users.read, job: 'Invite users, assign roles, and manage the organization roster.' },
-    { key: 'roles', label: 'Roles & Permissions', icon: 'shield-half', built: true, permission: TENANT_PERMISSIONS.users.read, job: 'Define roles and the permissions each one grants.' },
+    // users.manage, not users.read: the whole /tenant/:id/roles route group in
+    // auth-service requires users.manage, so gating the entry on users.read
+    // advertised the page to security_admin and viewer, who then hit the page's
+    // "Couldn't load roles" error banner instead of a proper access notice.
+    { key: 'roles', label: 'Roles & Permissions', icon: 'shield-half', built: true, permission: TENANT_PERMISSIONS.users.manage, job: 'Define roles and the permissions each one grants.' },
     {
       key: 'security-sso', label: 'Security & SSO', icon: 'fingerprint', built: true,
-      permission: TENANT_PERMISSIONS.settings.read,
+      // settings.update, not settings.read: auth-service gates the WHOLE
+      // /tenant/sso group at settings.update, reads included (ee/sso/routes.go),
+      // so a settings.read-only role could reach the page and get a load error
+      // instead of an access notice. Same shape as the `roles` entry above.
+      permission: TENANT_PERMISSIONS.settings.update,
       job: 'Configure identity-provider connections (OAuth / SAML / LDAP), the org authentication policy, and SSO-group → role mapping.',
       feature: 'sso_saml',
       lock: {
@@ -91,11 +99,23 @@ export const SETTINGS_NAV: SettingsNavSection[] = [
     },
     { key: 'ratings', label: 'Severity Ratings', icon: 'gauge', job: 'The source-of-truth registry that rates every cryptographic value consistently over time.' },
     { key: 'asset-lifecycle', label: 'Asset Lifecycle', icon: 'recycle', built: true, permission: TENANT_PERMISSIONS.settings.read, job: 'Set staleness thresholds and auto-archive behavior for assets.' },
+    // Stays settings.read: the page's only load call, GET /retention-policies,
+    // is ungated in audit-service, so the entry is not weaker than its route
+    // and nobody reaches an error banner. Its WRITE affordances are gated on
+    // audit.manage inside the page — the create/edit routes' real
+    // requirement.
     { key: 'retention', label: 'Retention Policies', icon: 'archive', built: true, permission: TENANT_PERMISSIONS.settings.read, job: 'Define data-retention schedules for audit and event logs.' },
     { key: 'scopes', label: 'Scopes', icon: 'crop', built: true, job: 'Define named, versioned asset boundaries used by CBOM.' },
   ] },
   { section: 'Audit', items: [
-    { key: 'audit', label: 'Audit', icon: 'history', built: true, permission: TENANT_PERMISSIONS.settings.read, job: 'Search, view, and export the full audit trail — who did what, when.' },
+    // audit.read, not settings.read: the audit trail is its own permission
+    // family now that audit-service resolves grants from
+    // tenant_role_permissions instead of a hardcoded role switch.
+    // Never weaker than the routes the page calls (GET /activity-logs is
+    // ungated; the by-user / by-resource drill-downs require audit.read), and
+    // it stops advertising the trail to billing_admin, which holds
+    // settings.read but has no operational scope.
+    { key: 'audit', label: 'Audit', icon: 'history', built: true, permission: TENANT_PERMISSIONS.audit.read, job: 'Search, view, and export the full audit trail — who did what, when.' },
   ] },
   { section: 'Infrastructure', items: [
     { key: 'sensor-config', label: 'Sensor Configuration', icon: 'radar', job: 'Set global discovery-engine behavior — Active Scanning Policy and Observation Rest Period.' },

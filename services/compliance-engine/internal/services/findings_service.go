@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -16,6 +17,8 @@ import (
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 )
+
+var ErrFindingNotFound = errors.New("finding not found")
 
 // sqlExecutor is satisfied by both *sql.Tx and *sqlx.DB, letting
 // recordFindingHistory write to compliance_finding_history either inside a
@@ -53,6 +56,22 @@ func NewFindingsService(db, bypassDB *sqlx.DB, ruleEvaluator *RuleEvaluator, fra
 		metricsService:          metricsService,
 		coalescer:               newTenantCoalescer(),
 	}
+}
+
+func licensedFindingExistsInTx(ctx context.Context, tx *sql.Tx, tenantID, findingID uuid.UUID) (bool, error) {
+	var exists bool
+	query := `
+		SELECT EXISTS(
+			SELECT 1
+			FROM compliance_findings cf
+			WHERE cf.id = $1 AND cf.tenant_id = $2
+			  AND ` + licensedFindingScopeSQL("cf", "$2") + `
+		)
+	`
+	if err := tx.QueryRowContext(ctx, query, findingID, tenantID).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
 // ReconcileTenantCoalesced runs a whole-tenant reconcile (or a framework-scoped one when
@@ -93,9 +112,23 @@ func (s *FindingsService) AssignFindingOwner(tenantID, findingID, assignedTo, as
 		SET assigned_to = $1, assigned_at = $2, assigned_by = $3, remediation_notes = $4, updated_at = $5
 		WHERE id = $6 AND tenant_id = $7
 	`
-	return shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenantID, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(context.Background(), query, assignedTo, now, assignedBy, notes, now, findingID, tenantID); err != nil {
+	ctx := context.Background()
+	return shareddatabase.WithTenantTx(ctx, s.db.DB, tenantID, func(tx *sql.Tx) error {
+		visible, err := licensedFindingExistsInTx(ctx, tx, tenantID, findingID)
+		if err != nil {
+			return fmt.Errorf("failed to check finding: %w", err)
+		}
+		if !visible {
+			return ErrFindingNotFound
+		}
+		res, err := tx.ExecContext(ctx, query, assignedTo, now, assignedBy, notes, now, findingID, tenantID)
+		if err != nil {
 			return fmt.Errorf("failed to assign finding owner: %w", err)
+		}
+		if rows, err := res.RowsAffected(); err != nil {
+			return err
+		} else if rows == 0 {
+			return ErrFindingNotFound
 		}
 		return nil
 	})
@@ -108,9 +141,23 @@ func (s *FindingsService) UnassignFindingOwner(tenantID, findingID uuid.UUID) er
 		SET assigned_to = NULL, assigned_at = NULL, assigned_by = NULL, updated_at = NOW()
 		WHERE id = $1 AND tenant_id = $2
 	`
-	return shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenantID, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(context.Background(), query, findingID, tenantID); err != nil {
+	ctx := context.Background()
+	return shareddatabase.WithTenantTx(ctx, s.db.DB, tenantID, func(tx *sql.Tx) error {
+		visible, err := licensedFindingExistsInTx(ctx, tx, tenantID, findingID)
+		if err != nil {
+			return fmt.Errorf("failed to check finding: %w", err)
+		}
+		if !visible {
+			return ErrFindingNotFound
+		}
+		res, err := tx.ExecContext(ctx, query, findingID, tenantID)
+		if err != nil {
 			return fmt.Errorf("failed to unassign finding owner: %w", err)
+		}
+		if rows, err := res.RowsAffected(); err != nil {
+			return err
+		} else if rows == 0 {
+			return ErrFindingNotFound
 		}
 		return nil
 	})
@@ -127,8 +174,9 @@ func (s *FindingsService) GetFinding(tenantID, findingID uuid.UUID) (*models.Com
 		       detection_state, workflow_status, occurrence_count, resurfaced_at,
 		       suppressed_until, suppression_reason, is_stale, last_evaluated_at,
 		       evaluation_version, created_at, updated_at
-		FROM compliance_findings
-		WHERE id = $1 AND tenant_id = $2
+		FROM compliance_findings cf
+		WHERE cf.id = $1 AND cf.tenant_id = $2
+		  AND ` + licensedFindingScopeSQL("cf", "$2") + `
 	`
 	var finding models.ComplianceFinding
 	var evidenceJSONB []byte
@@ -157,7 +205,7 @@ func (s *FindingsService) GetFinding(tenantID, findingID uuid.UUID) (*models.Com
 		return nil, fmt.Errorf("failed to get finding: %w", err)
 	}
 	if notFound {
-		return nil, fmt.Errorf("finding not found")
+		return nil, ErrFindingNotFound
 	}
 
 	finding.Evidence = make(map[string]interface{})
@@ -223,10 +271,11 @@ func (s *FindingsService) GetFindingsByAsset(tenantID, assetID uuid.UUID) ([]mod
 		       detection_state, workflow_status, occurrence_count, resurfaced_at,
 		       suppressed_until, suppression_reason, is_stale, last_evaluated_at,
 		       evaluation_version, created_at, updated_at
-		FROM compliance_findings
+		FROM compliance_findings cf
 		WHERE tenant_id = $1 AND asset_id = $2
 		  AND detection_state = 'ACTIVE'
 		  AND (workflow_status != 'SUPPRESSED' OR workflow_status IS NULL)
+		  AND ` + licensedFindingScopeSQL("cf", "$1") + `
 		ORDER BY last_seen DESC
 	`
 	// Scan manually to handle JSONB evidence field
@@ -343,7 +392,9 @@ func (s *FindingsService) ListFindings(tenantID uuid.UUID, filters FindingListFi
 		pageSize = 200
 	}
 
-	where := []string{"cf.tenant_id = $1", "cf.detection_state = 'ACTIVE'"}
+	// licensedFindingScopeSQL: only frameworks the tenant activated (or authored)
+	// are listable. Findings are materialized for every published framework.
+	where := []string{"cf.tenant_id = $1", "cf.detection_state = 'ACTIVE'", licensedFindingScopeSQL("cf", "$1")}
 	args := []interface{}{tenantID}
 	idx := 2
 	if filters.WorkflowStatus != "" {
@@ -659,9 +710,10 @@ func (s *FindingsService) GetFindingsByControl(tenantID uuid.UUID, limit int) ([
 
 	// A finding's control_id resolves to exactly one of platform/tenant controls
 	// (UUIDs are globally unique), so the paired LEFT JOINs never double-count;
-	// COALESCE picks whichever side matched. detection_state='ACTIVE' mirrors
-	// ListFindings so the ranking agrees with the Findings page.
-	const query = `
+	// COALESCE picks whichever side matched. detection_state='ACTIVE' and the
+	// licensed scope both mirror ListFindings so the ranking, the Findings page
+	// and the Posture page's Top Exposures panel all agree.
+	query := `
 		SELECT
 			cf.control_id AS control_id,
 			COALESCE(pfc.title, tfc.title, 'Unknown control')      AS control_name,
@@ -684,6 +736,7 @@ func (s *FindingsService) GetFindingsByControl(tenantID uuid.UUID, limit int) ([
 		WHERE cf.tenant_id = $1
 		  AND cf.detection_state = 'ACTIVE'
 		  AND (pfc.id IS NOT NULL OR tfc.id IS NOT NULL)
+		  AND ` + licensedFindingScopeSQL("cf", "$1") + `
 		GROUP BY cf.control_id, pfc.title, tfc.title, pf.id, pf.name, tf.id, tf.name
 		ORDER BY worst_rank DESC, finding_count DESC, asset_count DESC
 		LIMIT $2`
@@ -766,12 +819,17 @@ func (s *FindingsService) GetFindingStatistics(tenantID uuid.UUID) (*FindingStat
 	stats := &FindingStatistics{}
 
 	// Get counts by detection state
+	// All four rollups carry the licensed scope (see licensedFindingScopeSQL):
+	// these counts drive the Dashboard's severity tiles, and an unactivated
+	// framework's findings used to land there — a tenant whose single activated
+	// framework had zero Criticals still read "5 Critical" on the Dashboard.
 	query := `
 		SELECT
 			detection_state,
 			COUNT(*) as count
-		FROM compliance_findings
+		FROM compliance_findings cf
 		WHERE tenant_id = $1
+		  AND ` + licensedFindingScopeSQL("cf", "$1") + `
 		GROUP BY detection_state
 	`
 	// Get counts by workflow status
@@ -779,18 +837,20 @@ func (s *FindingsService) GetFindingStatistics(tenantID uuid.UUID) (*FindingStat
 		SELECT
 			workflow_status,
 			COUNT(*) as count
-		FROM compliance_findings
+		FROM compliance_findings cf
 		WHERE tenant_id = $1
 		  AND detection_state = 'ACTIVE'
+		  AND ` + licensedFindingScopeSQL("cf", "$1") + `
 		GROUP BY workflow_status
 	`
 	// Get resurfaced findings count
 	resurfacedQuery := `
 		SELECT COUNT(*)
-		FROM compliance_findings
+		FROM compliance_findings cf
 		WHERE tenant_id = $1
 		  AND detection_state = 'ACTIVE'
 		  AND resurfaced_at IS NOT NULL
+		  AND ` + licensedFindingScopeSQL("cf", "$1") + `
 	`
 	// Get counts by severity, ACTIVE findings only, tenant-wide (no control-join,
 	// no LIMIT) — the same detection_state scope GetFindingsByControl uses, so
@@ -800,9 +860,10 @@ func (s *FindingsService) GetFindingStatistics(tenantID uuid.UUID) (*FindingStat
 		SELECT
 			severity,
 			COUNT(*) as count
-		FROM compliance_findings
+		FROM compliance_findings cf
 		WHERE tenant_id = $1
 		  AND detection_state = 'ACTIVE'
+		  AND ` + licensedFindingScopeSQL("cf", "$1") + `
 		GROUP BY severity
 	`
 
@@ -898,17 +959,19 @@ func (s *FindingsService) GetFindingStatistics(tenantID uuid.UUID) (*FindingStat
 
 // GetEvidenceID returns the evidence ID for a finding in both UUID and formatted format
 func (s *FindingsService) GetEvidenceID(tenantID, findingID uuid.UUID) (string, string, error) {
-	// Verify finding exists and belongs to tenant
+	// Verify finding exists, belongs to tenant, and is in an activated/custom framework.
 	var exists bool
-	query := `SELECT EXISTS(SELECT 1 FROM compliance_findings WHERE id = $1 AND tenant_id = $2)`
-	err := shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenantID, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(context.Background(), query, findingID, tenantID).Scan(&exists)
+	ctx := context.Background()
+	err := shareddatabase.WithTenantTx(ctx, s.db.DB, tenantID, func(tx *sql.Tx) error {
+		var err error
+		exists, err = licensedFindingExistsInTx(ctx, tx, tenantID, findingID)
+		return err
 	})
 	if err != nil {
 		return "", "", fmt.Errorf("failed to check finding: %w", err)
 	}
 	if !exists {
-		return "", "", fmt.Errorf("finding not found")
+		return "", "", ErrFindingNotFound
 	}
 
 	// Return UUID and formatted evidence ID
@@ -1608,8 +1671,9 @@ func (s *FindingsService) UpdateWorkflowStatus(tenantID, findingID, changedBy uu
 	var oldSuppressionReason *string
 	query := `
 		SELECT workflow_status, suppressed_until, suppression_reason
-		FROM compliance_findings
-		WHERE id = $1 AND tenant_id = $2
+		FROM compliance_findings cf
+		WHERE cf.id = $1 AND cf.tenant_id = $2
+		  AND ` + licensedFindingScopeSQL("cf", "$2") + `
 	`
 	// Update finding
 	updateQuery := `
@@ -1620,12 +1684,22 @@ func (s *FindingsService) UpdateWorkflowStatus(tenantID, findingID, changedBy uu
 		    updated_at = NOW()
 		WHERE id = $4 AND tenant_id = $5
 	`
-	if err := shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenantID, func(tx *sql.Tx) error {
-		if err := tx.QueryRowContext(context.Background(), query, findingID, tenantID).Scan(&oldWorkflowStatus, &oldSuppressedUntil, &oldSuppressionReason); err != nil {
+	ctx := context.Background()
+	if err := shareddatabase.WithTenantTx(ctx, s.db.DB, tenantID, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, query, findingID, tenantID).Scan(&oldWorkflowStatus, &oldSuppressedUntil, &oldSuppressionReason); err != nil {
+			if err == sql.ErrNoRows {
+				return ErrFindingNotFound
+			}
 			return fmt.Errorf("failed to get finding: %w", err)
 		}
-		if _, err := tx.ExecContext(context.Background(), updateQuery, workflowStatus, suppressedUntil, suppressionReason, findingID, tenantID); err != nil {
+		res, err := tx.ExecContext(ctx, updateQuery, workflowStatus, suppressedUntil, suppressionReason, findingID, tenantID)
+		if err != nil {
 			return fmt.Errorf("failed to update workflow status: %w", err)
+		}
+		if rows, err := res.RowsAffected(); err != nil {
+			return err
+		} else if rows == 0 {
+			return ErrFindingNotFound
 		}
 		return nil
 	}); err != nil {
@@ -1649,17 +1723,19 @@ func (s *FindingsService) UpdateWorkflowStatus(tenantID, findingID, changedBy uu
 
 // GetFindingHistory retrieves the history of a finding
 func (s *FindingsService) GetFindingHistory(tenantID, findingID uuid.UUID) ([]models.ComplianceFindingHistory, error) {
-	// Verify finding belongs to tenant
+	// Verify finding belongs to tenant and is in an activated/custom framework.
 	var exists bool
-	checkQuery := `SELECT EXISTS(SELECT 1 FROM compliance_findings WHERE id = $1 AND tenant_id = $2)`
-	err := shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenantID, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(context.Background(), checkQuery, findingID, tenantID).Scan(&exists)
+	ctx := context.Background()
+	err := shareddatabase.WithTenantTx(ctx, s.db.DB, tenantID, func(tx *sql.Tx) error {
+		var err error
+		exists, err = licensedFindingExistsInTx(ctx, tx, tenantID, findingID)
+		return err
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to check finding: %w", err)
 	}
 	if !exists {
-		return nil, fmt.Errorf("finding not found")
+		return nil, ErrFindingNotFound
 	}
 
 	// Get history

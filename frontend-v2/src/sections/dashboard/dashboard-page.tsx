@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router';
 import { clients } from '../../lib/clients';
 import { Icon, LevelBar, LevelDot, MiniBar, RiskGauge, levelFromScore, riskColor, LEVEL_MIN } from '../../components/ui';
 import { PostureTrendChart } from '../../components/posture-trend-chart';
-import { DASHBOARD_COMPLIANCE_FINDINGS_ROUTE, getDashboardPqcMetric } from './dashboard-metrics';
+import { DASHBOARD_COMPLIANCE_FINDINGS_ROUTE, getDashboardPqcMetric, getDiscoveryFleetMetric } from './dashboard-metrics';
 
 // Dashboard — the command center, ported to the mock's four layers (Dashboard.jsx):
 // cinematic hero, "needs attention" triage strip, lifecycle pipeline, supporting
@@ -27,6 +27,16 @@ function useRollups() {
     queryFn: async () => {
       const { data } = await clients.sensors.GET('/sensors', {});
       return data?.sensors ?? [];
+    },
+  });
+  // Discovery agents are a SECOND fleet, in device-interrogation-service's own
+  // table — the Discovery card counted only /sensors and so under-reported the
+  // fleet by every registered agent. Same source Command Center uses.
+  const deviceAgents = useQuery({
+    queryKey: ['dashboard', 'device-agents'],
+    queryFn: async () => {
+      const { data } = await clients.devices.GET('/agents', {});
+      return data?.agents ?? [];
     },
   });
   // /pqc/progress rather than /pqc/summary (M-2): progress exposes the
@@ -88,12 +98,12 @@ function useRollups() {
       return data;
     },
   });
-  return { risk, sensors, pqc, expiring, tickets, trend, connections, findingsSeverity };
+  return { risk, sensors, deviceAgents, pqc, expiring, tickets, trend, connections, findingsSeverity };
 }
 
 export function DashboardPage() {
   const nav = useNavigate();
-  const { risk, sensors, pqc, expiring, tickets, trend, connections, findingsSeverity } = useRollups();
+  const { risk, sensors, deviceAgents, pqc, expiring, tickets, trend, connections, findingsSeverity } = useRollups();
   const s = risk.data;
   const total = s?.total_assets ?? 0;
   const high = s?.high_risk ?? 0;
@@ -121,8 +131,11 @@ export function DashboardPage() {
   const pqcNeedsMigration = pqcMetric.needsMigration;
   const pqcUnclassified = pqcMetric.unclassified;
 
-  const sensorList = sensors.data ?? [];
-  const sensorsOnline = sensorList.filter((x) => (x.status || '').toLowerCase() === 'active').length;
+  // Both fleets, split by what each row actually IS — the platform
+  // interrogation agent is a row in the sensors table, so "everything from
+  // /sensors is a sensor" was wrong even before agents were missing entirely.
+  const fleet = getDiscoveryFleetMetric(sensors.data, deviceAgents.data);
+  const fleetDots = [...(sensors.data ?? []), ...(deviceAgents.data ?? [])];
 
   const certs = expiring.data ?? [];
   const expSoon = certs.filter((c) => typeof c.days_until_expiry === 'number' && c.days_until_expiry >= 0 && c.days_until_expiry <= 30).length;
@@ -291,19 +304,26 @@ export function DashboardPage() {
           <span style={{ fontSize: 12, color: 'var(--app-t3)' }}>— discovery flows through to remediation</span>
         </div>
         <div style={{ display: 'flex', alignItems: 'stretch', flexWrap: 'wrap', gap: '0 0' }}>
-          <Stage icon="radar" accent={BLUE} title="Discovery" hero={String(sensorsOnline)} heroUnit={`/ ${sensorList.length} sensors`} caption="sensors online" onClick={() => nav('/discovery')}
+          <Stage icon="radar" accent={BLUE} title="Discovery" hero={String(fleet.all.online)} heroUnit={`/ ${fleet.all.total} online`} caption="sensors and agents reporting in" onClick={() => nav('/discovery')}
             viz={
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%' }}>
                 <div style={{ display: 'flex', gap: 5 }}>
-                  {sensorList.slice(0, 10).map((x, i) => {
+                  {fleetDots.slice(0, 10).map((x, i) => {
                     const on = (x.status || '').toLowerCase() === 'active';
                     return <span key={i} style={{ width: 9, height: 9, borderRadius: 50, background: on ? GREEN : RED, boxShadow: on ? 'none' : `0 0 6px ${RED}` }} />;
                   })}
                 </div>
-                <span style={{ fontSize: 11, color: 'var(--app-t3)' }}>{sensorsOnline}/{sensorList.length} active</span>
+                <span style={{ fontSize: 11, color: 'var(--app-t3)' }}>{fleet.all.online}/{fleet.all.total} active</span>
               </div>
             }
-            stats={[['Sensors', String(sensorList.length), null]]} />
+            // Broken out because "sensor" is loosely used for both: a passive
+            // network sensor and a command-driven discovery agent are different
+            // things with different failure modes, and one combined number hides
+            // which half is down.
+            stats={[
+              ['Sensors', `${fleet.sensors.online}/${fleet.sensors.total}`, null],
+              ['Agents', `${fleet.agents.online}/${fleet.agents.total}`, null],
+            ]} />
           <Connector />
           <Stage icon="database" accent={GREEN} title="Inventory" hero={crypto.toLocaleString()} heroUnit={`· ${total.toLocaleString()} assets`} caption="crypto configurations" onClick={() => nav('/inventory')}
             viz={

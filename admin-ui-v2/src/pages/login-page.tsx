@@ -52,6 +52,7 @@ export function LoginPage() {
     const e = params.get('error');
     if (e) setError(SSO_ERRORS[e] ?? 'Single sign-on failed. Please try again or use credentials.');
     else if (params.get('reason') === 'session-expired') setError('Your session has expired. Please sign in again.');
+    else if (params.get('reason') === 'signed-out') setError('You have been signed out. Please sign in again.');
   }, [params]);
 
   useEffect(() => {

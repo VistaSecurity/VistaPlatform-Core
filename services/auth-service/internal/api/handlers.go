@@ -108,6 +108,11 @@ func NewAuthHandlers(authService *auth.AuthService, cfg *config.Config, rateLimi
 	}
 }
 
+// refreshCookieMaxAge is the lifetime of the refresh-token cookie, and hence of
+// the whole session. The JS-readable csrf_token cookie shares it — see
+// setAuthCookies.
+const refreshCookieMaxAge = 7 * 24 * 60 * 60
+
 // setAuthCookies sets httpOnly cookies for access and refresh tokens, plus a
 // non-httpOnly CSRF token cookie that the frontend can read and echo back.
 func (h *AuthHandlers) setAuthCookies(c *gin.Context, accessToken, refreshToken string) {
@@ -133,7 +138,7 @@ func (h *AuthHandlers) setAuthCookies(c *gin.Context, accessToken, refreshToken 
 		Value:    refreshToken,
 		Path:     "/",
 		Domain:   domain,
-		MaxAge:   7 * 24 * 60 * 60,
+		MaxAge:   refreshCookieMaxAge,
 		HttpOnly: true,
 		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
@@ -142,13 +147,23 @@ func (h *AuthHandlers) setAuthCookies(c *gin.Context, accessToken, refreshToken 
 	// CSRF token — readable by JS (not httpOnly), double-submit pattern, and
 	// bound to THIS session via HMAC(access-token jti) so it can't be replayed
 	// across sessions.
+	//
+	// Its MaxAge tracks the REFRESH token, not the access token. The frontend
+	// treats this cookie's presence as "a session exists" and only then attempts
+	// a silent refresh on a 401. Expiring it with the access token made that
+	// signal vanish exactly when the refresh was due: every request 401'd, the
+	// refresh was never attempted, no session-expired redirect fired, and each
+	// page rendered its own "Couldn't load …" card. The cookie grants nothing on
+	// its own — validation is against the CURRENT access token's jti/csrf claim,
+	// so a csrf cookie that outlives its access token simply fails until a
+	// refresh reissues both.
 	if csrfValue := sharedmw.CSRFTokenForAccessToken(h.config.JWTSecret, accessToken); csrfValue != "" {
 		http.SetCookie(c.Writer, &http.Cookie{
 			Name:     "csrf_token",
 			Value:    csrfValue,
 			Path:     "/",
 			Domain:   domain,
-			MaxAge:   int(h.config.JWTExpiry.Seconds()),
+			MaxAge:   refreshCookieMaxAge,
 			HttpOnly: false,
 			Secure:   secure,
 			SameSite: http.SameSiteStrictMode,
@@ -208,20 +223,21 @@ func setAuthCookiesResponseWriter(w http.ResponseWriter, cfg *config.Config, acc
 		Value:    refreshToken,
 		Path:     "/",
 		Domain:   domain,
-		MaxAge:   7 * 24 * 60 * 60,
+		MaxAge:   refreshCookieMaxAge,
 		HttpOnly: true,
 		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 	})
 
-	// Session-bound CSRF token.
+	// Session-bound CSRF token. MaxAge tracks the refresh token — see
+	// setAuthCookies for why.
 	if csrfValue := sharedmw.CSRFTokenForAccessToken(cfg.JWTSecret, accessToken); csrfValue != "" {
 		http.SetCookie(w, &http.Cookie{
 			Name:     "csrf_token",
 			Value:    csrfValue,
 			Path:     "/",
 			Domain:   domain,
-			MaxAge:   accessExpirySeconds,
+			MaxAge:   refreshCookieMaxAge,
 			HttpOnly: false,
 			Secure:   secure,
 			SameSite: http.SameSiteStrictMode,
@@ -356,7 +372,22 @@ func (h *AuthHandlers) Login(c *gin.Context) {
 				ipAddr := c.ClientIP()
 				ua := c.Request.UserAgent()
 				resType := "user"
+				// Attach the tenant and user the attempt was against when the
+				// email resolves. Without them the entry is untenanted, and the
+				// failed-login-burst detector drops untenanted alerts outright
+				// (`alerts.tenant_id` is NOT NULL and RLS-partitioned) — so the
+				// alert could never open no matter how many failures arrived.
+				// Best-effort: an attempt against an unknown address stays
+				// untenanted, and the lookup result is never reflected in the
+				// response, so this reveals no account-existence signal.
+				var tenantID, userID *uuid.UUID
+				if existing, lookupErr := h.authService.GetUserByEmail(req.Email); lookupErr == nil && existing != nil {
+					tid, uid := existing.TenantID, existing.ID
+					tenantID, userID = &tid, &uid
+				}
 				_ = mw.LogActivity(c.Request.Context(), &audithelpers.ActivityLogRequest{
+					TenantID:          tenantID,
+					UserID:            userID,
 					UserType:          "tenant",
 					UserEmail:         &req.Email,
 					EventType:         "user.login_failed",

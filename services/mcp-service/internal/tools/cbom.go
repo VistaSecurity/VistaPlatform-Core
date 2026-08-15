@@ -28,7 +28,7 @@ func registerCBOMTools(s *mcp.Server, d *Deps) {
 		Description: "List the tenant's CBOM scopes — named, versioned asset-boundary predicates (e.g. All, Production) that define what a CBOM artifact includes.",
 		Annotations: readOnly("List CBOM scopes"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in emptyInput) (*mcp.CallToolResult, any, error) {
-		return run(ctx, "reports.read", func() (any, error) {
+		return d.run(ctx, req, "reports.read", in, func() (any, error) {
 			return d.Client.Get(ctx, d.Client.CBOMURL, "/api/v1/cbom-service/scopes", nil)
 		})
 	})
@@ -39,7 +39,7 @@ func registerCBOMTools(s *mcp.Server, d *Deps) {
 			"Each entry includes the scope it was generated from, its content hash, component count and signing status.",
 		Annotations: readOnly("List CBOM artifacts"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in listArtifactsInput) (*mcp.CallToolResult, any, error) {
-		return run(ctx, "reports.read", func() (any, error) {
+		return d.run(ctx, req, "reports.read", in, func() (any, error) {
 			q := url.Values{}
 			if in.ScopeID != "" {
 				id, err := requireUUID("scope_id", in.ScopeID)
@@ -66,7 +66,7 @@ func registerCBOMTools(s *mcp.Server, d *Deps) {
 			"(Metadata only — download the CycloneDX document itself from the VistaPlatform UI.)",
 		Annotations: readOnly("Get CBOM artifact"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in getArtifactInput) (*mcp.CallToolResult, any, error) {
-		return run(ctx, "reports.read", func() (any, error) {
+		return d.run(ctx, req, "reports.read", in, func() (any, error) {
 			id, err := requireUUID("artifact_id", in.ArtifactID)
 			if err != nil {
 				return nil, err
@@ -81,7 +81,7 @@ func registerCBOMTools(s *mcp.Server, d *Deps) {
 			"improvement, regression, drift or neutral with a one-phrase reason — ideal for answering \"did our crypto posture regress since the last snapshot?\".",
 		Annotations: readOnly("Compare CBOM artifacts"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in compareArtifactsInput) (*mcp.CallToolResult, any, error) {
-		return run(ctx, "reports.read", func() (any, error) {
+		return d.run(ctx, req, "reports.read", in, func() (any, error) {
 			baseID, err := requireUUID("base_id", in.BaseID)
 			if err != nil {
 				return nil, err

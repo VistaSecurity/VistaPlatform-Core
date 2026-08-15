@@ -20,6 +20,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/approval"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
+	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 )
 
@@ -62,7 +63,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create inventory client: %v", err)
 	}
-	batchProcessor := processor.NewBatchProcessor(db.DB, converter, approvalService, inventoryClient)
+	// Audit logging. This service's HTTP surface is /health, /metrics and
+	// /status — nothing tenant-facing — so there is no request middleware to
+	// mount. The audit middleware is used here as the transport for
+	// consumer-path events emitted per discovery batch: same store, same
+	// batching, same NATS/HTTP fallback as every HTTP service's LogRequest.
+	auditMiddleware := auditmiddleware.NewMiddleware(auditmiddleware.ServiceConfig(
+		"discovery-processor-service", cfg.UseMTLS, cfg.ClientCertPath, cfg.ClientKeyPath, cfg.PlatformCACertPath,
+	))
+	defer auditMiddleware.Stop()
+
+	batchProcessor := processor.NewBatchProcessor(db.DB, converter, approvalService, inventoryClient, auditMiddleware)
 	discoveryProcessor := processor.NewDiscoveryProcessor(db.DB, bypassDB, batchProcessor, cfg)
 
 	// Setup HTTP server for API endpoints (metrics/status/health)

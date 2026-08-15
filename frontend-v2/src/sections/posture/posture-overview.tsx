@@ -21,18 +21,29 @@ import { useAssetFacts, useBatchEvaluate, useFrameworkContext, usePostureByContr
 import { PostureTrendChart } from '../../components/posture-trend-chart';
 import { sevLevel, type BatchFinding } from '../findings/model';
 import { buildControlGrid } from '../findings/posture-grid';
+import { coverageLine, formatScore, isUnscored, normalizeControlStatus, notAssessedReasonText, NOT_ASSESSED_LABEL } from '../findings/control-status';
 
-function FwRing({ pct, size = 50, stroke = 5 }: { pct: number; size?: number; stroke?: number }) {
+/**
+ * Framework score ring. A null score means NO control was assessed: the ring
+ * draws no arc and reads "—" in a muted tone. Rendering 0 there would
+ * read as "everything failed" and 100 as "everything passed"; both are claims
+ * we have not earned.
+ */
+function FwRing({ pct, size = 50, stroke = 5 }: { pct: number | null | undefined; size?: number; stroke?: number }) {
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
-  const col = pct >= 85 ? 'var(--ok)' : pct >= 70 ? 'var(--warn)' : pct >= 50 ? 'var(--warn-strong)' : 'var(--danger)';
+  const unscored = isUnscored(pct);
+  const col = unscored ? 'var(--app-t3)'
+    : pct! >= 85 ? 'var(--ok)' : pct! >= 70 ? 'var(--warn)' : pct! >= 50 ? 'var(--warn-strong)' : 'var(--danger)';
   return (
-    <div style={{ position: 'relative', width: size, height: size, flex: 'none' }}>
+    <div style={{ position: 'relative', width: size, height: size, flex: 'none' }} title={unscored ? 'No control could be assessed yet, so there is no score to show.' : undefined}>
       <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
         <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--app-track)" strokeWidth={stroke} />
-        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={col} strokeWidth={stroke} strokeLinecap="round" strokeDasharray={c} strokeDashoffset={c * (1 - pct / 100)} style={{ transition: 'stroke-dashoffset .8s ease' }} />
+        {!unscored && (
+          <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={col} strokeWidth={stroke} strokeLinecap="round" strokeDasharray={c} strokeDashoffset={c * (1 - pct! / 100)} style={{ transition: 'stroke-dashoffset .8s ease' }} />
+        )}
       </svg>
-      <span className="mono" style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: size * 0.27, fontWeight: 700, color: col }}>{Math.round(pct)}</span>
+      <span className="mono" style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: size * 0.27, fontWeight: 700, color: col }}>{formatScore(pct)}</span>
     </div>
   );
 }
@@ -94,6 +105,7 @@ export function PostureOverview() {
     if (!facts) return [];
     return buildControlGrid(facts, cols, findingsByControl, dim);
   }, [factsQ.data, cols, findingsByControl, dim]);
+  const notAssessedCols = useMemo(() => cols.filter((c) => normalizeControlStatus(c.status) === 'NOT_ASSESSED').length, [cols]);
 
   // ---- top exposures: server-ranked by severity → count → breadth (ADR-0007
   // item 4). Reads materialized findings via /findings/by-control instead of
@@ -138,7 +150,12 @@ export function PostureOverview() {
               <span style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>risk index · lower is better</span>
             </div>
             <div style={{ textAlign: 'right' }}>
-              <div className="mono accent-text" style={{ fontSize: 26, fontWeight: 800, lineHeight: 1 }}>{overall != null ? Math.round(overall) : '—'}<span style={{ fontSize: 15 }}>%</span></div>
+              {/* The service returns null here when no framework produced a
+                  score at all (#1369) — render "—" and drop the % sign with it,
+                  rather than "0%". */}
+              <div className="mono accent-text" style={{ fontSize: 26, fontWeight: 800, lineHeight: 1, color: isUnscored(overall) ? 'var(--app-t3)' : undefined }} title={isUnscored(overall) ? 'No framework has an assessed control yet, so there is no overall score.' : undefined}>
+                {formatScore(overall)}{!isUnscored(overall) && <span style={{ fontSize: 15 }}>%</span>}
+              </div>
               <div style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>Overall compliance</div>
             </div>
           </div>
@@ -160,16 +177,31 @@ export function PostureOverview() {
 
       {/* framework scorecards */}
       <div className="fade-up" style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min(5, Math.max(1, fwItems.length))},1fr)`, gap: 12, marginBottom: 16, animationDelay: '.04s' }}>
-        {fwItems.map((f) => (
-          <button key={f.id} onClick={() => nav(`/risk-compliance/findings?lens=control&fw=${f.id}`)} className="panel row-hover" style={{ padding: '15px 16px', display: 'flex', alignItems: 'center', gap: 13, cursor: 'pointer', textAlign: 'left' }}>
-            <FwRing pct={f.compliance_percent} />
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, fontFamily: 'var(--font-head)', color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.name}</div>
-              <div style={{ fontSize: 11, color: f.controls_failing ? 'var(--danger-text)' : 'var(--app-t3)', marginTop: 2 }}>{f.controls_failing} failing control{f.controls_failing !== 1 ? 's' : ''}</div>
-              <div style={{ fontSize: 11, color: 'var(--app-t3)' }}>{f.controls_total} controls</div>
-            </div>
-          </button>
-        ))}
+        {fwItems.map((f) => {
+          // Coverage disclosure: whenever any control was skipped, the
+          // score is shown next to the size of the sample behind it.
+          const coverage = coverageLine({
+            total: f.controls_total,
+            passing: f.controls_passing,
+            failing: f.controls_failing,
+            notAssessed: f.controls_not_assessed,
+          });
+          return (
+            <button key={f.id} onClick={() => nav(`/risk-compliance/findings?lens=control&fw=${f.id}`)} className="panel row-hover" style={{ padding: '15px 16px', display: 'flex', alignItems: 'center', gap: 13, cursor: 'pointer', textAlign: 'left' }}>
+              <FwRing pct={f.compliance_percent} />
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, fontFamily: 'var(--font-head)', color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.name}</div>
+                <div style={{ fontSize: 11, color: f.controls_failing ? 'var(--danger-text)' : 'var(--app-t3)', marginTop: 2 }}>{f.controls_failing} failing control{f.controls_failing !== 1 ? 's' : ''}</div>
+                <div style={{ fontSize: 11, color: 'var(--app-t3)' }}>{f.controls_total} controls</div>
+                {coverage && (
+                  <div style={{ fontSize: 10.5, color: 'var(--app-t3)', marginTop: 2 }} title="Controls that could not be evaluated are left out of the score entirely — they neither reward nor punish you.">
+                    {coverage}
+                  </div>
+                )}
+              </div>
+            </button>
+          );
+        })}
         {!ctxQ.isLoading && fwItems.length === 0 && (
           <div className="panel" style={{ padding: '15px 16px', gridColumn: '1 / -1' }}>
             <EmptyState compact variant="first-run" title="No active frameworks" message="Activate a compliance framework to see per-framework standing here." />
@@ -182,7 +214,13 @@ export function PostureOverview() {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
           <div>
             <h3 style={{ margin: 0, fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 16, color: 'var(--app-t1)' }}>Control posture grid</h3>
-            <p style={{ margin: '3px 0 0', fontSize: 12.5, color: 'var(--app-t3)' }}>Where each framework control fails. Pivot rows; click any hot cell to open those findings.</p>
+            <p style={{ margin: '3px 0 0', fontSize: 12.5, color: 'var(--app-t3)' }}>
+              Where each framework control fails. Pivot rows; click any hot cell to open those findings.
+              {/* Without this the muted dash is unexplained — and an unexplained
+                  blank cell reads as "nothing wrong here", which is the exact
+                  misreading this change exists to prevent. */}
+              {notAssessedCols > 0 && <> <span className="mono">—</span> marks {notAssessedCols} control{notAssessedCols !== 1 ? 's' : ''} that could not be assessed; hover for why.</>}
+            </p>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
             <span className="eyebrow-app">Rows</span>
@@ -234,11 +272,19 @@ export function PostureOverview() {
                       </div>
                     </td>
                     {row.cells.map((cell, ci) => (
+                      // Three cell states: a fail count, a green check
+                      // for assessed-and-clean, and a muted dash for a control
+                      // that was never assessed. The last one deliberately gets
+                      // no heat colour and no tick — it is an absence of
+                      // information, not a clean result and not a severity.
                       <td key={ci} onClick={() => cell.fail && nav(`/risk-compliance/findings?lens=control&fw=${cols[ci].fwId}&control=${cols[ci].id}`)} className="mcell"
-                        style={{ height: 38, width: 58, textAlign: 'center', borderBottom: '1px solid var(--app-border)', borderLeft: '1px solid var(--app-border)', background: heatColor(cell.ratio), cursor: cell.fail ? 'pointer' : 'default' }}>
-                        {cell.fail === 0
-                          ? <Icon name="check" size={12} style={{ color: 'var(--ok)', opacity: 0.55 }} />
-                          : <span className="mono" style={{ fontSize: 12, fontWeight: 700, color: cell.ratio > 0.5 ? '#fff' : 'var(--app-t1)' }}>{cell.fail}</span>}
+                        title={cell.notAssessed ? `${cols[ci].name} · ${NOT_ASSESSED_LABEL} — ${notAssessedReasonText(cell.notAssessedReason)}` : undefined}
+                        style={{ height: 38, width: 58, textAlign: 'center', borderBottom: '1px solid var(--app-border)', borderLeft: '1px solid var(--app-border)', background: cell.notAssessed ? 'var(--app-panel2)' : heatColor(cell.ratio), cursor: cell.fail ? 'pointer' : 'default' }}>
+                        {cell.notAssessed
+                          ? <span className="mono" style={{ fontSize: 12, color: 'var(--app-t3)', opacity: 0.7 }}>—</span>
+                          : cell.fail === 0
+                            ? <Icon name="check" size={12} style={{ color: 'var(--ok)', opacity: 0.55 }} />
+                            : <span className="mono" style={{ fontSize: 12, fontWeight: 700, color: cell.ratio > 0.5 ? '#fff' : 'var(--app-t1)' }}>{cell.fail}</span>}
                       </td>
                     ))}
                     <td style={{ position: 'sticky', right: 0, zIndex: 2, background: 'var(--app-panel)', borderLeft: '1px solid var(--app-border)', borderBottom: '1px solid var(--app-border)', height: 38, width: 84 }}>

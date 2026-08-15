@@ -93,7 +93,12 @@ export function DevicesPage() {
 
   return (
     <PageWrap title="Devices" count={q.isLoading ? '' : devices.length}>
-      <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage}>
+      {/* Gates below name the permission each route enforces
+          (device-interrogation-service/internal/api/router.go): POST /devices and
+          /devices/discover-and-create are DiscoveryCreate; PUT /devices/:id is
+          DiscoveryUpdate; POST /devices/:id/test-connection is DiscoveryRead;
+          /devices/:id/interrogate and DELETE /devices/:id are DiscoveryManage. */}
+      <PermissionGate permission={TENANT_PERMISSIONS.discovery.create}>
         <div style={{ display: 'flex', gap: 9, marginBottom: 14 }}>
           <button className="ui-btn accent" onClick={() => { setEditing(null); setFormOpen(true); }}>
             <Icon name="plus" size={13} />Add device
@@ -136,24 +141,30 @@ export function DevicesPage() {
                 <span style={{ textAlign: 'right', fontSize: 11.5, fontWeight: 600, color: connColor(d.connection_status) }} title={d.interrogation_error || ''}>
                   {(d.connection_status || 'unknown').replace('_', ' ')}
                 </span>
-                <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage} fallback={<span />}>
-                  <span style={{ display: 'inline-flex', gap: 4, justifyContent: 'flex-end' }}>
+                <span style={{ display: 'inline-flex', gap: 4, justifyContent: 'flex-end' }}>
+                  <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage}>
                     <RowBtn
                       icon={interrogatingId === d.id ? 'loader' : 'activity'}
                       title={cloud ? 'Not interrogable — discovered via cloud API, no management credentials' : 'Interrogate'}
                       onClick={() => interrogate.mutate(d.id)}
                       disabled={interrogatingId === d.id || cloud}
                     />
+                  </PermissionGate>
+                  <PermissionGate permission={TENANT_PERMISSIONS.discovery.read}>
                     <RowBtn
                       icon="plug"
                       title={cloud ? 'Not applicable — discovered via cloud API' : 'Test connection'}
                       onClick={() => setTesting(d)}
                       disabled={cloud}
                     />
+                  </PermissionGate>
+                  <PermissionGate permission={TENANT_PERMISSIONS.discovery.update}>
                     <RowBtn icon="wrench" title="Edit device" onClick={() => { setEditing(d); setFormOpen(true); }} />
+                  </PermissionGate>
+                  <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage}>
                     <RowBtn icon="x-circle" title="Delete device" danger onClick={() => setDeleting(d)} />
-                  </span>
-                </PermissionGate>
+                  </PermissionGate>
+                </span>
               </>
             );
           }}

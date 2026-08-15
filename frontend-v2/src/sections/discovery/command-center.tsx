@@ -70,12 +70,19 @@ export function CommandCenterPage() {
     <PageWrap>
       <div className="fade-up" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
         <h2 style={{ margin: 0, fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 16, color: 'var(--app-t1)' }}>Command Center</h2>
-        <PermissionGate permission={TENANT_PERMISSIONS.discovery.create}>
-          <div style={{ display: 'flex', gap: 8 }}>
+        {/* Two gates: the spreadsheet import creates assets or network
+            segments (POST /infrastructure-assets/bulk → assets.create,
+            POST /network-segments/bulk → settings.update — the modal gates its
+            own submit per target), while "Discover assets" queues a discovery
+            job (POST /discovery/jobs → discovery.create). */}
+        <div style={{ display: 'flex', gap: 8 }}>
+          <PermissionGate permission={TENANT_PERMISSIONS.assets.create}>
             <button className="ui-btn" onClick={() => setImportOpen(true)}><Icon name="upload" size={14} />Import from spreadsheet</button>
+          </PermissionGate>
+          <PermissionGate permission={TENANT_PERMISSIONS.discovery.create}>
             <button className="ui-btn accent" onClick={() => setDiscoverOpen(true)}><Icon name="radar" size={14} />Discover assets</button>
-          </div>
-        </PermissionGate>
+          </PermissionGate>
+        </div>
       </div>
 
       <DiscoverAssetsModal open={discoverOpen} onClose={() => setDiscoverOpen(false)} />

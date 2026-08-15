@@ -17,6 +17,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/approval"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 )
 
 // ErrNoValidFindings marks a batch that produced nothing importable — every
@@ -25,26 +26,104 @@ import (
 // poller classifies it with errors.Is instead of grepping err.Error().
 var ErrNoValidFindings = errors.New("no valid findings to import")
 
+// AuditSink records one unit of consumer work on the shared audit path.
+// *auditmiddleware.Middleware satisfies it; tests substitute a recorder.
+type AuditSink interface {
+	LogConsumerEvent(ctx context.Context, ev auditmiddleware.ConsumerEvent) error
+}
+
 // BatchProcessor processes batches of sensor discoveries
 type BatchProcessor struct {
 	db              *sqlx.DB
 	converter       *converter.SensorDiscoveryConverter
 	approvalService *approval.Service
 	inventoryClient *client.InventoryClient
+	audit           AuditSink
 }
 
-// NewBatchProcessor creates a new batch processor
+// NewBatchProcessor creates a new batch processor.
+//
+// auditSink may be nil (no audit-service configured); the batch then records
+// nothing rather than failing.
 func NewBatchProcessor(
 	db *sqlx.DB,
 	converter *converter.SensorDiscoveryConverter,
 	approvalService *approval.Service,
 	inventoryClient *client.InventoryClient,
+	auditSink AuditSink,
 ) *BatchProcessor {
 	return &BatchProcessor{
 		db:              db,
 		converter:       converter,
 		approvalService: approvalService,
 		inventoryClient: inventoryClient,
+		audit:           auditSink,
+	}
+}
+
+// batchAudit accumulates what a batch materialized, for the audit record
+// emitted when ProcessBatch returns.
+//
+// Counts only — never a discovery's contents. A sensor discovery carries
+// certificates, hostnames and negotiated crypto; the audit trail's job is to
+// say a batch for tenant T turned N discoveries into M assets, not to become a
+// second copy of the discovery data.
+type batchAudit struct {
+	started  time.Time
+	counts   map[string]int
+	imported int
+}
+
+// classifyBatchError maps a batch failure to a short, payload-free label.
+// err.Error() routinely quotes the finding that failed, which is exactly what
+// must not reach the audit store.
+func classifyBatchError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, ErrNoValidFindings) {
+		return "no_valid_findings"
+	}
+	var statusErr *client.HTTPStatusError
+	if errors.As(err, &statusErr) {
+		return fmt.Sprintf("inventory_http_%d", statusErr.StatusCode)
+	}
+	return "batch_failed"
+}
+
+// logBatchAudit records the outcome of one discovery batch.
+//
+// discovery-processor-service materializes sensor discoveries into tenant
+// assets, certificates and external connections. Its HTTP surface is
+// /health, /metrics and /status only, so the LogRequest middleware the HTTP
+// services mount has nothing to attach to — every asset it created was
+// invisible to the audit trail. This is the consumer-path equivalent.
+func (p *BatchProcessor) logBatchAudit(ctx context.Context, tenantID uuid.UUID, batchID string, ba *batchAudit, err error) {
+	if p.audit == nil {
+		return
+	}
+
+	eventType := "discovery.batch.processed"
+	if err != nil {
+		eventType = "discovery.batch.failed"
+	}
+	ba.counts["assets_imported"] = ba.imported
+
+	tid := tenantID
+	if logErr := p.audit.LogConsumerEvent(ctx, auditmiddleware.ConsumerEvent{
+		TenantID:      &tid,
+		Source:        "discovery-batch",
+		EventCategory: "discovery",
+		EventType:     eventType,
+		Action:        "process",
+		ResourceType:  "discovery_batch",
+		ResourceRef:   batchID,
+		Counts:        ba.counts,
+		Duration:      time.Since(ba.started),
+		Success:       err == nil,
+		ErrorKind:     classifyBatchError(err),
+	}); logErr != nil {
+		fmt.Printf("Warning: failed to record audit event for batch %s: %v\n", batchID, logErr)
 	}
 }
 
@@ -52,11 +131,18 @@ func NewBatchProcessor(
 // Discoveries are split into two tracks:
 //   - third_party (public internet) → external_connections table via UpsertExternalConnection
 //   - everything else               → managed asset lifecycle (approval, compliance, findings)
-func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) error {
+func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err error) {
 	// ProcessBatch is invoked per-(batch, tenant) by the poller, which already
 	// resolved tenantID. No ctx is threaded into this method, so use
 	// context.Background() to match the existing pattern.
 	ctx := context.Background()
+
+	// One audit record per batch, on every exit path. The named return is what
+	// lets the deferred emit see the outcome — ProcessBatch returns from a
+	// dozen places and an emit at the bottom would miss most of the failures,
+	// which are the ones worth recording.
+	ba := &batchAudit{started: time.Now(), counts: map[string]int{}}
+	defer func() { p.logBatchAudit(ctx, tenantID, batchID, ba, err) }()
 
 	query := `
 		SELECT id, sensor_id, tenant_id, batch_id, protocol, dest_ip, port, confidence,
@@ -72,7 +158,7 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) error 
 	// WithTenantTx sets app.tenant_id; the explicit WHERE tenant_id = $2 is kept
 	// as the primary control (belt-and-suspenders).
 	var discoveries []*models.SensorDiscovery
-	err := shareddatabase.WithTenantTx(ctx, p.db.DB, tenantID, func(tx *sql.Tx) error {
+	err = shareddatabase.WithTenantTx(ctx, p.db.DB, tenantID, func(tx *sql.Tx) error {
 		rows, qErr := tx.QueryContext(ctx, query, batchID, tenantID)
 		if qErr != nil {
 			return fmt.Errorf("failed to query discoveries: %w", qErr)
@@ -100,6 +186,8 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) error 
 	if err != nil {
 		return err
 	}
+
+	ba.counts["discoveries_read"] = len(discoveries)
 
 	if len(discoveries) == 0 {
 		return fmt.Errorf("no discoveries found for batch %s", batchID)
@@ -282,6 +370,10 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) error 
 		marks.add(d.ID, "auto_approved", nil)
 	}
 
+	ba.counts["internal_findings"] = len(findingsWithStatus)
+	ba.counts["external_connections"] = len(externalEntries) - externalFailed
+	ba.counts["external_failed"] = externalFailed
+
 	// --- Managed asset pipeline ---
 	if len(findingsWithStatus) == 0 && len(externalEntries) == 0 {
 		return fmt.Errorf("%w for batch %s", ErrNoValidFindings, batchID)
@@ -303,6 +395,9 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) error 
 			}
 		}
 
+		ba.counts["monitoring"] = len(monitoringFindings)
+		ba.counts["pending_approval"] = len(pendingFindings)
+
 		batchJobID := uuid.New()
 		totalImported := 0
 
@@ -316,6 +411,7 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) error 
 				return fmt.Errorf("failed to import monitoring findings: %w", err)
 			}
 			totalImported += response.Imported
+			ba.imported = totalImported
 		}
 
 		if len(pendingFindings) > 0 {
@@ -325,6 +421,7 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) error 
 				return fmt.Errorf("failed to import pending findings: %w", err)
 			}
 			totalImported += response.Imported
+			ba.imported = totalImported
 		}
 
 		allDiscoveries := append(monitoringDiscoveries, pendingDiscoveries...)

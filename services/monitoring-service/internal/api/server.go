@@ -18,6 +18,7 @@ import (
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
+	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	sharedrbac "github.com/vistasecurity/vistaplatform/shared/middleware/rbac"
 	rbac "github.com/vistasecurity/vistaplatform/shared/rbac"
 	"github.com/vistasecurity/vistaplatform/shared/version"
@@ -85,152 +86,12 @@ func (s *Server) Start(addr string) error {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	// Create router
-	router := gin.New()
+	// Audit logging — see monitoringAuditConfig for what is and is not audited
+	// and why.
+	auditMiddleware := auditmiddleware.NewMiddleware(monitoringAuditConfig(s.config))
+	defer auditMiddleware.Stop()
 
-	// Middleware
-	router.Use(gin.Logger())
-	router.Use(gin.Recovery())
-	router.Use(sharedmw.SecurityHeaders())
-
-	// CORS is handled by Traefik API gateway - no need for duplicate headers
-
-	// Health check endpoint. Includes version info so the About-page
-	// aggregator (and operators tail-curling /health) can spot version
-	// skew across the running deployment in one glance.
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":  "healthy",
-			"service": "monitoring-service",
-			"version": version.Get(),
-		})
-	})
-
-	// API routes
-	api := router.Group("/api/v1")
-	{
-		// Status endpoints for tenant UI
-		status := api.Group("/monitoring-service/status")
-		// Apply authentication middleware to tenant status routes
-		status.Use(middleware.RequireAuth(s.config.JWTSecret), middleware.StringifyUserID())
-		status.Use(middleware.RequireTenant())
-		{
-			status.GET("/system", s.getSystemStatus)
-			status.GET("/metrics", s.getSystemMetrics)
-			status.GET("/health/overview", s.getHealthOverview)
-			status.GET("/services/:name", s.getServiceStatus)
-			status.GET("/incidents", s.getIncidentHistory)
-		}
-
-		// Admin status endpoints
-		admin := api.Group("/admin-service/status")
-		// Apply authentication middleware to admin status routes
-		admin.Use(middleware.RequireAuth(s.config.JWTSecret), middleware.StringifyUserID())
-		// Note: Admin routes don't require tenant context as they're platform-level
-		{
-			admin.GET("/system", s.getAdminSystemStatus)
-			admin.GET("/metrics", s.getAdminSystemMetrics)
-			admin.GET("/tenants", s.getTenantStatuses)
-			admin.GET("/tenants/:id", s.getTenantStatus)
-			admin.GET("/services/:name", s.getServiceStatus)
-			admin.GET("/incidents", s.getIncidentHistory)
-			admin.GET("/monitoring", s.getMonitoringData)
-		}
-
-		// Platform metrics endpoints - For admin-service dashboard consumption
-		// These endpoints require platform.analytics or platform.health permissions
-		platform := api.Group("/monitoring-service/platform")
-		platform.Use(middleware.RequirePlatformAuth(s.config.JWTSecret), middleware.StringifyUserID())
-		platform.Use(sharedrbac.RequireAnyPlatformPermission(s.db, rbac.PermissionPlatformAnalytics, rbac.PermissionPlatformHealth))
-		// Note: Platform routes don't require tenant context as they're platform-level
-		{
-			platform.GET("/summary", s.getPlatformSummary)
-			platform.GET("/services/:name", s.getPlatformServiceMetrics)
-			platform.GET("/incidents", s.getPlatformIncidents)
-			platform.GET("/uptime", s.getPlatformUptime)
-		}
-
-		// Compliance logging endpoints - Phase 2.2
-		// These endpoints require platform.logs.read permission
-		logs := api.Group("/monitoring-service/logs")
-		logs.Use(middleware.RequirePlatformAuth(s.config.JWTSecret), middleware.StringifyUserID())
-		logs.Use(sharedrbac.RequirePlatformPermission(s.db, rbac.PermissionPlatformLogsRead))
-		{
-			logs.GET("", s.getLogs)                       // GET /monitoring-service/logs - List logs with pagination
-			logs.GET("/:id", s.getLog)                    // GET /monitoring-service/logs/:id - Get single log with signed URL
-			logs.GET("/siem/export", s.exportLogsForSIEM) // GET /monitoring-service/logs/siem/export - Export logs in SIEM format
-		}
-
-		// Alerting endpoints - Phase 1.5
-		// These endpoints require platform.health permission
-		alerting := api.Group("/monitoring-service/alerting")
-		alerting.Use(middleware.RequirePlatformAuth(s.config.JWTSecret), middleware.StringifyUserID())
-		alerting.Use(sharedrbac.RequirePlatformPermission(s.db, rbac.PermissionPlatformHealth))
-		{
-			alerting.GET("/thresholds", s.GetAlertThresholds)          // GET /monitoring-service/alerting/thresholds - List alert thresholds
-			alerting.GET("/thresholds/:id", s.GetAlertThreshold)       // GET /monitoring-service/alerting/thresholds/:id - Get single threshold
-			alerting.POST("/thresholds", s.CreateAlertThreshold)       // POST /monitoring-service/alerting/thresholds - Create threshold
-			alerting.PUT("/thresholds/:id", s.UpdateAlertThreshold)    // PUT /monitoring-service/alerting/thresholds/:id - Update threshold
-			alerting.DELETE("/thresholds/:id", s.DeleteAlertThreshold) // DELETE /monitoring-service/alerting/thresholds/:id - Delete threshold
-			alerting.GET("/history", s.GetAlertHistory)                // GET /monitoring-service/alerting/history - Get alert history
-		}
-
-		// Historical trends endpoints - Phase 1.5
-		// These endpoints require platform.health permission
-		trends := api.Group("/monitoring-service/trends")
-		trends.Use(middleware.RequirePlatformAuth(s.config.JWTSecret), middleware.StringifyUserID())
-		trends.Use(sharedrbac.RequirePlatformPermission(s.db, rbac.PermissionPlatformHealth))
-		{
-			trends.GET("", s.GetHistoricalTrends) // GET /monitoring-service/trends - Get historical trends
-		}
-
-		// Gateway proxy endpoints — serve Traefik dashboard API data server-side to avoid
-		// browser CORS restrictions. Protected by platform.health permission.
-		gateway := api.Group("/monitoring-service/gateway")
-		gateway.Use(middleware.RequirePlatformAuth(s.config.JWTSecret), middleware.StringifyUserID())
-		gateway.Use(sharedrbac.RequirePlatformPermission(s.db, rbac.PermissionPlatformHealth))
-		{
-			gateway.GET("/overview", s.getGatewayOverview)
-			gateway.GET("/routers", s.getGatewayRouters)
-			gateway.GET("/services", s.getGatewayServices)
-			gateway.GET("/middlewares", s.getGatewayMiddlewares)
-		}
-
-		// Admin platform status — reachable via gateway under /monitoring-service prefix.
-		// Returns live service health (GetSystemStatus) without requiring tenant context.
-		// NOTE: The /admin-service/status/... routes above are NOT dead code (an
-		// earlier version of this comment said so): the registry's admin_plane
-		// service_overrides deliberately routes /admin-service/status/** to THIS
-		// service, and the admin host serves it. They carry only RequireAuth —
-		// the tenant-host deny is the control keeping their cross-tenant data
-		// off the public host. This group is the same data on the conventional
-		// /monitoring-service prefix, with the platform gate applied directly.
-		adminStatus := api.Group("/monitoring-service/admin")
-		adminStatus.Use(middleware.RequirePlatformAuth(s.config.JWTSecret), middleware.StringifyUserID())
-		{
-			adminStatus.GET("/status", s.getAdminSystemStatus)
-			adminStatus.GET("/metrics", s.getAdminSystemMetrics)
-		}
-
-		// Tenant performance endpoints - For tenant health service
-		tenantMetrics := api.Group("/monitoring-service/tenant")
-		tenantMetrics.Use(middleware.RequireAuth(s.config.JWTSecret), middleware.StringifyUserID())
-		// Note: These routes are for admin platform use, not tenant UI
-		{
-			tenantMetrics.GET("/:id/performance-summary", s.getTenantPerformanceSummary)
-		}
-
-		// Version aggregator for the web-UI About page. Any authenticated
-		// user (tenant or platform admin) can read this — version info is
-		// not sensitive and the About page exists so any user can answer
-		// "what version am I on?" without admin-side access. The handler
-		// fans out to every Go service's /health and computes alignment.
-		api.GET("/monitoring-service/version",
-			middleware.RequireAuth(s.config.JWTSecret),
-			middleware.StringifyUserID(),
-			NewVersionAggregator(s.peerServiceURLs(), s.peerVersionClient()).Handle,
-		)
-	}
+	router := s.buildRouter(auditMiddleware)
 
 	// Health check server (HTTP, port 8080)
 	healthRouter := gin.New()
@@ -685,4 +546,169 @@ func (s *Server) getTenantPerformanceSummary(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, summary)
+}
+
+// buildRouter constructs the router Start serves: middleware, audit logging
+// and every route group.
+//
+// It is a separate function so a test can exercise the REAL router rather
+// than a hand-built stand-in. audit_test.go assembles its own gin.Engine and
+// calls attachAuditLogging on it, which stays green even when nothing mounts
+// the middleware in the running service — the wiring, not the helper, is what
+// has to be under test. Mounting here, in the same function that registers
+// the routes, means "routes but no audit middleware" is not a state Start can
+// reach by deleting a line.
+func (s *Server) buildRouter(auditMiddleware *auditmiddleware.Middleware) *gin.Engine {
+	// Create router
+	router := gin.New()
+
+	// Middleware
+	router.Use(gin.Logger())
+	router.Use(gin.Recovery())
+	router.Use(sharedmw.SecurityHeaders())
+
+	// Audit logging — see monitoringAuditConfig for what is and is not audited
+	// and why.
+	attachAuditLogging(router, auditMiddleware)
+
+	// CORS is handled by Traefik API gateway - no need for duplicate headers
+
+	// Health check endpoint. Includes version info so the About-page
+	// aggregator (and operators tail-curling /health) can spot version
+	// skew across the running deployment in one glance.
+	router.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "healthy",
+			"service": "monitoring-service",
+			"version": version.Get(),
+		})
+	})
+
+	// API routes
+	api := router.Group("/api/v1")
+	{
+		// Status endpoints for tenant UI
+		status := api.Group("/monitoring-service/status")
+		// Apply authentication middleware to tenant status routes
+		status.Use(middleware.RequireAuth(s.config.JWTSecret), middleware.StringifyUserID())
+		status.Use(middleware.RequireTenant())
+		{
+			status.GET("/system", s.getSystemStatus)
+			status.GET("/metrics", s.getSystemMetrics)
+			status.GET("/health/overview", s.getHealthOverview)
+			status.GET("/services/:name", s.getServiceStatus)
+			status.GET("/incidents", s.getIncidentHistory)
+		}
+
+		// Admin status endpoints
+		admin := api.Group("/admin-service/status")
+		// Apply authentication middleware to admin status routes
+		admin.Use(middleware.RequireAuth(s.config.JWTSecret), middleware.StringifyUserID())
+		// Note: Admin routes don't require tenant context as they're platform-level
+		{
+			admin.GET("/system", s.getAdminSystemStatus)
+			admin.GET("/metrics", s.getAdminSystemMetrics)
+			admin.GET("/tenants", s.getTenantStatuses)
+			admin.GET("/tenants/:id", s.getTenantStatus)
+			admin.GET("/services/:name", s.getServiceStatus)
+			admin.GET("/incidents", s.getIncidentHistory)
+			admin.GET("/monitoring", s.getMonitoringData)
+		}
+
+		// Platform metrics endpoints - For admin-service dashboard consumption
+		// These endpoints require platform.analytics or platform.health permissions
+		platform := api.Group("/monitoring-service/platform")
+		platform.Use(middleware.RequirePlatformAuth(s.config.JWTSecret), middleware.StringifyUserID())
+		platform.Use(sharedrbac.RequireAnyPlatformPermission(s.db, rbac.PermissionPlatformAnalytics, rbac.PermissionPlatformHealth))
+		// Note: Platform routes don't require tenant context as they're platform-level
+		{
+			platform.GET("/summary", s.getPlatformSummary)
+			platform.GET("/services/:name", s.getPlatformServiceMetrics)
+			platform.GET("/incidents", s.getPlatformIncidents)
+			platform.GET("/uptime", s.getPlatformUptime)
+		}
+
+		// Compliance logging endpoints - Phase 2.2
+		// These endpoints require platform.logs.read permission
+		logs := api.Group("/monitoring-service/logs")
+		logs.Use(middleware.RequirePlatformAuth(s.config.JWTSecret), middleware.StringifyUserID())
+		logs.Use(sharedrbac.RequirePlatformPermission(s.db, rbac.PermissionPlatformLogsRead))
+		{
+			logs.GET("", s.getLogs)                       // GET /monitoring-service/logs - List logs with pagination
+			logs.GET("/:id", s.getLog)                    // GET /monitoring-service/logs/:id - Get single log with signed URL
+			logs.GET("/siem/export", s.exportLogsForSIEM) // GET /monitoring-service/logs/siem/export - Export logs in SIEM format
+		}
+
+		// Alerting endpoints - Phase 1.5
+		// These endpoints require platform.health permission
+		alerting := api.Group("/monitoring-service/alerting")
+		alerting.Use(middleware.RequirePlatformAuth(s.config.JWTSecret), middleware.StringifyUserID())
+		alerting.Use(sharedrbac.RequirePlatformPermission(s.db, rbac.PermissionPlatformHealth))
+		{
+			alerting.GET("/thresholds", s.GetAlertThresholds)          // GET /monitoring-service/alerting/thresholds - List alert thresholds
+			alerting.GET("/thresholds/:id", s.GetAlertThreshold)       // GET /monitoring-service/alerting/thresholds/:id - Get single threshold
+			alerting.POST("/thresholds", s.CreateAlertThreshold)       // POST /monitoring-service/alerting/thresholds - Create threshold
+			alerting.PUT("/thresholds/:id", s.UpdateAlertThreshold)    // PUT /monitoring-service/alerting/thresholds/:id - Update threshold
+			alerting.DELETE("/thresholds/:id", s.DeleteAlertThreshold) // DELETE /monitoring-service/alerting/thresholds/:id - Delete threshold
+			alerting.GET("/history", s.GetAlertHistory)                // GET /monitoring-service/alerting/history - Get alert history
+		}
+
+		// Historical trends endpoints - Phase 1.5
+		// These endpoints require platform.health permission
+		trends := api.Group("/monitoring-service/trends")
+		trends.Use(middleware.RequirePlatformAuth(s.config.JWTSecret), middleware.StringifyUserID())
+		trends.Use(sharedrbac.RequirePlatformPermission(s.db, rbac.PermissionPlatformHealth))
+		{
+			trends.GET("", s.GetHistoricalTrends) // GET /monitoring-service/trends - Get historical trends
+		}
+
+		// Gateway proxy endpoints — serve Traefik dashboard API data server-side to avoid
+		// browser CORS restrictions. Protected by platform.health permission.
+		gateway := api.Group("/monitoring-service/gateway")
+		gateway.Use(middleware.RequirePlatformAuth(s.config.JWTSecret), middleware.StringifyUserID())
+		gateway.Use(sharedrbac.RequirePlatformPermission(s.db, rbac.PermissionPlatformHealth))
+		{
+			gateway.GET("/overview", s.getGatewayOverview)
+			gateway.GET("/routers", s.getGatewayRouters)
+			gateway.GET("/services", s.getGatewayServices)
+			gateway.GET("/middlewares", s.getGatewayMiddlewares)
+		}
+
+		// Admin platform status — reachable via gateway under /monitoring-service prefix.
+		// Returns live service health (GetSystemStatus) without requiring tenant context.
+		// NOTE: The /admin-service/status/... routes above are NOT dead code (an
+		// earlier version of this comment said so): the registry's admin_plane
+		// service_overrides deliberately routes /admin-service/status/** to THIS
+		// service, and the admin host serves it. They carry only RequireAuth —
+		// the tenant-host deny is the control keeping their cross-tenant data
+		// off the public host. This group is the same data on the conventional
+		// /monitoring-service prefix, with the platform gate applied directly.
+		adminStatus := api.Group("/monitoring-service/admin")
+		adminStatus.Use(middleware.RequirePlatformAuth(s.config.JWTSecret), middleware.StringifyUserID())
+		{
+			adminStatus.GET("/status", s.getAdminSystemStatus)
+			adminStatus.GET("/metrics", s.getAdminSystemMetrics)
+		}
+
+		// Tenant performance endpoints - For tenant health service
+		tenantMetrics := api.Group("/monitoring-service/tenant")
+		tenantMetrics.Use(middleware.RequireAuth(s.config.JWTSecret), middleware.StringifyUserID())
+		// Note: These routes are for admin platform use, not tenant UI
+		{
+			tenantMetrics.GET("/:id/performance-summary", s.getTenantPerformanceSummary)
+		}
+
+		// Version aggregator for the web-UI About page. Any authenticated
+		// user (tenant or platform admin) can read this — version info is
+		// not sensitive and the About page exists so any user can answer
+		// "what version am I on?" without admin-side access. The handler
+		// fans out to every Go service's /health and computes alignment.
+		api.GET("/monitoring-service/version",
+			middleware.RequireAuth(s.config.JWTSecret),
+			middleware.StringifyUserID(),
+			NewVersionAggregator(s.peerServiceURLs(), s.peerVersionClient()).Handle,
+		)
+	}
+
+	return router
 }

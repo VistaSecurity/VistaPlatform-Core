@@ -84,3 +84,56 @@ func TestSetAuthCookies_CSRFCookieAttributes(t *testing.T) {
 		t.Error("access_token must be HttpOnly")
 	}
 }
+
+// The JS-readable csrf_token cookie is the frontend's "a session exists" signal:
+// on a 401 it only attempts a silent refresh when this cookie is present. Tying
+// its MaxAge to the short access-token expiry made the signal vanish exactly
+// when the refresh was due — every request 401'd, no refresh was attempted, no
+// session-expired redirect fired, and the user was left on "Couldn't load …"
+// cards. It must outlive the access token and match the refresh token.
+func TestSetAuthCookies_CSRFCookieOutlivesAccessToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	h := &AuthHandlers{
+		config: &config.Config{JWTExpiry: 15 * time.Minute},
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	h.setAuthCookies(c, accessTokenWithJTI(t), "refresh-jwt")
+
+	got := map[string]int{}
+	for _, ck := range (&http.Response{Header: w.Header()}).Cookies() {
+		got[ck.Name] = ck.MaxAge
+	}
+
+	if got["access_token"] != int((15 * time.Minute).Seconds()) {
+		t.Errorf("access_token MaxAge = %d, want %d", got["access_token"], int((15 * time.Minute).Seconds()))
+	}
+	if got["refresh_token"] != refreshCookieMaxAge {
+		t.Errorf("refresh_token MaxAge = %d, want %d", got["refresh_token"], refreshCookieMaxAge)
+	}
+	if got["csrf_token"] != refreshCookieMaxAge {
+		t.Errorf("csrf_token MaxAge = %d, want %d (the refresh-token lifetime, NOT the access-token expiry)",
+			got["csrf_token"], refreshCookieMaxAge)
+	}
+}
+
+// Same invariant on the SSO path, which sets the cookies through a standalone
+// helper rather than the AuthHandlers method.
+func TestSetAuthCookiesResponseWriter_CSRFCookieOutlivesAccessToken(t *testing.T) {
+	w := httptest.NewRecorder()
+	setAuthCookiesResponseWriter(w, &config.Config{}, 900, accessTokenWithJTI(t), "refresh-jwt")
+
+	got := map[string]int{}
+	for _, ck := range (&http.Response{Header: w.Header()}).Cookies() {
+		got[ck.Name] = ck.MaxAge
+	}
+
+	if got["access_token"] != 900 {
+		t.Errorf("access_token MaxAge = %d, want 900", got["access_token"])
+	}
+	if got["csrf_token"] != refreshCookieMaxAge {
+		t.Errorf("csrf_token MaxAge = %d, want %d (the refresh-token lifetime)", got["csrf_token"], refreshCookieMaxAge)
+	}
+}

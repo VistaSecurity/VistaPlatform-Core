@@ -9,6 +9,7 @@ import { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { Icon, Pill, DrawerShell, DrawerCloseBtn, riskColor } from '../../components/ui';
 import { EmptyState, Loading } from '../findings/bits';
+import { coverageLine, formatScore, isUnscored } from '../findings/control-status';
 import { describeMeasurement } from './measurement-language';
 import { useAvailableFrameworks, useFrameworkDetail, type AvailableFrameworkRow, type FrameworkControlRow } from './queries';
 
@@ -21,13 +22,13 @@ function scoreColor(pct: number) {
 }
 
 function ScoreBadge({ value }: { value?: number | null }) {
-  if (value === null || value === undefined) {
-    return <span style={{ fontSize: 12, color: 'var(--app-t3)' }} title="Not yet scored">—</span>;
+  // "—" covers both "not scored yet" and "nothing could be assessed".
+  if (isUnscored(value)) {
+    return <span style={{ fontSize: 12, color: 'var(--app-t3)' }} title="No control could be assessed against your current inventory, so there is no score to show.">—</span>;
   }
-  const col = scoreColor(value);
   return (
-    <span className="mono" style={{ fontSize: 20, fontWeight: 800, color: col, lineHeight: 1 }}>
-      {Math.round(value)}<span style={{ fontSize: 12 }}>%</span>
+    <span className="mono" style={{ fontSize: 20, fontWeight: 800, color: scoreColor(value!), lineHeight: 1 }}>
+      {formatScore(value)}<span style={{ fontSize: 12 }}>%</span>
     </span>
   );
 }
@@ -86,6 +87,12 @@ export function FrameworkBrowser() {
 
 function FrameworkCard({ fw, onOpen }: { fw: AvailableFrameworkRow; onOpen: () => void }) {
   const p = fw.platform_framework;
+  const coverage = coverageLine({
+    total: p.controls_count,
+    passing: fw.controls_passing,
+    failing: fw.controls_failing,
+    notAssessed: fw.controls_not_assessed,
+  });
   return (
     <button onClick={onOpen} className="panel row-hover" style={{ padding: 16, textAlign: 'left', cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
@@ -105,13 +112,15 @@ function FrameworkCard({ fw, onOpen }: { fw: AvailableFrameworkRow; onOpen: () =
           <span style={{ fontSize: 11.5, color: 'var(--danger-text)', marginLeft: 'auto' }}>{fw.controls_failing} failing</span>
         )}
       </div>
-      {/* A control can carry an open finding and still score as passing — the
-          weighted score only fails a control at Medium+ severity. Surface the raw
-          open-finding count so a clean-looking score isn't read as "nothing found". */}
-      {!!fw.open_findings_controls && fw.open_findings_controls > (fw.controls_failing ?? 0) && (
-        <div style={{ fontSize: 11, color: 'var(--app-t3)', display: 'flex', alignItems: 'center', gap: 5 }}>
+      {/* Coverage disclosure (#1369). This replaces the old "N controls with
+          open findings (below scoring severity)" note: severity no longer
+          decides pass/fail, so a control with an open finding now simply FAILS
+          and there is no sub-scoring-threshold category left to disclose. */}
+      {coverage && (
+        <div style={{ fontSize: 11, color: 'var(--app-t3)', display: 'flex', alignItems: 'center', gap: 5 }}
+          title="Controls that could not be evaluated — no measurement rule configured, nothing in scope, or the check failed — are excluded from the score entirely.">
           <Icon name="info" size={12} />
-          {fw.open_findings_controls} control{fw.open_findings_controls !== 1 ? 's' : ''} with open findings (below scoring severity)
+          {coverage}
         </div>
       )}
     </button>

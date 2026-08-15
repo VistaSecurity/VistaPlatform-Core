@@ -55,21 +55,32 @@ type FrameworkSummary struct {
 	Version string `json:"version"`
 }
 
-// KPISummary represents key performance indicators
+// KPISummary represents key performance indicators.
+//
+// Score is a POINTER: a framework with no ASSESSED controls has no score, and
+// any sentinel integer would be read as a posture claim. The UI renders
+// nil as "—". ControlsAssessed / ControlsTotal is the coverage figure that
+// accompanies it ("8 of 11 controls assessed").
+//
+// The old Warn KPI is gone with the WARN status: it was only ever reachable from
+// a Med baseline severity and earned no score weight.
 type KPISummary struct {
-	Score           int `json:"score"`
-	FailingControls int `json:"failing_controls"`
-	AffectedAssets  int `json:"affected_assets"`
-	OverridesActive int `json:"overrides_active"`
+	Score               *int `json:"score"`
+	FailingControls     int  `json:"failing_controls"`
+	NotAssessedControls int  `json:"not_assessed_controls"`
+	ControlsTotal       int  `json:"controls_total"`
+	ControlsAssessed    int  `json:"controls_assessed"`
+	AffectedAssets      int  `json:"affected_assets"`
+	OverridesActive     int  `json:"overrides_active"`
 }
 
 // FamilySummary represents family-level summary
 type FamilySummary struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Pass int    `json:"pass"`
-	Warn int    `json:"warn"`
-	Fail int    `json:"fail"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Pass        int    `json:"pass"`
+	Fail        int    `json:"fail"`
+	NotAssessed int    `json:"not_assessed"`
 }
 
 // ControlSummary represents control-level summary
@@ -82,6 +93,10 @@ type ControlSummary struct {
 	StatusBaseline    string `json:"status_baseline"`
 	SeverityEffective string `json:"severity_effective"`
 	SeverityBaseline  string `json:"severity_baseline"`
+	// NotAssessedReason is machine-readable and empty unless the status is
+	// NOT_ASSESSED: no_measurements / nothing_in_scope / check_error. The UI
+	// shows one bucket ("Not assessed") with a different sentence per reason.
+	NotAssessedReason string `json:"not_assessed_reason,omitempty"`
 	Findings          int    `json:"findings"`
 	LastSeen          string `json:"last_seen"`
 	HasOverride       bool   `json:"has_override"`
@@ -250,14 +265,27 @@ func (s *EvaluationService) EvaluateFramework(tenantID, frameworkID uuid.UUID, v
 
 	// Evaluate each control
 	controlSummaries := make([]ControlSummary, 0, len(controls))
-	familyCounts := make(map[string]map[string]int) // family_id -> {pass, warn, fail}
+	familyCounts := make(map[string]map[string]int) // family_id -> {pass, fail, not_assessed}
 
-	var totalControls, passControls, failingControls int
+	var totalControls, passControls, failingControls, notAssessedControls int
 	outcomes := make([]controlOutcome, 0, len(controls)) // folded by frameworkScore
 	affectedAssetSet := make(map[uuid.UUID]bool)
 
 	// Use the framework source determined above for live evaluation
 	frameworkType := frameworkSource
+
+	// Materialized assessment for every control, from the SAME loader the rollup
+	// and the posture scorecard use. Without it this path defaulted an
+	// unviolated control to PASS, which is how a framework with no measurements
+	// configured — or a tenant with no inventory at all — scored 100.
+	controlIDs := make([]uuid.UUID, 0, len(controls))
+	for _, c := range controls {
+		controlIDs = append(controlIDs, c.ID)
+	}
+	assessments, err := loadControlAssessments(context.Background(), s.db.DB, tenantID, controlIDs, frameworkType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load control assessments: %w", err)
+	}
 
 	for _, control := range controls {
 		// Get stored findings for this control
@@ -268,23 +296,27 @@ func (s *EvaluationService) EvaluateFramework(tenantID, frameworkID uuid.UUID, v
 
 		// If no stored findings and live evaluator is available, evaluate on-demand.
 		// This handles new tenants and cases where NATS events haven't been processed yet.
-		var baselineStatus, baselineSeverity string
+		var baselineStatus, baselineSeverity, notAssessedReason string
 		findingCount := len(findings)
 
 		if findingCount == 0 && s.ruleEvaluator != nil {
 			result, evalErr := s.ruleEvaluator.EvaluateControl(tenantID, control.ID, frameworkType)
 			if evalErr == nil && result != nil {
+				// The live evaluator is the only path that can tell
+				// nothing-in-scope and check-error apart, because it is the only
+				// one that actually runs extraction.
 				baselineStatus = strings.ToUpper(result.Status)
 				baselineSeverity = result.Severity
+				notAssessedReason = result.NotAssessedReason
 				findingCount = len(result.Findings)
 				for _, f := range result.Findings {
 					affectedAssetSet[f.AssetID] = true
 				}
 			} else {
-				baselineStatus, baselineSeverity = s.calculateControlStatus(findings)
+				baselineStatus, baselineSeverity, notAssessedReason = s.controlStatusFromAssessment(findings, assessments[control.ID])
 			}
 		} else {
-			baselineStatus, baselineSeverity = s.calculateControlStatus(findings)
+			baselineStatus, baselineSeverity, notAssessedReason = s.controlStatusFromAssessment(findings, assessments[control.ID])
 			for _, finding := range findings {
 				affectedAssetSet[finding.AssetID] = true
 			}
@@ -300,6 +332,9 @@ func (s *EvaluationService) EvaluateFramework(tenantID, frameworkID uuid.UUID, v
 		}
 
 		// Create control summary
+		if effectiveStatus != statusNotAssessed {
+			notAssessedReason = ""
+		}
 		controlSummary := ControlSummary{
 			ID:                control.ID.String(),
 			ControlID:         control.ControlID,
@@ -309,6 +344,7 @@ func (s *EvaluationService) EvaluateFramework(tenantID, frameworkID uuid.UUID, v
 			StatusBaseline:    baselineStatus,
 			SeverityEffective: effectiveSeverity,
 			SeverityBaseline:  baselineSeverity,
+			NotAssessedReason: notAssessedReason,
 			Findings:          findingCount,
 			LastSeen:          s.getLastSeen(findings),
 			HasOverride:       hasOverride,
@@ -326,11 +362,9 @@ func (s *EvaluationService) EvaluateFramework(tenantID, frameworkID uuid.UUID, v
 		case statusPass:
 			passControls++
 		case statusFail:
-			// Strict FAIL count for the KPI. Deliberately narrower than
-			// frameworkScore's "failing" (which is everything that isn't PASS):
-			// the KPI answers "how many controls are in breach", and a WARN is
-			// not a breach even though it earns no score credit.
 			failingControls++
+		case statusNotAssessed:
+			notAssessedControls++
 		}
 
 		// Update family counts (handle nil FamilyID for tenant frameworks)
@@ -339,7 +373,7 @@ func (s *EvaluationService) EvaluateFramework(tenantID, frameworkID uuid.UUID, v
 			familyIDStr = control.FamilyID.String()
 		}
 		if familyCounts[familyIDStr] == nil {
-			familyCounts[familyIDStr] = map[string]int{"pass": 0, "warn": 0, "fail": 0}
+			familyCounts[familyIDStr] = map[string]int{"pass": 0, "fail": 0, "not_assessed": 0}
 		}
 		familyCounts[familyIDStr][strings.ToLower(effectiveStatus)]++
 	}
@@ -355,16 +389,18 @@ func (s *EvaluationService) EvaluateFramework(tenantID, frameworkID uuid.UUID, v
 			name = "Default"
 		}
 		familySummaries = append(familySummaries, FamilySummary{
-			ID:   familyID,
-			Name: name,
-			Pass: counts["pass"],
-			Warn: counts["warn"],
-			Fail: counts["fail"],
+			ID:          familyID,
+			Name:        name,
+			Pass:        counts["pass"],
+			Fail:        counts["fail"],
+			NotAssessed: counts["not_assessed"],
 		})
 	}
 
-	// Canonical severity-weighted score (Critical 4x, High 3x, Med 2x, Low 1x).
-	score, _, _, _ := frameworkScore(outcomes)
+	// Canonical severity-weighted score over the ASSESSED controls only
+	// (Critical 4x, High 3x, Med 2x, Low 1x). Score is nil — "—", never 100 —
+	// when nothing was assessed.
+	breakdown := frameworkScore(outcomes)
 
 	overridesActive := len(overrides)
 
@@ -375,10 +411,13 @@ func (s *EvaluationService) EvaluateFramework(tenantID, frameworkID uuid.UUID, v
 		},
 		LastUpdated: time.Now().Format(time.RFC3339),
 		KPIs: KPISummary{
-			Score:           score,
-			FailingControls: failingControls,
-			AffectedAssets:  len(affectedAssetSet),
-			OverridesActive: overridesActive,
+			Score:               breakdown.Score,
+			FailingControls:     failingControls,
+			NotAssessedControls: notAssessedControls,
+			ControlsTotal:       totalControls,
+			ControlsAssessed:    passControls + failingControls,
+			AffectedAssets:      len(affectedAssetSet),
+			OverridesActive:     overridesActive,
 		},
 		Families: familySummaries,
 		Controls: controlSummaries,
@@ -448,9 +487,10 @@ func (s *EvaluationService) getControlsForFramework(frameworkID uuid.UUID, filte
 	return nil, fmt.Errorf("no controls found for framework %s (source: %s)", frameworkID, source)
 }
 
-// ComplianceScoreResponse represents the overall compliance score across all frameworks
+// ComplianceScoreResponse represents the overall compliance score across all frameworks.
+// Score is nil when no framework contributed an assessed score — "—", never 0.
 type ComplianceScoreResponse struct {
-	Score          float64                `json:"score"`
+	Score          *float64               `json:"score"`
 	FrameworkCount int                    `json:"framework_count"`
 	Frameworks     []FrameworkScoreDetail `json:"frameworks"`
 }
@@ -461,8 +501,8 @@ type FrameworkScoreDetail struct {
 	Name    string `json:"name"`
 	Code    string `json:"code"`
 	Version string `json:"version"`
-	Score   int    `json:"score"`
-	Type    string `json:"type"` // "platform" or "tenant"
+	Score   *int   `json:"score"` // nil when no control was assessed (#1369)
+	Type    string `json:"type"`  // "platform" or "tenant"
 }
 
 // MultiFrameworkEvaluationResult represents evaluation result for a single framework
@@ -472,13 +512,14 @@ type MultiFrameworkEvaluationResult struct {
 	FrameworkCode    string              `json:"framework_code,omitempty"`
 	FrameworkVersion string              `json:"framework_version"`
 	FrameworkType    string              `json:"framework_type"` // "platform" or "tenant"
-	Score            int                 `json:"score"`
+	Score            *int                `json:"score"`          // nil when nothing was assessed (#1369)
 	Summary          *SummaryResponse    `json:"summary"`
 	AffectedEntities map[string][]string `json:"affected_entities"` // entity_type -> []entity_id
 	Controls         struct {
-		Total   int `json:"total"`
-		Passing int `json:"passing"`
-		Failing int `json:"failing"`
+		Total       int `json:"total"`
+		Passing     int `json:"passing"`
+		Failing     int `json:"failing"`
+		NotAssessed int `json:"not_assessed"`
 	} `json:"controls"`
 	LastEvaluated string `json:"last_evaluated"`
 }
@@ -606,12 +647,15 @@ func (s *EvaluationService) EvaluateMultipleFrameworks(
 			// regardless of real posture. Compare against the shared constants.
 			passingControls := 0
 			failingControls := 0
+			notAssessedControls := 0
 			for _, control := range summary.Controls {
 				switch control.StatusEffective {
 				case statusPass:
 					passingControls++
 				case statusFail:
 					failingControls++
+				case statusNotAssessed:
+					notAssessedControls++
 				}
 			}
 
@@ -625,13 +669,15 @@ func (s *EvaluationService) EvaluateMultipleFrameworks(
 				Summary:          summary,
 				AffectedEntities: affectedEntities,
 				Controls: struct {
-					Total   int `json:"total"`
-					Passing int `json:"passing"`
-					Failing int `json:"failing"`
+					Total       int `json:"total"`
+					Passing     int `json:"passing"`
+					Failing     int `json:"failing"`
+					NotAssessed int `json:"not_assessed"`
 				}{
-					Total:   len(summary.Controls),
-					Passing: passingControls,
-					Failing: failingControls,
+					Total:       len(summary.Controls),
+					Passing:     passingControls,
+					Failing:     failingControls,
+					NotAssessed: notAssessedControls,
 				},
 				LastEvaluated: time.Now().Format(time.RFC3339),
 			}
@@ -743,7 +789,8 @@ func (s *EvaluationService) GetComplianceScore(tenantID uuid.UUID, frameworkID *
 		return nil, fmt.Errorf("failed to evaluate framework: %w", err)
 	}
 
-	// Extract score from summary
+	// Extract score from summary. A framework with nothing assessed carries no
+	// score forward — averaging a sentinel in would invent posture.
 	score := summary.KPIs.Score
 	frameworkScores = append(frameworkScores, FrameworkScoreDetail{
 		ID:      framework.ID.String(),
@@ -753,11 +800,14 @@ func (s *EvaluationService) GetComplianceScore(tenantID uuid.UUID, frameworkID *
 		Score:   score,
 		Type:    "platform",
 	})
-	totalScore = float64(score)
-	totalWeight = 1
 
-	// Calculate overall score (same as single framework score in this case)
-	overallScore := totalScore / float64(totalWeight)
+	var overallScore *float64
+	if score != nil {
+		totalScore = float64(*score)
+		totalWeight = 1
+		avg := totalScore / float64(totalWeight)
+		overallScore = &avg
+	}
 
 	return &ComplianceScoreResponse{
 		Score:          overallScore,
@@ -767,7 +817,7 @@ func (s *EvaluationService) GetComplianceScore(tenantID uuid.UUID, frameworkID *
 }
 
 // calculatePlatformFrameworkScore calculates the severity-weighted compliance score for a platform framework
-func (s *EvaluationService) calculatePlatformFrameworkScore(tenantID, frameworkID uuid.UUID) (int, error) {
+func (s *EvaluationService) calculatePlatformFrameworkScore(tenantID, frameworkID uuid.UUID) (*int, error) {
 	type controlRow struct {
 		ID               uuid.UUID `db:"id"`
 		BaselineSeverity string    `db:"baseline_severity"`
@@ -779,31 +829,41 @@ func (s *EvaluationService) calculatePlatformFrameworkScore(tenantID, frameworkI
 		WHERE framework_id = $1
 	`, frameworkID)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	if len(controls) == 0 {
-		return 100, nil // No controls means perfect score
+		// A framework with no controls has nothing to assess. It used to return
+		// 100, which claims a clean bill of health for an empty policy.
+		return nil, nil
+	}
+
+	controlIDs := make([]uuid.UUID, 0, len(controls))
+	for _, ctrl := range controls {
+		controlIDs = append(controlIDs, ctrl.ID)
+	}
+	assessments, err := loadControlAssessments(context.Background(), s.db.DB, tenantID, controlIDs, "platform")
+	if err != nil {
+		return nil, err
 	}
 
 	outcomes := make([]controlOutcome, 0, len(controls))
 	for _, ctrl := range controls {
-		findings, err := s.getFindingsForControl(tenantID, ctrl.ID, models.ScenarioFilters{})
-		if err != nil {
+		findings, ferr := s.getFindingsForControl(tenantID, ctrl.ID, models.ScenarioFilters{})
+		if ferr != nil {
 			continue
 		}
-		status, _ := s.calculateControlStatus(findings)
+		status, _, _ := s.controlStatusFromAssessment(findings, assessments[ctrl.ID])
 		outcomes = append(outcomes, controlOutcome{BaselineSeverity: ctrl.BaselineSeverity, Status: status})
 	}
 
-	score, _, _, _ := frameworkScore(outcomes)
-	return score, nil
+	return frameworkScore(outcomes).Score, nil
 }
 
 // FrameworkStatusResponse represents framework status information
 type FrameworkStatusResponse struct {
 	Frameworks        []FrameworkStatusDetail `json:"frameworks"`
-	OverallScore      float64                 `json:"overall_score"`
+	OverallScore      *float64                `json:"overall_score"` // nil when nothing was assessed (#1369)
 	SelectedFramework *FrameworkStatusDetail  `json:"selected_framework,omitempty"`
 }
 
@@ -813,8 +873,8 @@ type FrameworkStatusDetail struct {
 	Name              string `json:"name"`
 	Code              string `json:"code"`
 	Version           string `json:"version"`
-	CompliancePercent int    `json:"compliance_percent"`
-	Type              string `json:"type"` // "platform" or "tenant"
+	CompliancePercent *int   `json:"compliance_percent"` // nil when nothing was assessed (#1369)
+	Type              string `json:"type"`               // "platform" or "tenant"
 	IsSelected        bool   `json:"is_selected"`
 }
 
@@ -1019,7 +1079,7 @@ func (s *EvaluationService) GetFrameworkStatus(tenantID uuid.UUID) (*FrameworkSt
 		score, err := s.calculatePlatformFrameworkScore(tenantID, detail.PlatformFramework.ID)
 		if err != nil {
 			log.Printf("⚠️ Failed to calculate score for framework %s: %v", detail.PlatformFramework.ID, err)
-			score = 0
+			score = nil
 		}
 
 		isSelected := activeFrameworkID == detail.PlatformFramework.ID
@@ -1033,8 +1093,10 @@ func (s *EvaluationService) GetFrameworkStatus(tenantID uuid.UUID) (*FrameworkSt
 			Type:              "platform",
 			IsSelected:        isSelected,
 		})
-		totalScore += float64(score)
-		totalWeight++
+		if score != nil {
+			totalScore += float64(*score)
+			totalWeight++
+		}
 	}
 
 	// Note: All tenants automatically have Best Practices licensed via database trigger,
@@ -1042,10 +1104,11 @@ func (s *EvaluationService) GetFrameworkStatus(tenantID uuid.UUID) (*FrameworkSt
 	// If no licensed frameworks exist (shouldn't happen), the function will have already
 	// returned an error at line 789.
 
-	// Calculate overall score
-	var overallScore float64
+	// Calculate overall score across the frameworks that HAVE one.
+	var overallScore *float64
 	if totalWeight > 0 {
-		overallScore = totalScore / float64(totalWeight)
+		avg := totalScore / float64(totalWeight)
+		overallScore = &avg
 	}
 
 	// Find selected framework detail
@@ -1061,7 +1124,7 @@ func (s *EvaluationService) GetFrameworkStatus(tenantID uuid.UUID) (*FrameworkSt
 	if len(frameworkStatuses) == 0 {
 		return &FrameworkStatusResponse{
 			Frameworks:        []FrameworkStatusDetail{},
-			OverallScore:      0,
+			OverallScore:      nil,
 			SelectedFramework: nil,
 		}, nil
 	}
@@ -1075,6 +1138,14 @@ func (s *EvaluationService) GetFrameworkStatus(tenantID uuid.UUID) (*FrameworkSt
 
 // getFindingsForControl gets findings for a specific control with filters
 func (s *EvaluationService) getFindingsForControl(tenantID, controlID uuid.UUID, filters models.ScenarioFilters) ([]models.ComplianceFinding, error) {
+	return s.getFindingsForControlScoped(tenantID, controlID, filters, false)
+}
+
+func (s *EvaluationService) getVisibleFindingsForControl(tenantID, controlID uuid.UUID, filters models.ScenarioFilters) ([]models.ComplianceFinding, error) {
+	return s.getFindingsForControlScoped(tenantID, controlID, filters, true)
+}
+
+func (s *EvaluationService) getFindingsForControlScoped(tenantID, controlID uuid.UUID, filters models.ScenarioFilters, licensedOnly bool) ([]models.ComplianceFinding, error) {
 	// Note: We join network_assets only for filtering, not for selecting fields
 	// Asset fields are in the joined Asset struct with db:"-" tag, so sqlx can't scan them
 	query := `
@@ -1092,6 +1163,9 @@ func (s *EvaluationService) getFindingsForControl(tenantID, controlID uuid.UUID,
 	`
 	args := []interface{}{tenantID, controlID}
 	argIndex := 3
+	if licensedOnly {
+		query += " AND " + licensedFindingScopeSQL("cf", "$1")
+	}
 
 	// Apply environment filter (only if asset exists and is not deleted)
 	// Ignore "undefined" string values (from frontend URLSearchParams)
@@ -1239,7 +1313,27 @@ func severityToWeight(severity string) int {
 	}
 }
 
+// controlStatusFromAssessment is calculateControlStatus plus the materialized
+// assessment for the same control: a control with findings FAILS (and the worst
+// severity is its weight/badge), while a control with none is PASS only if it was
+// actually assessed. The old code returned PASS unconditionally, which is how a
+// control with no measurements — or a tenant with nothing in inventory — reported
+// a clean pass at 100.
+func (s *EvaluationService) controlStatusFromAssessment(findings []models.ComplianceFinding, a controlAssessment) (status, severity, notAssessedReason string) {
+	if len(findings) > 0 {
+		status, severity = s.calculateControlStatus(findings)
+		return status, severity, ""
+	}
+	if a.Status == statusNotAssessed {
+		return statusNotAssessed, "Low", a.Reason
+	}
+	return statusPass, "Low", ""
+}
+
 // calculateControlStatus calculates the baseline status and severity for a control
+// from its stored findings. Status is decided by whether the control was violated;
+// severity is the worst finding's rating, which is the scoring WEIGHT and the
+// badge, never the pass/fail input.
 func (s *EvaluationService) calculateControlStatus(findings []models.ComplianceFinding) (status, severity string) {
 	if len(findings) == 0 {
 		return statusPass, "Low"
@@ -1262,9 +1356,9 @@ func (s *EvaluationService) calculateControlStatus(findings []models.ComplianceF
 		}
 	}
 
-	// Determine status based on severity — shared with the materialized path so
-	// the in-memory fold and the SQL fold cannot disagree.
-	return statusForWorstSeverity(highestSeverity), highestSeverity
+	// Violated → FAIL, whatever the severity. Shared with the materialized path
+	// so the in-memory fold and the SQL fold cannot disagree.
+	return statusForFindings(true), highestSeverity
 }
 
 // applyOverrides applies overrides to control status and severity
@@ -1279,13 +1373,21 @@ func (s *EvaluationService) applyOverrides(controlID uuid.UUID, baselineStatus, 
 
 	switch override.OverrideType {
 	case models.OverrideTypeDisregard:
+		if baselineStatus == statusNotAssessed {
+			// "Accept this risk" cannot manufacture evidence of a check that was
+			// never run. A disregard on a not-assessed control leaves it not
+			// assessed rather than laundering it into a pass.
+			return baselineStatus, baselineSeverity, hasOverride
+		}
 		return statusPass, baselineSeverity, hasOverride
 	case models.OverrideTypeSeverity:
 		if override.SeverityTo != nil {
 			effectiveSeverity = *override.SeverityTo
 		}
-		// Recalculate status based on the new severity, same mapping as everywhere else.
-		return statusForWorstSeverity(effectiveSeverity), effectiveSeverity, hasOverride
+		// A re-rating changes the control's WEIGHT, not whether it was violated
+		//. It used to also flip the status, so re-rating a failing
+		// control to Low made it report PASS.
+		return baselineStatus, effectiveSeverity, hasOverride
 	}
 
 	return baselineStatus, baselineSeverity, hasOverride
@@ -1351,7 +1453,7 @@ func (s *EvaluationService) GetControlDetails(tenantID, controlID uuid.UUID, sce
 	}
 
 	// Get findings for this control
-	allFindings, err := s.getFindingsForControl(tenantID, controlID, filters)
+	allFindings, err := s.getVisibleFindingsForControl(tenantID, controlID, filters)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get findings: %w", err)
 	}
@@ -1524,7 +1626,7 @@ func (s *EvaluationService) GetControlDetails(tenantID, controlID uuid.UUID, sce
 
 // GetControlDetailsTotalCount returns the total count of findings for a control (for pagination)
 func (s *EvaluationService) GetControlDetailsTotalCount(tenantID, controlID uuid.UUID, filters models.ScenarioFilters) (int, error) {
-	allFindings, err := s.getFindingsForControl(tenantID, controlID, filters)
+	allFindings, err := s.getVisibleFindingsForControl(tenantID, controlID, filters)
 	if err != nil {
 		return 0, err
 	}

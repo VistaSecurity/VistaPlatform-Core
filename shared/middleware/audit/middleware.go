@@ -404,11 +404,15 @@ func (m *Middleware) flushBatch() {
 // preserving user_type so the audit-service subscriber can satisfy the
 // activity_logs valid_user_type CHECK constraint ('tenant' or 'platform').
 func toAuditEvent(entry *ActivityLogRequest) events.AuditEvent {
+	success := entry.Success
 	auditEvt := events.AuditEvent{
-		EventID:   uuid.New(),
-		UserType:  entry.UserType,
-		Action:    entry.Action,
-		Timestamp: entry.OccurredAt,
+		EventID:       uuid.New(),
+		UserType:      entry.UserType,
+		Action:        entry.Action,
+		Timestamp:     entry.OccurredAt,
+		EventType:     entry.EventType,
+		EventCategory: entry.EventCategory,
+		Success:       &success,
 	}
 	if entry.TenantID != nil {
 		auditEvt.TenantID = *entry.TenantID

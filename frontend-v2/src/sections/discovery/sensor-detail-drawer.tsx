@@ -691,8 +691,11 @@ function ConfigSection({ sensor }: { sensor: Sensor }) {
 
   const configDirty = airGapped !== sensor.air_gapped || description !== (sensor.description ?? '') || tags !== (sensor.tags ?? []).join(', ');
 
+  // sensors.update, not .manage: sensor-manager gates PUT
+  // /sensors/:id/interfaces and PUT /sensors/:id/config on SensorsUpdate.
+  // sensors.manage guards only certificate regeneration/revocation.
   return (
-    <PermissionGate permission={TENANT_PERMISSIONS.sensors.manage} fallback={<div style={{ fontSize: 12, color: 'var(--app-t3)', padding: '12px 0' }}>You don't have permission to manage this sensor's configuration.</div>}>
+    <PermissionGate permission={TENANT_PERMISSIONS.sensors.update} fallback={<div style={{ fontSize: 12, color: 'var(--app-t3)', padding: '12px 0' }}>You don't have permission to manage this sensor's configuration.</div>}>
       <SectionLabel icon="sliders-horizontal">Network interfaces</SectionLabel>
       <div style={{ fontSize: 10.5, color: 'var(--app-t3)', margin: '2px 0 4px' }}>Select the interfaces the sensor should monitor, then Save NICs to send the change.</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -836,7 +839,8 @@ function CommandsSection({ sensorId }: { sensorId: string }) {
   return (
     <>
       <SectionLabel icon="terminal">Send command</SectionLabel>
-      <PermissionGate permission={TENANT_PERMISSIONS.sensors.manage} fallback={<div style={{ fontSize: 12, color: 'var(--app-t3)', padding: '6px 0' }}>You don't have permission to send commands.</div>}>
+      {/* sensors.update: POST /sensors/:id/commands is gated on SensorsUpdate. */}
+      <PermissionGate permission={TENANT_PERMISSIONS.sensors.update} fallback={<div style={{ fontSize: 12, color: 'var(--app-t3)', padding: '6px 0' }}>You don't have permission to send commands.</div>}>
         <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
           <select value={commandType} onChange={(e) => setCommandType(e.target.value)} style={{ flex: 'none', height: 32, padding: '0 8px', borderRadius: 8, border: '1px solid var(--app-border2)', background: 'var(--app-panel2)', color: 'var(--app-t1)', fontSize: 12.5, cursor: 'pointer' }}>
             {COMMAND_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}

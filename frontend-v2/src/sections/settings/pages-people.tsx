@@ -5,13 +5,15 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '@vistasecurity/primitives/auth';
-import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
+import { PermissionGate, TENANT_PERMISSIONS, usePermissions } from '@vistasecurity/primitives/rbac';
 import { useFeature } from '@vistasecurity/primitives/features';
 import { clients } from '../../lib/clients';
 import { Icon } from '../../components/ui';
 import { SPage, SSection, SCard, SRow, SSelect, STable, STableRow, STag, SDot, SAvatar, StateNote, relTime, GREEN, AMBER } from './kit';
 import { InviteMemberModal, ChangeRoleModal } from './people-modals';
 import { SsoProviderModal, SsoProviderDeleteModal } from './sso-modals';
+import { RolePermissionDrawer, CreateRoleModal, DeleteRoleModal } from './role-modals';
+import type { TenantRole } from './role-logic';
 import { ssoProvidersQuery, authPolicyQuery } from './sso-queries';
 import type { SettingsNavItem } from './nav';
 import type { authServiceComponents as AuthC } from '@vistasecurity/api-contract';
@@ -174,9 +176,19 @@ function PendingInvitations({ tenantId }: { tenantId: string }) {
   );
 }
 
+// Roles & Permissions. The nav entry is gated on users.manage (nav.ts) because
+// the WHOLE /tenant/:id/roles route group in auth-service requires it — a
+// users.read-only visitor would reach a failed load, which is exactly the bug
+// fixed for this page. Do not weaken that without re-gating the backend
+// list route first.
 export function RolesPage({ meta }: { meta: SettingsNavItem }) {
   const { tenant } = useAuth();
   const tenantId = tenant?.id;
+  const canManage = usePermissions().hasPermission(TENANT_PERMISSIONS.users.manage);
+  const [drawerRole, setDrawerRole] = useState<TenantRole | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [deleteRole, setDeleteRole] = useState<TenantRole | null>(null);
+
   const { data, isLoading, isError } = useQuery({
     queryKey: ['settings', 'roles', tenantId],
     enabled: !!tenantId,
@@ -191,7 +203,17 @@ export function RolesPage({ meta }: { meta: SettingsNavItem }) {
   const roles = data?.roles ?? [];
 
   return (
-    <SPage eyebrow="People & Access" title="Roles & Permissions" job={meta.job}>
+    <SPage
+      eyebrow="People & Access" title="Roles & Permissions" job={meta.job}
+      actions={
+        <PermissionGate permission={TENANT_PERMISSIONS.users.manage}>
+          <button className="ui-btn sm accent" onClick={() => setCreateOpen(true)}><Icon name="plus" size={14} />New role</button>
+        </PermissionGate>
+      }
+    >
+      {createOpen && <CreateRoleModal onClose={() => setCreateOpen(false)} />}
+      {drawerRole && <RolePermissionDrawer key={drawerRole.id} role={drawerRole} canManage={canManage} onClose={() => setDrawerRole(null)} />}
+      {deleteRole && <DeleteRoleModal key={deleteRole.id} role={deleteRole} roles={roles} onClose={() => setDeleteRole(null)} />}
       {isError ? (
         <SCard><StateNote icon="alert-triangle" tone="var(--danger-text)" title="Couldn't load roles" message="The role list failed to load." /></SCard>
       ) : isLoading || !tenantId ? (
@@ -202,18 +224,36 @@ export function RolesPage({ meta }: { meta: SettingsNavItem }) {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {roles.map((r) => {
             const c = roleColor(r.name);
-            const permCount = r.permissions ? Object.keys(r.permissions).length : 0;
             return (
-              <SCard key={r.id} pad={18} style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+              <SCard key={r.id} pad={18} style={{ display: 'flex', alignItems: 'center', gap: 16, cursor: 'pointer' }} onClick={() => setDrawerRole(r)}>
                 <span style={{ width: 38, height: 38, borderRadius: 10, flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', background: `color-mix(in srgb, ${c} 11%, transparent)`, color: c }}>
                   <Icon name="shield" size={18} />
                 </span>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--app-t1)' }}>{r.name}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+                    <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--app-t1)' }}>{r.display_name || r.name}</span>
+                    <STag color={r.is_system_role ? 'var(--info)' : GREEN}>{r.is_system_role ? 'Built-in' : 'Custom'}</STag>
+                  </div>
                   <div style={{ fontSize: 12, color: 'var(--app-t3)', marginTop: 2 }}>{r.description || 'No description.'}</div>
                 </div>
                 <div style={{ fontSize: 11.5, color: 'var(--app-t2)', textAlign: 'right', flex: 'none', maxWidth: 200 }}>
-                  {permCount > 0 ? `${permCount} permission${permCount !== 1 ? 's' : ''}` : '—'}
+                  {r.permission_count > 0 ? `${r.permission_count} permission${r.permission_count !== 1 ? 's' : ''}` : 'No permissions'}
+                  <div style={{ color: 'var(--app-t3)' }}>{r.user_count} {r.user_count === 1 ? 'member' : 'members'}</div>
+                </div>
+                <div style={{ display: 'flex', gap: 6, flex: 'none' }} onClick={(e) => e.stopPropagation()}>
+                  <button className="ui-btn sm" onClick={() => setDrawerRole(r)}>
+                    {canManage && !r.is_system_role ? 'Edit permissions' : 'View permissions'}
+                  </button>
+                  {/* Built-in roles have no delete affordance at all: the server
+                      refuses with system_role_immutable, so offering the button
+                      would only manufacture a 403 for the user to read. */}
+                  <PermissionGate permission={TENANT_PERMISSIONS.users.manage}>
+                    {!r.is_system_role && (
+                      <button className="ui-btn sm ghost" title="Delete role" style={{ color: 'var(--danger-text)' }} onClick={() => setDeleteRole(r)}>
+                        <Icon name="x" size={14} />
+                      </button>
+                    )}
+                  </PermissionGate>
                 </div>
               </SCard>
             );

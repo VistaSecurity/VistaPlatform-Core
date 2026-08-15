@@ -169,15 +169,23 @@ describe('createSessionExpiryHandler', () => {
     await expect(handler()).resolves.toBe(false); // latched: no second refresh, no second callback
     expect(refresh).toHaveBeenCalledTimes(1);
     expect(onSessionExpired).toHaveBeenCalledTimes(1);
+    expect(onSessionExpired).toHaveBeenCalledWith('expired');
   });
 
-  it('does nothing for anonymous visitors (no session cookie)', async () => {
+  // The bug this pins: with no session cookie the handler used to return false
+  // silently — no refresh AND no callback — so a 401 burst left the user on a
+  // page of "Couldn't load …" cards with nothing explaining why and no route to
+  // sign-in. Skipping the refresh is right (there is no session to refresh);
+  // skipping the notification is not.
+  it('with no session cookie skips the refresh but still reports the dead session', async () => {
     const refresh = vi.fn();
     const onSessionExpired = vi.fn();
     const handler = createSessionExpiryHandler({ hasSession: () => false, refresh, onSessionExpired });
 
     await expect(handler()).resolves.toBe(false);
+    await expect(handler()).resolves.toBe(false); // latched
     expect(refresh).not.toHaveBeenCalled();
-    expect(onSessionExpired).not.toHaveBeenCalled();
+    expect(onSessionExpired).toHaveBeenCalledTimes(1);
+    expect(onSessionExpired).toHaveBeenCalledWith('no-session');
   });
 });

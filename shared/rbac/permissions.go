@@ -34,26 +34,25 @@ const (
 	PermissionTenantsUpdate = "tenants.update"
 )
 
-// PCAP ingestion permission constants for tenant-level pcap upload management.
-const (
-	PermissionPcapUpload = "pcap.upload"
-	PermissionPcapRead   = "pcap.read"
-	PermissionPcapDelete = "pcap.delete"
-)
-
-// Core tenant resource permission constants. These mirror rows in the
-// tenant_permissions DB table and the TENANT_PERMISSIONS object in
-// web-ui/src/constants/permissions.ts. Adding a new resource means:
-//  1. Add the row(s) to scripts/database/seed.sql tenant_permissions INSERT
-//  2. Decide which roles grant it (seed.sql DO block + auth-service
-//     assignRolePermissions filter)
-//  3. Add the constant here so services can use it in middleware
-//  4. Apply RequireTenantPermission(db, rbac.PermissionXxx) on the
-//     relevant routes
-//  5. Add web-ui constant in TENANT_PERMISSIONS and gate the UI if needed
+// Tenant resource permission constants. These are typed references to the rows
+// in the tenant_permissions DB table and to the TENANT_PERMISSIONS object in
+// packages/primitives/src/rbac/constants.ts (imported by both frontend-v2 and
+// admin-ui-v2 as @vistasecurity/primitives/rbac). All three — plus the seed
+// catalogue, the seed grant filters, and this service's grant filters — are
+// generated from standards/permissions.yaml.
 //
-// The permission-parity audit (scripts/audit-permissions.mjs) checks
-// 1, 2, and 4 — but step 5 has to be done by the feature author.
+// Adding a permission means:
+//  1. Add it to standards/permissions.yaml (catalogue + whichever role grants
+//     it) and run `make generate`. That covers the DB rows, the grant filters
+//     on both reconciliation paths, this constant, and the TS constant.
+//  2. Apply RequireTenantPermission(db, rbac.PermissionXxx) on the relevant
+//     routes.
+//  3. Gate the UI with the TENANT_PERMISSIONS constant if needed.
+//
+// The permission-parity audit (scripts/audit-permissions.mjs) checks 2; step 3
+// has to be done by the feature author.
+//
+// BEGIN GENERATED: tenant permission constants — from standards/permissions.yaml (make generate)
 const (
 	PermissionAssetsCreate = "assets.create"
 	PermissionAssetsRead   = "assets.read"
@@ -67,30 +66,15 @@ const (
 	PermissionSensorsDelete = "sensors.delete"
 	PermissionSensorsManage = "sensors.manage"
 
-	// reports.{create,update,delete} were retired with the legacy
-	// templated-report surface (Phase 5). reports.read and .manage remain
-	// as frontend route gates for the CBOM page and scheduled-reports
-	// page respectively.
+	// reports.read and reports.manage are retained because the web-ui uses
+	// them as frontend-only gates for the CBOM page (reports.read) and the
+	// scheduled-reports view (reports.manage). reports.{create,update,delete}
+	// were retired with the legacy templated-report surface in Phase 5
+	// (see CLAUDE.md) — no backend handler exists and no UI references them.
+	// The retired-permission cleanup below removes any rows that may have
+	// been seeded by an older release.
 	PermissionReportsRead   = "reports.read"
 	PermissionReportsManage = "reports.manage"
-
-	PermissionComplianceRead   = "compliance.read"
-	PermissionComplianceUpdate = "compliance.update"
-	PermissionComplianceManage = "compliance.manage"
-
-	// Stateful alert lifecycle. Reads are open to members; acknowledge/
-	// snooze/resolve/ticket-create sit behind alerts.manage.
-	PermissionAlertsRead   = "alerts.read"
-	PermissionAlertsManage = "alerts.manage"
-
-	PermissionDiscoveryCreate = "discovery.create"
-	PermissionDiscoveryRead   = "discovery.read"
-	PermissionDiscoveryUpdate = "discovery.update"
-	PermissionDiscoveryManage = "discovery.manage"
-
-	PermissionSettingsRead   = "settings.read"
-	PermissionSettingsUpdate = "settings.update"
-	PermissionSettingsManage = "settings.manage"
 
 	PermissionUsersCreate = "users.create"
 	PermissionUsersRead   = "users.read"
@@ -98,9 +82,42 @@ const (
 	PermissionUsersDelete = "users.delete"
 	PermissionUsersManage = "users.manage"
 
+	PermissionSettingsRead   = "settings.read"
+	PermissionSettingsUpdate = "settings.update"
+	PermissionSettingsManage = "settings.manage"
+
 	PermissionBillingRead   = "billing.read"
 	PermissionBillingUpdate = "billing.update"
+
+	PermissionComplianceRead   = "compliance.read"
+	PermissionComplianceUpdate = "compliance.update"
+	PermissionComplianceManage = "compliance.manage"
+
+	// Stateful alert lifecycle. Reads are open to members;
+	// acknowledge/snooze/resolve/ticket-create sit behind alerts.manage.
+	PermissionAlertsRead   = "alerts.read"
+	PermissionAlertsManage = "alerts.manage"
+
+	PermissionDiscoveryRead   = "discovery.read"
+	PermissionDiscoveryCreate = "discovery.create"
+	PermissionDiscoveryUpdate = "discovery.update"
+	PermissionDiscoveryManage = "discovery.manage"
+
+	PermissionPcapRead   = "pcap.read"
+	PermissionPcapUpload = "pcap.upload"
+	PermissionPcapDelete = "pcap.delete"
+
+	// Audit trail. audit-service previously ran a private permission
+	// system: a hardcoded switch on the role NAME inventing audit.read /
+	// audit.manage / audit.security / audit.export, none of which existed
+	// here, in shared/rbac/permissions.go, or in tenant_role_permissions. No
+	// tenant could grant audit access to anyone. Two permissions replace all
+	// four — audit.security and audit.export were demanded by no route at all.
+	PermissionAuditRead   = "audit.read"
+	PermissionAuditManage = "audit.manage"
 )
+
+// END GENERATED: tenant permission constants
 
 // PcapPermissions returns all PCAP ingestion permissions.
 func PcapPermissions() []string {

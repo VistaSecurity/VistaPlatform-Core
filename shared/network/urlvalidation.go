@@ -1,11 +1,22 @@
 package network
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"strings"
 )
+
+// ErrUnresolvableHost reports that a URL's hostname could not be resolved.
+//
+// It is deliberately distinguishable from the policy rejections this validator
+// also returns (bad scheme, private/internal address). Those are properties of
+// the URL and stay true; a resolution failure may be a DNS blip. Callers that
+// retry — notification-service's delivery retry queue — must not treat a
+// transient DNS outage as a permanent "this webhook is invalid" verdict and
+// drop the delivery.
+var ErrUnresolvableHost = errors.New("unable to resolve hostname")
 
 // ValidateWebhookURL checks that a URL is safe to make requests to,
 // rejecting private/internal IP addresses to prevent SSRF attacks.
@@ -52,7 +63,7 @@ func ValidateWebhookURL(rawURL string) error {
 			}
 			return nil
 		}
-		return fmt.Errorf("unable to resolve hostname: %w", err)
+		return fmt.Errorf("%w: %v", ErrUnresolvableHost, err)
 	}
 
 	for _, ip := range ips {

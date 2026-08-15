@@ -7,13 +7,19 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
+	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
+	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
+	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 )
 
 // AlertEngineService owns the stateful alert lifecycle ():
@@ -26,6 +32,11 @@ type AlertEngineService struct {
 	natsClient *events.NATSClient
 	ticketSvc  *TicketService
 	stop       chan struct{}
+	// httpClient carries the NATS-down fallback POST to notification-service.
+	// Under serviceMtls it must present a client certificate (the peer URL is
+	// https://notification-service:8443, which demands one), hence the
+	// cert-aware constructor below.
+	httpClient *http.Client
 }
 
 var (
@@ -37,12 +48,35 @@ var (
 )
 
 func NewAlertEngineService(db, bypassDB *sqlx.DB, natsClient *events.NATSClient, ticketSvc *TicketService) *AlertEngineService {
+	return NewAlertEngineServiceWithConfig(db, bypassDB, natsClient, ticketSvc, false, "", "", "")
+}
+
+// NewAlertEngineServiceWithConfig is the mTLS-aware constructor. It mirrors
+// audit-service's NewAlertServiceWithConfig: when the mesh is on, the HTTP
+// notification fallback needs a client certificate or the handshake fails and
+// the fallback is no fallback at all.
+func NewAlertEngineServiceWithConfig(db, bypassDB *sqlx.DB, natsClient *events.NATSClient, ticketSvc *TicketService,
+	useMTLS bool, clientCertPath, clientKeyPath, platformCACertPath string) *AlertEngineService {
+	var httpClient *http.Client
+	if useMTLS && clientCertPath != "" && clientKeyPath != "" && platformCACertPath != "" {
+		var err error
+		httpClient, err = sharedhttp.NewMTLSClient(clientCertPath, clientKeyPath, platformCACertPath)
+		if err != nil {
+			log.Printf("[AlertEngine] Failed to create mTLS client, falling back to plain HTTP: %v", err)
+			httpClient = &http.Client{Timeout: 10 * time.Second}
+		} else {
+			httpClient.Timeout = 10 * time.Second
+		}
+	} else {
+		httpClient = &http.Client{Timeout: 10 * time.Second}
+	}
 	return &AlertEngineService{
 		db:         db,
 		bypassDB:   bypassDB,
 		natsClient: natsClient,
 		ticketSvc:  ticketSvc,
 		stop:       make(chan struct{}),
+		httpClient: httpClient,
 	}
 }
 
@@ -647,11 +681,15 @@ func alertEventComment(eventType string, details map[string]interface{}) string 
 
 // --- notification fan-out ------------------------------------------------------
 
-func (s *AlertEngineService) publishAlertNotification(tenantID uuid.UUID, source, alertType, severity, title, message string,
-	alertID uuid.UUID, transition string, metadata map[string]interface{}) {
-	if s.natsClient == nil {
-		return
-	}
+// internalSendPath is notification-service's HMAC-guarded ingestion route. It is
+// mounted under /api/v1 only — the /api/v2 form 404s, which is invisible here
+// because the fallback runs exactly when nobody is watching.
+const internalSendPath = "/api/v1/notification-service/internal/send"
+
+// alertNotificationEvent builds the fan-out payload shared by both rails, so the
+// NATS event and the HTTP fallback body can never drift apart.
+func alertNotificationEvent(tenantID uuid.UUID, source, alertType, severity, title, message string,
+	alertID uuid.UUID, transition string, metadata map[string]interface{}) events.NotificationEvent {
 	md := map[string]interface{}{
 		"alert_id":         alertID.String(),
 		"alert_transition": transition,
@@ -661,7 +699,7 @@ func (s *AlertEngineService) publishAlertNotification(tenantID uuid.UUID, source
 			md[k] = v
 		}
 	}
-	notif := events.NotificationEvent{
+	return events.NotificationEvent{
 		EventID:     uuid.New(),
 		TenantID:    tenantID,
 		AlertSource: source,
@@ -672,9 +710,102 @@ func (s *AlertEngineService) publishAlertNotification(tenantID uuid.UUID, source
 		Timestamp:   time.Now(),
 		Metadata:    md,
 	}
-	if err := events.PublishJSON(s.natsClient, events.SubjectNotificationsSend, notif); err != nil {
-		log.Printf("[AlertEngine] Failed to publish notification (non-fatal): %v", err)
+}
+
+// publishAlertNotification fans an alert transition out to notification-service.
+//
+// Fan-out happens ONLY on open and on severity escalation — never on re-raise —
+// so this is a single-shot delivery with no natural second chance: a NATS outage
+// at this instant loses the notification permanently, because the next scan
+// sweep dedupes onto the already-open alert and does not re-notify. It therefore
+// falls back to an HMAC-signed HTTP POST when NATS is unavailable or the publish
+// fails, the same way audit-service and monitoring-service do.
+func (s *AlertEngineService) publishAlertNotification(tenantID uuid.UUID, source, alertType, severity, title, message string,
+	alertID uuid.UUID, transition string, metadata map[string]interface{}) {
+	notif := alertNotificationEvent(tenantID, source, alertType, severity, title, message, alertID, transition, metadata)
+	if s.natsClient != nil && s.natsClient.IsConnected() {
+		if err := events.PublishJSON(s.natsClient, events.SubjectNotificationsSend, notif); err == nil {
+			return
+		} else {
+			log.Printf("[AlertEngine] NATS notification publish failed, falling back to HTTP: %v", err)
+		}
 	}
+
+	if err := s.postAlertNotification(notif); err != nil {
+		// Both rails are down. Log loudly: this alert transition reached nobody
+		// and, because fan-out is open/escalate-only, will not be retried.
+		log.Printf("[AlertEngine] ALERT NOTIFICATION LOST — NATS and HTTP both failed (alert=%s type=%s tenant=%s): %v",
+			alertID, alertType, tenantID, err)
+	}
+}
+
+// notificationServiceBaseURL resolves notification-service's base URL exactly as
+// audit-service does: an explicit NOTIFICATION_SERVICE_URL wins (rewritten to the
+// mTLS scheme/port when USE_MTLS=true), otherwise the peer URL is derived from
+// mTLS mode.
+func notificationServiceBaseURL() string {
+	if u := os.Getenv("NOTIFICATION_SERVICE_URL"); u != "" {
+		if os.Getenv("USE_MTLS") == "true" {
+			u = strings.Replace(u, "http://", "https://", 1)
+			u = strings.Replace(u, ":8080", ":8443", 1)
+		}
+		return u
+	}
+	if os.Getenv("USE_MTLS") == "true" {
+		return "https://notification-service:8443"
+	}
+	return sharedconfig.PeerURL("notification-service", sharedconfig.MTLSEnabled())
+}
+
+// postAlertNotification is the HTTP fallback. /internal/send is HMAC-only
+// (RequireInternalHMAC), so the request must be signed with serviceauth — an
+// unsigned POST 401s silently, which is how a "fallback" can exist for months
+// while delivering nothing.
+func (s *AlertEngineService) postAlertNotification(notif events.NotificationEvent) error {
+	body := map[string]interface{}{
+		"tenant_id":    notif.TenantID.String(),
+		"alert_source": notif.AlertSource,
+		"alert_type":   notif.AlertType,
+		"severity":     notif.Severity,
+		// Title is carried explicitly: the NATS event has one, and dropping it on
+		// the fallback would degrade the in-app headline to a humanized
+		// alert_type ("Control noncompliant") exactly when delivery is already
+		// degraded.
+		"title":             notif.Title,
+		"message":           notif.Message,
+		"notification_type": "alert",
+		"metadata":          notif.Metadata,
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal notification request: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	url := notificationServiceBaseURL() + internalSendPath
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(payload))) //nolint:gosec // internal S2S call; URL from trusted config, not user input
+	if err != nil {
+		return fmt.Errorf("create notification request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	serviceauth.SignRequestFromEnv(req)
+
+	client := s.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	resp, err := client.Do(req) //nolint:gosec // internal S2S call; URL from trusted config, not user input
+	if err != nil {
+		return fmt.Errorf("post notification: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("notification service returned status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // --- snooze expiry sweeper -------------------------------------------------------

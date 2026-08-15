@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"database/sql"
 	"net/http"
 	"strings"
 
@@ -9,6 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/audit-service/internal/config"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
+	sharedrbac "github.com/vistasecurity/vistaplatform/shared/middleware/rbac"
+	"github.com/vistasecurity/vistaplatform/shared/rbac"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 )
 
@@ -164,9 +167,36 @@ func RequireAuth(cfg *config.Config) gin.HandlerFunc {
 	}
 }
 
-// RequirePermission creates middleware that checks for a specific permission
-// Platform users are checked against platform_permissions, tenant users against tenant_permissions
-func RequirePermission(permission string) gin.HandlerFunc {
+// RequirePermission gates a route on a permission.
+//
+// TENANT users resolve through the platform's real RBAC store: the check is
+// delegated to sharedrbac.RequireTenantPermission, which asks
+// user_has_permission(user, tenant, permission) — i.e. the grants in
+// tenant_role_permissions. Until this middleware ran a private permission
+// system: a hardcoded switch on the ROLE NAME granting any `audit.*` by prefix
+// to tenant_admin, and `audit.read`/`audit.security`/`audit.export` to
+// security_admin. Those four strings existed in no registry (seed.sql
+// tenant_permissions, shared/rbac/permissions.go,
+// packages/primitives/src/rbac/constants.ts) and never touched
+// tenant_role_permissions, so no tenant could grant audit access to anyone, the
+// permission-parity audit could not see these routes, and tenant custom roles
+// would have had zero effect here. The permissions are now
+// rbac.PermissionAuditRead / rbac.PermissionAuditManage, seeded and granted like
+// every other tenant permission.
+//
+// PLATFORM users stay ROLE-BASED, deliberately. The platform Audit section in
+// admin-ui-v2 authenticates with a no-tenant token, so there is no tenant to
+// resolve tenant_role_permissions against — RequireTenantPermission would 401
+// on the missing tenantID for every platform admin. platform_permissions has no
+// audit.* rows either, so there is nothing to check against on that side yet.
+// The branch below is byte-for-byte the pre- platform logic, so the
+// platform half of this middleware is unchanged in behaviour.
+func RequirePermission(db *sql.DB, permission string) gin.HandlerFunc {
+	// Built once, not per request: it opens no connections, it only closes over
+	// the pool. Nil db yields a 503 gate (see sharedrbac), which is the correct
+	// fail-closed answer for a service that cannot reach its RBAC store.
+	tenantGate := sharedrbac.RequireTenantPermission(db, permission)
+
 	return func(c *gin.Context) {
 		userType, exists := c.Get("userType")
 		if !exists {
@@ -175,40 +205,28 @@ func RequirePermission(permission string) gin.HandlerFunc {
 			return
 		}
 
+		if userType != UserTypePlatform {
+			tenantGate(c)
+			return
+		}
+
 		role, _ := c.Get("role")
 		roleStr, _ := role.(string)
 
-		// For now, use role-based authorization
-		// Platform admins (super_admin, platform_admin) have access to platform.* permissions
-		// Tenant admins have access to audit.* permissions
 		allowed := false
-
-		if userType == UserTypePlatform {
-			// Platform users: check if role grants the permission
-			switch roleStr {
-			case "super_admin":
-				allowed = true // Super admins have all permissions
-			case "platform_admin":
-				// Platform admins have platform.audit and related permissions
-				allowed = strings.HasPrefix(permission, "platform.") ||
-					strings.HasPrefix(permission, "audit.") ||
-					permission == "platform_users.manage"
-			case "support_admin":
-				// Support admins have read-only audit access
-				allowed = permission == "platform.audit" ||
-					permission == "audit.read" ||
-					permission == "platform.audit.read"
-			}
-		} else {
-			// Tenant users: check tenant role permissions
-			switch roleStr {
-			case "tenant_admin", "admin":
-				allowed = strings.HasPrefix(permission, "audit.")
-			case "security_admin":
-				allowed = permission == "audit.read" ||
-					permission == "audit.security" ||
-					permission == "audit.export"
-			}
+		switch roleStr {
+		case "super_admin":
+			allowed = true // Super admins have all permissions
+		case "platform_admin":
+			// Platform admins have platform.audit and related permissions
+			allowed = strings.HasPrefix(permission, "platform.") ||
+				strings.HasPrefix(permission, "audit.") ||
+				permission == "platform_users.manage"
+		case "support_admin":
+			// Support admins have read-only audit access
+			allowed = permission == "platform.audit" ||
+				permission == rbac.PermissionAuditRead ||
+				permission == "platform.audit.read"
 		}
 
 		if !allowed {

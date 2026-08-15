@@ -27,7 +27,9 @@ func (h *IntegrationsHandler) List(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
 		return
 	}
-	list, err := h.svc.ListIntegrations(tenantUUID)
+	// Redacted deliberately: a list response never carries credential material,
+	// whoever asks. See services.ListIntegrationsRedacted.
+	list, err := h.svc.ListIntegrationsRedacted(tenantUUID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return

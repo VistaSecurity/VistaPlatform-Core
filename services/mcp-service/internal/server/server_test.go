@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vistasecurity/vistaplatform/mcp-service/internal/auditlog"
 	"github.com/vistasecurity/vistaplatform/mcp-service/internal/platform"
 	"github.com/vistasecurity/vistaplatform/mcp-service/internal/tools"
 )
@@ -22,6 +23,7 @@ type fixture struct {
 	validPAT     string
 	limitedPAT   string // assets.read only
 	backendAuthz []string
+	audit        *auditSink
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -85,10 +87,13 @@ func newFixture(t *testing.T) *fixture {
 
 	t.Setenv("INTERNAL_AUTH_SECRET", "test-secret")
 
-	exchanger := platform.NewExchanger(authSrv.URL, nil)
+	f.audit = &auditSink{}
+	recorder := auditlog.NewRecorder(f.audit)
+
+	exchanger := platform.NewExchanger(authSrv.URL, nil, recorder)
 	client := platform.NewClient(nil, backend.URL, backend.URL, backend.URL)
-	mcpServer := NewMCPServer(&tools.Deps{Client: client})
-	handler := NewHandler(mcpServer, exchanger)
+	mcpServer := NewMCPServer(&tools.Deps{Client: client, Audit: recorder})
+	handler := NewHandler(mcpServer, exchanger, recorder)
 
 	router := NewRouter(handler)
 	f.ts = httptest.NewServer(router)

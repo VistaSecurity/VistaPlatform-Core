@@ -81,7 +81,9 @@ export function SensorsPage() {
 
   return (
     <PageWrap title="Sensors & Agents" count={bothLoaded ? total : ''}>
-      <PermissionGate permission={TENANT_PERMISSIONS.sensors.manage}>
+      {/* sensors.create: registering a sensor or agent POSTs /sensors/pending,
+          which sensor-manager gates on SensorsCreate — not SensorsManage. */}
+      <PermissionGate permission={TENANT_PERMISSIONS.sensors.create}>
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 14 }}>
           <button className="ui-btn accent" onClick={() => setRegisterOpen(true)}>
             <Icon name="plus" size={14} />Register sensor or agent

@@ -8,16 +8,26 @@
 // "recovered" so the middleware can replay idempotent requests. If it fails,
 // fire `onSessionExpired` exactly once and answer false forever after — the
 // callback navigates away, so the latch only has to hold until page unload.
+//
+// A 401 with no session signal at all still fires the callback (with reason
+// 'no-session'), it just skips the pointless refresh. Returning silently there
+// is what stranded users on "Couldn't load …" cards: nothing navigated, so the
+// only feedback was one error card per panel.
+
+/** Why the session ended, so the app can word the sign-in prompt correctly.
+ *  - 'expired'    — a session existed and the refresh exchange failed.
+ *  - 'no-session' — a protected call 401'd with no session signal present. */
+export type SessionExpiredReason = 'expired' | 'no-session';
 
 export interface SessionExpiryHandlerOptions {
-  /** Does a session exist at all (csrf-cookie presence)? A 401 with no session
-   * is an anonymous visitor, not an expiry — never fire the callback for it. */
+  /** Does a session exist at all (csrf-cookie presence)? When false the refresh
+   * exchange is skipped — there is no session to refresh. */
   hasSession(): boolean;
   /** Exchange the refresh token for a new access token (rejects when dead). */
   refresh(): Promise<unknown>;
   /** The session is unrecoverable: clear local state and send the user to
    * sign-in. Called at most once per page lifetime. */
-  onSessionExpired(): void;
+  onSessionExpired(reason: SessionExpiredReason): void;
 }
 
 export function createSessionExpiryHandler(
@@ -26,8 +36,17 @@ export function createSessionExpiryHandler(
   let inflight: Promise<boolean> | null = null;
   let expired = false;
 
+  const giveUp = (reason: SessionExpiredReason): boolean => {
+    if (!expired) {
+      expired = true;
+      opts.onSessionExpired(reason);
+    }
+    return false;
+  };
+
   return async () => {
-    if (expired || !opts.hasSession()) return false;
+    if (expired) return false;
+    if (!opts.hasSession()) return giveUp('no-session');
     if (!inflight) {
       inflight = opts.refresh().then(
         () => true,
@@ -38,10 +57,6 @@ export function createSessionExpiryHandler(
       });
     }
     const recovered = await inflight;
-    if (!recovered && !expired) {
-      expired = true;
-      opts.onSessionExpired();
-    }
-    return recovered;
+    return recovered || giveUp('expired');
   };
 }

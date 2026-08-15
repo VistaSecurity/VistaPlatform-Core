@@ -3,6 +3,8 @@ package platform
 import (
 	"context"
 	"time"
+
+	"github.com/vistasecurity/vistaplatform/mcp-service/internal/auditlog"
 )
 
 // Grant is the resolved identity behind an API token: the short-lived user
@@ -30,6 +32,21 @@ func (g *Grant) HasPermission(perm string) bool {
 		}
 	}
 	return false
+}
+
+// Identity flattens the grant into the actor fields an audit record carries.
+// Deliberately excludes AccessToken: the JWT is a credential, and an audit
+// trail that stores credentials is a second place to steal them from.
+func (g *Grant) Identity() auditlog.Identity {
+	if g == nil {
+		return auditlog.Identity{}
+	}
+	return auditlog.Identity{
+		TenantID: g.TenantID,
+		UserID:   g.UserID,
+		Email:    g.Email,
+		Role:     g.Role,
+	}
 }
 
 type grantCtxKey struct{}

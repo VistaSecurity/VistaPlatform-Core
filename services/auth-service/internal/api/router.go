@@ -307,7 +307,11 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 			// Branding asset upload
 			tenant.POST("/branding/upload", middleware.RequirePermission(rbacService, "settings.update"), UploadBrandingAsset(db))
 			// List users in a specific tenant (used by web-ui)
-			tenant.GET("/:tenantId/users", ListTenantUsers(db))
+			// Roster read. Gated on users.read to match the flat GET /users and
+			// the sibling GET /:tenantId/invitations — the handler's own
+			// same-tenant check stays, but it only proves WHICH tenant you may
+			// read, not that you may read the roster at all.
+			tenant.GET("/:tenantId/users", middleware.RequirePermission(rbacService, "users.read"), ListTenantUsers(db))
 			tenant.POST("/:tenantId/users/invite", middleware.RequirePermission(rbacService, "users.create"), InviteTenantMember(cfg, db, bypassDB, authService))
 			// Pending invitations (auth-method-agnostic): list/revoke/resend.
 			tenant.GET("/:tenantId/invitations", middleware.RequirePermission(rbacService, "users.read"), ListTenantInvitations(db))
@@ -402,8 +406,11 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 		tenantRoles.Use(middleware.RequirePermission(rbacService, "users.manage"))
 		{
 			tenantRoles.GET("", rbacHandlers.GetTenantRoles)
+			tenantRoles.POST("", rbacHandlers.CreateTenantRole)
 			tenantRoles.GET("/:roleId/matrix", rbacHandlers.GetPermissionMatrix)
 			tenantRoles.PUT("/:roleId/permissions", rbacHandlers.UpdateRolePermissions)
+			// Custom roles only — DeleteTenantRole refuses is_system_role=true.
+			tenantRoles.DELETE("/:roleId", rbacHandlers.DeleteTenantRole)
 		}
 
 		// Tenant permissions routes

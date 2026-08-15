@@ -16,6 +16,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/pcap-processor/internal/processor"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
+	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 )
 
@@ -41,8 +42,18 @@ func main() {
 	defer natsClient.Close()
 	log.Println("Connected to NATS")
 
+	// Audit logging. pcap-processor serves no tenant HTTP surface (only
+	// /health), so there is no request middleware to mount — the audit
+	// middleware is used here purely as the transport for consumer-path
+	// events emitted per PCAP job. Same store, same batching, same NATS/HTTP
+	// fallback as every HTTP service's LogRequest.
+	auditMiddleware := auditmiddleware.NewMiddleware(auditmiddleware.ServiceConfig(
+		"pcap-processor", cfg.UseMTLS, cfg.ClientCertPath, cfg.ClientKeyPath, cfg.PlatformCACertPath,
+	))
+	defer auditMiddleware.Stop()
+
 	// Create processor
-	proc := processor.New(db, cfg, natsClient)
+	proc := processor.New(db, cfg, natsClient, auditMiddleware)
 
 	// Create subscriber and subscribe to pcap jobs
 	subscriber := events.NewSubscriber(natsClient)

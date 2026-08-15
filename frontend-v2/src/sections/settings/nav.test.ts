@@ -150,6 +150,35 @@ describe('settingsPageMeta', () => {
     expect(meta.section).toBe('Account');
   });
 
+  it('gates Roles & Permissions on users.manage, matching the backend route', () => {
+    // auth-service's /tenant/:tenantId/roles group requires users.manage. Gating
+    // the entry on the weaker users.read let security_admin and viewer reach a
+    // page whose every call 403s — an error banner where an access notice
+    // belongs. The nav permission must never be weaker than the route's.
+    expect(settingsPageMeta('roles').permission).toBe('users.manage');
+    expect(settingsPageMeta('members').permission).toBe('users.read');
+  });
+
+  it('gates Security & SSO on settings.update, matching the backend route', () => {
+    // auth-service gates the whole /tenant/sso group at settings.update — the
+    // provider list and auth-policy GETs included — so settings.read would put
+    // the same error banner where the access notice belongs.
+    expect(settingsPageMeta('security-sso').permission).toBe('settings.update');
+  });
+
+  it('gates the Audit page on audit.read, its own permission family', () => {
+    // audit-service resolves grants from tenant_role_permissions now instead of
+    // a hardcoded switch on the role name, so the audit trail has real
+    // permissions: audit.read and audit.manage. The Audit entry names the read
+    // one — never weaker than the routes the page calls (GET /activity-logs is
+    // ungated; the by-user / by-resource drill-downs require audit.read).
+    expect(settingsPageMeta('audit').permission).toBe('audit.read');
+    // Retention stays on settings.read: its only load call, GET
+    // /retention-policies, is ungated, so nobody reaches an error banner. The
+    // page's WRITE affordances are gated on audit.manage inline instead.
+    expect(settingsPageMeta('retention').permission).toBe('settings.read');
+  });
+
   it('leaves ungated pages ungated', () => {
     expect(settingsPageMeta('members').feature).toBeUndefined();
     expect(settingsPageMeta('integrations').feature).toBeUndefined();

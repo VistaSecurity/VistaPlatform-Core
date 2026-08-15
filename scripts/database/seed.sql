@@ -413,6 +413,7 @@ ON CONFLICT (code) DO NOTHING;
 -- =================================================================
 -- Tenant Permissions (assigned to tenant roles when tenants are created)
 -- =================================================================
+-- BEGIN GENERATED: tenant permission catalogue — from standards/permissions.yaml (make generate)
 INSERT INTO tenant_permissions (name, resource, action, scope, description) VALUES
 ('assets.create',     'assets',     'create', 'tenant', 'Create network assets'),
 ('assets.read',       'assets',     'read',   'tenant', 'View network assets'),
@@ -429,8 +430,8 @@ INSERT INTO tenant_permissions (name, resource, action, scope, description) VALU
 -- scheduled-reports view (reports.manage). reports.{create,update,delete}
 -- were retired with the legacy templated-report surface in Phase 5
 -- (see CLAUDE.md) — no backend handler exists and no UI references them.
--- The cleanup DELETE at the bottom of this file removes any rows that
--- may have been seeded by an older release.
+-- The retired-permission cleanup below removes any rows that may have
+-- been seeded by an older release.
 ('reports.read',      'reports',    'read',   'tenant', 'View CBOM artifacts and scheduled report listings (frontend route gate)'),
 ('reports.manage',    'reports',    'manage', 'tenant', 'Manage scheduled report configuration (frontend route gate)'),
 ('users.create',      'users',      'create', 'tenant', 'Create tenant users'),
@@ -446,6 +447,8 @@ INSERT INTO tenant_permissions (name, resource, action, scope, description) VALU
 ('compliance.read',   'compliance', 'read',   'tenant', 'View compliance data'),
 ('compliance.update', 'compliance', 'update', 'tenant', 'Update compliance settings'),
 ('compliance.manage', 'compliance', 'manage', 'tenant', 'Full compliance management'),
+-- Stateful alert lifecycle. Reads are open to members;
+-- acknowledge/snooze/resolve/ticket-create sit behind alerts.manage.
 ('alerts.read',       'alerts',     'read',   'tenant', 'View alerts and their evidence timeline'),
 ('alerts.manage',     'alerts',     'manage', 'tenant', 'Acknowledge, snooze, resolve alerts and create tickets from them'),
 ('discovery.read',    'discovery',  'read',   'tenant', 'View discovery jobs, devices, and interrogation results'),
@@ -454,24 +457,32 @@ INSERT INTO tenant_permissions (name, resource, action, scope, description) VALU
 ('discovery.manage',  'discovery',  'manage', 'tenant', 'Manage devices for interrogation, run discovery and interrogation jobs'),
 ('pcap.read',         'pcap',       'read',   'tenant', 'View PCAP upload jobs and processing status'),
 ('pcap.upload',       'pcap',       'upload', 'tenant', 'Upload PCAP files for offline processing'),
-('pcap.delete',       'pcap',       'delete', 'tenant', 'Delete PCAP upload jobs')
+('pcap.delete',       'pcap',       'delete', 'tenant', 'Delete PCAP upload jobs'),
+-- Audit trail. audit-service previously ran a private permission
+-- system: a hardcoded switch on the role NAME inventing audit.read /
+-- audit.manage / audit.security / audit.export, none of which existed
+-- here, in shared/rbac/permissions.go, or in tenant_role_permissions. No
+-- tenant could grant audit access to anyone. Two permissions replace all
+-- four — audit.security and audit.export were demanded by no route at all.
+('audit.read',        'audit',      'read',   'tenant', 'View the audit trail, retention policies and SIEM integration list'),
+('audit.manage',      'audit',      'manage', 'tenant', 'Manage retention policies, alert rules, scheduled reports and SIEM integrations')
 ON CONFLICT (name) DO NOTHING;
 
--- Cleanup: remove orphan permissions from prior seeds. Both rows were
--- added earlier in this branch but have no backend endpoint and no UI
+-- Both rows were added earlier but have no backend endpoint and no UI
 -- gate. Dropping them collapses the audit's "GRANTED but no UI gates it"
 -- noise and prevents anyone granting a permission that can never be
--- meaningful. CASCADE removes the matching rows from
--- tenant_role_permissions automatically (FK ON DELETE CASCADE).
+-- meaningful.
+-- CASCADE on tenant_role_permissions removes the matching grants automatically.
 DELETE FROM tenant_permissions WHERE name IN ('discovery.delete', 'pcap.manage');
 
 -- Phase 5 retired the legacy templated-report surface (see CLAUDE.md).
 -- These three permissions had no backend handler before and no UI
 -- reference now. reports.read and reports.manage are kept — the web-ui
 -- still uses them as frontend route gates for the CBOM and
--- scheduled-reports pages. CASCADE removes the matching rows from
--- tenant_role_permissions automatically.
+-- scheduled-reports pages.
+-- CASCADE on tenant_role_permissions removes the matching grants automatically.
 DELETE FROM tenant_permissions WHERE name IN ('reports.create', 'reports.update', 'reports.delete');
+-- END GENERATED: tenant permission catalogue
 
 -- =================================================================
 -- Platform Admin Users
@@ -2742,19 +2753,19 @@ BEGIN
         DELETE FROM tenant_roles
         WHERE tenant_id = tenant_record.id AND name = 'analyst' AND is_system_role = true;
 
+        -- BEGIN GENERATED: system role grant filters — from standards/permissions.yaml (make generate)
         -- ----------------------------------------------------------------
         -- Reconcile permission grants on SYSTEM roles to match the
         -- canonical filters below. The DELETE removes grants that no
-        -- longer satisfy the current filter (e.g. operational permissions
-        -- previously held by billing_admin). The INSERT adds any new ones
-        -- (e.g. discovery.create when it's added to tenant_permissions).
-        -- Both are no-ops once the role is in the desired state. Only
-        -- touches is_system_role=true; custom user-created roles are
-        -- never modified here.
+        -- longer satisfy the current filter; the INSERT adds any new
+        -- ones. Both are no-ops once the role is in the desired state.
+        -- Only touches is_system_role=true; custom user-created roles
+        -- are never modified here.
         -- ----------------------------------------------------------------
 
-        -- Billing Admin (internal: billing_admin) — billing + read-only
-        -- visibility into who has access and basic tenant settings.
+        -- Billing Admin (internal: billing_admin)
+        -- Billing + read-only visibility into who has access and basic tenant
+        -- settings.
         DELETE FROM tenant_role_permissions trp
         USING tenant_roles tr, tenant_permissions tp
         WHERE trp.role_id = tr.id AND trp.permission_id = tp.id
@@ -2766,7 +2777,10 @@ BEGIN
           AND (tp.resource = 'billing' OR tp.name IN ('settings.read', 'users.read'))
         ON CONFLICT (role_id, permission_id) DO NOTHING;
 
-        -- Tenant Admin — everything except billing.update (gets billing.read).
+        -- Tenant Administrator (internal: tenant_admin)
+        -- Everything except billing.update. Gets billing.read so they can see
+        -- invoices, usage and payment history without being able to alter payment
+        -- methods or cancel.
         DELETE FROM tenant_role_permissions trp
         USING tenant_roles tr, tenant_permissions tp
         WHERE trp.role_id = tr.id AND trp.permission_id = tp.id
@@ -2778,21 +2792,43 @@ BEGIN
           AND tp.name <> 'billing.update'
         ON CONFLICT (role_id, permission_id) DO NOTHING;
 
-        -- Security Admin — operational/security scope + users.read + settings.read for incident response.
+        -- Security Administrator (internal: security_admin)
+        -- Operational/security scope + users.read + settings.read for incident
+        -- response.
+        --
+        -- audit.read is granted BY NAME, not by adding 'audit' to the resource
+        -- list: the resource form would also hand over audit.manage, which the
+        -- pre- role switch never gave security_admin (it granted
+        -- audit.read/security/export only). This filter is a RESOURCE ALLOWLIST —
+        -- a new resource is not granted unless it is named here, so omitting
+        -- audit.read entirely would have silently STRIPPED security_admin's audit
+        -- access in the migration.
         DELETE FROM tenant_role_permissions trp
         USING tenant_roles tr, tenant_permissions tp
         WHERE trp.role_id = tr.id AND trp.permission_id = tp.id
           AND tr.tenant_id = tenant_record.id AND tr.name = 'security_admin' AND tr.is_system_role = true
           AND NOT (tp.resource IN ('assets', 'sensors', 'reports', 'compliance', 'pcap', 'discovery', 'alerts')
-                   OR tp.name IN ('users.read', 'settings.read'));
+                   OR tp.name IN ('users.read', 'settings.read', 'audit.read'));
         INSERT INTO tenant_role_permissions (role_id, permission_id)
         SELECT tr.id, tp.id FROM tenant_roles tr CROSS JOIN tenant_permissions tp
         WHERE tr.tenant_id = tenant_record.id AND tr.name = 'security_admin' AND tr.is_system_role = true
           AND (tp.resource IN ('assets', 'sensors', 'reports', 'compliance', 'pcap', 'discovery', 'alerts')
-               OR tp.name IN ('users.read', 'settings.read'))
+               OR tp.name IN ('users.read', 'settings.read', 'audit.read'))
         ON CONFLICT (role_id, permission_id) DO NOTHING;
 
-        -- Viewer — read-only across all operational resources (no billing).
+        -- Viewer (internal: viewer)
+        -- Read-only across all operational resources (no billing).
+        --
+        -- NOTE: this filter is action-based, so seeding the `audit`
+        -- resource hands viewer audit.read automatically. That is a real, if
+        -- small, WIDENING versus the pre- role switch, which denied every
+        -- audit.* permission to viewer. It is left in place deliberately: the
+        -- routes audit.read gates (activity-logs/by-user, /by-resource, the SIEM
+        -- integration list) are tenant-scoped in the handler, and viewer can
+        -- already read the same tenant's full audit trail through the ungated
+        -- GET /activity-logs. Carving `audit` out would make viewer's "read
+        -- everything non-billing" rule a special case. If audit reads should be
+        -- privileged, change it HERE — one edit now reaches every mirror.
         DELETE FROM tenant_role_permissions trp
         USING tenant_roles tr, tenant_permissions tp
         WHERE trp.role_id = tr.id AND trp.permission_id = tp.id
@@ -2804,7 +2840,8 @@ BEGIN
           AND tp.action = 'read' AND tp.resource <> 'billing'
         ON CONFLICT (role_id, permission_id) DO NOTHING;
 
-        -- API User — read-only integration scope across operational data.
+        -- API User (internal: api_user)
+        -- Read-only integration scope across operational data.
         DELETE FROM tenant_role_permissions trp
         USING tenant_roles tr, tenant_permissions tp
         WHERE trp.role_id = tr.id AND trp.permission_id = tp.id
@@ -2815,6 +2852,7 @@ BEGIN
         WHERE tr.tenant_id = tenant_record.id AND tr.name = 'api_user' AND tr.is_system_role = true
           AND tp.action = 'read' AND tp.resource IN ('assets', 'sensors', 'reports', 'compliance', 'discovery', 'pcap')
         ON CONFLICT (role_id, permission_id) DO NOTHING;
+        -- END GENERATED: system role grant filters
     END LOOP;
     RAISE NOTICE '✅ Reconciled tenant roles and permissions for all tenants';
 END $$;
@@ -3835,6 +3873,158 @@ material we will ask you to review it before you continue using the Service.
 $priv$)
 ) AS d(doc_type, version, title, body)
 ON CONFLICT (doc_type, version) DO NOTHING;
+
+-- =================================================================
+-- Platform notification default pack (first install only)
+-- =================================================================
+-- The platform track had no equivalent of the tenant default pack
+-- (auth-service seedDefaultNotificationPack), so a fresh install had ZERO
+-- platform_notification_channels and ZERO platform_notification_rules. The
+-- platform detectors fire correctly — service_down forms an alert in `alerts`,
+-- the alert engine publishes the notification — and then the rule engine
+-- matches nothing and the notification is written to notification_history with
+-- an empty channels_used. Nobody is told a platform service is down until an
+-- operator manually configures delivery. This closes that.
+--
+-- Mirrors the tenant pack's design, including the one insight that makes a
+-- seeded email channel possible at all: the channel stores NO address. It
+-- names a ROLE, and delivery_service resolves the role's active members at
+-- send time — here the platform-admin equivalent (platform_users JOIN
+-- platform_roles), so the pack works before any operator has entered an
+-- address, and tracks admin membership as it changes.
+--
+--   'Platform in-app'          in_app  → platform_in_app_notifications (operator bell)
+--   'Platform admin email'     email   → recipient_role 'super_admin', resolved at send time
+--   'Default platform critical alerts'  all sources, critical+high  → in-app + email
+--   'Default platform activity feed'    all sources, medium+low+info → in-app
+--
+-- Severity coverage is exhaustive ON PURPOSE. NormalizeSeverity
+-- (notification-service) maps every producer severity onto exactly five values
+-- — critical / high / medium / low / info — and its `default:` branch degrades
+-- ANY unrecognized or empty severity to 'info'. The tenant pack originally
+-- omitted 'info' and silently dropped every notification that landed there,
+-- including everything the default branch degrades. The two rules here union
+-- to all five bands, so no platform notification can fall through the rules.
+--
+-- Platform severities this covers: service_down (critical, rule 1),
+-- tenant_health_degraded (medium, rule 2), metric_threshold (from-threshold:
+-- the evaluator emits 'critical' on the critical arm and 'high' on the warning
+-- arm — both rule 1).
+--
+-- FIRST-INSTALL-ONLY, deliberately. The seed Job re-runs on every helm upgrade,
+-- so a per-name ON CONFLICT DO NOTHING would resurrect a default the operator
+-- deliberately DELETED, every upgrade, forever. Guarding on "the operator has
+-- configured no platform delivery at all" means we seed the empty case and
+-- never touch a configured one — an operator who has edited, disabled, renamed
+-- or deleted any of this keeps exactly what they have.
+DO $$
+DECLARE
+    v_in_app_id uuid;
+    v_email_id  uuid;
+BEGIN
+    IF EXISTS (SELECT 1 FROM platform_notification_channels)
+       OR EXISTS (SELECT 1 FROM platform_notification_rules) THEN
+        RETURN;  -- operator-configured: leave it exactly as it is
+    END IF;
+
+    INSERT INTO platform_notification_channels (channel_name, channel_type, config, enabled, description)
+    VALUES ('Platform in-app', 'in_app', '{}'::jsonb, true,
+            'Default platform in-app notifications (operator bell). Seeded on first install.')
+    RETURNING id INTO v_in_app_id;
+
+    INSERT INTO platform_notification_channels (channel_name, channel_type, config, enabled, description)
+    VALUES ('Platform admin email', 'email',
+            '{"recipients": [], "recipient_role": "super_admin"}'::jsonb, true,
+            'Emails all active super_admin platform users (resolved at send time). Seeded on first install.')
+    RETURNING id INTO v_email_id;
+
+    INSERT INTO platform_notification_rules
+        (rule_name, alert_source, channel_ids, severity_filter, frequency, enabled, priority)
+    VALUES
+        ('Default platform critical alerts', 'all', ARRAY[v_in_app_id, v_email_id],
+         ARRAY['critical','high']::varchar[], 'immediate', true, 100),
+        ('Default platform activity feed', 'all', ARRAY[v_in_app_id],
+         ARRAY['medium','low','info']::varchar[], 'immediate', true, 50);
+END $$;
+
+-- =================================================================
+-- Default monitoring alert thresholds (first install only)
+-- =================================================================
+-- metric_threshold is a `status: live` platform alert type whose detector
+-- (monitoring-service alert_evaluator) evaluates monitoring_alert_thresholds.
+-- That table shipped EMPTY, so the detector had nothing to breach and the
+-- alert type could not fire on a fresh install however healthy or unhealthy
+-- the platform was.
+--
+-- Shape constraints, all learned from the evaluator and the snapshot schema —
+-- get any of them wrong and the row is silently inert:
+--
+--  * service_name MUST be set. GetServiceMetrics filters
+--    `service_name = $1` exactly, so a NULL service_name asks for metrics of
+--    the service named '' and matches nothing, forever.
+--  * The name must match a key of monitoring-service's health-check config
+--    (the aggregator writes snapshots under exactly those names).
+--  * Only response_time / error_rate / throughput are evaluated.
+--    cpu_usage and memory_usage hit an explicit `return nil` — seeding those
+--    would look like coverage and provide none.
+--  * response_time is compared against latency_p95 in MILLISECONDS, which the
+--    aggregator derives as (health-check round-trip ms x 1.5).
+--  * The evaluator reads the 60-SECOND snapshot window and uses the single
+--    latest sample. duration_minutes is stored but NOT honored — one bad
+--    sample fires. That is precisely why the values below are set well above
+--    any plausible healthy reading rather than at a tight SLO.
+--
+-- Values: warning 1000 ms p95, critical 2500 ms p95.
+--   1000 ms p95 == a ~667 ms raw /health round-trip. /health does no query
+--   work, and an in-cluster round-trip to a healthy Go service is single-digit
+--   milliseconds, so two-thirds of a second means the process is saturated,
+--   GC-thrashing, or the network path is degraded. It is ~100x the healthy
+--   reading, so ordinary jitter cannot reach it: a default that cries wolf
+--   gets muted, which is worse than no default.
+--   2500 ms p95 == a ~1.7 s raw round-trip, still below the 5 s
+--   SERVICE_TIMEOUT at which the probe fails outright and the service is
+--   recorded down (service_down's job). So the ladder warns while the service
+--   is merely sick and hands off cleanly before it is dead.
+--
+-- Only three services, not all nineteen. These are the ones whose latency a
+-- user feels directly (every request authenticates; inventory is the primary
+-- data path) plus the datastore that is the usual root cause. Nineteen
+-- default thresholds would be nineteen chances to cry wolf; operators extend
+-- the set from admin-ui → System → Alerts.
+--
+-- Deliberately NOT seeded: an error_rate threshold. The aggregator does not
+-- measure a real request error rate — it synthesizes 1.0 when a service is
+-- down and 0.1 when degraded. Any error_rate threshold low enough to catch
+-- 'degraded' also fires on every outage, double-alerting alongside
+-- service_down for the same condition. Flagged for the owner rather than
+-- guessed at.
+--
+-- First-install-only for the same reason as the notification pack above: the
+-- seed Job re-runs on every upgrade, and a per-name guard would resurrect a
+-- threshold the operator deleted.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM monitoring_alert_thresholds) THEN
+        RETURN;  -- operator-configured: leave it exactly as it is
+    END IF;
+
+    -- notify_* are stored for the admin UI's benefit; actual fan-out is
+    -- governed by platform_notification_rules (seeded above), not by these.
+    INSERT INTO monitoring_alert_thresholds
+        (threshold_name, metric_type, service_name, warning_threshold, critical_threshold,
+         severity, enabled, comparison_operator, duration_minutes,
+         notify_in_app, notify_email, notify_slack, notify_webhook, description)
+    VALUES
+        ('auth-service response time', 'response_time', 'auth-service', 1000, 2500,
+         'high', true, 'gt', 5, true, false, false, false,
+         'Authentication is on every request path; p95 health latency above 1s means sign-in is already painful.'),
+        ('inventory-service response time', 'response_time', 'inventory-service', 1000, 2500,
+         'high', true, 'gt', 5, true, false, false, false,
+         'The primary tenant data path. Slow here is slow everywhere in the product.'),
+        ('postgres response time', 'response_time', 'postgres', 1000, 2500,
+         'high', true, 'gt', 5, true, false, false, false,
+         'The datastore every service depends on — usually the root cause when several services slow at once.');
+END $$;
 
 -- =================================================================
 -- Edition-gate correction (idempotent, must run on every seed)

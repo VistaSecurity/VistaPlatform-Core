@@ -47,27 +47,31 @@ type FrameworkContextResponse struct {
 
 // FrameworkContextStatus contains compliance status for all licensed frameworks
 type FrameworkContextStatus struct {
-	Frameworks   []FrameworkStatusItem `json:"frameworks"`
-	OverallScore float64               `json:"overall_score"`
+	Frameworks []FrameworkStatusItem `json:"frameworks"`
+	// OverallScore averages only the frameworks that HAVE a score; nil when none do.
+	OverallScore *float64 `json:"overall_score"`
 }
 
-// FrameworkStatusItem represents the compliance status for a single framework
+// FrameworkStatusItem represents the compliance status for a single framework.
 //
-// ControlsFailing is severity-weighted (frameworkScore/statusForWorstSeverity):
-// a control whose worst active finding is Low severity scores as passing, so
-// ControlsFailing can undercount versus /findings/by-control, which lists any
-// control with an open finding regardless of severity. OpenFindingsControls
-// reports that raw count so the Posture scorecard and the Findings page never
-// disagree about whether a control has an open exposure (#M-6).
+// ControlsPassing + ControlsFailing + ControlsNotAssessed == ControlsTotal, and
+// CompliancePercent is scored over the ASSESSED subset only. It is nil —
+// rendered "—" — when nothing was assessed; it is never 100 for "we didn't look".
+//
+// ControlsFailing counts every control with an ACTIVE, non-suppressed finding of
+// ANY severity, so it now agrees with OpenFindingsControls by construction. The
+// two used to disagree because status was derived from severity: a control whose
+// worst finding was Low reported PASS.
 type FrameworkStatusItem struct {
 	ID                   string `json:"id"`
 	Name                 string `json:"name"`
 	Code                 string `json:"code"`
 	Version              string `json:"version"`
-	CompliancePercent    int    `json:"compliance_percent"`
+	CompliancePercent    *int   `json:"compliance_percent"`
 	ControlsTotal        int    `json:"controls_total"`
 	ControlsPassing      int    `json:"controls_passing"`
 	ControlsFailing      int    `json:"controls_failing"`
+	ControlsNotAssessed  int    `json:"controls_not_assessed"`
 	OpenFindingsControls int    `json:"open_findings_controls"`
 	IsDefault            bool   `json:"is_default"`
 }
@@ -167,7 +171,7 @@ func (s *FrameworkContextService) GetFrameworkContext(tenantID, userID uuid.UUID
 		}
 
 		// Calculate compliance score for this framework
-		score, controlsTotal, controlsPassing, controlsFailing := s.calculateFrameworkStats(tenantID, frameworkID)
+		stats := s.calculateFrameworkStats(tenantID, frameworkID)
 		openFindingsControls := s.countControlsWithOpenFindings(tenantID, frameworkID)
 
 		statusItems = append(statusItems, FrameworkStatusItem{
@@ -175,21 +179,25 @@ func (s *FrameworkContextService) GetFrameworkContext(tenantID, userID uuid.UUID
 			Name:                 lic.PlatformFramework.Name,
 			Code:                 lic.PlatformFramework.Code,
 			Version:              lic.PlatformFramework.Version,
-			CompliancePercent:    score,
-			ControlsTotal:        controlsTotal,
-			ControlsPassing:      controlsPassing,
-			ControlsFailing:      controlsFailing,
+			CompliancePercent:    stats.Score,
+			ControlsTotal:        stats.Total,
+			ControlsPassing:      stats.Passing,
+			ControlsFailing:      stats.Failing,
+			ControlsNotAssessed:  stats.NotAssessed,
 			OpenFindingsControls: openFindingsControls,
 			IsDefault:            lic.IsDefault,
 		})
 
-		totalScore += float64(score)
-		totalWeight++
+		if stats.Score != nil {
+			totalScore += float64(*stats.Score)
+			totalWeight++
+		}
 	}
 
-	var overallScore float64
+	var overallScore *float64
 	if totalWeight > 0 {
-		overallScore = totalScore / float64(totalWeight)
+		avg := totalScore / float64(totalWeight)
+		overallScore = &avg
 	}
 
 	response.Status = &FrameworkContextStatus{
@@ -239,7 +247,11 @@ func (s *FrameworkContextService) countControlsWithOpenFindings(tenantID, framew
 // evaluation and the materialized rollup use. It used to count controls flat,
 // which meant the Posture scorecard and the framework summary page could show
 // different percentages for the same framework.
-func (s *FrameworkContextService) calculateFrameworkStats(tenantID, frameworkID uuid.UUID) (score, total, passing, failing int) {
+//
+// Every failure path returns NO score rather than 100. A read error is
+// exactly the state where the honest answer is "we do not know"; returning 100
+// made a broken query look like a perfect posture.
+func (s *FrameworkContextService) calculateFrameworkStats(tenantID, frameworkID uuid.UUID) scoreBreakdown {
 	type controlRow struct {
 		ID               uuid.UUID `db:"id"`
 		BaselineSeverity string    `db:"baseline_severity"`
@@ -252,26 +264,26 @@ func (s *FrameworkContextService) calculateFrameworkStats(tenantID, frameworkID 
 	`, frameworkID)
 	if err != nil {
 		log.Printf("WARN: Failed to get controls for framework %s: %v", frameworkID, err)
-		return 100, 0, 0, 0
+		return scoreBreakdown{}
 	}
 	if len(controls) == 0 {
-		return 100, 0, 0, 0
+		return scoreBreakdown{}
 	}
 
 	controlIDs := make([]uuid.UUID, len(controls))
 	for i, c := range controls {
 		controlIDs[i] = c.ID
 	}
-	statuses, err := loadControlStatuses(context.Background(), s.db.DB, tenantID, controlIDs)
+	assessments, err := loadControlAssessments(context.Background(), s.db.DB, tenantID, controlIDs, "platform")
 	if err != nil {
-		log.Printf("WARN: Failed to load control statuses for framework %s: %v", frameworkID, err)
-		return 100, len(controls), 0, 0
+		log.Printf("WARN: Failed to load control assessments for framework %s: %v", frameworkID, err)
+		return scoreBreakdown{Total: len(controls), NotAssessed: len(controls)}
 	}
 
-	outcomes := make([]controlOutcome, 0, len(controls))
-	for _, c := range controls {
-		outcomes = append(outcomes, controlOutcome{BaselineSeverity: c.BaselineSeverity, Status: statuses[c.ID]})
-	}
+	outcomes := outcomesFromAssessments(controls,
+		func(c controlRow) uuid.UUID { return c.ID },
+		func(c controlRow) string { return c.BaselineSeverity },
+		assessments)
 	return frameworkScore(outcomes)
 }
 
@@ -322,17 +334,18 @@ type BatchEvaluateResponse struct {
 
 // BatchEvaluateResult represents evaluation results for a single framework
 type BatchEvaluateResult struct {
-	FrameworkID      string                `json:"framework_id"`
-	FrameworkName    string                `json:"framework_name"`
-	FrameworkCode    string                `json:"framework_code"`
-	FrameworkVersion string                `json:"framework_version"`
-	Score            int                   `json:"score"`
-	ControlsTotal    int                   `json:"controls_total"`
-	ControlsPassing  int                   `json:"controls_passing"`
-	ControlsFailing  int                   `json:"controls_failing"`
-	AffectedAssets   int                   `json:"affected_assets"`
-	Findings         []BatchFindingSummary `json:"findings,omitempty"`
-	ControlBreakdown []BatchControlStatus  `json:"control_breakdown,omitempty"`
+	FrameworkID         string                `json:"framework_id"`
+	FrameworkName       string                `json:"framework_name"`
+	FrameworkCode       string                `json:"framework_code"`
+	FrameworkVersion    string                `json:"framework_version"`
+	Score               *int                  `json:"score"` // nil when nothing was assessed (#1369)
+	ControlsTotal       int                   `json:"controls_total"`
+	ControlsPassing     int                   `json:"controls_passing"`
+	ControlsFailing     int                   `json:"controls_failing"`
+	ControlsNotAssessed int                   `json:"controls_not_assessed"`
+	AffectedAssets      int                   `json:"affected_assets"`
+	Findings            []BatchFindingSummary `json:"findings,omitempty"`
+	ControlBreakdown    []BatchControlStatus  `json:"control_breakdown,omitempty"`
 }
 
 // BatchFindingSummary represents a summarized finding
@@ -348,9 +361,12 @@ type BatchFindingSummary struct {
 type BatchControlStatus struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
-	Status   string `json:"status"`
+	Status   string `json:"status"` // PASS | FAIL | NOT_ASSESSED
 	Severity string `json:"severity"`
-	Findings int    `json:"findings"`
+	// NotAssessedReason is machine-readable and empty unless Status is
+	// NOT_ASSESSED: no_measurements / nothing_in_scope / check_error.
+	NotAssessedReason string `json:"not_assessed_reason,omitempty"`
+	Findings          int    `json:"findings"`
 }
 
 // BatchEvaluateFrameworks evaluates multiple frameworks in a single call
@@ -494,32 +510,48 @@ func (s *FrameworkContextService) evaluateSingleFramework(tenantID, frameworkID 
 		})
 	}
 
+	// Assessment state for every control, from the shared loader — so this
+	// endpoint cannot disagree with the posture scorecard or the rollup.
+	controlUUIDs := make([]uuid.UUID, 0, len(controls))
+	for _, c := range controls {
+		controlUUIDs = append(controlUUIDs, c.ID)
+	}
+	assessments, aErr := loadControlAssessments(ctx, s.db.DB, tenantID, controlUUIDs, "platform")
+	if aErr != nil {
+		return nil, fmt.Errorf("failed to load control assessments: %w", aErr)
+	}
+
 	// Roll the findings up per control, in control_id order (unchanged from the
 	// per-control-query version — `controls` is already ORDER BY control_id).
+	outcomes := make([]controlOutcome, 0, len(controls))
 	for _, control := range controls {
 		controlFindings := findingsByControl[control.ID]
 
 		findingCount := len(controlFindings)
-		status := "PASS"
+		assessment := assessments[control.ID]
+		status := assessment.Status
+		if status == "" {
+			status = statusNotAssessed
+			assessment.Reason = reasonNoMeasurements
+		}
 		severity := "Low"
 
 		if findingCount > 0 {
-			// Find highest severity
+			// Any violation fails the control; severity is the badge/weight, not
+			// the verdict.
+			status = statusFail
 			for _, f := range controlFindings {
 				affectedAssetSet[f.AssetID] = true
 				switch f.Severity {
 				case "Critical":
 					severity = "Critical"
-					status = "FAIL"
 				case "High":
 					if severity != "Critical" {
 						severity = "High"
-						status = "FAIL"
 					}
 				case "Med":
 					if severity == "Low" {
 						severity = "Med"
-						status = "WARN"
 					}
 				}
 
@@ -534,28 +566,38 @@ func (s *FrameworkContextService) evaluateSingleFramework(tenantID, frameworkID 
 					})
 				}
 			}
-			result.ControlsFailing++
-		} else {
-			result.ControlsPassing++
 		}
 
+		switch status {
+		case statusFail:
+			result.ControlsFailing++
+		case statusNotAssessed:
+			result.ControlsNotAssessed++
+		default:
+			result.ControlsPassing++
+		}
+		outcomes = append(outcomes, controlOutcome{BaselineSeverity: control.BaselineSeverity, Status: status})
+
 		if includeDetails {
+			reason := ""
+			if status == statusNotAssessed {
+				reason = assessment.Reason
+			}
 			controlBreakdown = append(controlBreakdown, BatchControlStatus{
-				ID:       control.ID.String(),
-				Name:     control.Title,
-				Status:   status,
-				Severity: severity,
-				Findings: findingCount,
+				ID:                control.ID.String(),
+				Name:              control.Title,
+				Status:            status,
+				Severity:          severity,
+				NotAssessedReason: reason,
+				Findings:          findingCount,
 			})
 		}
 	}
 
-	// Calculate score
-	if result.ControlsTotal > 0 {
-		result.Score = (result.ControlsPassing * 100) / result.ControlsTotal
-	} else {
-		result.Score = 100
-	}
+	// Score through the ONE model — severity-weighted, over the assessed subset.
+	// This used to be a local flat control count, which is precisely the
+	// divergence framework_score.go exists to prevent.
+	result.Score = frameworkScore(outcomes).Score
 
 	result.AffectedAssets = len(affectedAssetSet)
 

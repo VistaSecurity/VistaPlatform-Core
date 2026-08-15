@@ -330,10 +330,15 @@ export function ImportSpreadsheetModal({
     primary = <button className="ui-btn accent" disabled={!mapComplete} onClick={() => setPhase('preview')}>Review</button>;
     secondary = <button className="ui-btn" onClick={() => setPhase('upload')}>Back</button>;
   } else if (phase === 'preview') {
+    // The submit permission follows the target's route, not the wizard:
+    // POST /infrastructure-assets/bulk is assets.create, POST
+    // /network-segments/bulk is settings.update.
     primary = (
-      <button className="ui-btn accent" disabled={validRows.length === 0 || busy} onClick={() => importM.mutate()}>
-        {busy ? 'Importing…' : `Import ${validRows.length} ${validRows.length === 1 ? 'row' : 'rows'}`}
-      </button>
+      <PermissionGate permission={target === 'assets' ? TENANT_PERMISSIONS.assets.create : TENANT_PERMISSIONS.settings.update}>
+        <button className="ui-btn accent" disabled={validRows.length === 0 || busy} onClick={() => importM.mutate()}>
+          {busy ? 'Importing…' : `Import ${validRows.length} ${validRows.length === 1 ? 'row' : 'rows'}`}
+        </button>
+      </PermissionGate>
     );
     secondary = <button className="ui-btn" onClick={() => setPhase('map')} disabled={busy}>Back</button>;
   } else if (phase === 'result') {

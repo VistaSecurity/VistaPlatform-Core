@@ -78,18 +78,22 @@ type LicensedFrameworkResponse struct {
 // AvailableFrameworkResponse represents an available framework for selection.
 // For unlicensed frameworks, only summary info is included (not full controls).
 //
-// PreviewScore / ControlsPassing / ControlsFailing come from the materialized
-// tenant_framework_scores rollup (ADR-0014) and are present for EVERY published
-// framework — activated or not — so a card can show a preview score before the
-// tenant activates. They are nil until the evaluation engine has produced a rollup.
+// PreviewScore / ControlsPassing / ControlsFailing / ControlsNotAssessed come
+// from the materialized tenant_framework_scores rollup (ADR-0014) and are present
+// for EVERY published framework — activated or not — so a card can show a preview
+// score before the tenant activates. They are nil until the evaluation engine has
+// produced a rollup.
 //
-// ControlsFailing is severity-weighted (frameworkScore/statusForWorstSeverity):
-// a control whose worst active finding is Low severity scores as passing, so
-// ControlsFailing can be lower than the number of controls that actually carry
-// an open finding. OpenFindingsControls reports that raw count — any control
-// with at least one ACTIVE, non-suppressed finding regardless of severity, the
-// same definition GetFindingsByControl uses — so the UI never claims "0
-// failing" while findings are genuinely open (#H-4/#M-15).
+// PreviewScore is ALSO nil once a rollup exists but nothing in the framework was
+// assessed — a prospect comparing frameworks must see "—", never a 100
+// that only means "we did not look". ControlsPassing + ControlsFailing +
+// ControlsNotAssessed == the framework's control count, and the score is computed
+// over the assessed subset only.
+//
+// ControlsFailing counts every control carrying an ACTIVE, non-suppressed finding
+// of ANY severity, so it now agrees with OpenFindingsControls by construction.
+// The two used to disagree because status was derived from severity: a control
+// whose worst finding was Low reported PASS (#H-4/#M-15).
 type AvailableFrameworkResponse struct {
 	PlatformFramework    *PlatformFramework `json:"platform_framework"`
 	IsLicensed           bool               `json:"is_licensed"`
@@ -97,6 +101,7 @@ type AvailableFrameworkResponse struct {
 	PreviewScore         *int               `json:"preview_score,omitempty"`
 	ControlsPassing      *int               `json:"controls_passing,omitempty"`
 	ControlsFailing      *int               `json:"controls_failing,omitempty"`
+	ControlsNotAssessed  *int               `json:"controls_not_assessed,omitempty"`
 	OpenFindingsControls *int               `json:"open_findings_controls,omitempty"`
 }
 

@@ -1869,7 +1869,8 @@ export interface components {
         /** @description Per-framework compliance status (services.FrameworkStatusResponse), returned bare by GET /frameworks/status. */
         FrameworkStatusResponse: {
             frameworks: components["schemas"]["FrameworkStatusDetail"][];
-            overall_score: number;
+            /** @description Average score across the frameworks that HAVE a score. Null when none of them do — every framework was unscored (nothing assessed), so there is nothing to average. Null renders as "—", never 0. */
+            overall_score: number | null;
             /** @description The selected framework's status; omitted when none is selected. */
             selected_framework?: components["schemas"]["FrameworkStatusDetail"];
         };
@@ -1878,17 +1879,23 @@ export interface components {
             name: string;
             code: string;
             version: string;
-            compliance_percent: number;
+            /** @description Severity-weighted compliance score over the ASSESSED controls only. null when NO control was assessed — the UI renders "—". Never 0 or 100 as a stand-in for "not evaluated". */
+            compliance_percent: number | null;
+            /** @description All controls in the framework. controls_passing + controls_failing + controls_not_assessed == controls_total. */
             controls_total: number;
             controls_passing: number;
+            /** @description Controls with at least one ACTIVE, non-suppressed finding of ANY severity. Severity is the scoring weight, not the pass/fail input. */
             controls_failing: number;
-            /** @description Controls with at least one ACTIVE, non-suppressed finding of any severity. controls_failing is severity-weighted (a control whose worst finding is Low scores as passing), so this raw count can be higher — it's the same "has an open exposure" definition /findings/by-control uses. */
+            /** @description Controls that could not be evaluated (no measurements configured, nothing in scope, or the check failed). Excluded from both sides of the score fraction; controls_passing + controls_failing is the assessed subset that "N of M controls assessed" reports. */
+            controls_not_assessed: number;
+            /** @description Controls with at least one ACTIVE, non-suppressed finding of any severity — the same "has an open exposure" definition /findings/by-control uses. Equal to controls_failing by construction; kept as its own field because the two disagreed while status was derived from severity. */
             open_findings_controls: number;
             is_default: boolean;
         };
         FrameworkContextStatus: {
             frameworks: components["schemas"]["FrameworkStatusItem"][];
-            overall_score: number;
+            /** @description Null when no framework in the set was scored (nothing assessed). Renders as "—", never 0. */
+            overall_score: number | null;
         };
         FrameworkSubscriptionInfo: {
             tier: string;
@@ -1915,7 +1922,8 @@ export interface components {
             framework_version: string;
             /** @enum {string} */
             framework_type: "platform" | "tenant";
-            score: number;
+            /** @description Severity-weighted score over the ASSESSED controls only; null when nothing was assessed (rendered "—", never 0 or 100). */
+            score: number | null;
             /** @description Per-framework summary; the deep summary tree is not pinned in this slice. */
             summary: {
                 [key: string]: unknown;
@@ -1924,10 +1932,14 @@ export interface components {
             affected_entities: {
                 [key: string]: string[];
             };
+            /** @description passing + failing + not_assessed == total. The score's denominator is passing + failing (the assessed subset). */
             controls: {
                 total: number;
                 passing: number;
+                /** @description Controls with at least one ACTIVE, non-suppressed finding of ANY severity. */
                 failing: number;
+                /** @description Controls that could not be evaluated — no measurements configured, nothing in scope, or the check failed. */
+                not_assessed: number;
             };
             last_evaluated: string;
         };
@@ -1960,7 +1972,16 @@ export interface components {
         BatchControlStatus: {
             id: string;
             name: string;
-            status: string;
+            /**
+             * @description PASS when the control was checked and nothing violated it, FAIL when it has any ACTIVE, non-suppressed finding (of ANY severity), NOT_ASSESSED when it could not be checked. WARN was removed: it was reachable only from a Med baseline severity, earned no score weight, and read as "not failing" while failing the arithmetic.
+             * @enum {string}
+             */
+            status: "PASS" | "FAIL" | "NOT_ASSESSED";
+            /**
+             * @description Machine-readable reason, present only when status is NOT_ASSESSED. The UI shows one bucket ("Not assessed") with a different sentence per reason: no measurements configured / nothing in scope to check / check failed.
+             * @enum {string}
+             */
+            not_assessed_reason?: "no_measurements" | "nothing_in_scope" | "check_error";
             severity: string;
             findings: number;
         };
@@ -1970,10 +1991,14 @@ export interface components {
             framework_name: string;
             framework_code: string;
             framework_version: string;
-            score: number;
+            /** @description Severity-weighted score over the ASSESSED controls only; null when nothing was assessed (rendered "—"). */
+            score: number | null;
             controls_total: number;
             controls_passing: number;
+            /** @description Controls with at least one ACTIVE, non-suppressed finding of ANY severity. */
             controls_failing: number;
+            /** @description Controls excluded from the score because they could not be evaluated. passing + failing + not_assessed == controls_total. */
+            controls_not_assessed: number;
             affected_assets: number;
             /** @description Omitted unless include_details=true. */
             findings?: components["schemas"]["BatchFindingSummary"][];
@@ -2093,13 +2118,15 @@ export interface components {
             platform_framework: components["schemas"]["PublishedFramework"];
             is_licensed: boolean;
             is_platform_default: boolean;
-            /** @description Materialized compliance score (0–100) for this framework against the tenant's current inventory (ADR-0014 evaluation engine). Present for every published framework — activated or not — so a card can show a preview before the tenant activates. Absent/null until the engine has produced a rollup for this tenant+framework. */
+            /** @description Materialized compliance score (0–100) for this framework against the tenant's current inventory (ADR-0014 evaluation engine), computed over the ASSESSED controls only. Present for every published framework — activated or not — so a card can show a preview before the tenant activates. Null until the engine has produced a rollup, AND null once it has if NO control was assessed: a prospect comparing frameworks must see "—", never a 100 that only means "nothing was evaluated". */
             preview_score?: number | null;
             /** @description Passing control count behind preview_score (null until scored). */
             controls_passing?: number | null;
-            /** @description Failing control count behind preview_score (null until scored). */
+            /** @description Controls with at least one ACTIVE, non-suppressed finding of ANY severity (null until scored). Severity is the scoring weight, not the pass/fail input. */
             controls_failing?: number | null;
-            /** @description Controls with at least one ACTIVE, non-suppressed finding of any severity. controls_failing is severity-weighted (a control whose worst finding is Low scores as passing), so this raw count can be higher — it's the same "has an open exposure" definition /findings/by-control uses. Null until scored, same as controls_failing. */
+            /** @description Controls excluded from preview_score because they could not be evaluated — no measurements configured, nothing in scope, or the check failed (null until scored). passing + failing is the assessed subset behind the "N of M controls assessed" coverage line. */
+            controls_not_assessed?: number | null;
+            /** @description Controls with at least one ACTIVE, non-suppressed finding of any severity — the same "has an open exposure" definition /findings/by-control uses. Equal to controls_failing by construction; the two disagreed while status was derived from severity. Null until scored. */
             open_findings_controls?: number | null;
         };
         DefaultFrameworkDescriptor: {

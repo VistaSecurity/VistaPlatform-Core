@@ -28,10 +28,10 @@ setSessionExpiredHandler(
   createSessionExpiryHandler({
     hasSession: () => tokenManager.hasToken(),
     refresh: () => sessionAuthClient.refresh(),
-    onSessionExpired: () => {
+    onSessionExpired: (reason) => {
       tokenManager.clearTokens();
       if (window.location.pathname !== '/login') {
-        window.location.assign('/login?reason=session-expired');
+        window.location.assign(`/login?reason=${reason === 'expired' ? 'session-expired' : 'signed-out'}`);
       }
     },
   }),

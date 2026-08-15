@@ -208,8 +208,12 @@ type stubRBACStore struct {
 	tenantRoles       []authrbac.Role
 	tenantPermissions []authrbac.Permission
 	userRoles         []authrbac.Role
-	matrix            interface{}
+	matrix            *authrbac.PermissionMatrix
 	matrixErr         error
+	createdRole       *authrbac.Role
+	createErr         error
+	deleteResult      *authrbac.DeleteRoleResult
+	deleteErr         error
 	assignErr         error
 	removeErr         error
 	updPermsErr       error
@@ -228,13 +232,19 @@ func (s *stubRBACStore) GetTenantPermissions(_ uuid.UUID) ([]authrbac.Permission
 func (s *stubRBACStore) GetUserRoles(_, _ uuid.UUID) ([]authrbac.Role, error) {
 	return s.userRoles, s.err
 }
-func (s *stubRBACStore) AssignUserRole(_, _, _ uuid.UUID) error { return s.assignErr }
-func (s *stubRBACStore) RemoveUserRole(_, _, _ uuid.UUID) error { return s.removeErr }
-func (s *stubRBACStore) GetPermissionMatrix(_, _ uuid.UUID) (interface{}, error) {
+func (s *stubRBACStore) AssignUserRole(_, _, _, _ uuid.UUID) error { return s.assignErr }
+func (s *stubRBACStore) RemoveUserRole(_, _, _ uuid.UUID) error    { return s.removeErr }
+func (s *stubRBACStore) GetPermissionMatrix(_, _, _ uuid.UUID) (*authrbac.PermissionMatrix, error) {
 	return s.matrix, s.matrixErr
 }
-func (s *stubRBACStore) UpdateRolePermissions(_, _ uuid.UUID, _ []uuid.UUID) error {
+func (s *stubRBACStore) UpdateRolePermissions(_, _, _ uuid.UUID, _ []uuid.UUID) error {
 	return s.updPermsErr
+}
+func (s *stubRBACStore) CreateTenantRole(_, _ uuid.UUID, _ authrbac.CreateRoleRequest) (*authrbac.Role, error) {
+	return s.createdRole, s.createErr
+}
+func (s *stubRBACStore) DeleteTenantRole(_, _ uuid.UUID, _ *uuid.UUID) (*authrbac.DeleteRoleResult, error) {
+	return s.deleteResult, s.deleteErr
 }
 func (s *stubRBACStore) CheckPermission(_, _ uuid.UUID, _ string) (bool, error) {
 	return false, nil
@@ -315,6 +325,8 @@ func newEngine(
 	grp.GET("/user/permissions", rbacHandlers.GetCurrentUserPermissions)
 	grp.GET("/tenant/features", newTenantFeaturesHandler(limits))
 	grp.GET("/tenant/:tenantId/roles", rbacHandlers.GetTenantRoles)
+	grp.POST("/tenant/:tenantId/roles", rbacHandlers.CreateTenantRole)
+	grp.DELETE("/tenant/:tenantId/roles/:roleId", rbacHandlers.DeleteTenantRole)
 	grp.GET("/permissions", rbacHandlers.GetTenantPermissions)
 	grp.GET("/tenant/:tenantId/users/:userId/roles", rbacHandlers.GetUserRoles)
 	grp.GET("/auth/me/preferences/notifications", authHandlers.GetNotificationPreferences)
@@ -813,10 +825,21 @@ func TestContract_UpdateNotificationPreferences_400(t *testing.T) {
 
 func TestContract_GetPermissionMatrix_200(t *testing.T) {
 	sv := loadSpec(t)
+	permID := uuid.New()
 	eng := newEngine(
 		nil,
-		&stubRBACStore{matrix: map[string]interface{}{
-			"role_id": aTenantID, "permissions": []string{"users.read", "settings.update"},
+		&stubRBACStore{matrix: &authrbac.PermissionMatrix{
+			RoleID:       uuid.MustParse(aTenantID),
+			RoleName:     "auditors",
+			DisplayName:  "Auditors",
+			Description:  "custom role",
+			IsSystemRole: false,
+			Editable:     true,
+			Permissions: []authrbac.MatrixPermission{{
+				ID: permID, Name: "users.read", Description: "Read users",
+				Resource: "users", Action: "read", Granted: true, Grantable: true,
+			}},
+			GrantedPermissionIDs: []uuid.UUID{permID},
 		}},
 		nil, true, aUserID, aTenantID,
 	)
@@ -825,6 +848,60 @@ func TestContract_GetPermissionMatrix_200(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "PermissionMatrixResponse", w.Body.Bytes())
+}
+
+func TestContract_CreateTenantRole_201(t *testing.T) {
+	sv := loadSpec(t)
+	eng := newEngine(nil, &stubRBACStore{createdRole: &authrbac.Role{
+		ID: uuid.New(), Name: "auditors", DisplayName: "Auditors",
+		Description: "custom role", IsSystemRole: false,
+		PermissionCount: 1, UserCount: 0,
+	}}, nil, true, aUserID, aTenantID)
+	w := do(eng, http.MethodPost, "/api/v1/auth-service/tenant/"+aTenantID+"/roles",
+		strings.NewReader(`{"display_name":"Auditors"}`))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "CreateTenantRoleResponse", w.Body.Bytes())
+}
+
+func TestContract_DeleteTenantRole_200(t *testing.T) {
+	sv := loadSpec(t)
+	eng := newEngine(nil, &stubRBACStore{
+		deleteResult: &authrbac.DeleteRoleResult{RoleID: uuid.MustParse(aTenantID)},
+	}, nil, true, aUserID, aTenantID)
+	w := do(eng, http.MethodDelete, "/api/v1/auth-service/tenant/"+aTenantID+"/roles/"+aTenantID, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "DeleteTenantRoleResponse", w.Body.Bytes())
+}
+
+// A blocked delete must carry the `role_in_use` code and the holder count — the
+// UI branches on it to open a reassignment picker.
+func TestContract_DeleteTenantRole_409(t *testing.T) {
+	sv := loadSpec(t)
+	eng := newEngine(nil, &stubRBACStore{
+		deleteErr: &authrbac.ErrRoleInUse{UserCount: 2},
+	}, nil, true, aUserID, aTenantID)
+	w := do(eng, http.MethodDelete, "/api/v1/auth-service/tenant/"+aTenantID+"/roles/"+aTenantID, nil)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "RoleErrorResponse", w.Body.Bytes())
+}
+
+// System roles are read-only on the permission write — 403 `system_role_immutable`.
+func TestContract_UpdateRolePermissions_403SystemRole(t *testing.T) {
+	sv := loadSpec(t)
+	eng := newEngine(nil, &stubRBACStore{updPermsErr: authrbac.ErrSystemRoleImmutable},
+		nil, true, aUserID, aTenantID)
+	w := do(eng, http.MethodPut, "/api/v1/auth-service/tenant/"+aTenantID+"/roles/"+aTenantID+"/permissions",
+		strings.NewReader(`{"permission_ids":[]}`))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "RoleErrorResponse", w.Body.Bytes())
 }
 
 func TestContract_UpdateRolePermissions_200(t *testing.T) {

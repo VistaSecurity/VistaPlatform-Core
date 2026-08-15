@@ -9,6 +9,7 @@ import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rb
 import { clients } from '../../lib/clients';
 import { Icon } from '../../components/ui';
 import { SPage, SSection, SCard, STable, STableRow, STag, SDot, SToggle, StateNote, GREEN, AMBER } from './kit';
+import { coverageLine, formatScore, isUnscored } from '../findings/control-status';
 import { ScopeEditModal, ScopeDeleteModal } from './scope-modals';
 import { RetentionPolicyModal } from './policies-modals';
 import type { SettingsNavItem } from './nav';
@@ -46,6 +47,13 @@ type ScopeModalState =
   | { kind: 'edit'; scope: NonNullable<CbomComponents['schemas']['Scope']> }
   | { kind: 'delete'; scope: NonNullable<CbomComponents['schemas']['Scope']> };
 
+// Scope writes are gated on compliance.update, NOT settings.update: cbom-service
+// mounts the scope handler behind RequireTenantPermission(compliance.update)
+// (services/cbom-service/cmd/main.go). Gating on settings.update both invited a
+// 403 (a role with settings.update but no compliance.update) and hid the
+// controls from security_admin, which holds every compliance.* permission but no
+// settings.update. Reads (GET /scopes, including the lazy default seed) are
+// ungated, so the list still renders for anyone who can reach the page.
 export function ScopesPage({ meta }: { meta: SettingsNavItem }) {
   const [modal, setModal] = useState<ScopeModalState>({ kind: 'closed' });
   const { data, isLoading, isError } = useQuery({
@@ -63,7 +71,7 @@ export function ScopesPage({ meta }: { meta: SettingsNavItem }) {
     <SPage
       eyebrow="Policies" title="Scopes" job={meta.job}
       actions={
-        <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
+        <PermissionGate permission={TENANT_PERMISSIONS.compliance.update}>
           <button className="ui-btn sm accent" onClick={() => setModal({ kind: 'create' })}><Icon name="plus" size={14} />New scope</button>
         </PermissionGate>
       }
@@ -94,7 +102,7 @@ export function ScopesPage({ meta }: { meta: SettingsNavItem }) {
               <span className="mono" style={{ fontSize: 11.5, color: 'var(--app-t3)', flex: 'none' }} title={predicateSummary(s.predicate)}>
                 {predicateSummary(s.predicate).length > 42 ? `${predicateSummary(s.predicate).slice(0, 42)}…` : predicateSummary(s.predicate)}
               </span>
-              <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
+              <PermissionGate permission={TENANT_PERMISSIONS.compliance.update}>
                 <div style={{ display: 'flex', gap: 8, flex: 'none' }}>
                   <button className="ui-btn sm" onClick={() => setModal({ kind: 'edit', scope: s })}>Edit</button>
                   {!s.is_system && (
@@ -125,9 +133,11 @@ export function ScopesPage({ meta }: { meta: SettingsNavItem }) {
   );
 }
 
-// Preview-score colour ramp — mirrors the posture FwRing thresholds.
-function fwScoreColor(pct: number): string {
-  return pct >= 85 ? 'var(--ok)' : pct >= 70 ? 'var(--warn)' : pct >= 50 ? 'var(--warn-strong)' : 'var(--danger)';
+// Preview-score colour ramp — mirrors the posture FwRing thresholds. An
+// unscored framework is muted, not coloured.
+function fwScoreColor(pct: number | null | undefined): string {
+  if (isUnscored(pct)) return 'var(--app-t3)';
+  return pct! >= 85 ? 'var(--ok)' : pct! >= 70 ? 'var(--warn)' : pct! >= 50 ? 'var(--warn-strong)' : 'var(--danger)';
 }
 
 export function FrameworksPage({ meta }: { meta: SettingsNavItem }) {
@@ -192,6 +202,13 @@ export function FrameworksPage({ meta }: { meta: SettingsNavItem }) {
   const card = (f: (typeof frameworks)[number]) => {
     const fw = f.platform_framework;
     const isActive = f.is_licensed;
+    const previewUnscored = isUnscored(f.preview_score);
+    const coverage = coverageLine({
+      total: fw.controls_count,
+      passing: f.controls_passing,
+      failing: f.controls_failing,
+      notAssessed: f.controls_not_assessed,
+    });
 
     return (
       <SCard key={fw.id} pad={18} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -210,22 +227,27 @@ export function FrameworksPage({ meta }: { meta: SettingsNavItem }) {
               {fw.controls_count} controls · v{fw.version}
             </div>
           </div>
-          {typeof f.preview_score === 'number' && (
-            <div style={{ textAlign: 'center', flex: 'none' }} title={`Compliance score against your current inventory${isActive ? '' : ' — preview before activating'}`}>
-              <div className="mono" style={{ fontSize: 20, fontWeight: 800, lineHeight: 1, color: fwScoreColor(f.preview_score) }}>{f.preview_score}%</div>
-              <div style={{ fontSize: 9, color: 'var(--app-t3)', marginTop: 2, textTransform: 'uppercase', letterSpacing: 0.4 }}>{isActive ? 'posture' : 'preview'}</div>
+          {/* The preview follows exactly the same rules as an activated
+              framework's score (D4): a framework nothing could be evaluated
+              against shows "—", so a preview can never flatter itself with a
+              100% that nothing earned. The old `typeof === 'number'` guard hid
+              the whole block on null, which read as "no opinion" rather than
+              "we could not assess this". */}
+          <div style={{ textAlign: 'center', flex: 'none' }} title={previewUnscored
+            ? 'No control could be assessed against your current inventory, so there is no score to preview.'
+            : `Compliance score against your current inventory${isActive ? '' : ' — preview before activating'}`}>
+            <div className="mono" style={{ fontSize: 20, fontWeight: 800, lineHeight: 1, color: fwScoreColor(f.preview_score) }}>
+              {formatScore(f.preview_score)}{!previewUnscored && '%'}
             </div>
-          )}
+            <div style={{ fontSize: 9, color: 'var(--app-t3)', marginTop: 2, textTransform: 'uppercase', letterSpacing: 0.4 }}>{isActive ? 'posture' : 'preview'}</div>
+          </div>
         </div>
 
-        {/* A control can carry an open finding and still score as "passing" — the
-            weighted score only fails a control on Medium+ severity. Surface the raw
-            open-finding count so a 100%/"0 failing" framework isn't read as nothing
-            was found when something was, just not severe enough to move the score. */}
-        {!!f.open_findings_controls && f.open_findings_controls > (f.controls_failing ?? 0) && (
-          <div style={{ fontSize: 11, color: 'var(--app-t3)', display: 'flex', alignItems: 'center', gap: 5 }}>
+        {coverage && (
+          <div style={{ fontSize: 11, color: 'var(--app-t3)', display: 'flex', alignItems: 'center', gap: 5 }}
+            title="Controls that could not be evaluated — no measurement rule configured, nothing in scope, or the check failed — are excluded from the score entirely.">
             <Icon name="info" size={12} />
-            {f.open_findings_controls} control{f.open_findings_controls !== 1 ? 's' : ''} with open findings (below scoring severity)
+            {coverage}
           </div>
         )}
 
@@ -236,7 +258,10 @@ export function FrameworksPage({ meta }: { meta: SettingsNavItem }) {
               <Link to="/risk-compliance/posture" className="ui-btn sm" style={{ textDecoration: 'none' }}>
                 <Icon name="bar-chart-2" size={13} />View posture
               </Link>
-              <PermissionGate permission={TENANT_PERMISSIONS.compliance.manage}>
+              {/* compliance.update, not .manage: compliance-engine gates
+                  POST /frameworks/subscribe, DELETE /frameworks/subscribe/:id
+                  and PUT /frameworks/default on ComplianceUpdate. */}
+              <PermissionGate permission={TENANT_PERMISSIONS.compliance.update}>
                 {!f.is_platform_default && (
                   <button className="ui-btn sm" disabled={busy} onClick={() => setDefault.mutate(fw.id)}>
                     Set default
@@ -258,7 +283,7 @@ export function FrameworksPage({ meta }: { meta: SettingsNavItem }) {
               </PermissionGate>
             </>
           ) : (
-            <PermissionGate permission={TENANT_PERMISSIONS.compliance.manage}>
+            <PermissionGate permission={TENANT_PERMISSIONS.compliance.update}>
               <button className="ui-btn sm accent" disabled={busy} onClick={() => subscribe.mutate(fw.id)}>
                 {subscribe.isPending ? 'Activating…' : 'Activate'}
               </button>
@@ -356,11 +381,15 @@ export function RetentionPage({ meta }: { meta: SettingsNavItem }) {
     { label: 'Active', w: '70px', align: 'right' as const }, { label: '', w: '50px', align: 'right' as const },
   ];
 
+  // Every write gate below is audit.manage, not settings.update: audit-service
+  // gates POST/PUT /retention-policies on audit.manage. The list GET is
+  // ungated, so the page still loads read-only for anyone who can reach it —
+  // only the write affordances follow the route's real requirement.
   return (
     <SPage
       eyebrow="Policies" title="Retention Policies" job={meta.job}
       actions={
-        <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
+        <PermissionGate permission={TENANT_PERMISSIONS.audit.manage}>
           <button className="ui-btn sm accent" onClick={() => setModal({ kind: 'create' })}><Icon name="plus" size={14} />Add policy</button>
         </PermissionGate>
       }
@@ -387,10 +416,10 @@ export function RetentionPage({ meta }: { meta: SettingsNavItem }) {
                 </div>,
                 <span style={{ fontSize: 12.5, color: 'var(--app-t2)' }}>{days(p.hot_storage_days)}</span>,
                 <span style={{ fontSize: 12.5, color: 'var(--app-t2)' }}>{days(p.total_retention_days)}</span>,
-                <PermissionGate permission={TENANT_PERMISSIONS.settings.update} fallback={<span style={{ display: 'inline-flex', justifyContent: 'flex-end' }}><SDot color={p.is_active ? GREEN : AMBER} /></span>}>
+                <PermissionGate permission={TENANT_PERMISSIONS.audit.manage} fallback={<span style={{ display: 'inline-flex', justifyContent: 'flex-end' }}><SDot color={p.is_active ? GREEN : AMBER} /></span>}>
                   <span style={{ display: 'inline-flex', justifyContent: 'flex-end' }}><RetentionActiveToggle policy={p} /></span>
                 </PermissionGate>,
-                <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
+                <PermissionGate permission={TENANT_PERMISSIONS.audit.manage}>
                   <button className="ui-btn sm ghost" title="Edit policy" onClick={() => setModal({ kind: 'edit', policy: p })}><Icon name="settings" size={14} /></button>
                 </PermissionGate>,
               ]}

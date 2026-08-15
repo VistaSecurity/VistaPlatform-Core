@@ -39,6 +39,19 @@ var secretNameFragments = []string{
 	"secret", "credential",
 	"psk", "preshared", "pre_shared",
 	"token", "bearer", "cookie",
+	// An `authorization` field is a header value — "Bearer …", "Basic …" — and
+	// is the single likeliest key name for an integration whose auth_type is a
+	// header. Deliberately NOT the bare fragment "auth": that would swallow
+	// authentication_algorithm / authmethod, which are crypto posture and are
+	// exactly what we are in business to collect. A bare field named `auth` is
+	// handled by exactSecretNames instead.
+	"authorization",
+	// Webhook URLs (Slack, Teams, generic SIEM sinks) carry their credential
+	// inside the URL path, so the URL IS the secret. Redacted whole rather than
+	// split: there is no vendor-independent way to say which path segment is the
+	// token, and a half-shown URL invites the reader to believe the rest is safe
+	// to display. Matches webhook_url, webhook_uri, slack_webhook, ….
+	"webhook",
 	"apikey", "api_key",
 	"privatekey", "private_key",
 	"x_authkey", "authkey", "auth_key",
@@ -47,6 +60,16 @@ var secretNameFragments = []string{
 	"sharedkey", "shared_key",
 	"signingkey", "signing_key",
 	"encryptionkey", "encryption_key",
+}
+
+// exactSecretNames are field names that carry secret material as the WHOLE name
+// but whose text is too common to use as a fragment. `auth` is the case that
+// forced this: an integration's auth block is often stored under a bare `auth`
+// key, while "auth" as a substring appears throughout legitimate crypto posture
+// (authentication_algorithm, authmethod, authenticated). Matched after
+// safeFieldNames, on the normalized whole name only.
+var exactSecretNames = map[string]bool{
+	"auth": true,
 }
 
 // safeFieldNames are the cryptographic-posture fields whose names contain "key"
@@ -91,6 +114,9 @@ func isSecretFieldName(name string) bool {
 	}
 	if safeFieldNames[lower] {
 		return false
+	}
+	if exactSecretNames[lower] {
+		return true
 	}
 	for _, frag := range secretNameFragments {
 		if strings.Contains(lower, frag) {

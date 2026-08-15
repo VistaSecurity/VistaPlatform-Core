@@ -7,6 +7,264 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-15
+
+### Added
+
+- **Two alert types that were listed as active can now actually reach you.**
+  Failed-login bursts and breached metric thresholds were both declared live in
+  the alert catalogue, and neither could form an alert. Their detectors live
+  outside compliance-engine, and the generic `alerts.raise` rail they needed had
+  never had a single producer — so both published a bare notification instead,
+  with no deduplication, no escalation, no auto-resolve, and no entry on
+  Remediation → Alerts. A brute-force burst and a breached threshold, arguably
+  the two most urgent operational signals, were invisible on the page built to
+  show urgent things. Both now open, escalate and resolve like every other alert
+  type.
+
+  Two further faults sat underneath, either of which alone kept them silent.
+  The failed-login rule matched the event name `user.login.failed` while the
+  login handler emits `user.login_failed` — a dot against an underscore, which
+  means **this detector had never once fired**. And it declared a threshold of
+  five failures in five minutes that nothing read, so repairing only the name
+  would have paged you on a *single* failed login. The metric evaluator asked
+  for a one-hour window of readings that are stamped an hour in the past, so the
+  set it evaluated was always empty.
+
+- **Platform operators are told when the platform breaks.** A fresh install had
+  no platform notification channels or routing rules at all, so `service_down` —
+  a critical alert whose detector works correctly — reached zero recipients
+  until an operator configured delivery by hand. Installs now seed an operator
+  bell and an admin email channel that **stores no address**: it names the
+  platform-admin role and resolves live members at send time, so it works before
+  anyone has entered an address and tracks admin membership as it changes.
+
+  Separately, every platform alert was being routed as though it belonged to a
+  tenant. The reserved platform sentinel id was passed through as a real tenant,
+  so platform notifications matched no rules and failed a foreign key — the
+  seeded defaults could never have been consulted on the live path. Default
+  monitoring thresholds are seeded too, so threshold alerting has something to
+  evaluate out of the box.
+
+  Both seeds are **first-install-only by design**: they apply when no platform
+  delivery is configured at all, and never touch a configured one. An
+  administrator who edits, disables, renames or deletes any of it keeps exactly
+  what they have, on every subsequent upgrade.
+
+- **Failed notification deliveries are retried.** The delivery queue had
+  retry-count and next-attempt columns and was only ever deleted from, never
+  written — a send that failed was attempted once and lost. Failures now retry
+  with exponential backoff, bounded at five attempts, and a delivery that
+  exhausts them leaves a durable record naming the attempt count rather than
+  quietly stopping. Retries are scoped to the **specific channel that failed**,
+  so a webhook outage cannot re-send an email that already arrived.
+
+  Alert fan-out also gained the HTTP fallback its peers already had. Alerts
+  notify only when they open or escalate, never on re-raise, so a message broker
+  outage at that moment lost the notification permanently with no second chance.
+
+- **Custom roles.** Settings → People & Access → Roles & Permissions is now a
+  working screen rather than a list. Tenant administrators can create a role,
+  set exactly which permissions it grants from the full catalogue, and delete it
+  again. Until now the tenant side had no way to define a role at all: the five
+  built-ins were the only options, and the two endpoints that looked like they
+  supported editing were stubs — the permission matrix always returned an empty
+  list and the save endpoint returned `200` without writing anything, so a UI
+  built on them would have reported success and discarded every edit
+ .
+
+  The **built-in roles stay read-only**, and the screen says why: the seeded
+  role definitions are reconciled on every upgrade, so an edit to one would be
+  silently reverted the next time you upgraded. Custom roles are untouched by
+  that reconciliation.
+
+  Two locks appear in the permission grid. A permission you do not hold yourself
+  cannot be added to a role — otherwise `users.manage` would quietly be a
+  superuser permission, since its holder could mint a role carrying anything and
+  assign it to themselves. Permissions a role already holds that you lack are
+  shown checked-but-locked and are preserved when you save. Deleting a role that
+  people still hold asks where to move them first, and a role wired into an SSO
+  group mapping is refused outright rather than silently breaking federated
+  sign-in.
+
+### Changed
+
+- **The AI-agent interface now records what it was asked for.** The MCP server
+  hands tenant inventory, compliance state and CBOM artifacts to AI agents and
+  kept no record of any of it — there was no way to answer "what did the agent
+  read, and on whose behalf". Every tool call and every credential decision is
+  now recorded: which tool, which tenant, which identity, and how much data came
+  back. Tool arguments are filtered through an allowlist, so the trail never
+  accumulates a field nobody vetted, and the data itself is never recorded —
+  only that it was read, and how much.
+
+- **Audit logging now covers every service.** Seven services wrote nothing to
+  the audit trail, including two that modify tenant data. All sixteen now record
+  to it, and an automated check fails the build if a service stops (,
+ ). Along the way: a shared helper for recording audit entries had been
+  returning nothing to every caller since a dependency changed how it stores
+  request values — nine call sites had been silently skipping their audit entry,
+  with no error anywhere.
+
+- **Compliance findings from frameworks you never activated are no longer
+  reachable.** Listing already excluded them, but fetching, modifying or reading
+  the history of one by its id did not, so a direct request returned and could
+  change a finding outside your activated set.
+
+- **Permissions have a single source of truth.** The permission catalogue and
+  the per-role grant rules were maintained by hand in five places across three
+  languages — including, as it turned out, inside the very script that checks
+  for permission drift. That script's copy had itself drifted and was reporting
+  the wrong grants, and the parity test guarding the rest covered one role out
+  of five. All five are now generated from `standards/permissions.yaml` by
+  `make generate`, and `make audit` fails on drift. No role's permissions change
+  as a result of this: the generated output reproduces the previous state
+  exactly, which is asserted rather than assumed.
+
+- **A control now passes or fails on whether anything violated it, not on how
+  severe it is.** Severity was doing two jobs: it weighted the score *and* it
+  decided the verdict. Because a finding's severity is copied from the control's
+  own rating, that made a Low-severity control incapable of failing — it
+  reported PASS while carrying open findings, and a Medium one could only ever
+  report WARN. One framework emitted two active findings and simultaneously
+  reported "score 100, 1 of 1 controls passing". Severity keeps the job it is
+  good at — it weights the score and labels each finding — and the violation
+  decides the result. **WARN is retired**: it earned no score either way, so it
+  read as "not failing" while counting as a failure in the arithmetic.
+
+  **Controls that were never checked are no longer counted as passes.** Three
+  different situations — no measurement rule configured, nothing in scope to
+  check, and the check itself failing — all scored as a pass, so a half-authored
+  framework, an empty inventory or a broken extractor could each report 100%.
+  They are now reported as **Not assessed**, with the reason available on the
+  result, and excluded from the score on both sides of the fraction. A score is
+  shown alongside its coverage ("8 of 11 controls assessed"), and a framework
+  with nothing assessed shows **—** rather than a number. An extraction failure
+  is now logged and counted rather than silently discarded.
+
+  **Your scores will move — but not at the moment you upgrade.** Frameworks whose
+  only violations were low-severity previously reported as fully passing and will
+  now report those failures; frameworks scoring 100% on unevaluated controls drop
+  to their assessed subset. Nothing about your inventory has changed — only what
+  the platform is willing to call a pass.
+
+  Stored scores are recomputed **on the next reconcile**, not by the upgrade
+  itself: an asset or certificate change, a framework activation or publish, or
+  the platform-admin re-evaluation action. Until one of those happens the stored
+  rollup keeps its previous value, so an operator who upgrades and sees an
+  unchanged score is looking at a stale rollup, not a failed upgrade. Pages that
+  evaluate live — Posture in particular — show the new behaviour immediately,
+  which means the two can disagree in the window between. To converge everything
+  at once, trigger a re-evaluation per tenant.
+
+  The model follows the separation of *result*, *severity* and *weight* that
+  NIST's XCCDF (IR 7275) defines, and its "strict scoring" rule that any
+  violating instance fails the control.
+
+### Fixed
+
+- **Alerts at the lowest severity reached nobody.** Default notification routing
+  covered critical, high, medium and low, and silently omitted informational —
+  which is where plan-usage warnings and billing notices land, and where any
+  unrecognized severity is normalized. Those notifications were recorded as sent
+  while reaching zero channels, indistinguishable from a real delivery. New
+  tenants get the corrected routing, and **existing tenants are repaired on
+  upgrade** — narrowly, matching only rules still carrying the shipped defaults,
+  so customized routing is never overwritten.
+
+- **Digest notification rules could not be created.** Choosing a digest in the
+  routing-rule dialog sent a frequency the database rejects, so saving failed
+  outright; the rules table also displayed existing digest rules as immediate.
+  Three real cadences (hourly, daily, weekly) are now offered.
+
+- **Three billing notification fallbacks were posting to a URL that does not
+  exist**, so when the message broker was unavailable those notices were lost
+  rather than delivered over HTTP. One was also unsigned.
+
+- **Integration credentials are no longer returned to every signed-in user.**
+  `GET /integrations` had no permission check and decrypted `auth_config` before
+  returning it, so any member of the tenant — including read-only roles and
+  read-only API tokens — could read the plaintext API keys and passwords for
+  connected SIEM, CMDB and ITSM systems. The endpoint now requires
+  `settings.read`, **and** secret values are redacted from list responses
+  regardless of who asks: a browse surface never needs the secret back. If you
+  have tooling that reads credentials out of this endpoint, it will now receive
+  `[redacted]`.
+
+- **Audit permissions are real permissions.** `audit-service` had been running a
+  private authorization scheme: a hardcoded check against the user's role name,
+  using permission names that existed nowhere in the permission catalogue and
+  were never stored against any role. No tenant could grant audit access to
+  anyone, because there was nothing to grant. Audit routes now use the same
+  `audit.read` / `audit.manage` permissions as everything else, which also makes
+  them assignable to custom roles. **`viewer` now formally holds `audit.read`** —
+  this reflects access it already had, since the full activity-log listing,
+  search and export endpoints were never gated.
+
+  As part of this, the SIEM integrations panel in Settings → Integrations stops
+  showing "failed to load" for everyone except tenant administrators: listing
+  SIEM forwarders was requiring the *write* permission.
+
+- **Buttons that 403'd on click.** A number of controls were gated on a
+  different permission from the route behind them, so the button was enabled and
+  the action failed: Scopes create/edit/delete, CMDB sync and pull, retention
+  policies, audit alert rules, spreadsheet import, sensor registration and
+  configuration, job retry/cancel, scheduled scans and the Devices actions.
+  Several were also gated *too strictly* and were hiding controls that Security
+  Administrators are entitled to use — Scopes and CMDB sync were invisible to
+  that role entirely. Both directions are corrected, and a test now asserts each
+  gate against the permission its route actually enforces.
+
+- **The SSO group-to-role mapping editor** no longer renders an empty role
+  dropdown for administrators who cannot list roles. Saving with that empty
+  dropdown would have cleared the role from every existing mapping.
+
+- **The invite dialog** no longer silently offers "viewer" as the only role when
+  it cannot load the tenant's roles. It now says what permission is missing and
+  blocks sending, instead of quietly sending the invitation with the wrong role
+ .
+
+- **Settings pages that advertised access nobody had.** Roles & Permissions and
+  Security & SSO appeared in the settings menu for roles whose every request to
+  those pages would fail, producing an error banner instead of a clear "you do
+  not have access" notice.
+
+- **Tenant member lists** now require the same `users.read` permission whichever
+  endpoint they are read through; one of the two paths had no permission check
+  at all.
+
+- **An idle session now returns you to sign-in instead of a wall of errors.**
+  After the access token expired, every request answered `401`, no silent
+  refresh was attempted, nothing navigated, and each panel rendered its own
+  "Couldn't load …" card with no indication that the session had ended. The
+  JS-readable `csrf_token` cookie is the signal the frontend reads as "a session
+  exists", and it gates the refresh attempt — but it was issued with the *access
+  token's* lifetime, so it disappeared at exactly the moment a refresh was due,
+  while the refresh token was still valid for another seven days. It now tracks
+  the refresh token. The practical effect is that an idle user is silently
+  refreshed rather than interrupted at all; when the session really has ended,
+  both UIs land on sign-in with a message saying so.
+
+- **The Dashboard's Discovery card counted one fleet out of two.** It read only
+  the sensor list, so a registered discovery agent going offline could never
+  appear there, and the platform interrogation agent — which is a row in the
+  sensors table — was counted as a sensor. A tenant running two sensors and two
+  agents read "3/3 sensors". The card now shows both fleets combined and breaks
+  them out as "Sensors 2/2 · Agents 2/2": a passive network sensor and a
+  command-driven agent fail in different ways, and one number hides which half
+  is down.
+
+- **Findings from frameworks you never activated no longer appear anywhere.**
+  The engine deliberately evaluates every published framework so it can show a
+  preview score before you activate one, and pairs that with a rule that the
+  detail is only visible for frameworks you *have* activated. The read half was
+  never built. A tenant with one activated framework saw four on Findings → By
+  Framework; the Dashboard's critical-findings count was sourced entirely from
+  an unactivated framework while the activated one had none; and the Posture
+  page contradicted itself, its control grid showing one framework beside a Top
+  Exposures panel dominated by another. Alerting was never affected — it had the
+  check all along. Custom policies, which carry no licence, stay visible.
+
 ## [0.6.3] - 2026-08-14
 
 > 0.6.0 and 0.6.1 were tagged but never released (builder-toolchain failures);

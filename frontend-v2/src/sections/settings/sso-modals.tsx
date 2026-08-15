@@ -7,6 +7,7 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '@vistasecurity/primitives/auth';
+import { usePermissions, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
 import { Icon, Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
 import type { authServiceComponents as AuthC } from '@vistasecurity/api-contract';
@@ -64,11 +65,35 @@ function legacyMessage(error: unknown, fallback: string): string {
 
 type MappingDraft = { external_group_name: string; role_id: string };
 
-function MappingsEditor({ mappings, onChange, roles }: {
+// The role dropdown is populated from GET /tenant/{tenantId}/roles, which
+// auth-service gates on users.manage — a stricter permission than the
+// settings.update that opens this modal. Without it the request 403s and the
+// select renders empty, which reads as "this tenant has no roles" and, on save,
+// would blank the role_id of every existing mapping. So when the caller can't
+// read roles we say so and show the existing mappings read-only rather than
+// offering a control that cannot work.
+function MappingsEditor({ mappings, onChange, roles, rolesReadable }: {
   mappings: MappingDraft[];
   onChange: (m: MappingDraft[]) => void;
   roles: Array<{ id: string; name: string }>;
+  rolesReadable: boolean;
 }) {
+  if (!rolesReadable) {
+    return (
+      <div style={{ border: '1px solid var(--app-border)', borderRadius: 12, padding: '13px 14px', marginBottom: 15 }}>
+        <div className="eyebrow-app" style={{ marginBottom: 10 }}>Group → role mapping</div>
+        <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginBottom: mappings.length ? 10 : 0 }}>
+          Editing group → role mappings needs the "Manage users" permission, which lists the
+          tenant's roles. {mappings.length ? 'Existing mappings are shown below and are preserved on save.' : 'No mappings are configured.'}
+        </div>
+        {mappings.map((m, i) => (
+          <div key={i} className="mono" style={{ fontSize: 11.5, color: 'var(--app-t2)', marginBottom: 4 }}>
+            {m.external_group_name || '(unnamed group)'}
+          </div>
+        ))}
+      </div>
+    );
+  }
   return (
     <div style={{ border: '1px solid var(--app-border)', borderRadius: 12, padding: '13px 14px', marginBottom: 15 }}>
       <div className="eyebrow-app" style={{ marginBottom: 10 }}>Group → role mapping</div>
@@ -150,9 +175,12 @@ export function SsoProviderModal({ provider, open, onClose }: { provider: SSOPro
     if (!scopes.trim()) setScopes(d.scopes);
   };
 
+  // Not destructured: `const { hasPermission } = usePermissions()` trips
+  // @typescript-eslint/unbound-method and the lint job is a warning ratchet.
+  const rolesReadable = usePermissions().hasPermission(TENANT_PERMISSIONS.users.manage);
   const rolesQ = useQuery({
     queryKey: ['settings', 'roles', tenant?.id],
-    enabled: !!tenant?.id && open,
+    enabled: !!tenant?.id && open && rolesReadable,
     queryFn: async () => {
       const { data, error } = await clients.auth.GET('/tenant/{tenantId}/roles', { params: { path: { tenantId: tenant!.id } } });
       if (error || !data) throw new Error('Failed to load roles');
@@ -333,7 +361,7 @@ export function SsoProviderModal({ provider, open, onClose }: { provider: SSOPro
         <ModalInput value={groupsClaim} className="mono" placeholder="groups" onChange={(e) => setGroupsClaim(e.target.value)} />
       </ModalField>
 
-      <MappingsEditor mappings={mappings} onChange={setMappings} roles={roles} />
+      <MappingsEditor mappings={mappings} onChange={setMappings} roles={roles} rolesReadable={rolesReadable} />
 
       {toggleRow('Enabled', 'Members can sign in through this provider.', enabled, setEnabled)}
       {toggleRow('Default provider', 'Pre-selected on the sign-in page.', isDefault, setIsDefault)}

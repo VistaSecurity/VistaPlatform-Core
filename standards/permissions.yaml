@@ -1,0 +1,273 @@
+# Tenant RBAC permission registry — THE single source of truth.
+#
+# Everything below is generated from this file by `scripts/generate-permissions.mjs`
+# (run via `make generate`; `make audit` runs it with `--check` and fails on drift):
+#
+#   1. scripts/database/seed.sql
+#        - the `tenant_permissions` catalogue INSERT      (BEGIN/END GENERATED region)
+#        - the per-role grant reconciliation DO-block body (BEGIN/END GENERATED region)
+#   2. services/auth-service/internal/auth/role_grants_gen.go
+#        - the same grant filters, consumed by assignRolePermissions()
+#   3. shared/rbac/permissions.go
+#        - the tenant permission constants                (BEGIN/END GENERATED region)
+#   4. packages/primitives/src/rbac/constants.ts
+#        - TENANT_PERMISSIONS + TenantPermissionKey       (whole file)
+#   5. scripts/lib/role-grants.gen.mjs
+#        - the ROLE_GRANTS predicates used by scripts/audit-permissions.mjs
+#
+# DO NOT hand-edit any of those regions. Edit here and run `make generate`.
+#
+# ---------------------------------------------------------------------------
+# Grant-rule model
+# ---------------------------------------------------------------------------
+# A role's `grant` is a DISJUNCTION of clauses (`any_of:`) — a permission is
+# granted if ANY clause matches — or the literal `all: true`.
+#
+# Within one clause every field is AND-ed. Available fields:
+#
+#   resources:        [..]  resource is in this allowlist
+#   actions:          [..]  action is in this allowlist
+#   names:            [..]  full permission name is in this allowlist
+#   except_resources: [..]  resource is NOT in this list
+#   except_actions:   [..]  action is NOT in this list
+#   except_names:     [..]  name is NOT in this list
+#
+# A role may also carry a top-level `except_names:` applied after the clauses.
+# `all: true` + `except_names:` is the tenant_admin shape.
+#
+# The four filter shapes in use today all fall out of this:
+#   resource allowlist + name allowlist  -> security_admin, billing_admin
+#   action predicate + resource denylist -> viewer
+#   action predicate + resource allowlist-> api_user
+#   everything-except-a-name             -> tenant_admin
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# The catalogue. `name` is always "<resource>.<action>"; scope is always tenant.
+# Order here is the order emitted into seed.sql and constants.ts.
+# ---------------------------------------------------------------------------
+resources:
+  - name: assets
+    permissions:
+      - action: create
+        description: Create network assets
+      - action: read
+        description: View network assets
+      - action: update
+        description: Update network assets
+      - action: delete
+        description: Delete network assets
+      - action: manage
+        description: Full asset management
+
+  - name: sensors
+    permissions:
+      - action: create
+        description: Create sensors
+      - action: read
+        description: View sensors
+      - action: update
+        description: Update sensors
+      - action: delete
+        description: Delete sensors
+      - action: manage
+        description: Full sensor management
+
+  - name: reports
+    note: |
+      reports.read and reports.manage are retained because the web-ui uses
+      them as frontend-only gates for the CBOM page (reports.read) and the
+      scheduled-reports view (reports.manage). reports.{create,update,delete}
+      were retired with the legacy templated-report surface in Phase 5
+      (see CLAUDE.md) — no backend handler exists and no UI references them.
+      The retired-permission cleanup below removes any rows that may have
+      been seeded by an older release.
+    permissions:
+      - action: read
+        description: View CBOM artifacts and scheduled report listings (frontend route gate)
+      - action: manage
+        description: Manage scheduled report configuration (frontend route gate)
+
+  - name: users
+    permissions:
+      - action: create
+        description: Create tenant users
+      - action: read
+        description: View tenant users
+      - action: update
+        description: Update tenant users
+      - action: delete
+        description: Delete tenant users
+      - action: manage
+        description: Full user management
+
+  - name: settings
+    permissions:
+      - action: read
+        description: View tenant settings
+      - action: update
+        description: Update tenant settings
+      - action: manage
+        description: Full settings management
+
+  - name: billing
+    permissions:
+      - action: read
+        description: View billing information
+      - action: update
+        description: Update billing settings
+
+  - name: compliance
+    permissions:
+      - action: read
+        description: View compliance data
+      - action: update
+        description: Update compliance settings
+      - action: manage
+        description: Full compliance management
+
+  - name: alerts
+    note: |
+      Stateful alert lifecycle (#943). Reads are open to members;
+      acknowledge/snooze/resolve/ticket-create sit behind alerts.manage.
+    permissions:
+      - action: read
+        description: View alerts and their evidence timeline
+      - action: manage
+        description: Acknowledge, snooze, resolve alerts and create tickets from them
+
+  - name: discovery
+    permissions:
+      - action: read
+        description: View discovery jobs, devices, and interrogation results
+      - action: create
+        description: Register devices for interrogation
+      - action: update
+        description: Update device configuration and interrogation jobs
+      - action: manage
+        description: Manage devices for interrogation, run discovery and interrogation jobs
+
+  - name: pcap
+    permissions:
+      - action: read
+        description: View PCAP upload jobs and processing status
+      - action: upload
+        description: Upload PCAP files for offline processing
+      - action: delete
+        description: Delete PCAP upload jobs
+
+  - name: audit
+    note: |
+      Audit trail (#1374). audit-service previously ran a private permission
+      system: a hardcoded switch on the role NAME inventing audit.read /
+      audit.manage / audit.security / audit.export, none of which existed
+      here, in shared/rbac/permissions.go, or in tenant_role_permissions. No
+      tenant could grant audit access to anyone. Two permissions replace all
+      four — audit.security and audit.export were demanded by no route at all.
+    permissions:
+      - action: read
+        description: View the audit trail, retention policies and SIEM integration list
+      - action: manage
+        description: Manage retention policies, alert rules, scheduled reports and SIEM integrations
+
+# ---------------------------------------------------------------------------
+# Permissions removed from the catalogue in an earlier release. seed.sql
+# DELETEs these so an install seeded by an older build converges. CASCADE on
+# tenant_role_permissions removes the matching grants automatically.
+# Remove an entry here only once no deployed release can still carry the row.
+# ---------------------------------------------------------------------------
+retired:
+  - names: [discovery.delete, pcap.manage]
+    note: |
+      Both rows were added earlier but have no backend endpoint and no UI
+      gate. Dropping them collapses the audit's "GRANTED but no UI gates it"
+      noise and prevents anyone granting a permission that can never be
+      meaningful.
+  - names: [reports.create, reports.update, reports.delete]
+    note: |
+      Phase 5 retired the legacy templated-report surface (see CLAUDE.md).
+      These three permissions had no backend handler before and no UI
+      reference now. reports.read and reports.manage are kept — the web-ui
+      still uses them as frontend route gates for the CBOM and
+      scheduled-reports pages.
+
+# ---------------------------------------------------------------------------
+# System roles and their grant filters.
+#
+# `display_name` and `summary` feed the permission x role matrix printed by
+# `node scripts/audit-permissions.mjs --matrix`. The tenant_roles rows
+# themselves (and their DB descriptions) are still seeded by the hand-written
+# role-migration block in seed.sql — this file owns the GRANTS, not the roles.
+# ---------------------------------------------------------------------------
+roles:
+  - name: billing_admin
+    display_name: Billing Admin
+    summary: Billing + visibility into who has access
+    note: |
+      Billing + read-only visibility into who has access and basic tenant
+      settings.
+    grant:
+      any_of:
+        - resources: [billing]
+        - names: [settings.read, users.read]
+
+  - name: tenant_admin
+    display_name: Tenant Administrator
+    summary: Everything except billing.update
+    note: |
+      Everything except billing.update. Gets billing.read so they can see
+      invoices, usage and payment history without being able to alter payment
+      methods or cancel.
+    grant:
+      all: true
+      except_names: [billing.update]
+
+  - name: security_admin
+    display_name: Security Administrator
+    summary: Operational/security scope + read users/settings
+    note: |
+      Operational/security scope + users.read + settings.read for incident
+      response.
+
+      audit.read is granted BY NAME, not by adding 'audit' to the resource
+      list: the resource form would also hand over audit.manage, which the
+      pre-#1374 role switch never gave security_admin (it granted
+      audit.read/security/export only). This filter is a RESOURCE ALLOWLIST —
+      a new resource is not granted unless it is named here, so omitting
+      audit.read entirely would have silently STRIPPED security_admin's audit
+      access in the migration.
+    grant:
+      any_of:
+        - resources: [assets, sensors, reports, compliance, pcap, discovery, alerts]
+        - names: [users.read, settings.read, audit.read]
+
+  - name: viewer
+    display_name: Viewer
+    summary: Read-only non-billing
+    note: |
+      Read-only across all operational resources (no billing).
+
+      NOTE (#1374): this filter is action-based, so seeding the `audit`
+      resource hands viewer audit.read automatically. That is a real, if
+      small, WIDENING versus the pre-#1374 role switch, which denied every
+      audit.* permission to viewer. It is left in place deliberately: the
+      routes audit.read gates (activity-logs/by-user, /by-resource, the SIEM
+      integration list) are tenant-scoped in the handler, and viewer can
+      already read the same tenant's full audit trail through the ungated
+      GET /activity-logs. Carving `audit` out would make viewer's "read
+      everything non-billing" rule a special case. If audit reads should be
+      privileged, change it HERE — one edit now reaches every mirror.
+    grant:
+      any_of:
+        - actions: [read]
+          except_resources: [billing]
+
+  - name: api_user
+    display_name: API User
+    summary: Read-only integration scope
+    note: Read-only integration scope across operational data.
+    grant:
+      any_of:
+        - actions: [read]
+          resources: [assets, sensors, reports, compliance, discovery, pcap]

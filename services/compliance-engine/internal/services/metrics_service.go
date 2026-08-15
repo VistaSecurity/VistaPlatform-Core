@@ -29,6 +29,14 @@ type EventMetrics struct {
 	FindingsUpdated        int64 `json:"findings_updated"`
 	FindingsMarkedInactive int64 `json:"findings_marked_inactive"`
 
+	// Control-assessment metrics. A control that could not be assessed
+	// is excluded from the compliance score rather than counted as a pass — that
+	// is only defensible while the omission is visible, so it is counted here and
+	// surfaced on /metrics. MeasurementExtractionErrors is the specific signal
+	// that used to be discarded by a bare `continue` in the rule evaluator.
+	ControlsNotAssessed         map[string]int64 `json:"controls_not_assessed_by_reason"`
+	MeasurementExtractionErrors int64            `json:"measurement_extraction_errors"`
+
 	// State transition metrics
 	StateTransitions   map[string]int64 `json:"state_transitions"` // "ACTIVE->INACTIVE", "INACTIVE->ACTIVE", etc.
 	ResurfacedFindings int64            `json:"resurfaced_findings"`
@@ -63,6 +71,7 @@ func NewMetricsService() *MetricsService {
 			EventsProcessedByType: make(map[string]int64),
 			StateTransitions:      make(map[string]int64),
 			ErrorByType:           make(map[string]int64),
+			ControlsNotAssessed:   make(map[string]int64),
 			NATSConnectionStatus:  "disconnected",
 		},
 	}
@@ -120,6 +129,26 @@ func (s *MetricsService) RecordFindingUpserted(isNew bool) {
 	}
 }
 
+// RecordControlNotAssessed records that a control could not be assessed, keyed
+// by reason (no_measurements / nothing_in_scope / check_error).
+func (s *MetricsService) RecordControlNotAssessed(reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.metrics.ControlsNotAssessed == nil {
+		s.metrics.ControlsNotAssessed = make(map[string]int64)
+	}
+	s.metrics.ControlsNotAssessed[reason]++
+}
+
+// RecordMeasurementExtractionError records a measurement check that failed to run.
+func (s *MetricsService) RecordMeasurementExtractionError() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.metrics.MeasurementExtractionErrors++
+}
+
 // RecordFindingMarkedInactive records that a finding was marked inactive
 func (s *MetricsService) RecordFindingMarkedInactive() {
 	s.mu.Lock()
@@ -160,25 +189,27 @@ func (s *MetricsService) GetMetrics() EventMetrics {
 
 	// Create a deep copy
 	metrics := EventMetrics{
-		EventsPublished:        s.metrics.EventsPublished,
-		EventsPublishedByType:  make(map[string]int64),
-		EventsProcessed:        s.metrics.EventsProcessed,
-		EventsProcessedByType:  make(map[string]int64),
-		EventsProcessedSuccess: s.metrics.EventsProcessedSuccess,
-		EventsProcessedError:   s.metrics.EventsProcessedError,
-		ProcessingLatencySum:   s.metrics.ProcessingLatencySum,
-		ProcessingLatencyCount: s.metrics.ProcessingLatencyCount,
-		ProcessingLatencyMax:   s.metrics.ProcessingLatencyMax,
-		FindingsUpserted:       s.metrics.FindingsUpserted,
-		FindingsCreated:        s.metrics.FindingsCreated,
-		FindingsUpdated:        s.metrics.FindingsUpdated,
-		FindingsMarkedInactive: s.metrics.FindingsMarkedInactive,
-		StateTransitions:       make(map[string]int64),
-		ResurfacedFindings:     s.metrics.ResurfacedFindings,
-		ProcessingErrors:       s.metrics.ProcessingErrors,
-		ErrorByType:            make(map[string]int64),
-		NATSConnectionStatus:   s.metrics.NATSConnectionStatus,
-		NATSReconnectCount:     s.metrics.NATSReconnectCount,
+		EventsPublished:             s.metrics.EventsPublished,
+		EventsPublishedByType:       make(map[string]int64),
+		EventsProcessed:             s.metrics.EventsProcessed,
+		EventsProcessedByType:       make(map[string]int64),
+		EventsProcessedSuccess:      s.metrics.EventsProcessedSuccess,
+		EventsProcessedError:        s.metrics.EventsProcessedError,
+		ProcessingLatencySum:        s.metrics.ProcessingLatencySum,
+		ProcessingLatencyCount:      s.metrics.ProcessingLatencyCount,
+		ProcessingLatencyMax:        s.metrics.ProcessingLatencyMax,
+		FindingsUpserted:            s.metrics.FindingsUpserted,
+		FindingsCreated:             s.metrics.FindingsCreated,
+		FindingsUpdated:             s.metrics.FindingsUpdated,
+		FindingsMarkedInactive:      s.metrics.FindingsMarkedInactive,
+		StateTransitions:            make(map[string]int64),
+		ControlsNotAssessed:         make(map[string]int64),
+		MeasurementExtractionErrors: s.metrics.MeasurementExtractionErrors,
+		ResurfacedFindings:          s.metrics.ResurfacedFindings,
+		ProcessingErrors:            s.metrics.ProcessingErrors,
+		ErrorByType:                 make(map[string]int64),
+		NATSConnectionStatus:        s.metrics.NATSConnectionStatus,
+		NATSReconnectCount:          s.metrics.NATSReconnectCount,
 	}
 
 	// Copy maps
@@ -193,6 +224,9 @@ func (s *MetricsService) GetMetrics() EventMetrics {
 	}
 	for k, v := range s.metrics.ErrorByType {
 		metrics.ErrorByType[k] = v
+	}
+	for k, v := range s.metrics.ControlsNotAssessed {
+		metrics.ControlsNotAssessed[k] = v
 	}
 
 	// Copy timestamps
@@ -238,6 +272,7 @@ func (s *MetricsService) Reset() {
 	s.metrics = &EventMetrics{
 		EventsPublishedByType: make(map[string]int64),
 		EventsProcessedByType: make(map[string]int64),
+		ControlsNotAssessed:   make(map[string]int64),
 		StateTransitions:      make(map[string]int64),
 		ErrorByType:           make(map[string]int64),
 		NATSConnectionStatus:  "disconnected",

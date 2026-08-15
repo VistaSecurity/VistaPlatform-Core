@@ -8,11 +8,11 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { useFeature } from '@vistasecurity/primitives/features';
-import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
+import { PermissionGate, TENANT_PERMISSIONS, usePermissions } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
 import { Icon } from '../../components/ui';
 import { SPage, SSection, SCard, STable, STableRow, STag, SDot, SToggle, StateNote, relTime, GREEN, AMBER, RED } from './kit';
-import { ChannelModal, ChannelDeleteModal, RuleModal, RuleDeleteModal } from './notification-modals';
+import { ChannelModal, ChannelDeleteModal, RuleModal, RuleDeleteModal, isDigest } from './notification-modals';
 import { CmdbProfileModal, CmdbDeleteModal, CmdbJobsModal, PLATFORM_LABEL, jobTone, type CMDBProfile } from './cmdb-modals';
 import { cmdbProfilesQuery, siemIntegrationsQuery, editionSectionState } from './integrations-queries';
 import type { SettingsNavItem } from './nav';
@@ -161,8 +161,18 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
   const closeCmdb = () => setCmdbModal({ kind: 'closed' });
   const channelsQ = useChannels();
   const siemEntitled = useFeature('siem_export');
-  const siemQ = useQuery(siemIntegrationsQuery(siemEntitled));
-  const siemState = siemEntitled ? editionSectionState(siemQ) : 'unavailable';
+  // GET /siem/integrations requires audit.read ( — it required the WRITE
+  // permission audit.manage until then, which is why this panel showed "SIEM
+  // integrations failed to load" for every role but tenant_admin). Gate the
+  // fetch on the permission as well as the entitlement: a role that cannot read
+  // the audit surface should see the panel absent, not failing.
+  // Not destructured: `const { hasPermission } = usePermissions()` trips
+  // @typescript-eslint/unbound-method, and the lint job is a warning ratchet.
+  // Same call form as discovery/pcap-page.tsx.
+  const siemPermitted = usePermissions().hasPermission(TENANT_PERMISSIONS.audit.read);
+  const siemQ = useQuery(siemIntegrationsQuery(siemEntitled && siemPermitted));
+  const siemState = siemEntitled && siemPermitted ? editionSectionState(siemQ) : 'unavailable';
+  const siemForbidden = siemEntitled && !siemPermitted;
 
   const siem = siemQ.data ?? [];
   const channels = channelsQ.data ?? [];
@@ -241,7 +251,12 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
         </p>
       )}
       <p style={{ fontSize: 12, color: 'var(--app-t3)', marginTop: 4 }}>
-        {siemUnavailable ? (
+        {siemForbidden ? (
+          <>
+            <Icon name="lock" size={13} style={{ verticalAlign: '-2px', marginRight: 5, color: 'var(--app-t3)' }} />
+            SIEM forwarders are not shown — viewing them needs the audit read permission. Ask a Tenant Administrator if you need access.
+          </>
+        ) : siemUnavailable ? (
           <>
             <Icon name="lock" size={13} style={{ verticalAlign: '-2px', marginRight: 5, color: 'var(--accent)' }} />
             Outbound SIEM forwarding (Splunk, Datadog, Elastic) is an Enterprise feature. Audit events are still recorded and searchable in every edition — only forwarding them to an external SIEM is gated.
@@ -296,16 +311,28 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
                       {p.last_sync_status && <STag color={jobTone(p.last_sync_status)}>{p.last_sync_status}</STag>}
                       <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{last}</span>
                     </div>
-                    <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
-                      <div style={{ display: 'flex', gap: 4, flex: 'none' }}>
+                    {/* Two gates, because the routes behind these buttons ask
+                        for two different permissions (ee/cmdbsync/routes.go):
+                        profile CRUD + /test are settings.update, while /sync
+                        and /pull are assets.manage — they move inventory, not
+                        configuration. One settings.update gate over the whole
+                        cluster both 403'd on sync/pull for a role holding only
+                        settings.update, and hid sync/pull from security_admin,
+                        which holds assets.manage but no settings.update. */}
+                    <div style={{ display: 'flex', gap: 4, flex: 'none' }}>
+                      <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
                         <CmdbTestButton profile={p} />
+                      </PermissionGate>
+                      <PermissionGate permission={TENANT_PERMISSIONS.assets.manage}>
                         <CmdbPullButton profile={p} />
                         <CmdbSyncButton profile={p} />
-                        <button className="ui-btn sm ghost" title="Sync history" onClick={() => setCmdbModal({ kind: 'jobs', profile: p })}><Icon name="history" size={14} /></button>
+                      </PermissionGate>
+                      <button className="ui-btn sm ghost" title="Sync history" onClick={() => setCmdbModal({ kind: 'jobs', profile: p })}><Icon name="history" size={14} /></button>
+                      <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
                         <button className="ui-btn sm ghost" title="Configure" onClick={() => setCmdbModal({ kind: 'edit', profile: p })}><Icon name="settings" size={14} /></button>
                         <button className="ui-btn sm ghost" title="Remove" style={{ color: 'var(--danger-text)' }} onClick={() => setCmdbModal({ kind: 'delete', profile: p })}><Icon name="x" size={14} /></button>
-                      </div>
-                    </PermissionGate>
+                      </PermissionGate>
+                    </div>
                   </div>
                 </SCard>
               );
@@ -405,7 +432,7 @@ export function RoutingRulesPage({ meta }: { meta: SettingsNavItem }) {
                     {(r.channel_ids ?? []).map(channelName).join(', ') || '—'}
                   </span>
                 </span>,
-                <STag>{r.frequency === 'digest' ? `Digest${r.digest_window ? ` · ${r.digest_window}m` : ''}` : 'Immediate'}</STag>,
+                <STag>{isDigest(r.frequency ?? '') ? `Digest${r.digest_window ? ` · ${r.digest_window}m` : ''}` : 'Immediate'}</STag>,
                 <PermissionGate permission={TENANT_PERMISSIONS.settings.update} fallback={<span style={{ display: 'inline-flex', justifyContent: 'flex-end' }}><SDot color={r.enabled ? GREEN : 'var(--app-t3)'} /></span>}>
                   <span style={{ display: 'inline-flex', justifyContent: 'flex-end' }}><RuleEnableToggle rule={r} /></span>
                 </PermissionGate>,
@@ -693,7 +720,10 @@ export function AlertRulesPage({ meta }: { meta: SettingsNavItem }) {
                   </div>
                 </div>
                 <STag color={tone}>{r.severity}</STag>
-                <PermissionGate permission={TENANT_PERMISSIONS.settings.update} fallback={<SDot color={r.is_enabled ? GREEN : 'var(--app-t3)'} />}>
+                {/* audit.manage, not settings.update: this toggle PUTs
+                    /audit-service/alert-rules/:id, which audit-service gates on
+                    PermissionAuditManage (#1374). */}
+                <PermissionGate permission={TENANT_PERMISSIONS.audit.manage} fallback={<SDot color={r.is_enabled ? GREEN : 'var(--app-t3)'} />}>
                   <AlertRuleToggle rule={r} />
                 </PermissionGate>
               </SCard>

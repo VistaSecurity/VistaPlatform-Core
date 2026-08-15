@@ -19,6 +19,8 @@ import (
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
+	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
+	"github.com/vistasecurity/vistaplatform/shared/rbac"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 
 	"github.com/gin-gonic/gin"
@@ -113,115 +115,29 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	// Initialize router
-	router := gin.Default()
+	// Audit logging for audit-service's OWN API surface. Which requests are
+	// recorded — and why the S2S ingest endpoints are not — is decided in
+	// audit.go; see attachAuditLogging.
+	auditMiddleware := auditmiddleware.NewMiddleware(auditmiddleware.ServiceConfig(
+		"audit-service",
+		cfg.UseMTLS,
+		cfg.ClientCertPath,
+		cfg.ClientKeyPath,
+		cfg.PlatformCACertPath,
+	))
+	defer auditMiddleware.Stop()
 
-	// Health check endpoint (no auth required)
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":  "healthy",
-			"service": "audit-service",
-			"version": version.Get(),
-		})
+	router := newRouter(cfg, db, auditMiddleware, routerHandlers{
+		activityLog:      activityLogHandler,
+		jobExecution:     jobExecutionHandler,
+		compliance:       complianceHandler,
+		retention:        retentionHandler,
+		alert:            alertHandler,
+		alertRule:        alertRuleHandler,
+		analytics:        analyticsHandler,
+		siemExport:       siemExport,
+		scheduledReports: scheduledReports,
 	})
-
-	router.GET("/ready", func(c *gin.Context) {
-		if err := db.Ping(); err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unhealthy", "error": "Service health check failed"})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"status": "ready"})
-	})
-
-	// Internal service-to-service ingestion endpoints (HMAC auth required)
-	// These are called by the shared audit middleware from other services within the Docker network.
-	// Access is verified via HMAC-SHA256 signature using INTERNAL_AUTH_SECRET.
-	internal := router.Group("/api/v1")
-	internal.Use(middleware.RequireInternalAuth(cfg.InternalAuthSecret))
-	{
-		internal.POST("/audit-service/activity-logs", activityLogHandler.LogActivity)
-		internal.POST("/audit-service/job-execution-logs/start", jobExecutionHandler.LogJobStart)
-		internal.POST("/audit-service/job-execution-logs/:id/progress", jobExecutionHandler.LogJobProgress)
-		internal.POST("/audit-service/job-execution-logs/:id/complete", jobExecutionHandler.LogJobCompletion)
-	}
-
-	// API routes with authentication (user-facing queries and management)
-	api := router.Group("/api/v1")
-	api.Use(middleware.RequireAuth(cfg))
-	// RLS: Tenant isolation uses WHERE tenant_id=$X in queries (primary) and PostgreSQL
-	// RLS policies (defense-in-depth). For RLS session-variable enforcement, use
-	// shared/database.WithTenantContext() at the repository level — never db.Exec().
-	{
-		// Activity log query endpoints
-		api.GET("/audit-service/activity-logs", activityLogHandler.GetActivityLogs)
-		api.GET("/audit-service/activity-logs/:id", activityLogHandler.GetActivityLogByID)
-		api.GET("/audit-service/activity-logs/summary", activityLogHandler.GetActivityLogsSummary)
-		// SECURITY: these by-id queries take a client-supplied UUID; gate on
-		// audit.read and tenant-scope in the handler so a tenant can't read another
-		// tenant's activity. Mirrors the by-resource/:.../:... trail above.
-		api.GET("/audit-service/activity-logs/by-user", middleware.RequirePermission("audit.read"), activityLogHandler.GetActivityLogsByUser)
-		api.GET("/audit-service/activity-logs/by-resource", middleware.RequirePermission("audit.read"), activityLogHandler.GetActivityLogsByResource)
-		api.GET("/audit-service/activity-logs/by-resource/:resource_type/:resource_id", activityLogHandler.GetResourceAuditTrail) // NEW
-		api.GET("/audit-service/activity-logs/by-user/:user_id", activityLogHandler.GetUserActivityTimeline)                      // NEW
-		api.POST("/audit-service/activity-logs/query", activityLogHandler.QueryActivityLogs)
-		api.GET("/audit-service/activity-logs/export", activityLogHandler.ExportActivityLogs)
-
-		// Job execution log query endpoint
-		api.GET("/audit-service/job-execution-logs", jobExecutionHandler.GetJobExecutionLogs)
-
-		// Compliance endpoints
-		api.GET("/audit-service/compliance-reports/summary", complianceHandler.GetComplianceSummary)
-		api.GET("/audit-service/compliance-reports/validate-retention", complianceHandler.ValidateRetentionPolicies)
-		api.GET("/audit-service/compliance-reports/templates", complianceHandler.GetComplianceReportTemplates)
-		api.POST("/audit-service/compliance-reports/generate", complianceHandler.GenerateComplianceReport)
-
-		// Retention policy endpoints.
-		// SECURITY: writes interim-gated to audit.manage (blocks tenant
-		// viewers). retention_policies + siem/integrations are platform-GLOBAL
-		// config (no tenant_id column) — the durable fix is a platform-admin-only
-		// gate (or tenant-scoping the tables), pending the product decision.
-		api.GET("/audit-service/retention-policies", retentionHandler.GetRetentionPolicies)
-		api.GET("/audit-service/retention-policies/:id", retentionHandler.GetRetentionPolicyByID)
-		api.POST("/audit-service/retention-policies", middleware.RequirePermission("audit.manage"), retentionHandler.CreateRetentionPolicy)
-		api.PUT("/audit-service/retention-policies/:id", middleware.RequirePermission("audit.manage"), retentionHandler.UpdateRetentionPolicy)
-
-		// Alert endpoints (legacy)
-		api.GET("/audit-service/alerts/rules", alertHandler.GetAlertRules)
-		api.GET("/audit-service/alerts", alertHandler.GetAlerts)
-		api.POST("/audit-service/alerts/:id/acknowledge", middleware.RequirePermission("audit.manage"), alertHandler.AcknowledgeAlert)
-
-		// Custom Alert Rule endpoints (NEW)
-		api.POST("/audit-service/alert-rules", middleware.RequirePermission("audit.manage"), alertRuleHandler.CreateAlertRule)
-		api.GET("/audit-service/alert-rules", alertRuleHandler.GetAlertRules)
-		api.GET("/audit-service/alert-rules/:id", alertRuleHandler.GetAlertRuleByID)
-		api.PUT("/audit-service/alert-rules/:id", middleware.RequirePermission("audit.manage"), alertRuleHandler.UpdateAlertRule)
-		api.DELETE("/audit-service/alert-rules/:id", middleware.RequirePermission("audit.manage"), alertRuleHandler.DeleteAlertRule)
-		api.GET("/audit-service/alert-instances", alertRuleHandler.GetAlertInstances)
-		api.POST("/audit-service/alert-instances/:id/acknowledge", middleware.RequirePermission("audit.manage"), alertRuleHandler.AcknowledgeAlert)
-		api.POST("/audit-service/alert-instances/:id/resolve", middleware.RequirePermission("audit.manage"), alertRuleHandler.ResolveAlert)
-
-		// Scheduled Report endpoints (Enterprise). Absent in a Core build — the
-		// runner owns its own routes and permission gating; see
-		// ee/scheduledreports. Core still generates compliance reports on
-		// demand via /compliance-reports/generate above.
-		if scheduledReports != nil {
-			scheduledReports.RegisterRoutes(api)
-		}
-
-		// SIEM integration endpoints (Enterprise). Absent in a Core build. The
-		// exporter owns its own routes and permission gating, including the
-		// audit.manage gate on the read (SIEM integrations are
-		// platform-global config, not per-tenant data) and secret redaction.
-		if siemExport != nil {
-			siemExport.RegisterRoutes(api)
-		}
-
-		// Analytics endpoints
-		api.GET("/audit-service/analytics/user-activity", analyticsHandler.GetUserActivity)
-		api.GET("/audit-service/analytics/access-patterns", analyticsHandler.GetAccessPatterns)
-		api.GET("/audit-service/analytics/compliance-gaps", analyticsHandler.GetComplianceGaps)
-		api.GET("/audit-service/analytics/dashboard", analyticsHandler.GetDashboardMetrics)
-	}
 
 	// Health check server (HTTP, port 8080)
 	healthRouter := gin.New()
@@ -321,7 +237,7 @@ func main() {
 	if natsErr != nil {
 		log.Printf("WARNING: NATS unavailable, audit events will only be received via HTTP: %v", natsErr)
 	} else {
-		auditSubscriber = subscribers.NewAuditSubscriber(natsClient, activityLogService)
+		auditSubscriber = subscribers.NewAuditSubscriber(natsClient, activityLogService, alertService)
 		if err := auditSubscriber.Start(); err != nil {
 			log.Printf("WARNING: Failed to start NATS audit subscriber: %v", err)
 		} else {
@@ -394,4 +310,155 @@ func main() {
 	}
 
 	log.Println("Server exited")
+}
+
+// routerHandlers bundles the handlers newRouter registers. It exists only to
+// keep newRouter's signature readable; main() fills every field.
+type routerHandlers struct {
+	activityLog      *handlers.ActivityLogHandler
+	jobExecution     *handlers.JobExecutionHandler
+	compliance       *handlers.ComplianceHandler
+	retention        *handlers.RetentionHandler
+	alert            *handlers.AlertHandler
+	alertRule        *handlers.AlertRuleHandler
+	analytics        *handlers.AnalyticsHandler
+	siemExport       siemExporter
+	scheduledReports scheduledReportRunner
+}
+
+// newRouter builds the router main() serves: audit logging and every route
+// group.
+//
+// It exists as a function so a test can exercise the REAL router rather than a
+// hand-built stand-in. audit_test.go assembles its own gin.Engine and calls
+// attachAuditLogging on it, which stays green even when nothing mounts the
+// middleware in the running service — the wiring, not the helper, is what has
+// to be under test. Mounting here, in the same function that registers the
+// routes, means "routes but no audit middleware" is not a state main() can
+// reach by deleting a line.
+func newRouter(
+	cfg *config.Config,
+	db *database.DB,
+	auditMiddleware *auditmiddleware.Middleware,
+	h routerHandlers,
+) *gin.Engine {
+	// Initialize router
+	router := gin.Default()
+
+	// Audit logging for audit-service's OWN API surface. Mounted before the
+	// route groups so it wraps every handler registered below. Which requests
+	// are recorded — and why the S2S ingest endpoints are not — is decided in
+	// audit.go; see attachAuditLogging.
+	attachAuditLogging(router, auditMiddleware)
+
+	// Health check endpoint (no auth required)
+	router.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "healthy",
+			"service": "audit-service",
+			"version": version.Get(),
+		})
+	})
+
+	router.GET("/ready", func(c *gin.Context) {
+		if err := db.Ping(); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unhealthy", "error": "Service health check failed"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ready"})
+	})
+
+	// Internal service-to-service ingestion endpoints (HMAC auth required)
+	// These are called by the shared audit middleware from other services within the Docker network.
+	// Access is verified via HMAC-SHA256 signature using INTERNAL_AUTH_SECRET.
+	internal := router.Group("/api/v1")
+	internal.Use(middleware.RequireInternalAuth(cfg.InternalAuthSecret))
+	{
+		internal.POST("/audit-service/activity-logs", h.activityLog.LogActivity)
+		internal.POST("/audit-service/job-execution-logs/start", h.jobExecution.LogJobStart)
+		internal.POST("/audit-service/job-execution-logs/:id/progress", h.jobExecution.LogJobProgress)
+		internal.POST("/audit-service/job-execution-logs/:id/complete", h.jobExecution.LogJobCompletion)
+	}
+
+	// API routes with authentication (user-facing queries and management)
+	api := router.Group("/api/v1")
+	api.Use(middleware.RequireAuth(cfg))
+	// RLS: Tenant isolation uses WHERE tenant_id=$X in queries (primary) and PostgreSQL
+	// RLS policies (defense-in-depth). For RLS session-variable enforcement, use
+	// shared/database.WithTenantContext() at the repository level — never db.Exec().
+	{
+		// Activity log query endpoints
+		api.GET("/audit-service/activity-logs", h.activityLog.GetActivityLogs)
+		api.GET("/audit-service/activity-logs/:id", h.activityLog.GetActivityLogByID)
+		api.GET("/audit-service/activity-logs/summary", h.activityLog.GetActivityLogsSummary)
+		// SECURITY: these by-id queries take a client-supplied UUID; gate on
+		// audit.read and tenant-scope in the handler so a tenant can't read another
+		// tenant's activity. Mirrors the by-resource/:.../:... trail above.
+		api.GET("/audit-service/activity-logs/by-user", middleware.RequirePermission(db.DB, rbac.PermissionAuditRead), h.activityLog.GetActivityLogsByUser)
+		api.GET("/audit-service/activity-logs/by-resource", middleware.RequirePermission(db.DB, rbac.PermissionAuditRead), h.activityLog.GetActivityLogsByResource)
+		api.GET("/audit-service/activity-logs/by-resource/:resource_type/:resource_id", h.activityLog.GetResourceAuditTrail) // NEW
+		api.GET("/audit-service/activity-logs/by-user/:user_id", h.activityLog.GetUserActivityTimeline)                      // NEW
+		api.POST("/audit-service/activity-logs/query", h.activityLog.QueryActivityLogs)
+		api.GET("/audit-service/activity-logs/export", h.activityLog.ExportActivityLogs)
+
+		// Job execution log query endpoint
+		api.GET("/audit-service/job-execution-logs", h.jobExecution.GetJobExecutionLogs)
+
+		// Compliance endpoints
+		api.GET("/audit-service/compliance-reports/summary", h.compliance.GetComplianceSummary)
+		api.GET("/audit-service/compliance-reports/validate-retention", h.compliance.ValidateRetentionPolicies)
+		api.GET("/audit-service/compliance-reports/templates", h.compliance.GetComplianceReportTemplates)
+		api.POST("/audit-service/compliance-reports/generate", h.compliance.GenerateComplianceReport)
+
+		// Retention policy endpoints.
+		// SECURITY: writes gated on audit.manage (blocks tenant viewers).
+		// retention_policies + siem/integrations are platform-GLOBAL config (no
+		// tenant_id column) — the durable fix is a platform-admin-only gate (or
+		// tenant-scoping the tables), pending the product decision.
+		// Since audit.manage is a real, seeded tenant permission resolved
+		// from tenant_role_permissions, not a role name this service made up.
+		api.GET("/audit-service/retention-policies", h.retention.GetRetentionPolicies)
+		api.GET("/audit-service/retention-policies/:id", h.retention.GetRetentionPolicyByID)
+		api.POST("/audit-service/retention-policies", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.retention.CreateRetentionPolicy)
+		api.PUT("/audit-service/retention-policies/:id", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.retention.UpdateRetentionPolicy)
+
+		// Alert endpoints (legacy)
+		api.GET("/audit-service/alerts/rules", h.alert.GetAlertRules)
+		api.GET("/audit-service/alerts", h.alert.GetAlerts)
+		api.POST("/audit-service/alerts/:id/acknowledge", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.alert.AcknowledgeAlert)
+
+		// Custom Alert Rule endpoints (NEW)
+		api.POST("/audit-service/alert-rules", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.alertRule.CreateAlertRule)
+		api.GET("/audit-service/alert-rules", h.alertRule.GetAlertRules)
+		api.GET("/audit-service/alert-rules/:id", h.alertRule.GetAlertRuleByID)
+		api.PUT("/audit-service/alert-rules/:id", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.alertRule.UpdateAlertRule)
+		api.DELETE("/audit-service/alert-rules/:id", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.alertRule.DeleteAlertRule)
+		api.GET("/audit-service/alert-instances", h.alertRule.GetAlertInstances)
+		api.POST("/audit-service/alert-instances/:id/acknowledge", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.alertRule.AcknowledgeAlert)
+		api.POST("/audit-service/alert-instances/:id/resolve", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.alertRule.ResolveAlert)
+
+		// Scheduled Report endpoints (Enterprise). Absent in a Core build — the
+		// runner owns its own routes and permission gating; see
+		// ee/scheduledreports. Core still generates compliance reports on
+		// demand via /compliance-reports/generate above.
+		if h.scheduledReports != nil {
+			h.scheduledReports.RegisterRoutes(api)
+		}
+
+		// SIEM integration endpoints (Enterprise). Absent in a Core build. The
+		// exporter owns its own routes and permission gating, including the
+		// audit.manage gate on the read (SIEM integrations are
+		// platform-global config, not per-tenant data) and secret redaction.
+		if h.siemExport != nil {
+			h.siemExport.RegisterRoutes(api)
+		}
+
+		// Analytics endpoints
+		api.GET("/audit-service/analytics/user-activity", h.analytics.GetUserActivity)
+		api.GET("/audit-service/analytics/access-patterns", h.analytics.GetAccessPatterns)
+		api.GET("/audit-service/analytics/compliance-gaps", h.analytics.GetComplianceGaps)
+		api.GET("/audit-service/analytics/dashboard", h.analytics.GetDashboardMetrics)
+	}
+
+	return router
 }

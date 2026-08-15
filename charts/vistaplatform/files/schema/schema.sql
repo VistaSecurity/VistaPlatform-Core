@@ -18734,16 +18734,29 @@ CREATE INDEX IF NOT EXISTS idx_oauth_codes_expires ON public.oauth_authorization
 -- score on unactivated frameworks. Findings (failures) stay in
 -- compliance_findings; this is just the rollup.
 -- =====================================================================
+-- score is NULLable on purpose: a framework with no ASSESSED control has
+-- no score, and the rollup must be able to say so. It used to be NOT NULL
+-- DEFAULT 0, which forced the writer to pick a sentinel — and it picked 100,
+-- so a half-authored framework or an empty inventory previewed as perfect.
 CREATE TABLE IF NOT EXISTS public.tenant_framework_scores (
     tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
     platform_framework_id uuid NOT NULL REFERENCES public.platform_frameworks(id) ON DELETE CASCADE,
-    score integer NOT NULL DEFAULT 0,
+    score integer,
     controls_total integer NOT NULL DEFAULT 0,
     controls_passing integer NOT NULL DEFAULT 0,
     controls_failing integer NOT NULL DEFAULT 0,
+    controls_not_assessed integer NOT NULL DEFAULT 0,
     computed_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT tenant_framework_scores_pkey PRIMARY KEY (tenant_id, platform_framework_id)
 );
+
+-- Existing installs: CREATE TABLE IF NOT EXISTS above is a no-op for them, so
+-- the same two changes are applied as idempotent ALTERs. DROP NOT NULL and DROP
+-- DEFAULT are both no-ops when already applied.
+ALTER TABLE public.tenant_framework_scores
+  ADD COLUMN IF NOT EXISTS controls_not_assessed integer NOT NULL DEFAULT 0;
+ALTER TABLE public.tenant_framework_scores ALTER COLUMN score DROP NOT NULL;
+ALTER TABLE public.tenant_framework_scores ALTER COLUMN score DROP DEFAULT;
 
 
 CREATE INDEX IF NOT EXISTS idx_tenant_framework_scores_tenant
@@ -20159,6 +20172,30 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.agent_addresses TO crypto_app, cr
 -- DROP NOT NULL is a no-op when the column is already nullable, so this is
 -- safely re-appliable.
 ALTER TABLE IF EXISTS public.discovery_auto_approval_rules ALTER COLUMN created_by DROP NOT NULL;
+
+
+-- Backfill: give the seeded "Default activity feed" rule the `info` severity.
+--
+-- seedDefaultNotificationPack shipped this rule as ARRAY['medium','low'], and
+-- nothing covered 'info'. That is not a spare band — asset_limit_approaching
+-- opens there at its 80% rung, billing notifications are emitted there, and
+-- notification-service's NormalizeSeverity degrades ANY unrecognized producer
+-- severity to 'info'. An unmatched notification is written status='sent' with
+-- channels_used={}, so it looked delivered while reaching nobody.
+--
+-- The create-time fix (services/auth-service/internal/auth/service.go) only
+-- helps tenants created after it ships; every existing tenant keeps the broken
+-- rule. Hence this backfill.
+--
+-- Scoped deliberately narrowly: it matches only rules that still carry BOTH the
+-- shipped name and the exact shipped severity array, so a tenant who edited
+-- their routing — including one who removed 'medium' or 'low' on purpose — is
+-- never overwritten. Re-appliable: after the first run no row matches the WHERE
+-- clause, so subsequent applies update nothing.
+UPDATE public.tenant_notification_rules
+   SET severity_filter = ARRAY['medium','low','info']::varchar[]
+ WHERE rule_name = 'Default activity feed'
+   AND severity_filter = ARRAY['medium','low']::varchar[];
 
 
 -- ============================================================================

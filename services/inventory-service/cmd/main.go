@@ -283,7 +283,23 @@ func main() {
 		// tenant_permissions today; mapped to assets.{create,update,delete}
 		// since integrations are an asset-acquisition mechanism. Revisit
 		// if a dedicated integrations permission family is added.
-		api.GET("/inventory-service/integrations", integrationsHandler.List)
+		//
+		// READ AND WRITE USE DIFFERENT PERMISSION FAMILIES ON PURPOSE — do not
+		// "tidy" them into one. The read is gated on settings.read because the
+		// user-facing surface is Settings → Integrations. The writes stay on
+		// assets.{create,update,delete} because security_admin holds assets.*
+		// but NOT settings.update: moving the writes to settings.* would
+		// silently strip that role's ability to configure integrations. Owner
+		// decision; the asymmetry is the intended state, not drift.
+		//
+		// The LIST read is gated on settings.read, not assets.read: the UI
+		// surface is Settings → Integrations (frontend-v2 gates that nav item on
+		// TENANT_PERMISSIONS.settings.read), and the row carries third-party
+		// credential configuration rather than inventory. Ungated, any viewer,
+		// billing_admin or read-only PAT could enumerate a tenant's SIEM/CMDB/ITSM
+		// connections. Secret values in auth_config are additionally redacted in
+		// the list response — see redactIntegrationAuthConfig.
+		api.GET("/inventory-service/integrations", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), integrationsHandler.List)
 		api.POST("/inventory-service/integrations", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsCreate), integrationsHandler.Create)
 		api.PUT("/inventory-service/integrations/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), integrationsHandler.Update)
 		api.DELETE("/inventory-service/integrations/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsDelete), integrationsHandler.Delete)
@@ -337,7 +353,7 @@ func main() {
 		api.POST("/crypto/:id/attach-key", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), cryptoAssetsHandler.AttachKey)
 		api.POST("/libraries", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsCreate), cryptoAssetsHandler.CreateLibrary)
 		// Direct integrations
-		api.GET("/integrations", integrationsHandler.List)
+		api.GET("/integrations", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), integrationsHandler.List)
 		api.POST("/integrations", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsCreate), integrationsHandler.Create)
 		api.PUT("/integrations/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), integrationsHandler.Update)
 		api.DELETE("/integrations/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsDelete), integrationsHandler.Delete)
@@ -503,7 +519,7 @@ func main() {
 		apiv2.POST("/inventory-service/libraries", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsCreate), cryptoAssetsHandler.CreateLibrary)
 
 		// Tenant integrations — see note above the v1 block.
-		apiv2.GET("/inventory-service/integrations", integrationsHandler.List)
+		apiv2.GET("/inventory-service/integrations", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), integrationsHandler.List)
 		apiv2.POST("/inventory-service/integrations", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsCreate), integrationsHandler.Create)
 		apiv2.PUT("/inventory-service/integrations/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), integrationsHandler.Update)
 		apiv2.DELETE("/inventory-service/integrations/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsDelete), integrationsHandler.Delete)
