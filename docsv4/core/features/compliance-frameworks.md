@@ -66,10 +66,11 @@ Tenants browse published frameworks and **activate** the ones relevant to them. 
 
 The platform frameworks you can activate today:
 - **Best Practices** (free, always active) — core TLS, certificate, cipher, and key hygiene.
-- **SOC 2**, **PCI-DSS**, **ISO 27001**, **NIST CSF** — industry frameworks mapped to cryptographic controls.
-- **IEC 62351-3** — OT / industrial-protocol crypto profile.
 - **Certificate Hygiene** and **Certificate Expiry** (Not-Expired / 30-day / 90-day) — focused certificate posture.
 - **Post-Quantum Readiness** — quantum exposure across certificates *and* crypto-configurations (see below).
+
+Those six ship with every edition, Core included.
+
 
 > **Note on copying:** earlier versions let tenants *copy* a published framework. That workflow has been removed. To diverge from a platform framework, author a **Custom Policy** (below) instead.
 
@@ -91,24 +92,20 @@ It measures both your **certificates** and your **crypto-configurations**, becau
 
 **How to act on it:** the by-control lens groups your quantum-vulnerable crypto by control; from there (or from **Remediation**) you can open a **PQC migration** plan and track the work like any other remediation.
 
+### Re-evaluate on demand
 
-### Manage Framework Controls
+Compliance results are **materialized**: the engine recomputes them when your inventory changes, when a framework is published or activated, and when someone asks for a re-evaluation. It does *not* recompute on a schedule, so occasionally a score can lag what you expect — most often right after a platform upgrade that changed how something is evaluated.
 
-Add, update, and delete controls in tenant frameworks:
+**Where:** Risk & Compliance → **Posture** (Overview) — the **Re-evaluate now** button beside the overall compliance score.
 
-**API:**
-- `POST /api/v1/compliance-engine/frameworks/tenant/:id/controls` - Add control
-- `PUT /api/v1/compliance-engine/frameworks/tenant/:id/controls/:controlId` - Update control
-- `DELETE /api/v1/compliance-engine/frameworks/tenant/:id/controls/:controlId` - Delete control
+**Who:** users with the **Manage compliance** permission (`compliance.manage`) — Tenant Admin and Security Admin. Everyone else doesn't see the button.
 
-### Manage Control Measurements
+**What happens:** the whole of your inventory is re-checked against every framework you have activated. The run is **asynchronous** — the button confirms it was queued, and findings and scores update in the background over the next few minutes. Nothing is deleted or reset; results converge on the same answer if you run it twice.
 
-Define how controls are measured:
+**How often:** at most **once an hour per organization**, no matter who clicks. During the cooldown the button is disabled and shows when it becomes available again, alongside when the last re-evaluation ran.
 
-**API:**
-- `POST /api/v1/compliance-engine/frameworks/tenant/controls/:id/measurements` - Add measurement
-- `PUT /api/v1/compliance-engine/frameworks/tenant/controls/:id/measurements/:measurementId` - Update measurement
-- `DELETE /api/v1/compliance-engine/frameworks/tenant/controls/:id/measurements/:measurementId` - Delete measurement
+You rarely need this. Activating a framework, adding assets, and discovering certificates all trigger evaluation on their own.
+
 
 **Measurement Types:**
 

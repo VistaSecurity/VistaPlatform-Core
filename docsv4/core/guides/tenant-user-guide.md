@@ -64,26 +64,10 @@ Sign in with your email address and password:
 
 #### SSO Authentication
 
-Sign in with your organization's Single Sign-On provider:
+> Single Sign-On is an Enterprise capability. If your organization runs Core,
+> email and password is the only sign-in method and the rest of this subsection
+> does not apply.
 
-1. Your login page will display available SSO providers (e.g., "Sign in with Google", "Sign in with Microsoft")
-2. Click the SSO provider button
-3. You'll be redirected to your organization's identity provider
-4. Sign in with your corporate credentials
-5. You'll be redirected back to Vista Platform automatically
-
-**First-Time SSO Users**: If your account doesn't exist yet and your tenant has auto-provisioning enabled, your account will be created automatically on your first SSO login.
-
-#### Authentication Policy Types
-
-Your tenant administrator sets an authentication policy that determines which authentication methods are available:
-
-- **Password Only**: You can only sign in with email and password. SSO is not available.
-- **Prefer SSO**: SSO providers are shown first, but you can still use password authentication as a fallback.
-- **Enforce SSO**: Regular users must use SSO. Only administrators can use password authentication for emergency access.
-- **SSO Only**: All users, including administrators, must use SSO. Password authentication is disabled.
-
-**Linked Accounts**: If you've linked your password account to an SSO provider, you can use either method to sign in (unless your tenant enforces SSO-only authentication).
 
 ### Onboarding
 
@@ -1067,7 +1051,7 @@ View compliance frameworks:
 1. Navigate to **Compliance** → **Frameworks**
 2. View available frameworks:
    - **Published Frameworks**: Platform-provided frameworks
-   - **Custom Frameworks**: Tenant-specific frameworks
+   - **Custom Frameworks**: Tenant-specific frameworks you authored — an Enterprise capability, absent on Core
 3. Select framework to view details
 
 ### Compliance Status
@@ -1328,19 +1312,14 @@ The Compliance Workspace provides an auditor-focused view of your compliance pos
 - **Global Overrides**: Apply to all assessments (default)
 - **Assessment-Specific**: Apply only to the current saved assessment
 
-#### Exporting Reports
+#### Exporting
 
-**Quick Export:**
-- Click "Export PDF", "Export JSON", or "Export CSV" in the header
-- The export downloads the current view
-
-> The standalone Reports surface has been retired. For convenience exports of what's on screen, use the page-local **Export** button (e.g. on the Inventory lenses). For audit-grade output with provenance and a content hash, generate a **CBOM Artifact** — see [CBOM & Exports](#cbom--exports).
-
-**Custom Report Builder:**
-1. Click "Build Custom Report"
-2. Configure report parameters
-3. Select data sources and filters
-4. Generate comprehensive compliance report
+> The standalone Reports surface — templated reports, the custom report builder,
+> and per-page PDF export — has been retired. There is no "Export PDF" or "Build
+> Custom Report" button. For convenience exports of what's on screen, use the
+> page-local **Export** button, which produces CSV (e.g. on the Inventory
+> lenses). For audit-grade output with provenance and a content hash, generate a
+> **CBOM Artifact** — see [CBOM & Exports](#cbom--exports).
 
 **Controls Table:**
 - **Checkbox Selection**: Select controls for bulk operations
@@ -1608,52 +1587,19 @@ The **Sensor Configuration** page (under **Organization Settings** → **Infrast
 
 ### Billing & Subscription
 
-Manage your subscription, view invoices, track usage, and apply discount coupons.
+Track usage against your plan limits.
 
-#### View Subscription Details
+> **Self-service billing is an Enterprise capability.** A Core deployment has no
+> subscription, no invoices and no payment provider, so it mounts no billing
+> screens. **Usage Tracking** and **Usage Limits** below apply to every edition;
+> the subscription, payment, invoice and coupon subsections do not.
 
-1. Navigate to **Settings** → **Billing**
-2. View current subscription information:
-   - **Plan**: Current subscription tier (Trial, Professional, Enterprise)
-   - **Status**: Active, Trial, Suspended, Cancelled
-   - **Billing Cycle**: Monthly billing date
-   - **Next Charge**: Amount and date of next payment
-
-#### Payment Method
-
-Update your payment method:
-
-1. Navigate to **Settings** → **Billing** → **Payment Method**
-2. Click **Update Payment Method**
-3. Enter new card details (processed securely via Stripe)
-4. Click **Save**
-
-**Note:** Card details are never stored on Vista Platform servers. All payment processing is PCI-DSS compliant.
-
-#### Invoices
-
-Access and download your invoices:
-
-1. Navigate to **Settings** → **Billing** → **Invoices**
-2. View all invoices with details:
-   - Invoice number
-   - Billing period
-   - Amount charged
-   - Payment status
-   - Due date
-3. Click **Download PDF** to download any invoice
-4. Click **Email Invoice** to send to your billing contact
-
-Invoices include:
-- Subscription fees
-- Applied discounts
-- Detailed line items
 
 #### Usage Tracking
 
 Monitor your resource usage against plan limits:
 
-1. Navigate to **Settings** → **Billing** → **Usage**
+1. Navigate to **Settings** → **Usage & Limits**
 2. View current month's usage:
    - **API Requests**: Current vs. plan limit
    - **Storage**: Data stored vs. plan limit
@@ -1672,98 +1618,6 @@ platform prevents adding more rather than billing you for the excess.
 **Tip:** If you consistently approach your plan limits, upgrade your plan
 or contact sales about a custom limit (Enterprise plans are tuned per
 contract).
-
-#### Discount Coupons
-
-Apply promotional or discount codes to your subscription:
-
-1. Navigate to **Settings** → **Billing** → **Coupons**
-2. Click **Apply Coupon**
-3. Enter coupon code (e.g., WELCOME20)
-4. Click **Apply**
-
-View active coupons:
-- Discount amount or percentage
-- Duration (one-time, repeating, or forever)
-- Expiration date
-- Remaining discount period
-
-**Note:** Only one coupon can be active per subscription. Coupons apply to subscription fees only, not taxes.
-
-#### Plan Changes
-
-**Upgrade Your Plan:**
-
-1. Navigate to **Settings** → **Billing** → **Plan**
-2. Click **Upgrade Plan**
-3. Select desired tier (Professional or Enterprise)
-4. Review prorated charges
-5. Click **Confirm Upgrade**
-
-When upgrading mid-cycle, you're credited for unused time on your current plan and charged a prorated amount for the new plan.
-
-**Moving to a Lower Plan:**
-
-Paid subscriptions are 12-month agreements, so moving to a lower-priced tier
-isn't self-service — contact support and your account team can apply it for
-you. The change takes effect at your next invoice (annual prepayments aren't
-automatically refunded). Make sure your usage fits within the new plan's
-limits before requesting a downgrade.
-
-#### Trial Period
-
-If you're on a free trial:
-- View trial end date
-- See days remaining
-- Upgrade to paid plan anytime
-
-You'll receive email notifications:
-- 7 days before trial ends
-- 1 day before trial ends
-- When trial expires
-
-After trial expiration, your account is downgraded to the free tier or suspended until you upgrade.
-
-#### Cancel Subscription
-
-To cancel your subscription:
-
-1. Navigate to **Settings** → **Billing** → **Plan**
-2. Click **Cancel Subscription**
-3. Select reason for cancellation (optional)
-4. Click **Confirm Cancellation**
-
-**Important:**
-- Your subscription is a 12-month agreement. On monthly billing, billing and
-  service continue through the end of the agreement year (the confirmation
-  shows the exact end date); on annual prepay, the plan ends at the close of
-  the paid year and does not renew
-- You retain full access until the end date
-- No partial refunds for unused time
-- Data is retained for 30 days after the subscription ends
-- Easy to reactivate any time before the end date
-
-**Before cancelling:** Export your data from **Settings** → **Data Management** → **Export All Data**.
-
-#### Billing Contact
-
-Update billing contact information:
-
-1. Navigate to **Settings** → **Billing** → **Contact Information**
-2. Update:
-   - Billing email address
-   - Company name
-   - Billing address
-   - Tax ID (if applicable)
-3. Click **Save**
-
-This information appears on all invoices.
-
-#### Billing Support
-
-For billing questions or issues:
-- Email: your platform operator's billing contact
-- In-app: Click **Help** → **Contact Billing Support**
 
 
 ---
@@ -1818,46 +1672,9 @@ Enable MFA for additional security:
 
 ### SSO Account Linking
 
-> **Availability:** Viewing and unlinking already-connected SSO providers (under **My Profile → Connected Accounts**) is available today. *Linking a new* provider from this page is being finalized; until it ships, the page shows a notice in place of the link button. The steps below describe the linking flow once enabled.
+> **Requires SSO, an Enterprise capability.** On a Core deployment there are no
+> SSO providers to link and **Connected Accounts** has nothing to show.
 
-Link your account to SSO providers for seamless authentication:
-
-1. Navigate to **Profile** → **Security**
-2. Locate the **SSO Accounts** section
-3. Click **Link SSO Account**
-4. Select an available SSO provider from the list
-5. You'll be redirected to the identity provider
-6. Complete authentication with your corporate credentials
-7. You'll be redirected back to Vista Platform
-8. Account is linked successfully
-
-Once linked, you can sign in using either your password or your SSO provider (depending on your tenant's authentication policy).
-
-#### Managing Linked Accounts
-
-- **View Linked Accounts**: See all SSO providers linked to your account in the Security settings
-- **Unlink Account**: Click **Unlink** next to an SSO provider to remove the connection
-- **Multiple Providers**: You can link multiple SSO providers to the same account
-
-**Important Restrictions:**
-- You must maintain at least one authentication method (you cannot unlink your only SSO account if password auth is disabled)
-- If your tenant uses **Enforce SSO** or **SSO Only** authentication policy, you cannot unlink SSO accounts
-- Some tenants may limit which SSO providers are available based on organizational policies
-
-#### Troubleshooting SSO Linking
-
-**"No SSO Providers Available":**
-- Contact your tenant administrator to configure SSO providers
-- Verify your tenant's authentication policy allows SSO
-
-**"Email Address Already in Use":**
-- The email address from your SSO provider is already associated with another account
-- Contact your tenant administrator for assistance
-
-**"SSO Authentication Failed":**
-- Verify you're using the correct corporate credentials
-- Check with your IT department that your account has access to the application
-- Try clearing your browser cookies and trying again
 
 ---
 
@@ -2189,132 +2006,23 @@ described in the note above.
 
 ## SIEM Integration
 
-### Overview
+> **Enterprise capability.** In Core the `/siem/*` routes are never mounted and
+> audit-event ingestion skips the SIEM tee, so there is no SIEM screen. Core logs
+> every audit event and serves every audit query and export — what Enterprise
+> adds is the outbound forwarding.
 
-Forward audit events to your Security Information and Event Management (SIEM) system for centralized monitoring and analysis.
-
-### Accessing SIEM Integration
-
-Navigate to **Organization Settings → Integrations → SIEM Integration** to configure integrations.
-
-### Supported SIEM Systems
-
-**Splunk**
-- HTTP Event Collector (HEC)
-- Real-time event forwarding
-- Configurable format
-
-**Datadog**
-- Log Management integration
-- Automatic tagging
-- Metric generation
-
-**Elasticsearch / OpenSearch**
-- Direct indexing
-- Custom index patterns
-- Bulk operations
-
-**Generic Webhook**
-- Any HTTP endpoint
-- Custom headers
-- Flexible authentication
-
-### Configuring SIEM Integration
-
-1. Click **Add Integration**
-2. Select your SIEM type
-3. Configure connection details:
-   
-   **Splunk**
-   - HEC URL
-   - Auth Token
-   - Index name (optional)
-   
-   **Datadog**
-   - API Key
-   - Site (US/EU)
-   
-   **Elasticsearch**
-   - Cluster URL
-   - Index pattern
-   - Authentication (basic/API key)
-   
-   **Generic Webhook**
-   - URL
-   - Headers
-   - Authentication method
-
-4. Configure event filters (optional):
-   - Event categories to forward
-   - Minimum severity level
-   - Compliance tags to include
-5. Click **Test Connection** to verify
-6. Click **Create**
-
-### Event Filters
-
-Control which events are forwarded:
-
-**Event Categories**
-- Security events only
-- Compliance-related events
-- All events
-
-**Severities**
-- Critical only
-- High and above
-- All severities
-
-**Compliance Tags**
-- soc2
-- iso27001
-- gdpr
-- hipaa
-- pci_dss
-
-### Monitoring Health
-
-The SIEM Integration page shows health status for each integration:
-
-**Health Indicators**
-- ✅ **Healthy**: Events flowing normally
-- ⚠️ **Degraded**: Some failures occurring
-- ❌ **Unhealthy**: Multiple consecutive failures
-
-**Metrics**
-- Events sent today
-- Recent failures
-- Last successful event
-- Consecutive failures count
-
-### Testing Integration
-
-Always test after creating or modifying:
-
-1. Click **Test** button on integration card
-2. System sends a test event
-3. Check your SIEM for the test event
-4. Verify formatting and fields
-
-### Troubleshooting
-
-**Connection Failures**
-- Verify URL and authentication
-- Check network connectivity
-- Review SIEM system logs
-
-**Missing Events**
-- Check event filters configuration
-- Verify SIEM system is accepting events
-- Review health metrics
 
 ---
 
 ## Scheduled Compliance Reports
 
-Scheduled compliance reports are generated automatically by the audit-service. Navigate to **Organization Settings → Notifications & Alerts → Scheduled Reports** to configure automated framework-level compliance reports that are generated on a schedule and emailed to designated recipients.
+> **Enterprise capability.** In Core the scheduler never starts and the
+> `/scheduled-reports` endpoints are not mounted, so there is no Scheduled
+> Reports screen. On-demand compliance reports *are* Core — what Enterprise adds
+> is running them on a schedule and emailing the result.
 
-> For ad-hoc audit evidence with cryptographic provenance (content hash, optional signing), use [CBOM Artifacts](#cbom--exports) instead.
+
+> For ad-hoc audit evidence with cryptographic provenance (content hash), use [CBOM Artifacts](#cbom--exports) instead.
 
 ---
 

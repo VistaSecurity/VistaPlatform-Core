@@ -1217,6 +1217,82 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/inventory-service/admin/`) || Path(`/api/v1/inventory-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-inventory-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/inventory-service/admin/`) || Path(`/api/v1/inventory-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/inventory-service/admin/`) || Path(`/api/v2/inventory-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-inventory-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/inventory-service/admin/`) || Path(`/api/v2/inventory-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/compliance-engine/admin/`) || Path(`/api/v1/compliance-engine/admin`))
       kind: Rule
       priority: 900

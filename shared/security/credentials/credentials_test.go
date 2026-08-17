@@ -58,7 +58,7 @@ func TestRoundTrip(t *testing.T) {
 		"webhook_url": "https://hooks.slack.com/secret",
 		"channel":     "#alerts",
 		"headers":     map[string]interface{}{"Authorization": "Bearer abc", "X-Trace": "on"},
-		"auth":        map[string]interface{}{"type": "basic", "username": "svc", "password": "pw"},
+		"auth":        map[string]interface{}{"type": "basic", "username": "svc-user-9f3a2e", "password": "pw-4b71c0-secret"},
 		"enabled":     true,
 	}
 
@@ -67,7 +67,17 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatalf("EncryptMap: %v", err)
 	}
 	// Every declared credential must be tagged.
-	for _, probe := range []string{"Bearer abc", "svc", "pw", "https://hooks.slack.com/secret"} {
+	// Probe values are long and distinctive ON PURPOSE. This assertion is a
+	// substring search over the marshalled JSON, and the ciphertext is base64 —
+	// so a 2- or 3-character probe like "pw" or "svc" collides with the encoding
+	// by chance. Measured at ~5.5% of runs (11/200), it failed claiming
+	// `credential "pw" stored in the clear` while the value was plainly
+	// `"password":"enc:v1:AjX+c/szRIeD..."`. A false alarm in a leak test is
+	// worse than no test: it trains the reader to dismiss the one failure that
+	// is real. The property asserted is unchanged — no plaintext credential may
+	// appear in the marshalled output — only the probes are now distinctive
+	// enough for a chance match to be negligible.
+	for _, probe := range []string{"Bearer abc", "svc-user-9f3a2e", "pw-4b71c0-secret", "https://hooks.slack.com/secret"} {
 		b, _ := json.Marshal(enc)
 		if strings.Contains(string(b), probe) {
 			t.Fatalf("credential %q stored in the clear: %s", probe, b)
@@ -92,7 +102,7 @@ func TestRoundTrip(t *testing.T) {
 	if dec["headers"].(map[string]interface{})["Authorization"] != "Bearer abc" {
 		t.Fatalf("round trip lost header: %v", dec["headers"])
 	}
-	if dec["auth"].(map[string]interface{})["password"] != "pw" {
+	if dec["auth"].(map[string]interface{})["password"] != "pw-4b71c0-secret" {
 		t.Fatalf("round trip lost auth.password: %v", dec["auth"])
 	}
 	if dec["enabled"] != true {

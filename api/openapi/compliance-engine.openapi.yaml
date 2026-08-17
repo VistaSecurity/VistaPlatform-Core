@@ -2284,6 +2284,77 @@ paths:
       x-quirks:
         - "Comment-add 400 for a missing/empty `content` field returns `error: \"Content is required\"` — distinct wording from the generic create-ticket 400."
 
+  # ---- Tenant-triggered re-evaluation (Risk & Compliance → Posture) ----
+  /reevaluation:
+    get:
+      operationId: getReevaluationState
+      tags: [reevaluation]
+      summary: Cooldown state for tenant-triggered re-evaluation
+      description: >
+        When this tenant last triggered a manual re-evaluation, whether another is
+        allowed right now, and when the next one becomes available. Read-only, and
+        scoped to the caller's own tenant (there is no tenant parameter). The UI
+        calls this so it can DISABLE the control during the cooldown instead of
+        letting the user click and answering 429.
+      responses:
+        "200":
+          description: The tenant's re-evaluation cooldown state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReevaluationState"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /reevaluate:
+    post:
+      operationId: reevaluateTenant
+      tags: [reevaluation]
+      summary: Re-run compliance evaluation against the tenant's current inventory
+      description: >
+        Enqueues the same asynchronous whole-tenant reconcile the platform-admin
+        route enqueues, for the CALLER'S OWN tenant (taken from the session, never
+        from a parameter). Requires `compliance.manage`. Rate-limited to one
+        accepted run per tenant per hour, persisted in the database so the limit
+        holds across replicas and restarts; the platform-admin route is
+        deliberately exempt. Returns 202 with the new cooldown state on acceptance
+        and 429 with the same state when the cooldown blocks it.
+      responses:
+        "202":
+          description: Re-evaluation queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReevaluationAccepted"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "429":
+          description: >
+            The per-tenant cooldown has not elapsed. Nothing was enqueued and the
+            cooldown was NOT extended. `Retry-After` carries the same number of
+            seconds as `retry_after_seconds`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReevaluationBlocked"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+        "503":
+          description: >
+            The reconcile transport (NATS) is not configured, so no re-evaluation
+            could run. The cooldown is NOT consumed in this case.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+      x-quirks:
+        - "A blocked request is 429, not a 200 with `allowed: false` — it did not do what was asked, and a 200 would be indistinguishable from success in client logs and retry policies."
+        - "A blocked request does not extend the cooldown; `next_allowed_at` still counts from the last ACCEPTED request."
+
   /alerts:
     get:
       operationId: listAlerts
@@ -4575,6 +4646,54 @@ components:
         default_framework:
           $ref: "#/components/schemas/DefaultFrameworkDescriptor"
 
+    ReevaluationState:
+      type: object
+      # NOT additionalProperties:false — ReevaluationAccepted/Blocked compose this
+      # via allOf, and under allOf a `false` here would reject their own `message`
+      # / `error` fields (each subschema is evaluated independently).
+      description: >
+        The tenant's manual re-evaluation cooldown. Returned by GET /reevaluation and
+        embedded in BOTH POST outcomes, so a client never has to make a second call
+        to learn where it stands.
+      required: [allowed, cooldown_seconds, last_requested_at, next_allowed_at, retry_after_seconds]
+      properties:
+        allowed:
+          type: boolean
+          description: Whether a re-evaluation may be triggered right now.
+        cooldown_seconds:
+          type: integer
+          description: The configured per-tenant window between accepted runs (3600).
+        last_requested_at:
+          type: [string, "null"]
+          format: date-time
+          description: >
+            When this tenant last had a re-evaluation ACCEPTED. Null means never —
+            which the UI renders as "Not re-evaluated yet", not as a zero time.
+            Platform-admin re-evaluations are exempt from the cooldown and do not
+            appear here.
+        next_allowed_at:
+          type: [string, "null"]
+          format: date-time
+          description: Null exactly when `allowed` is true.
+        retry_after_seconds:
+          type: integer
+          description: Seconds until the next run is allowed, rounded up; 0 when allowed.
+    ReevaluationAccepted:
+      allOf:
+        - $ref: "#/components/schemas/ReevaluationState"
+        - type: object
+          required: [message]
+          properties:
+            message:
+              type: string
+    ReevaluationBlocked:
+      allOf:
+        - $ref: "#/components/schemas/ReevaluationState"
+        - type: object
+          required: [error]
+          properties:
+            error:
+              type: string
     MessageResponse:
       type: object
       additionalProperties: false

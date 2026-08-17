@@ -121,6 +121,7 @@
       "/monitoring-service/trends/",
       "/monitoring-service/gateway/",
       "/monitoring-service/admin/",
+      "/inventory-service/admin/",
       "/compliance-engine/admin/",
       "/device-interrogation-service/admin/",
       "/notification-service/platform/",

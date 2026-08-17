@@ -56,7 +56,11 @@ exists to stop that recurring.
 ## Ground rules that will fail CI if you miss them
 
 - **Go 1.26 only.** Not 1.27+. `go.mod`, `go.work`, and Dockerfiles all pin it.
-  Set `GOTOOLCHAIN=local` before any workspace command.
+  The `Makefile` pins `GOTOOLCHAIN` to the **exact** version `go.work` declares,
+  so `make` targets are already correct. Running `go` directly outside `make`,
+  pin it yourself: `GOTOOLCHAIN=go1.26.6 go work sync` (match `go.work`). Not
+  `GOTOOLCHAIN=local`, which cannot fetch the pinned patch release, and never
+  `auto`, which will silently download 1.27+.
 - **`standards/service-registry.yaml` is the source of truth** for services,
   ports, and routes. `docker-compose.yml` and the Traefik configs are generated
   from it — run `make generate` rather than hand-editing them.
@@ -73,17 +77,19 @@ exists to stop that recurring.
 ```bash
 make test-unit          # Go tests
 make lint               # golangci-lint + eslint
-make audit              # registry/compose/chart consistency + edition boundary
+make standards-check    # regenerate from the registry, then verify nothing drifted
 make api-contract       # spec ↔ client ↔ handler conformance
 ```
 
-`make audit` is the one that surprises people. It enforces invariants that are
-invisible in a diff — including that Core never references Enterprise code, and
-that the free and paid compliance frameworks stay on their own sides of the
-line.
+`make standards-check` is the one that surprises people. It regenerates
+everything derived from `standards/service-registry.yaml` and then fails if the
+result differs from what is committed, so a hand-edit to a generated file shows
+up as a failure rather than as working code.
 
-Install the git hooks once per clone with `make install-git-hooks`; they run
-the fast subset before every commit.
+Some targets you may see referenced elsewhere (`make audit`, the edition-boundary
+and export gates, the git hooks) run against the internal working tree and its
+tooling, which is not part of this repository — so they are not present here.
+`make help` lists what this tree actually has.
 
 ## Style
 

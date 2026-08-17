@@ -77,7 +77,7 @@ if [[ "$BUILD_SENSOR" == true ]]; then
   GOTOOLCHAIN="$GO_PIN" CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
     go build -C sensor $LDFLAGS \
     -o "$ROOT/bin/crypto-sensor-windows-amd64.exe" \
-    cmd/main.go
+    ./cmd
   cp bin/crypto-sensor-windows-amd64.exe artifacts/sensor/windows/amd64/crypto-sensor.exe
   ok "sensor → artifacts/sensor/windows/amd64/crypto-sensor.exe"
 fi
@@ -88,7 +88,7 @@ if [[ "$BUILD_AGENT" == true ]]; then
   GOTOOLCHAIN="$GO_PIN" CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
     go build -C device-agent $LDFLAGS \
     -o "$ROOT/bin/device-agent-windows-amd64.exe" \
-    ./cmd/main.go
+    ./cmd
   cp bin/device-agent-windows-amd64.exe artifacts/device-agent/windows/amd64/device-agent.exe
   ok "device-agent → artifacts/device-agent/windows/amd64/device-agent.exe"
 fi

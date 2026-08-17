@@ -187,10 +187,9 @@ Events are automatically tagged with relevant compliance frameworks to simplify 
 5. Run query
 
 **Generating Compliance Reports**
-1. Use scheduled reports feature
-2. Select framework
-3. All tagged events included automatically
-4. Generate on-demand or scheduled
+1. Select framework
+2. All tagged events included automatically
+3. Generate on demand (running them on a schedule is an Enterprise capability)
 
 ---
 
@@ -390,10 +389,8 @@ Build complex queries with multiple criteria:
    - Verify controls functioning
    - Prepare explanations for auditors
 
-5. **Automated Reporting**
-   - Set up scheduled report for SOC2
-   - Configure monthly generation
-   - Deliver to compliance team
+5. **Reporting**
+   - Generate the framework report and deliver it to the compliance team
    - Maintain historical reports
 
 ### GDPR Compliance Reporting
@@ -469,7 +466,6 @@ Build complex queries with multiple criteria:
 **Monthly**
 - Generate compliance reports
 - Review retention policies
-- Audit SIEM integration health
 - Update notification rules
 
 ### Alert Configuration
@@ -527,7 +523,6 @@ Build complex queries with multiple criteria:
 - Version control policies
 
 **Automation**
-- Use scheduled reports
 - Set up automatic exports
 - Configure retention policies
 - Automate evidence collection

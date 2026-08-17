@@ -54,6 +54,12 @@ System scopes (All, Production, Non-Dev/Test) cannot be deleted because an artif
 
 ## What's Enterprise, not Core
 
+Core generates the artifact and exports CycloneDX. The evidence layer on top —
+**comparison** (diffing two artifacts with categorized changes), the
+**compliance-attestation layer**, **signing and verification**, and **SPDX / PDF
+downloads** — is Enterprise. Those endpoints answer **402 Payment Required** on a
+Core install rather than failing obscurely.
+
 
 ## Still on the roadmap
 

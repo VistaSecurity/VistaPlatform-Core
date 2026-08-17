@@ -1,5 +1,14 @@
 # CMDB Integrations
 
+> **Enterprise capability — not included in Core.** Both directions of CMDB
+> integration (push *and* pull) ship in the Enterprise edition. A Core build does
+> not mount these endpoints at all, so there is no CMDB screen to configure and
+> the API answers **402 Payment Required**. Don't provision a CMDB service
+> account for this until you know which edition you are running. Core keeps the
+> complete internal CMDB — assets, crypto configurations, certificates, keys and
+> every inventory lens; what Enterprise adds is synchronizing it with a *foreign*
+> CMDB/ITSM system. See [Editions](../editions.md).
+
 Sync your cryptographic inventory with external Configuration Management Database (CMDB) platforms for unified IT asset management. The CMDB integration feature lets organizations both **push** infrastructure assets, certificates, cryptographic keys, and crypto configurations discovered by the platform into their existing CMDB systems, and **pull** server inventory from those systems into the platform.
 
 ## Overview

@@ -128,6 +128,8 @@ type stubAuthServiceStore struct {
 	registerResult   *models.User
 	registerErr      error
 	registerCalls    int
+	loginResult      *models.AuthResponse
+	loginErr         error
 	resetPasswordErr error
 	verifyEmailErr   error
 	emailUserResult  *models.User
@@ -155,7 +157,7 @@ func (s *stubAuthServiceStore) Register(_ *models.RegisterRequest) (*models.User
 	return s.registerResult, s.registerErr
 }
 func (s *stubAuthServiceStore) Login(_ *models.LoginRequest, _, _ string) (*models.AuthResponse, error) {
-	return nil, nil
+	return s.loginResult, s.loginErr
 }
 func (s *stubAuthServiceStore) Logout(_ uuid.UUID) error { return nil }
 func (s *stubAuthServiceStore) RefreshToken(_, _, _ string) (*models.AuthResponse, error) {

@@ -212,127 +212,32 @@ Configure identity-provider connections, the org authentication policy, and
 SSO-group → role mapping under **Organization Settings → People & Access →
 Security & SSO**.
 
-### Authentication Policy
+> **Federated sign-in is an Enterprise capability.** In Core the **Security &
+> SSO** page shows an upgrade card instead of the provider forms, and the
+> `/tenant/sso` endpoints are not mounted. Local user accounts, invitations and
+> roles are included in every edition — see [Members & Access](#members--access-roles).
+> The rest of this section applies to Enterprise.
 
-Vista Platform supports four authentication policies. Set yours at the top
-of the **Security & SSO** page; it takes effect immediately.
-
-| Policy | Behavior | Best for |
-|--------|----------|----------|
-| **Password Only** | Email/password only; SSO disabled. | Small teams without an enterprise IdP. |
-| **Prefer SSO** *(recommended)* | SSO shown first; password still available as fallback. | Organizations transitioning to SSO. |
-| **Enforce SSO** | Regular users must use SSO; admins keep password access for emergencies. | SSO-required security policies that still need a break-glass path. |
-| **SSO Only** | Everyone, including admins, must use SSO; passwords disabled entirely. | Strict policies with redundant SSO infrastructure. |
-
-> Before enabling **Enforce SSO** or **SSO Only**, make sure you have at least
-> one enabled, **tested** SSO provider and a backup plan for an IdP outage. The
-> console blocks these policies until an enabled provider exists.
-
-### Adding an OAuth2 / OIDC Provider (Google, Microsoft / Entra ID, Azure AD, Okta)
-
-1. On **Security & SSO**, click **Add OAuth/OIDC**.
-2. Pick a preset provider type — most fields (endpoints, scopes) are pre-filled.
-3. Enter your **Client ID** and **Client Secret** (encrypted before storage).
-   Adjust the authorization/token/user-info URLs and scopes only if your preset
-   doesn't supply them.
-4. Set basic options: **Enabled**, **Set as Default Provider**, and
-   **Auto-provision Users** (auto-create accounts on first SSO login).
-5. *(Optional)* Restrict **Allowed Email Domains** to limit which addresses may
-   sign in via this provider.
-6. Set the **Default Role** for auto-provisioned users (defaults to Viewer).
-7. *(Optional)* Configure **Group-to-Role Mappings** (see below).
-8. Click **Test**, then **Create Provider**.
-
-The form shows the **callback URL** to register in your IdP.
-
-### Adding a SAML Provider
-
-1. Click **Add SAML**.
-2. Enter the **Display Name**, **Entity ID (Issuer)**, **SSO URL**, and your
-   IdP's **X.509 certificate** (used to verify assertions). Add a **Private
-   Key** only if you sign requests.
-3. Configure the same options as OAuth (enabled, default, auto-provision,
-   allowed domains, default role, group mappings).
-4. Provide the **Entity ID** and **ACS URL** shown in the form to your IdP.
-5. Click **Test**, then **Create Provider**.
-
-### Group-to-Role Mapping
-
-Automatically assign roles from a member's IdP group membership:
-
-1. On SSO login, Vista Platform reads the **groups claim** from the IdP
-   response.
-2. Each group is matched against your configured mappings.
-3. Every match assigns the corresponding Vista Platform role.
-4. If nothing matches, the provider's **default role** is assigned.
-
-| Provider | Groups claim | Setup required |
-|----------|--------------|----------------|
-| **Google Workspace** | `groups` | Admin SDK Directory API + domain-wide delegation. |
-| **Microsoft / Entra ID** | `groups` | Enable the "groups" claim in App Registration → Token Configuration. |
-| **Okta** | `groups` | Add a "groups" claim under Security → API → Claims. |
-| **SAML** | `groups` (or a custom attribute) | Configure the group attribute in your SAML assertion. |
-
-### Managing & Testing Providers
-
-The provider list shows each provider's status (**Enabled/Disabled**,
-**Default**), key details, auto-provision state, mapping count, and domain
-restriction. Each provider offers **Test**, **Edit**, and **Delete**.
-
-Always **Test** before enabling for users: a window opens the full SSO flow;
-confirm you're redirected back and that email/name map correctly. If it fails,
-recheck the Client ID/Secret or SAML certificate, the callback URL registered
-in your IdP, and that scopes include `email` and `profile`.
-
-### Members Linking Their Own SSO Accounts
-
-Individual members link providers under **My Profile → Connected Accounts**.
-A member must always keep at least one authentication method; under **Enforce
-SSO** / **SSO Only** they cannot unlink their SSO account.
 
 ---
 
 ## Billing, Usage & Plan
 
-Billing lives under **Organization Settings → Account → Billing** (requires a
-role with billing access — Tenant Administrator can view; Billing Admin can
-manage). Usage lives alongside it under **Account → Usage & Limits**.
+Usage lives under **Organization Settings → Account → Usage & Limits**, and is
+included in every edition.
 
-### Billing
+> **The self-service billing surface is an Enterprise capability.** A Core
+> deployment has no subscription, no invoices and no payment provider, so there
+> is nothing for a Billing page to show and Core does not mount one. Tier
+> assignment and usage-against-limits still work, so **Usage & Limits** below
+> applies to Core. The Billing subsection does not.
 
-The Billing page covers:
-
-- **Current plan** — tier, price, billing interval, status, and your
-  **12-month agreement** dates (start and auto-renewal).
-- **Next payment** — amount, date, and the card on file (or a cancellation
-  notice with a **Reactivate** option).
-- **Active discount** — any applied coupon and its remaining time.
-- **Plan changes** — switch between **Monthly** and **Annual** (annual prepay
-  is 10× the monthly price — two months free), or **upgrade** to a higher
-  tier (effective immediately; Stripe prorates; the agreement dates don't
-  change). Moving to a lower tier mid-agreement is handled by support, not
-  self-service.
-- **Cancel / reactivate** — cancel any time with an optional reason. On
-  monthly billing, billing and service continue **through the end of the
-  agreement year** (the confirmation shows the exact date); on annual prepay
-  the plan simply ends at the close of the paid year. Reactivate any time
-  before the end date.
-- **Invoices** — number, status, amount, period, date, and **Download PDF**
-  when available.
-- **Payment methods** — cards on file with brand, last4, expiry, and a
-  **Default** badge; update via the secure (Stripe) form.
 
 ### Usage & Limits
 
 **Account → Usage & Limits** shows consumption (sensors, assets, storage, API
-calls) against your plan limits with progress bars, and an **Upgrade Plan**
-link into Billing.
+calls) against your plan limits with progress bars.
 
-### Trial Banner
-
-Organizations on a **free trial** see a banner: blue/Billing-only with more than
-7 days left, amber/global within 7 days, and red once the trial ends. **Upgrade
-now** opens the Billing page.
 
 ---
 
@@ -355,16 +260,14 @@ Click **Save changes** to apply.
 
 ### Branding
 
-**Organization → Branding** white-labels the console:
+**Organization → Branding** styles the console. Every edition can set the
+**primary**, **secondary** and **accent** colors — a single organization styling
+itself.
 
-- **Logo** — upload PNG, JPEG, SVG, or ICO (max 5 MB; ~40×40 recommended). It
-  appears in the header to the right of the user menu. Use **Remove** to clear
-  it.
-- **Favicon** — the icon shown in browser tabs.
-- **Company Name** — shown as a subtitle ("for Acme Corp").
+> **Replacing the product marks is an Enterprise capability.** Uploading your own
+> logo and favicon and setting a display company name are white-label features;
+> in Core those controls are unavailable and the color pickers still work.
 
-> If you see a "storage not configured" error on logo upload, ask your platform
-> administrator to enable storage before tenant branding uploads will work.
 
 Branding applies to everyone in your organization. The platform's own name and
 logo are set by the platform administrator and can't be changed by tenants.
@@ -491,8 +394,9 @@ Connect Vista Platform to third-party systems under **Organization Settings
 ### Setting Up an Integration
 
 1. Go to **Organization Settings → Integrations**.
-2. Choose an integration type (Slack, PagerDuty, Datadog, Splunk, custom
-   webhook, a CMDB platform, etc.).
+2. Choose an integration type — messaging channels (Slack, PagerDuty, custom
+   webhook) and storage are available in every edition. SIEM forwarding
+   (Splunk, Datadog, Elastic) and CMDB/ITSM platforms are Enterprise.
 3. Enter credentials (webhook URL, routing key, API key — as appropriate).
 4. **Test** the connection, then **Save**.
 
@@ -501,25 +405,10 @@ by [Notifications & Alerts](#notifications--alerts).
 
 ### CMDB Integrations
 
-Push your cryptographic inventory to an external CMDB for unified IT asset
-management. Supported platforms: **ServiceNow**, **Device42**, **SolarWinds**,
-and **Oomnitza**.
+> **Enterprise capability.** Core does not mount the CMDB endpoints in either
+> direction, so there is no CMDB integration to add. Core keeps the complete
+> *internal* CMDB — see [Working with Inventory & Certificates](#working-with-inventory--certificates).
 
-1. From **Integrations**, add a CMDB integration.
-2. Select the target platform and enter connection details.
-3. Configure **field mappings** to match your CMDB schema.
-4. Set a **sync schedule** (manual / hourly / daily / weekly).
-5. **Test** before enabling.
-
-Each configured CMDB integration offers **View History** (last 20 sync jobs),
-**Test Connection**, **Trigger Sync**, **Edit**, and **Delete**. Sync history
-shows per-job status, trigger, start time, duration, and item-level
-pushed/reconciled/failed/skipped counts.
-
-The model is **push with reconciliation**: data is pushed from Vista Platform
-to your CMDB, and external IDs/sync status are pulled back for linking — your
-CMDB remains the system of record. Full detail in the
-[CMDB Integrations feature documentation](../features/cmdb-integrations.md).
 
 ---
 
@@ -730,10 +619,8 @@ no template engine, no wait.
 
 ### Security
 
-- Configure SSO for enterprise authentication and **test** every provider
-  before enabling it.
-- Keep a break-glass admin password path unless you run redundant SSO
-  infrastructure.
+- Give each member the least-privileged role that lets them do their job, and
+  review the member list periodically.
 
 ### Asset Lifecycle
 
@@ -741,9 +628,9 @@ no template engine, no wait.
   above the warning threshold.
 - Enable stale-asset notifications and review aging assets periodically.
 
-### Billing
+### Usage
 
-- Watch **Usage & Limits** against your plan and upgrade before you hit a cap.
+- Watch **Usage & Limits** against your plan and act before you hit a cap.
 - Review usage trends monthly.
 
 ### Compliance
@@ -761,25 +648,8 @@ no template engine, no wait.
 
 1. Check the member's status (active / suspended) under **People & Access →
    Members**.
-2. Verify the authentication policy under **Security & SSO** isn't blocking
-   their method.
-3. If using SSO, **Test** the provider and check the member's connected
-   account.
-4. Review **Organization Settings → Audit** for the login attempts.
-
-### SSO Not Working
-
-1. Recheck provider configuration on **Security & SSO** and click **Test**.
-2. Confirm the callback URL is registered in your IdP and the Client
-   ID/Secret or SAML certificate are valid.
-3. For auto-provisioning, confirm it's enabled and that the IdP returns
-   `email` and `profile`.
-
-### Billing Issues
-
-1. Confirm subscription status and the payment method on **Account → Billing**.
-2. Check **Account → Usage & Limits** against your plan.
-3. Contact platform support if the discrepancy persists.
+2. Confirm they completed the invitation and have set a password.
+3. Review **Organization Settings → Audit** for the login attempts.
 
 ### Compliance Looks Wrong
 

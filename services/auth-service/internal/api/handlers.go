@@ -14,6 +14,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/middleware"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/models"
+	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 	audithelpers "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 
@@ -1494,9 +1495,13 @@ func (h *AuthHandlers) SelectTier(c *gin.Context) {
 		return
 	}
 
-	if err := validateSelfServiceTierSelection(c.Request.Context(), h.authService.GetDB(), req.SubscriptionTierID); err != nil {
+	if err := validateTenantTierSelection(c.Request.Context(), h.authService.GetDB(), tenantID, req.SubscriptionTierID); err != nil {
 		if errors.Is(err, errTierNotSelfSelectable) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "subscription tier is not available for self-service selection"})
+			return
+		}
+		if errors.Is(err, errTierNotEntitled) {
+			c.JSON(http.StatusPaymentRequired, gin.H{"error": "subscription tier requires an active subscription"})
 			return
 		}
 		logrus.WithError(err).WithField("tier_id", req.SubscriptionTierID).Error("Failed to validate subscription tier")
@@ -1524,6 +1529,18 @@ func (h *AuthHandlers) SelectTier(c *gin.Context) {
 
 var errTierNotSelfSelectable = errors.New("subscription tier is not self-service selectable")
 
+// errTierNotEntitled means the tier exists and is a legitimate platform tier,
+// but it is a PAID one and the tenant has no active subscription for it. Kept
+// distinct from errTierNotSelfSelectable so the caller can answer 402 (pay for
+// it) rather than 400 (that tier is not a thing you may pick at all).
+var errTierNotEntitled = errors.New("tenant is not entitled to the requested subscription tier")
+
+// validateSelfServiceTierSelection is the SIGNUP-path check. It runs
+// before any tenant exists, so there is nothing to hold an entitlement — only a
+// free trial tier may be chosen. `price_cents = 0` is not redundant with
+// `is_trial`: is_trial is an admin-settable flag on any tier row, so without the
+// price conjunct a paid tier flagged as a trial would be self-selectable, which
+// is the very hole this guards.
 func validateSelfServiceTierSelection(ctx context.Context, db *sql.DB, tierID uuid.UUID) error {
 	if db == nil {
 		return errors.New("database is not configured")
@@ -1538,9 +1555,74 @@ func validateSelfServiceTierSelection(ctx context.Context, db *sql.DB, tierID uu
 		  AND COALESCE(is_custom, false) = false
 		  AND owner_tenant_id IS NULL
 		  AND COALESCE(is_trial, false) = true
+		  AND COALESCE(price_cents, 0) = 0
 	`, tierID).Scan(&selectable)
 	if errors.Is(err, sql.ErrNoRows) {
 		return errTierNotSelfSelectable
+	}
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateTenantTierSelection is the AUTHENTICATED select-tier check.
+// A free trial tier stays selectable (onboarding repair path); any other tier
+// must be backed by an active subscription belonging to THIS tenant. Without
+// this, any caller who got past the RBAC gate could put the tenant on a paid
+// tier for free.
+//
+// The subscription read is RLS-scoped (billing_subscriptions carries a
+// tenant_isolation policy), so it must run inside WithTenantTx — on the plain
+// app-role pool it would return zero rows for everyone and deny entitled
+// tenants.
+func validateTenantTierSelection(ctx context.Context, db *sql.DB, tenantID, tierID uuid.UUID) error {
+	if db == nil {
+		return errors.New("database is not configured")
+	}
+
+	var (
+		name       string
+		priceCents int64
+		isTrial    bool
+	)
+	err := db.QueryRowContext(ctx, `
+		SELECT name, COALESCE(price_cents, 0), COALESCE(is_trial, false)
+		FROM subscription_tiers
+		WHERE id = $1
+		  AND is_active = true
+		  AND COALESCE(is_custom, false) = false
+		  AND owner_tenant_id IS NULL
+	`, tierID).Scan(&name, &priceCents, &isTrial)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errTierNotSelfSelectable
+	}
+	if err != nil {
+		return err
+	}
+	if isTrial && priceCents == 0 {
+		return nil
+	}
+
+	// Paid tier: require an active subscription that resolves to this tier.
+	// plan_key is written by several producers under different conventions
+	// (tier UUID, tier name); match the two that identify a tier locally. A
+	// Stripe price id in plan_key does not match here — deliberately: this
+	// endpoint is not the path onto a paid tier, checkout is, and
+	// failing closed costs a tenant nothing they cannot get from checkout.
+	var entitled int
+	err = shareddatabase.WithTenantTx(ctx, db, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			SELECT 1
+			FROM billing_subscriptions
+			WHERE tenant_id = $1
+			  AND status IN ('active', 'trialing')
+			  AND (plan_key = $2 OR lower(plan_key) = lower($3))
+			LIMIT 1
+		`, tenantID, tierID.String(), name).Scan(&entitled)
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return errTierNotEntitled
 	}
 	if err != nil {
 		return err

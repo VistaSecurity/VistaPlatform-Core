@@ -7,6 +7,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-17
+
+### Added
+
+- **Re-evaluate your compliance posture on demand.** Risk & Compliance → Posture
+  gains a "Re-evaluate now" control. Stored compliance scores are recomputed when
+  an asset or certificate changes, when a framework is activated or published, or
+  when someone asks — and until 0.8.0, "someone" could only be the platform
+  operator. After a remediation you can now force convergence yourself rather
+  than waiting for the next change to trigger it.
+
+  Rate-limited to **once per hour per organization**, regardless of who clicks:
+  a re-evaluation walks every activated framework across your whole inventory,
+  so the cost is real. The button shows when the last run happened and when the
+  next is available, and is disabled until then rather than failing when pressed.
+  Requires the `compliance.manage` permission ( gate model;).
+
+### Security
+
+- **Selecting a subscription tier now requires permission and an entitlement.**
+  The tier-selection endpoint had no permission check and no billing check, so
+  any signed-in member — including a read-only viewer — could move the
+  organization onto a higher tier without paying. It now requires
+  `billing.update`, and a paid tier is refused unless the organization actually
+  holds a subscription for it.
+
+  A second route to the same outcome is closed with it: the signup path accepted
+  any tier flagged as a trial without checking its price, so a **paid** tier
+  flagged as a trial was selectable during registration. Signup itself is
+  unchanged for legitimate use — a brand-new organization with no subscription
+  still completes onboarding onto the free tier.
+
+- **Role assignment cannot exceed the assigner's own permissions.** The RBAC
+  role-assignment API enforced that ceiling, but the older paths that assign a
+  role *by name* — creating a user, updating a user, and inviting one — did not,
+  so an administrator could mint a user or an invitation carrying permissions
+  they do not themselves hold. All of them now enforce the same bound, and a
+  pending invitation is re-checked **at the moment it is accepted**, so an
+  invitation issued before this release (or by someone who has since lost the
+  permission) cannot materialize an elevated role.
+
+  Note for administrators: an invitation whose issuer is unknown — very old
+  rows, or an inviter whose account was deleted — is now refused at acceptance
+  if it carries a role with permissions. Re-issue it.
+
+- **Platform alerts no longer fail to deliver when the message broker is down.**
+  Alert notifications carry a reserved platform identifier that the primary
+  delivery path knows to treat as platform-scoped; the HTTP fallback added in
+  0.7.0 did not, so on that path a platform alert was handled as though it
+  belonged to a tenant, matched no delivery rules, and was rejected by the
+  database.
+
+- **Algorithm-catalogue writes moved off the public host.** Creating or updating
+  an entry in the algorithm reference is a platform-operator action, but it lived
+  on a path the tenant UI also reads, so it could not be separated by host and
+  remained reachable on the public address — gated by permission, but present.
+  Those two operations moved to a dedicated administrative path that the existing
+  host split covers; reading the catalogue is unchanged.
+
+### Fixed
+
+- **`make build-services` failed on the first command.** The build targets
+  compiled a single `main.go` rather than its package, which excludes every
+  sibling file, so building from source stopped with `undefined: edition`. The
+  sensor and Windows agent build scripts had the same defect — the path our own
+  guidance points to for anyone who prefers building the binaries themselves. The
+  target also claimed to build all backend services while building 11 of 16;
+  it now builds all 15 that do not require libpcap, and an automated check keeps
+  it complete.
+
+- **Removed a stale internal endpoint that returned placeholder compliance
+  results.** An unused, unreachable handler returned hardcoded PCI-DSS and
+  NIST-800-53 control outcomes that were never derived from any inventory.
+  Nothing called it and nothing displayed it, but it had no business in a
+  codebase you are invited to read.
+
+### Changed
+
+- **Nightly builds and security scanning.** Secret-detection, dependency and
+  static-analysis findings now publish to the repository's security dashboard
+  with history, instead of only into a build artifact. Two intermittent test
+  failures that made the nightly build unreliable are fixed — one a database
+  lock ordering problem between concurrent test packages, the other a
+  credential-leak check whose search strings were short enough to match
+  encrypted output by chance and raise a false alarm.
+
+- **Documentation now describes Core accurately.** Several pages walked through
+  capabilities that are not in a Core build — identity-provider federation, CMDB
+  synchronization, SIEM forwarding, white-labelling and billing — and the feature
+  summary listed active OT/ICS probing as included. Passive OT/ICS observation
+  (Modbus, DNP3, BACnet-SC) **is** Core; *active* OT probing and the OT inventory
+  lens are Enterprise. The contributor guide's verification commands also
+  referenced targets that are not part of this repository.
+
 ## [0.7.0] - 2026-08-15
 
 ### Added

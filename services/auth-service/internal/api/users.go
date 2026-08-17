@@ -3,13 +3,16 @@ package api
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/auth"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/config"
+	authrbac "github.com/vistasecurity/vistaplatform/auth-service/internal/rbac"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/email"
 	audithelpers "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
@@ -305,6 +308,19 @@ func CreateUser(db *sql.DB, bypassDB *sql.DB, cfg *config.Config) gin.HandlerFun
 			return
 		}
 
+		actorID, ok := requireActorID(c)
+		if !ok {
+			return
+		}
+		if err := ensureRoleGrantableByName(c.Request.Context(), db, tenantID, actorID, req.Role); err != nil {
+			if writeRoleGrantError(c, err) {
+				return
+			}
+			logrus.WithError(err).WithField("role", req.Role).Error("Failed to validate requested role")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate role"})
+			return
+		}
+
 		// Check if email already exists in tenant.
 		// RLS-scoped: users carries a tenant_isolation policy; tenant from token.
 		var existingID uuid.UUID
@@ -379,7 +395,7 @@ func CreateUser(db *sql.DB, bypassDB *sql.DB, cfg *config.Config) gin.HandlerFun
 		}
 
 		// Assign RBAC role to the new user
-		if err := assignUserRole(db, userID, tenantID, req.Role); err != nil {
+		if err := assignUserRole(db, userID, tenantID, actorID, req.Role); err != nil {
 			logrus.WithError(err).WithFields(logrus.Fields{
 				"user_id": userID, "role": req.Role,
 			}).Error("Failed to assign role to new user")
@@ -462,8 +478,10 @@ func UpdateUser(db *sql.DB) gin.HandlerFunc {
 		}
 
 		// Get current user ID (to prevent self-modification issues)
-		currentUserIDStr := c.GetString("userID")
-		currentUserID, _ := uuid.Parse(currentUserIDStr)
+		currentUserID, ok := requireActorID(c)
+		if !ok {
+			return
+		}
 
 		// Parse request
 		var req UpdateUserRequest
@@ -471,6 +489,7 @@ func UpdateUser(db *sql.DB) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 			return
 		}
+		actorID := currentUserID
 
 		// Verify user belongs to tenant (role comes from RBAC, not users table).
 		// RLS-scoped: users carries a tenant_isolation policy; tenant from token.
@@ -532,7 +551,10 @@ func UpdateUser(db *sql.DB) gin.HandlerFunc {
 
 		// Handle role update via RBAC if requested
 		if req.Role != nil {
-			if err := assignUserRole(db, userID, tenantID, *req.Role); err != nil {
+			if err := assignUserRole(db, userID, tenantID, actorID, *req.Role); err != nil {
+				if writeRoleGrantError(c, err) {
+					return
+				}
 				logrus.WithError(err).WithFields(logrus.Fields{
 					"user_id": userID, "role": *req.Role,
 				}).Error("Failed to update user role")
@@ -845,6 +867,19 @@ func InviteTenantMember(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, authSe
 			return
 		}
 
+		invitedBy, ok := requireActorID(c)
+		if !ok {
+			return
+		}
+		if err := ensureRoleGrantableByName(c.Request.Context(), db, tenantID, invitedBy, roleName); err != nil {
+			if writeRoleGrantError(c, err) {
+				return
+			}
+			logrus.WithError(err).WithField("role", roleName).Error("Failed to validate invited role")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate role"})
+			return
+		}
+
 		emailNorm := strings.ToLower(strings.TrimSpace(req.Email))
 
 		// RLS-scoped: users carries a tenant_isolation policy; tenant from path.
@@ -872,13 +907,6 @@ func InviteTenantMember(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, authSe
 		// invitee chooses password / Google / Microsoft at accept time; no users
 		// row exists until then, so SSO acceptance no longer collides with a
 		// pre-created password user. roleName was already mapped above.
-		invitedBy := uuid.Nil
-		if uidStr := c.GetString("userID"); uidStr != "" {
-			if uid, perr := uuid.Parse(uidStr); perr == nil {
-				invitedBy = uid
-			}
-		}
-
 		invitationID, rawToken, err := createInvitation(db, tenantID, emailNorm, roleName, invitedBy)
 		if err != nil {
 			logrus.WithError(err).Error("Failed to create invitation")
@@ -953,24 +981,142 @@ func getUserRole(db *sql.DB, userID, tenantID uuid.UUID) string {
 	return roleName
 }
 
+func requireActorID(c *gin.Context) (uuid.UUID, bool) {
+	userIDStr := c.GetString("userID")
+	if userIDStr == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found"})
+		return uuid.Nil, false
+	}
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid user ID"})
+		return uuid.Nil, false
+	}
+	return userID, true
+}
+
+func writeRoleGrantError(c *gin.Context, err error) bool {
+	var notHeld *authrbac.ErrPermissionNotHeld
+	switch {
+	case errors.As(err, &notHeld):
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":               "You can only grant permissions you hold yourself",
+			"code":                "permission_not_held",
+			"missing_permissions": notHeld.Names,
+		})
+		return true
+	default:
+		return false
+	}
+}
+
+func ensureRoleGrantableByName(ctx context.Context, db *sql.DB, tenantID, actorID uuid.UUID, roleName string) error {
+	return shareddatabase.WithTenantTx(ctx, db, tenantID, func(tx *sql.Tx) error {
+		roleID, err := roleIDByName(ctx, tx, tenantID, roleName)
+		if err != nil {
+			return err
+		}
+		return validateRoleGrantable(ctx, tx, tenantID, actorID, roleID)
+	})
+}
+
+func roleIDByName(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, roleName string) (uuid.UUID, error) {
+	var roleID uuid.UUID
+	err := tx.QueryRowContext(ctx, `
+		SELECT id FROM tenant_roles
+		WHERE tenant_id = $1 AND name = $2
+	`, tenantID, roleName).Scan(&roleID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return uuid.Nil, fmt.Errorf("role %s not found for tenant", roleName)
+		}
+		return uuid.Nil, fmt.Errorf("failed to get role ID: %w", err)
+	}
+	return roleID, nil
+}
+
+func validateRoleGrantable(ctx context.Context, tx *sql.Tx, tenantID, actorID, roleID uuid.UUID) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT p.id, p.name
+		FROM tenant_role_permissions rp
+		JOIN tenant_permissions p ON p.id = rp.permission_id
+		WHERE rp.role_id = $1
+	`, roleID)
+	if err != nil {
+		return fmt.Errorf("read role grants: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	rolePermissions := map[uuid.UUID]string{}
+	permissionIDs := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return fmt.Errorf("scan role grant: %w", err)
+		}
+		rolePermissions[id] = name
+		permissionIDs = append(permissionIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(permissionIDs) == 0 {
+		return nil
+	}
+
+	heldRows, err := tx.QueryContext(ctx, `
+		SELECT DISTINCT p.id
+		FROM tenant_permissions p
+		JOIN tenant_role_permissions rp ON p.id = rp.permission_id
+		JOIN tenant_roles r ON rp.role_id = r.id
+		JOIN user_tenant_roles ur ON r.id = ur.role_id
+		WHERE ur.user_id = $1 AND r.tenant_id = $2 AND ur.is_active = true
+	`, actorID, tenantID)
+	if err != nil {
+		return fmt.Errorf("resolve caller permissions: %w", err)
+	}
+	defer func() { _ = heldRows.Close() }()
+
+	held := map[uuid.UUID]struct{}{}
+	for heldRows.Next() {
+		var id uuid.UUID
+		if err := heldRows.Scan(&id); err != nil {
+			return fmt.Errorf("scan caller permission: %w", err)
+		}
+		held[id] = struct{}{}
+	}
+	if err := heldRows.Err(); err != nil {
+		return err
+	}
+
+	var denied []string
+	for _, id := range permissionIDs {
+		if _, ok := held[id]; !ok {
+			denied = append(denied, rolePermissions[id])
+		}
+	}
+	if len(denied) > 0 {
+		sort.Strings(denied)
+		return &authrbac.ErrPermissionNotHeld{Names: denied}
+	}
+	return nil
+}
+
 // assignUserRole assigns an RBAC role to a user in a tenant.
 // If the user already has a role assignment for this role, it reactivates it.
-func assignUserRole(db *sql.DB, userID, tenantID uuid.UUID, roleName string) error {
+func assignUserRole(db *sql.DB, userID, tenantID, actorID uuid.UUID, roleName string) error {
 	// RLS-scoped: tenant_roles + user_tenant_roles both carry tenant_isolation
 	// policies; tenant is known. The role lookup, deactivate, and reassign run
 	// inside one WithTenantTx.
 	return shareddatabase.WithTenantTx(context.Background(), db, tenantID, func(tx *sql.Tx) error {
 		// Look up the role ID
-		var roleID uuid.UUID
-		err := tx.QueryRowContext(context.Background(), `
-			SELECT id FROM tenant_roles
-			WHERE tenant_id = $1 AND name = $2
-		`, tenantID, roleName).Scan(&roleID)
+		roleID, err := roleIDByName(context.Background(), tx, tenantID, roleName)
 		if err != nil {
-			if err == sql.ErrNoRows {
-				return fmt.Errorf("role %s not found for tenant", roleName)
-			}
-			return fmt.Errorf("failed to get role ID: %w", err)
+			return err
+		}
+		if err := validateRoleGrantable(context.Background(), tx, tenantID, actorID, roleID); err != nil {
+			return err
 		}
 
 		// Deactivate any existing roles for this user in this tenant

@@ -230,8 +230,20 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 			auth.GET("/legal/pending", middleware.RequireAuth(cfg, jwtService, middleware.AllowImpersonation()), GetPendingLegalAcceptances(bypassDB))
 			auth.POST("/legal/accept", middleware.RequireAuth(cfg, jwtService), AcceptLegalDocuments(bypassDB))
 
-			// Tier selection endpoint (requires auth)
-			auth.POST("/select-tier", middleware.RequireAuth(cfg, jwtService), authHandlers.SelectTier)
+			// Tier selection. Choosing the tenant's plan is a billing
+			// mutation, so it is gated by `billing.update` — the one permission
+			// the seeded role design withholds from tenant_admin precisely so
+			// that changing what the tenant pays for stays with billing_admin.
+			// It is NOT the signup path: onboarding assigns the tier through
+			// the unauthenticated POST /auth/register/complete, which never
+			// reaches this route, so gating here cannot break signup.
+			// The handler additionally refuses any paid tier the tenant has no
+			// active subscription for (validateTenantTierSelection) — the RBAC
+			// gate says who may choose, the entitlement check says what.
+			auth.POST("/select-tier",
+				middleware.RequireAuth(cfg, jwtService),
+				middleware.RequirePermission(rbacService, "billing.update"),
+				authHandlers.SelectTier)
 
 			// Onboarding — GET opt-in, POST access-only.
 			auth.GET("/onboarding/status", middleware.RequireAuth(cfg, jwtService, middleware.AllowImpersonation()), authHandlers.GetOnboardingStatus)

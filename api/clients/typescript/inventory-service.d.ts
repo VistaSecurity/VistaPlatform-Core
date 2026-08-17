@@ -305,6 +305,61 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/algorithms": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create an algorithm (platform admin)
+         * @description Gated on the `algorithms.manage` platform permission and audited. Inserts
+         *     a new row into the global crypto rating catalog (the `algorithms` table),
+         *     the platform-wide crypto source of truth (ADR-0003). `code`, `name` and
+         *     `category` are required; a duplicate `code` returns 409. All other
+         *     identity and assessment fields are optional and fall back to the table's
+         *     column defaults. Enum validation mirrors the schema CHECK constraints.
+         */
+        post: operations["createAlgorithm"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/algorithms/{code}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Algorithm code (e.g. AES-256-GCM). */
+                code: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Update an algorithm's crypto rating (platform admin)
+         * @description Platform-admin only and audited. Edits the assessment fields of an
+         *     algorithm in the global crypto rating catalog (the `algorithms` table),
+         *     the platform-wide crypto source of truth (ADR-0003 Phase 1). Only the
+         *     editable assessment fields below may be changed — identity / CycloneDX
+         *     fields (code, primitive, oid, family, …) are immutable through this
+         *     endpoint. Omitted fields are left unchanged; `recommended_alternatives`,
+         *     when supplied, replaces the existing list. The before/after state is
+         *     emitted to the audit log (resource_type `algorithm`).
+         */
+        put: operations["updateAlgorithm"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/algorithms": {
         parameters: {
             query?: never;
@@ -320,16 +375,7 @@ export interface paths {
          */
         get: operations["listAlgorithms"];
         put?: never;
-        /**
-         * Create an algorithm (platform admin)
-         * @description Gated on the `algorithms.manage` platform permission and audited. Inserts
-         *     a new row into the global crypto rating catalog (the `algorithms` table),
-         *     the platform-wide crypto source of truth (ADR-0003). `code`, `name` and
-         *     `category` are required; a duplicate `code` returns 409. All other
-         *     identity and assessment fields are optional and fall back to the table's
-         *     column defaults. Enum validation mirrors the schema CHECK constraints.
-         */
-        post: operations["createAlgorithm"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -399,18 +445,7 @@ export interface paths {
         };
         /** Get an algorithm by code */
         get: operations["getAlgorithmByCode"];
-        /**
-         * Update an algorithm's crypto rating (platform admin)
-         * @description Platform-admin only and audited. Edits the assessment fields of an
-         *     algorithm in the global crypto rating catalog (the `algorithms` table),
-         *     the platform-wide crypto source of truth (ADR-0003 Phase 1). Only the
-         *     editable assessment fields below may be changed — identity / CycloneDX
-         *     fields (code, primitive, oid, family, …) are immutable through this
-         *     endpoint. Omitted fields are left unchanged; `recommended_alternatives`,
-         *     when supplied, replaces the existing list. The before/after state is
-         *     emitted to the audit log (resource_type `algorithm`).
-         */
-        put: operations["updateAlgorithm"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -4142,33 +4177,6 @@ export interface operations {
             500: components["responses"]["LegacyServerError"];
         };
     };
-    listAlgorithms: {
-        parameters: {
-            query?: {
-                /** @description When true, return only PQC algorithms. */
-                pqc?: boolean;
-                /** @description Filter by algorithm category. */
-                category?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The algorithm list. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AlgorithmListResponse"];
-                };
-            };
-            401: components["responses"]["LegacyUnauthorized"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
     createAlgorithm: {
         parameters: {
             query?: never;
@@ -4195,6 +4203,65 @@ export interface operations {
             401: components["responses"]["LegacyUnauthorized"];
             403: components["responses"]["LegacyForbidden"];
             409: components["responses"]["LegacyConflict"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    updateAlgorithm: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Algorithm code (e.g. AES-256-GCM). */
+                code: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateAlgorithmRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated algorithm. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlgorithmResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    listAlgorithms: {
+        parameters: {
+            query?: {
+                /** @description When true, return only PQC algorithms. */
+                pqc?: boolean;
+                /** @description Filter by algorithm category. */
+                category?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The algorithm list. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlgorithmListResponse"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -4287,38 +4354,6 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
-            404: components["responses"]["LegacyNotFound"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    updateAlgorithm: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Algorithm code (e.g. AES-256-GCM). */
-                code: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UpdateAlgorithmRequest"];
-            };
-        };
-        responses: {
-            /** @description The updated algorithm. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AlgorithmResponse"];
-                };
-            };
-            400: components["responses"]["LegacyBadRequest"];
-            401: components["responses"]["LegacyUnauthorized"];
-            403: components["responses"]["LegacyForbidden"];
             404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
         };

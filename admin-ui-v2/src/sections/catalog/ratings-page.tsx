@@ -5,6 +5,12 @@
 // obsolete; no hard delete, since assets reference algorithms). User-facing
 // severity is still derived deterministically from strength + deprecation +
 // risk_score (severityOf). Writes are gated server-side; 403s surface as toasts.
+//
+// Reads come from the tenant-facing /algorithms paths (the tenant UI shows the
+// same catalogue). Writes go to /inventory-service/admin/algorithms, which is a
+// declared admin-plane prefix — reachable only on the admin host, where
+// this UI is served. Calling the old /algorithms POST/PUT would 404 on the
+// tenant host and no longer exists on either.
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
@@ -58,7 +64,7 @@ function useUpdateAlgorithm() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ code, body }: { code: string; body: UpdateAlgorithmRequest }) => {
-      const { error, response } = await clients.inventory.PUT('/algorithms/{code}', { params: { path: { code } }, body });
+      const { error, response } = await clients.inventory.PUT('/admin/algorithms/{code}', { params: { path: { code } }, body });
       if (error) {
         if (response?.status === 403) throw new Error('You do not have permission to edit algorithms (algorithms.manage required)');
         throw new Error('Update failed');
@@ -72,7 +78,7 @@ function useCreateAlgorithm() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (body: CreateAlgorithmRequest) => {
-      const { error, response } = await clients.inventory.POST('/algorithms', { body });
+      const { error, response } = await clients.inventory.POST('/admin/algorithms', { body });
       if (error) {
         if (response?.status === 409) throw new Error('An algorithm with this code already exists');
         if (response?.status === 403) throw new Error('You do not have permission to create algorithms (algorithms.manage required)');

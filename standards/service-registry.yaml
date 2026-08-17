@@ -163,10 +163,12 @@ ui:
 # and anything under it (used where a service mixes tenant-admin and
 # platform-admin routes under the same /admin segment — see sensor-manager).
 #
-# KNOWN GAP, deliberately not listed: inventory-service POST/PUT
-# /inventory-service/algorithms are platform-permission-gated *methods* on a
-# path whose GET is tenant-facing. Host-based splitting cannot express that;
-# the RBAC gate remains the only control..
+# A platform-gated *method* on a tenant-facing path cannot be split by host.
+# Where that shape appears, move the gated verbs to a distinct admin path and
+# declare it here (that is what did for the algorithm-catalogue writes) —
+# do NOT teach the generator per-method rules. If a case is genuinely
+# unsplittable, record it in `unsplittable` below with the reason, so it is a
+# declared exposure rather than an unnoticed one.
 admin_plane:
   prefixes:
     # admin-service — platform-admin login + the entire /admin/** console API,
@@ -196,6 +198,11 @@ admin_plane:
     - /monitoring-service/trends/
     - /monitoring-service/gateway/
     - /monitoring-service/admin/
+    # inventory-service — the algorithm-catalogue writes. The catalogue
+    # is global platform data; its GETs stay on the public host under
+    # /inventory-service/algorithms because the tenant UI reads them. Only the
+    # create/update verbs moved here.
+    - /inventory-service/admin/
     # compliance-engine — per-tenant manual re-evaluation and the platform-track
     # stateful alert feed (raised under the sentinel platform tenant).
     - /compliance-engine/admin/

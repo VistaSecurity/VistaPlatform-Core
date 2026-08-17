@@ -8,33 +8,24 @@ This is the right tool for: filtering down to a few hundred rows, dropping the r
 
 It's not evidence. The CSV doesn't carry a content hash, a signature, or a provenance record. If you regenerate the same view tomorrow, you'll get different rows (new assets, expired certs, edited tags) — that's expected for a working view, but it means a CSV from this button is a snapshot in a notebook, not a snapshot in a vault.
 
-For audit submissions, vendor questionnaires, or anything where the recipient needs to verify the artifact later, **generate a CBOM instead** (CBOM in the top nav). A CBOM:
+For audit submissions, vendor questionnaires, or anything where the recipient needs to verify the artifact later, **generate a CBOM instead** (Risk & Compliance → CBOM in the sidebar). A CBOM:
 
 - Locks the rows by content hash so the recipient can verify integrity.
 - Captures `scope_version` so the boundary is reproducible.
-- Optionally signs the artifact (HMAC for v1; asymmetric is roadmap).
-- Optionally embeds a compliance-attestation layer.
-- Stays retrievable later from the CBOM list, with a comparison view against your prior artifacts.
+- Stays retrievable later from the CBOM list.
+
 
 ## Where the Export button lives
 
 - **Inventory** (`/inventory`) → top right of the page, next to "Discover Assets." Exports the current lens view (whichever lens is active, with whichever filters are applied).
-- **Risk & Compliance** (`/risk-compliance`) → Overview tab, top right next to the layout toggle. Exports your current risk-posture and compliance-standing numbers (severity and category counts, post-quantum readiness, per-framework compliance scores, finding counts).
-- **Compliance Workspace** (`/compliance/workspace`) → top right of the page header. Exports the controls currently shown in the table — including any family filter and sort you've applied.
-- **Tickets** (`/tickets`) → top right of the toolbar. Exports the tickets matching your current status / category / search filters.
 
-On every page the button greys out when there's nothing to export, with a tooltip pointing you at the CBOM page for audit-grade output.
+That is the only one. The button greys out when there's nothing to export, with a tooltip pointing you at the CBOM page for audit-grade output.
 
 ## What's in the CSV
 
-Whatever the page is showing. Each page owns its own column layout, and the button just downloads what's on screen:
+Whatever the page is showing — the columns the active lens shows. Switch lenses (Infrastructure → Certificates → Configuration → …) and the next click exports the new layout.
 
-- **Inventory** — the columns the active lens shows. Switch lenses (Infrastructure → Certificates → Configuration → …) and the next click exports the new layout.
-- **Risk & Compliance** — a flat `section, metric, value` layout covering the Overview dashboard cards.
-- **Compliance Workspace** — control id, name, family, status, severity, failing-finding count, and last-seen.
-- **Tickets** — title, category, status, priority, severity, due date, assignee, external system/id, and created date.
-
-The filename is `<view>-<YYYY-MM-DD>.csv` (e.g. `inventory-certificate-2026-06-08.csv`, `tickets-2026-06-08.csv`). The date is the local date at the moment you clicked.
+The filename is `<view>-<YYYY-MM-DD>.csv` (e.g. `inventory-certificate-2026-06-08.csv`). The date is the local date at the moment you clicked.
 
 ## Why this exists (Phase 5 background)
 

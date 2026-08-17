@@ -36,8 +36,11 @@ actually deployed rather than what was documented.
 
 ## What it does
 
-**Discovery.** A libpcap-based sensor observes TLS, SSH, and SMB handshakes
-passively, and probes actively when you ask it to — including OT/ICS protocols.
+**Discovery.** A libpcap-based sensor observes TLS, SSH, SMB and OT/ICS
+(Modbus, DNP3, BACnet-SC) handshakes passively, and probes TLS and SSH actively
+when you ask it to. *Active* probing of OT/ICS protocols, and the OT-specific
+inventory lens, are Enterprise capabilities — Core's passive OT observation and
+its full TLS/SSH/SMB pipeline are not gated.
 A separate interrogation agent queries network devices (F5, Palo Alto, Cisco,
 Fortinet) and cloud providers for their crypto configuration. Both are Go
 binaries you deploy inside your own network. Active probing and device
@@ -73,8 +76,8 @@ product is indefensible.
 
 | | Core | Enterprise | MSP |
 |---|---|---|---|
-| Discovery — sensor, agent, cloud, OT | ✅ | ✅ | ✅ |
-| Inventory, CMDB model, all lenses | ✅ | ✅ | ✅ |
+| Discovery — sensor, agent, cloud; passive OT/ICS | ✅ | ✅ | ✅ |
+| Inventory, CMDB model, all nine lenses | ✅ | ✅ | ✅ |
 | Crypto assessment + PQC exposure | ✅ | ✅ | ✅ |
 | Compliance engine + 6 frameworks | ✅ | ✅ | ✅ |
 | CBOM generation + CycloneDX export | ✅ | ✅ | ✅ |
@@ -87,6 +90,7 @@ product is indefensible.
 | CMDB/ITSM sync — ServiceNow, Device42, SolarWinds | | ✅ | ✅ |
 | SIEM forwarding, scheduled audit reports | | ✅ | ✅ |
 | White-label branding | | ✅ | ✅ |
+| OT/ICS active probing + OT inventory lens | | ✅ | ✅ |
 | Multi-tenant management plane, tiering, billing | | | ✅ |
 
 The line is **generation vs. evidence**: Core produces a real CycloneDX CBOM

@@ -96,6 +96,19 @@ func TestIntegration_LegalAcceptance_RecordAndPending(t *testing.T) {
 	// path): demote the current row, insert v2 as current. The previously
 	// accepted user must now have exactly one pending item (the new ToS), which
 	// is what re-opens the post-login re-acceptance modal.
+	//
+	// legal_documents is platform-global — no tenant_id, so NewTenant's CASCADE
+	// cleanup cannot reach it and this publish is the one write in the test that
+	// outlives it. Undo it explicitly: without this the SECOND run against the
+	// same database fails on the v2 insert (duplicate key on
+	// legal_documents_type_version_unique), and every run after that reads one
+	// current document instead of two, because both ToS rows are left demoted.
+	// Nightly gets a fresh Postgres so it never saw this; anyone re-running the
+	// suite locally did.
+	t.Cleanup(func() {
+		_, _ = owner.Exec(`DELETE FROM legal_documents WHERE doc_type = 'terms_of_service' AND version = 2`)
+		_, _ = owner.Exec(`UPDATE legal_documents SET is_current = true WHERE doc_type = 'terms_of_service' AND version = 1`)
+	})
 	if _, err := owner.Exec(
 		`UPDATE legal_documents SET is_current = false WHERE doc_type = 'terms_of_service' AND is_current = true`); err != nil {
 		t.Fatalf("demote current ToS: %v", err)

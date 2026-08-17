@@ -763,7 +763,6 @@ func notificationServiceBaseURL() string {
 // while delivering nothing.
 func (s *AlertEngineService) postAlertNotification(notif events.NotificationEvent) error {
 	body := map[string]interface{}{
-		"tenant_id":    notif.TenantID.String(),
 		"alert_source": notif.AlertSource,
 		"alert_type":   notif.AlertType,
 		"severity":     notif.Severity,
@@ -775,6 +774,9 @@ func (s *AlertEngineService) postAlertNotification(notif events.NotificationEven
 		"message":           notif.Message,
 		"notification_type": "alert",
 		"metadata":          notif.Metadata,
+	}
+	if notif.TenantID != PlatformAlertTenantID {
+		body["tenant_id"] = notif.TenantID.String()
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {

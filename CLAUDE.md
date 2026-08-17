@@ -26,8 +26,12 @@ that workspace, not `go.mod` replace hacks. Module prefix:
 `github.com/vistasecurity/vistaplatform/`. After changing any `go.mod`, run:
 
 ```bash
-GOTOOLCHAIN=local go work sync
+GOTOOLCHAIN=go1.26.6 go work sync   # the exact version go.work declares
 ```
+
+Pin the **exact** toolchain, not `local` (which cannot fetch the pinned patch
+release) and never `auto` (which will silently download a forbidden 1.27+).
+`make` targets already export the right pin, derived from `go.work`.
 
 **`shared/` holds reusable packages** — check here before writing
 cross-cutting logic in a service: `serviceauth` (HMAC service-to-service
@@ -51,7 +55,7 @@ A small monorepo using npm workspaces (declared in the root `package.json`):
 |------|---------|
 | `api/` | OpenAPI specs (source of truth) + generated typed TS client (`@vistasecurity/api-contract`). Don't hand-edit `api/clients/typescript/*.d.ts` — run `npm run generate` in `api/`. |
 | `packages/primitives/` | Shared headless auth / RBAC / feature-flag primitives both UIs import. |
-| `frontend-v2/` | The **tenant UI** ("web-ui" — what a customer's users see). React 18, Vite, Tailwind, TanStack Query/Table, react-hook-form + Zod. |
+| `frontend-v2/` | The **tenant UI** ("web-ui" — what a customer's users see). React 19, Vite, Tailwind, TanStack Query/Table, react-hook-form + Zod. |
 | `admin-ui-v2/` | The **platform-admin UI** ("admin-ui" — for whoever operates the deployment: tenants, plans, catalog). Same stack. |
 
 `api/openapi/<svc>.openapi.yaml` is the source of truth for a service's HTTP
@@ -92,7 +96,7 @@ Auth is httpOnly cookies, not localStorage — every client API call needs
 ```bash
 make build-services              # build all services (sequential)
 make build-services-parallel     # build all services (parallel)
-cd services/auth-service && go build -o ../../bin/auth-service ./cmd/main.go   # one service
+cd services/auth-service && go build -o ../../bin/auth-service ./cmd   # one service
 ```
 
 ```bash

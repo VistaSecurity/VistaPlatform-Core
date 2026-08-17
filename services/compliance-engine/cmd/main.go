@@ -125,6 +125,12 @@ func main() {
 		platformFrameworkService.SetReconcileEnqueuer(reconcileEnqueuer)
 	}
 
+	// Tenant-triggered re-evaluation: same reconcile path as the admin route, but
+	// gated on compliance.manage and rate-limited by a PERSISTED per-tenant
+	// cooldown (multi-replica safe — see reevaluation_service.go).
+	reevaluationService := services.NewReevaluationService(db)
+	reevaluationHandler := handlers.NewReevaluationHandler(reevaluationService, reconcileEnqueuer)
+
 	// Initialize unified ticket service (uses NATS for notifications)
 	ticketService := services.NewTicketService(db, bypassDB, natsClient)
 	ticketHandlers := handlers.NewTicketHandlers(ticketService)
@@ -245,6 +251,13 @@ func main() {
 		// so it counts as a compliance.update (not a read).
 		compliance.POST("/checks", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionComplianceUpdate), complianceHandlers.RunComplianceCheck)
 		compliance.GET("/reports", complianceHandlers.GetComplianceReports)
+
+		// Tenant-triggered re-evaluation (Risk & Compliance → Posture). The tenant
+		// comes from the caller's context, never from a parameter. GET is read-only
+		// state so the UI can disable the control before the user clicks; POST is
+		// gated on compliance.manage and consumes the persisted 1h cooldown.
+		compliance.GET("/reevaluation", reevaluationHandler.GetState)
+		compliance.POST("/reevaluate", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionComplianceManage), reevaluationHandler.Reevaluate)
 		compliance.GET("/legacy/summary", complianceHandlers.GetComplianceSummary)
 
 		// Workspace endpoints (v1 MVP)
@@ -362,9 +375,6 @@ func main() {
 		compliance.DELETE("/plans/:id/items/:itemId", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionComplianceUpdate), planHandlers.RemovePlanItem)
 		compliance.PUT("/plans/:id/items/:itemId/ticket", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionComplianceUpdate), planHandlers.LinkTicketToItem)
 		compliance.GET("/plans/:id/progress", planHandlers.GetPlanProgress)
-
-		// Legacy workspace endpoint (for backward compatibility)
-		compliance.GET("/workspace/summary", complianceHandlers.GetWorkspaceSummary)
 
 		// Mappings (admin-only in future)
 		compliance.GET("/mappings", complianceHandlers.ListMappings)

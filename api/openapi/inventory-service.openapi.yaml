@@ -595,40 +595,7 @@ paths:
           $ref: '#/components/responses/LegacyNotFound'
         '500':
           $ref: '#/components/responses/LegacyServerError'
-  /algorithms:
-    get:
-      operationId: listAlgorithms
-      tags:
-      - algorithms
-      summary: List cryptographic algorithms
-      description: |
-        Returns the algorithm catalogue, optionally filtered. `pqc=true` selects
-        PQC algorithms, `category=<cat>` filters by category; otherwise the full
-        list is returned. Each entry is the authoritative assessment row.
-      parameters:
-      - name: pqc
-        in: query
-        required: false
-        description: When true, return only PQC algorithms.
-        schema:
-          type: boolean
-      - name: category
-        in: query
-        required: false
-        description: Filter by algorithm category.
-        schema:
-          type: string
-      responses:
-        '200':
-          description: The algorithm list.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AlgorithmListResponse'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
+  /admin/algorithms:
     post:
       operationId: createAlgorithm
       tags:
@@ -662,6 +629,85 @@ paths:
           $ref: '#/components/responses/LegacyForbidden'
         '409':
           $ref: '#/components/responses/LegacyConflict'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /admin/algorithms/{code}:
+    parameters:
+    - name: code
+      in: path
+      required: true
+      description: Algorithm code (e.g. AES-256-GCM).
+      schema:
+        type: string
+    put:
+      operationId: updateAlgorithm
+      tags:
+      - algorithms
+      summary: Update an algorithm's crypto rating (platform admin)
+      description: |
+        Platform-admin only and audited. Edits the assessment fields of an
+        algorithm in the global crypto rating catalog (the `algorithms` table),
+        the platform-wide crypto source of truth (ADR-0003 Phase 1). Only the
+        editable assessment fields below may be changed — identity / CycloneDX
+        fields (code, primitive, oid, family, …) are immutable through this
+        endpoint. Omitted fields are left unchanged; `recommended_alternatives`,
+        when supplied, replaces the existing list. The before/after state is
+        emitted to the audit log (resource_type `algorithm`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAlgorithmRequest'
+      responses:
+        '200':
+          description: The updated algorithm.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlgorithmResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /algorithms:
+    get:
+      operationId: listAlgorithms
+      tags:
+      - algorithms
+      summary: List cryptographic algorithms
+      description: |
+        Returns the algorithm catalogue, optionally filtered. `pqc=true` selects
+        PQC algorithms, `category=<cat>` filters by category; otherwise the full
+        list is returned. Each entry is the authoritative assessment row.
+      parameters:
+      - name: pqc
+        in: query
+        required: false
+        description: When true, return only PQC algorithms.
+        schema:
+          type: boolean
+      - name: category
+        in: query
+        required: false
+        description: Filter by algorithm category.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: The algorithm list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlgorithmListResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
         '500':
           $ref: '#/components/responses/LegacyServerError'
   /algorithms/pqc:
@@ -739,43 +785,6 @@ paths:
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
-        '404':
-          $ref: '#/components/responses/LegacyNotFound'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-    put:
-      operationId: updateAlgorithm
-      tags:
-      - algorithms
-      summary: Update an algorithm's crypto rating (platform admin)
-      description: |
-        Platform-admin only and audited. Edits the assessment fields of an
-        algorithm in the global crypto rating catalog (the `algorithms` table),
-        the platform-wide crypto source of truth (ADR-0003 Phase 1). Only the
-        editable assessment fields below may be changed — identity / CycloneDX
-        fields (code, primitive, oid, family, …) are immutable through this
-        endpoint. Omitted fields are left unchanged; `recommended_alternatives`,
-        when supplied, replaces the existing list. The before/after state is
-        emitted to the audit log (resource_type `algorithm`).
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/UpdateAlgorithmRequest'
-      responses:
-        '200':
-          description: The updated algorithm.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AlgorithmResponse'
-        '400':
-          $ref: '#/components/responses/LegacyBadRequest'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '403':
-          $ref: '#/components/responses/LegacyForbidden'
         '404':
           $ref: '#/components/responses/LegacyNotFound'
         '500':

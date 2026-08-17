@@ -1,9 +1,14 @@
 package api
 
 import (
+	"context"
+	"errors"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/google/uuid"
 	_ "github.com/lib/pq"
+	authrbac "github.com/vistasecurity/vistaplatform/auth-service/internal/rbac"
 )
 
 // TestListUsers_Validation tests the validation logic for list users
@@ -71,3 +76,77 @@ func TestUpdateUserRequest_Validation(t *testing.T) {
 // - Tenant context setup
 // - Actual database queries
 // These are better suited for integration test files with testcontainers or similar
+
+func TestAssignUserRole_RejectsRoleWhosePermissionsActorDoesNotHold(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	tenantID := uuid.New()
+	userID := uuid.New()
+	actorID := uuid.New()
+	roleID := uuid.New()
+	unheldPermissionID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT set_tenant_context`).WithArgs(tenantID).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT id FROM tenant_roles`).
+		WithArgs(tenantID, "tenant_admin").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(roleID))
+	mock.ExpectQuery(`SELECT p\.id, p\.name`).
+		WithArgs(roleID).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(unheldPermissionID, "users.delete"))
+	mock.ExpectQuery(`SELECT DISTINCT p\.id`).
+		WithArgs(actorID, tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectRollback()
+
+	err = assignUserRole(db, userID, tenantID, actorID, "tenant_admin")
+	var notHeld *authrbac.ErrPermissionNotHeld
+	if !errors.As(err, &notHeld) {
+		t.Fatalf("assignUserRole error = %v, want *ErrPermissionNotHeld", err)
+	}
+	if len(notHeld.Names) != 1 || notHeld.Names[0] != "users.delete" {
+		t.Fatalf("missing permissions = %v, want [users.delete]", notHeld.Names)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestEnsureRoleGrantableByName_RejectsBeforeInvitationOrUserCreate(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	tenantID := uuid.New()
+	actorID := uuid.New()
+	roleID := uuid.New()
+	unheldPermissionID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT set_tenant_context`).WithArgs(tenantID).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT id FROM tenant_roles`).
+		WithArgs(tenantID, "security_admin").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(roleID))
+	mock.ExpectQuery(`SELECT p\.id, p\.name`).
+		WithArgs(roleID).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(unheldPermissionID, "security.view"))
+	mock.ExpectQuery(`SELECT DISTINCT p\.id`).
+		WithArgs(actorID, tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectRollback()
+
+	err = ensureRoleGrantableByName(context.Background(), db, tenantID, actorID, "security_admin")
+	var notHeld *authrbac.ErrPermissionNotHeld
+	if !errors.As(err, &notHeld) {
+		t.Fatalf("ensureRoleGrantableByName error = %v, want *ErrPermissionNotHeld", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}

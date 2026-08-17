@@ -31,17 +31,75 @@ func ConnectAsAppRole(t *testing.T, owner *sql.DB) *sql.DB {
 			t.Fatalf("testdb: grant LOGIN to %s: %v", RLSAppRole, err)
 		}
 	})
+	return openAsRole(t, RLSAppRole, appRolePassword)
+}
+
+// BypassRole is the BYPASSRLS role that ships in the schema (ADR platform-0001,
+// Phase 2). Production services hold a second "bypassDB" handle connected as it,
+// for the few reads whose tenant is not yet known — an invitation looked up by
+// token, say. Tests that must exercise that handle open it with
+// ConnectAsBypassRole.
+const BypassRole = "crypto_bypass"
+
+// bypassRolePassword is a throwaway password the harness assigns BypassRole
+// (which ships NOLOGIN) so a test can open a real connection as it.
+const bypassRolePassword = "rls_test_bypass_pw"
+
+// ConnectAsBypassRole opens a *sql.DB connected as BypassRole — the production
+// "bypassDB" handle. It re-asserts the role, its grants and LOGIN + a known
+// password, then derives the DSN from TEST_DATABASE_URL by swapping the
+// userinfo.
+//
+// Every statement below mutates CLUSTER-GLOBAL catalog state (pg_authid, the
+// per-table ACLs). `go test ./...` runs one process per package IN PARALLEL, so
+// without serialization this races any other package binary applying schema.sql
+// or re-asserting its own grants against the same database — the two grant
+// expansions lock the same pg_class rows in table order while the seed's DO
+// blocks hold row locks, and Postgres resolves the cycle by killing one of them.
+//
+// That is not hypothetical: this helper lived in auth-service's internal/api
+// package and took NO lock, which deadlocked against internal/auth's concurrent
+// ApplySchemaAndSeed and failed the nightly `Test - auth-service` job roughly
+// every other night with `deadlock detected` on the first GRANT. The
+// local harness papered over it by running auth-service with `-p 1`, so it
+// reproduced only in CI. Taking the same advisory lock as every other
+// schema-mutating helper here is the actual fix — keep it.
+func ConnectAsBypassRole(t *testing.T, owner *sql.DB) *sql.DB {
+	t.Helper()
+	stmts := []string{
+		`DO $$ BEGIN CREATE ROLE ` + BypassRole + ` NOLOGIN BYPASSRLS;
+		 EXCEPTION WHEN duplicate_object THEN NULL; END $$;`,
+		`GRANT USAGE ON SCHEMA public TO ` + BypassRole,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ` + BypassRole,
+		`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ` + BypassRole,
+		`GRANT EXECUTE ON FUNCTION public.set_tenant_context(uuid) TO ` + BypassRole,
+		`ALTER ROLE ` + BypassRole + ` LOGIN PASSWORD '` + bypassRolePassword + `'`,
+	}
+	withSchemaLock(t, owner, func(ctx context.Context, conn *sql.Conn) {
+		for _, s := range stmts {
+			if _, err := conn.ExecContext(ctx, s); err != nil {
+				t.Fatalf("testdb: ensure %s: %v\nstmt: %s", BypassRole, err, s)
+			}
+		}
+	})
+	return openAsRole(t, BypassRole, bypassRolePassword)
+}
+
+// openAsRole derives a DSN from TEST_DATABASE_URL by swapping in role/password,
+// opens it and registers cleanup. The role must already have LOGIN.
+func openAsRole(t *testing.T, role, password string) *sql.DB {
+	t.Helper()
 	u, err := url.Parse(os.Getenv(URLEnv))
 	if err != nil {
 		t.Fatalf("testdb: parse %s: %v", URLEnv, err)
 	}
-	u.User = url.UserPassword(RLSAppRole, appRolePassword)
+	u.User = url.UserPassword(role, password)
 	db, err := sql.Open("postgres", u.String())
 	if err != nil {
-		t.Fatalf("testdb: open as %s: %v", RLSAppRole, err)
+		t.Fatalf("testdb: open as %s: %v", role, err)
 	}
 	if err := db.Ping(); err != nil {
-		t.Fatalf("testdb: ping as %s: %v", RLSAppRole, err)
+		t.Fatalf("testdb: ping as %s: %v", role, err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db

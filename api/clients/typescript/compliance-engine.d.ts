@@ -1142,6 +1142,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/reevaluation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Cooldown state for tenant-triggered re-evaluation
+         * @description When this tenant last triggered a manual re-evaluation, whether another is allowed right now, and when the next one becomes available. Read-only, and scoped to the caller's own tenant (there is no tenant parameter). The UI calls this so it can DISABLE the control during the cooldown instead of letting the user click and answering 429.
+         */
+        get: operations["getReevaluationState"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/reevaluate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Re-run compliance evaluation against the tenant's current inventory
+         * @description Enqueues the same asynchronous whole-tenant reconcile the platform-admin route enqueues, for the CALLER'S OWN tenant (taken from the session, never from a parameter). Requires `compliance.manage`. Rate-limited to one accepted run per tenant per hour, persisted in the database so the limit holds across replicas and restarts; the platform-admin route is deliberately exempt. Returns 202 with the new cooldown state on acceptance and 429 with the same state when the cooldown blocks it.
+         */
+        post: operations["reevaluateTenant"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/alerts": {
         parameters: {
             query?: never;
@@ -2158,6 +2198,31 @@ export interface components {
         };
         DefaultFrameworkResponse: {
             default_framework: components["schemas"]["DefaultFrameworkDescriptor"];
+        };
+        /** @description The tenant's manual re-evaluation cooldown. Returned by GET /reevaluation and embedded in BOTH POST outcomes, so a client never has to make a second call to learn where it stands. */
+        ReevaluationState: {
+            /** @description Whether a re-evaluation may be triggered right now. */
+            allowed: boolean;
+            /** @description The configured per-tenant window between accepted runs (3600). */
+            cooldown_seconds: number;
+            /**
+             * Format: date-time
+             * @description When this tenant last had a re-evaluation ACCEPTED. Null means never — which the UI renders as "Not re-evaluated yet", not as a zero time. Platform-admin re-evaluations are exempt from the cooldown and do not appear here.
+             */
+            last_requested_at: string | null;
+            /**
+             * Format: date-time
+             * @description Null exactly when `allowed` is true.
+             */
+            next_allowed_at: string | null;
+            /** @description Seconds until the next run is allowed, rounded up; 0 when allowed. */
+            retry_after_seconds: number;
+        };
+        ReevaluationAccepted: components["schemas"]["ReevaluationState"] & {
+            message: string;
+        };
+        ReevaluationBlocked: components["schemas"]["ReevaluationState"] & {
+            error: string;
         };
         /** @description Generic mutation acknowledgement. */
         MessageResponse: {
@@ -4962,6 +5027,69 @@ export interface operations {
             401: components["responses"]["LegacyUnauthorized"];
             404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
+        };
+    };
+    getReevaluationState: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The tenant's re-evaluation cooldown state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReevaluationState"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    reevaluateTenant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Re-evaluation queued. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReevaluationAccepted"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            /** @description The per-tenant cooldown has not elapsed. Nothing was enqueued and the cooldown was NOT extended. `Retry-After` carries the same number of seconds as `retry_after_seconds`. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReevaluationBlocked"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+            /** @description The reconcile transport (NATS) is not configured, so no re-evaluation could run. The cooldown is NOT consumed in this case. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
         };
     };
     listAlerts: {

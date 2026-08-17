@@ -192,19 +192,32 @@ build-services: ## Build all Go backend services
 		$(MAKE) build-services-parallel; \
 	else \
 		echo "Building Go services..." && \
-		cd services/auth-service && go build -o ../../bin/auth-service ./cmd/main.go && \
-		cd ../inventory-service && go build -o ../../bin/inventory-service ./cmd/main.go && \
-		cd ../compliance-engine && go build -o ../../bin/compliance-engine ./cmd/main.go && \
-		cd ../cbom-service && go build -o ../../bin/cbom-service ./cmd/main.go && \
-		cd ../sensor-manager && go build -o ../../bin/sensor-manager ./cmd/main.go && \
-		cd ../admin-service && go build -o ../../bin/admin-service ./cmd/main.go && \
-		cd ../monitoring-service && go build -o ../../bin/monitoring-service ./cmd/main.go && \
-		cd ../cluster-sensor-service && go build -o ../../bin/cluster-sensor-service ./cmd/main.go && \
-		cd ../resource-tracker-service && go build -o ../../bin/resource-tracker-service ./cmd/main.go && \
-		cd ../tenant-health-service && go build -o ../../bin/tenant-health-service ./cmd/main.go && \
+		cd services/auth-service && go build -o ../../bin/auth-service ./cmd && \
+		cd ../inventory-service && go build -o ../../bin/inventory-service ./cmd && \
+		cd ../compliance-engine && go build -o ../../bin/compliance-engine ./cmd && \
+		cd ../cbom-service && go build -o ../../bin/cbom-service ./cmd && \
+		cd ../sensor-manager && go build -o ../../bin/sensor-manager ./cmd && \
+		cd ../admin-service && go build -o ../../bin/admin-service ./cmd && \
+		cd ../monitoring-service && go build -o ../../bin/monitoring-service ./cmd && \
+		cd ../cluster-sensor-service && go build -o ../../bin/cluster-sensor-service ./cmd && \
+		cd ../resource-tracker-service && go build -o ../../bin/resource-tracker-service ./cmd && \
+		cd ../tenant-health-service && go build -o ../../bin/tenant-health-service ./cmd && \
 		cd ../mcp-service && go build -o ../../bin/mcp-service ./cmd && \
+		cd ../audit-service && go build -o ../../bin/audit-service ./cmd && \
+		cd ../notification-service && go build -o ../../bin/notification-service ./cmd && \
+		cd ../discovery-processor-service && go build -o ../../bin/discovery-processor-service ./cmd && \
+		cd ../device-interrogation-service && go build -o ../../bin/device-interrogation-service ./cmd && \
 		echo "Go services built successfully!"; \
 	fi
+
+# pcap-processor is deliberately NOT in build-services: it is the one backend that
+# needs CGO and libpcap headers, so including it would make "build all the services"
+# fail on any machine without libpcap-dev. Build it with `make build-pcap-processor`.
+#
+# The four services above were missing outright — this target's help text says "all
+# Go backend services" and it built 11 of 16, exiting 0. An incomplete build that
+# reports success is the same defect class as a check that cannot fail, so
+# scripts/audit-build-targets.mjs now audits coverage against the service registry.
 
 build-services-parallel: ## Build all Go services in parallel
 	@echo "Building Go services in parallel..."
@@ -490,43 +503,43 @@ push-dist: ## Push the 20-image dist set to registry (requires DIST_TAG and IMAG
 # Service-specific build targets
 build-auth-service: ## Build auth-service
 	@echo "Building auth-service..."
-	@cd services/auth-service && go build -o ../../bin/auth-service ./cmd/main.go
+	@cd services/auth-service && go build -o ../../bin/auth-service ./cmd
 
 build-inventory-service: ## Build inventory-service
 	@echo "Building inventory-service..."
-	@cd services/inventory-service && go build -o ../../bin/inventory-service ./cmd/main.go
+	@cd services/inventory-service && go build -o ../../bin/inventory-service ./cmd
 
 build-compliance-engine: ## Build compliance-engine
 	@echo "Building compliance-engine..."
-	@cd services/compliance-engine && go build -o ../../bin/compliance-engine ./cmd/main.go
+	@cd services/compliance-engine && go build -o ../../bin/compliance-engine ./cmd
 
 build-cbom-service: ## Build cbom-service
 	@echo "Building cbom-service..."
-	@cd services/cbom-service && go build -o ../../bin/cbom-service ./cmd/main.go
+	@cd services/cbom-service && go build -o ../../bin/cbom-service ./cmd
 
 build-sensor-manager: ## Build sensor-manager
 	@echo "Building sensor-manager..."
-	@cd services/sensor-manager && go build -o ../../bin/sensor-manager ./cmd/main.go
+	@cd services/sensor-manager && go build -o ../../bin/sensor-manager ./cmd
 
 build-admin-service: ## Build admin-service
 	@echo "Building admin-service..."
-	@cd services/admin-service && go build -o ../../bin/admin-service ./cmd/main.go
+	@cd services/admin-service && go build -o ../../bin/admin-service ./cmd
 
 build-monitoring-service: ## Build monitoring-service
 	@echo "Building monitoring-service..."
-	@cd services/monitoring-service && go build -o ../../bin/monitoring-service ./cmd/main.go
+	@cd services/monitoring-service && go build -o ../../bin/monitoring-service ./cmd
 
 build-cluster-sensor-service: ## Build cluster-sensor-service
 	@echo "Building cluster-sensor-service..."
-	@cd services/cluster-sensor-service && go build -o ../../bin/cluster-sensor-service ./cmd/main.go
+	@cd services/cluster-sensor-service && go build -o ../../bin/cluster-sensor-service ./cmd
 
 build-resource-tracker-service: ## Build resource-tracker-service
 	@echo "Building resource-tracker-service..."
-	@cd services/resource-tracker-service && go build -o ../../bin/resource-tracker-service ./cmd/main.go
+	@cd services/resource-tracker-service && go build -o ../../bin/resource-tracker-service ./cmd
 
 build-tenant-health-service: ## Build tenant-health-service
 	@echo "Building tenant-health-service..."
-	@cd services/tenant-health-service && go build -o ../../bin/tenant-health-service ./cmd/main.go
+	@cd services/tenant-health-service && go build -o ../../bin/tenant-health-service ./cmd
 
 build-mcp-service: ## Build mcp-service
 	@echo "Building mcp-service..."
@@ -534,7 +547,7 @@ build-mcp-service: ## Build mcp-service
 
 build-pcap-processor: ## Build pcap-processor (requires CGO + libpcap)
 	@echo "Building pcap-processor..."
-	@cd services/pcap-processor && CGO_ENABLED=1 go build -o ../../bin/pcap-processor ./cmd/main.go
+	@cd services/pcap-processor && CGO_ENABLED=1 go build -o ../../bin/pcap-processor ./cmd
 
 ROOT_DIR := $(abspath $(CURDIR))
 BIN_DIR := $(ROOT_DIR)/bin
@@ -577,7 +590,7 @@ build-windows: sensor-windows-amd64 device-agent-windows-amd64 ## Build sensor a
 build-device-agent: ## Build device-agent binary
 	@echo "Building device-agent..."
 	@mkdir -p $(BIN_DIR)
-	go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent ./cmd/main.go
+	go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent ./cmd
 	@echo "Building cross-platform binaries (set CROSS=1 to enable)..."
 	@if [ "$(CROSS)" = "1" ]; then \
 		$(MAKE) device-agent-all-platforms; \
@@ -589,42 +602,42 @@ device-agent-all-platforms: device-agent-linux-amd64 device-agent-linux-arm64 de
 device-agent-linux-amd64: ## Build device-agent for Linux x86_64
 	@echo "Building Linux x86_64 device-agent..."
 	@mkdir -p $(BIN_DIR) artifacts/device-agent/linux/amd64
-	GOOS=linux GOARCH=amd64 go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent-linux-amd64 ./cmd/main.go
+	GOOS=linux GOARCH=amd64 go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent-linux-amd64 ./cmd
 	cp $(BIN_DIR)/device-agent-linux-amd64 artifacts/device-agent/linux/amd64/device-agent
 	@echo "✅ Linux x86_64 device-agent built and placed in artifacts/"
 
 device-agent-linux-arm64: ## Build device-agent for Linux ARM64
 	@echo "Building Linux ARM64 device-agent..."
 	@mkdir -p $(BIN_DIR) artifacts/device-agent/linux/arm64
-	GOOS=linux GOARCH=arm64 go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent-linux-arm64 ./cmd/main.go
+	GOOS=linux GOARCH=arm64 go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent-linux-arm64 ./cmd
 	cp $(BIN_DIR)/device-agent-linux-arm64 artifacts/device-agent/linux/arm64/device-agent
 	@echo "✅ Linux ARM64 device-agent built and placed in artifacts/"
 
 device-agent-windows-amd64: ## Build device-agent for Windows x86_64
 	@echo "Building Windows x86_64 device-agent..."
 	@mkdir -p $(BIN_DIR) artifacts/device-agent/windows/amd64
-	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent-windows-amd64.exe ./cmd/main.go
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent-windows-amd64.exe ./cmd
 	cp $(BIN_DIR)/device-agent-windows-amd64.exe artifacts/device-agent/windows/amd64/device-agent.exe
 	@echo "✅ Windows x86_64 device-agent built and placed in artifacts/"
 
 device-agent-windows-386: ## Build device-agent for Windows x86 (32-bit)
 	@echo "Building Windows x86 (32-bit) device-agent..."
 	@mkdir -p $(BIN_DIR) artifacts/device-agent/windows/386
-	CGO_ENABLED=0 GOOS=windows GOARCH=386 go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent-windows-386.exe ./cmd/main.go
+	CGO_ENABLED=0 GOOS=windows GOARCH=386 go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent-windows-386.exe ./cmd
 	cp $(BIN_DIR)/device-agent-windows-386.exe artifacts/device-agent/windows/386/device-agent.exe
 	@echo "✅ Windows x86 device-agent built and placed in artifacts/"
 
 device-agent-darwin-amd64: ## Build device-agent for macOS x86_64
 	@echo "Building macOS x86_64 device-agent..."
 	@mkdir -p $(BIN_DIR) artifacts/device-agent/darwin/amd64
-	GOOS=darwin GOARCH=amd64 go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent-darwin-amd64 ./cmd/main.go
+	GOOS=darwin GOARCH=amd64 go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent-darwin-amd64 ./cmd
 	cp $(BIN_DIR)/device-agent-darwin-amd64 artifacts/device-agent/darwin/amd64/device-agent
 	@echo "✅ macOS x86_64 device-agent built and placed in artifacts/"
 
 device-agent-darwin-arm64: ## Build device-agent for macOS ARM64 (Apple Silicon)
 	@echo "Building macOS ARM64 device-agent..."
 	@mkdir -p $(BIN_DIR) artifacts/device-agent/darwin/arm64
-	GOOS=darwin GOARCH=arm64 go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent-darwin-arm64 ./cmd/main.go
+	GOOS=darwin GOARCH=arm64 go build -C device-agent $(AGENT_LDFLAGS) -o $(BIN_DIR)/device-agent-darwin-arm64 ./cmd
 	cp $(BIN_DIR)/device-agent-darwin-arm64 artifacts/device-agent/darwin/arm64/device-agent
 	@echo "✅ macOS ARM64 device-agent built and placed in artifacts/"
 

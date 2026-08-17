@@ -399,10 +399,11 @@ func ResendTenantInvitation(db *sql.DB, cfg *config.Config) gin.HandlerFunc {
 // --- shared internals ------------------------------------------------------
 
 type pendingInvitation struct {
-	id       uuid.UUID
-	tenantID uuid.UUID
-	email    string
-	role     string
+	id        uuid.UUID
+	tenantID  uuid.UUID
+	email     string
+	role      string
+	invitedBy uuid.UUID
 }
 
 // lockPendingInvitation loads a still-valid pending invitation by raw token.
@@ -412,12 +413,13 @@ type pendingInvitation struct {
 // (zero rows) and every valid invite would read as "invalid".
 func lockPendingInvitation(bypassDB *sql.DB, rawToken string) (*pendingInvitation, error) {
 	var inv pendingInvitation
+	var invitedBy uuid.NullUUID
 	var status string
 	var expiresAt time.Time
 	err := bypassDB.QueryRow(`
-		SELECT id, tenant_id, email, role, status, expires_at
+		SELECT id, tenant_id, email, role, invited_by, status, expires_at
 		FROM public.invitations WHERE token_hash = $1
-	`, hashInvitationToken(rawToken)).Scan(&inv.id, &inv.tenantID, &inv.email, &inv.role, &status, &expiresAt)
+	`, hashInvitationToken(rawToken)).Scan(&inv.id, &inv.tenantID, &inv.email, &inv.role, &invitedBy, &status, &expiresAt)
 	if err == sql.ErrNoRows {
 		return nil, errInvitationInvalid
 	}
@@ -429,6 +431,9 @@ func lockPendingInvitation(bypassDB *sql.DB, rawToken string) (*pendingInvitatio
 	}
 	if time.Now().After(expiresAt) {
 		return nil, errInvitationExpired
+	}
+	if invitedBy.Valid {
+		inv.invitedBy = invitedBy.UUID
 	}
 	return &inv, nil
 }
@@ -442,6 +447,9 @@ func materializeInvitedUser(ctx context.Context, db *sql.DB, inv *pendingInvitat
 	// inv.role is already an internal role name (mapped at invite-create time).
 	roleName := inv.role
 	userID := uuid.New()
+	if err := ensureRoleGrantableByName(ctx, db, inv.tenantID, inv.invitedBy, roleName); err != nil {
+		return uuid.Nil, "", err
+	}
 
 	// The existing-user check, the user INSERT, and the optional extra step (set a
 	// password) are all RLS-scoped (users carries a tenant_isolation policy). They
@@ -485,7 +493,7 @@ func materializeInvitedUser(ctx context.Context, db *sql.DB, inv *pendingInvitat
 	// assignUserRole owns its own WithTenantTx (tenant_roles + user_tenant_roles
 	// are RLS-scoped). TODO(rls): if user_roles ever gains a tenant_isolation
 	// policy, this still threads the tenant via assignUserRole's own context.
-	if err := assignUserRole(db, userID, inv.tenantID, roleName); err != nil {
+	if err := assignUserRole(db, userID, inv.tenantID, inv.invitedBy, roleName); err != nil {
 		return uuid.Nil, "", err
 	}
 
@@ -573,6 +581,9 @@ func respondInvitationError(c *gin.Context, err error) {
 	case errInvitationEmailTaken:
 		c.JSON(http.StatusConflict, gin.H{"error": "An account with this email already exists. Sign in with your existing method instead."})
 	default:
+		if writeRoleGrantError(c, err) {
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to accept invitation"})
 	}
 }

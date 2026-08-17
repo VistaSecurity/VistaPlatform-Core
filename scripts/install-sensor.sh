@@ -365,7 +365,7 @@ if [[ -f "./crypto-sensor" ]]; then
     print_status "Sensor binary installed"
 else
     print_error "Sensor binary not found. Please build it first:"
-    echo "  cd sensor && go build -o crypto-sensor cmd/main.go"
+    echo "  cd sensor && go build -o crypto-sensor ./cmd"
     exit 1
 fi
 

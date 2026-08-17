@@ -3,8 +3,6 @@ package api
 import (
 	"context"
 	"database/sql"
-	"net/url"
-	"os"
 	"testing"
 
 	"github.com/google/uuid"
@@ -13,40 +11,18 @@ import (
 )
 
 // connectAsBypassRole opens a *sql.DB connected as the BYPASSRLS crypto_bypass
-// role — the production "bypassDB" handle. The schema already creates and grants
-// it; we re-assert LOGIN + a known password (mirroring testdb.ConnectAsAppRole)
-// and derive the DSN from TEST_DATABASE_URL by swapping the userinfo.
+// role — the production "bypassDB" handle.
+//
+// This used to re-assert the role and its grants inline, with no
+// synchronization. Those statements mutate cluster-global catalog state, so
+// under `go test ./...` package parallelism they deadlocked against
+// internal/auth's concurrent ApplySchemaAndSeed and failed the nightly job
+// roughly every other night. The implementation now lives in
+// shared/testdb behind the same advisory lock as every other schema-mutating
+// helper; this wrapper only keeps the call sites short.
 func connectAsBypassRole(t *testing.T, owner *sql.DB) *sql.DB {
 	t.Helper()
-	const role = "crypto_bypass"
-	const pw = "rls_test_bypass_pw"
-	stmts := []string{
-		`DO $$ BEGIN CREATE ROLE ` + role + ` NOLOGIN BYPASSRLS; EXCEPTION WHEN duplicate_object THEN NULL; END $$;`,
-		`GRANT USAGE ON SCHEMA public TO ` + role,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ` + role,
-		`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ` + role,
-		`GRANT EXECUTE ON FUNCTION public.set_tenant_context(uuid) TO ` + role,
-		`ALTER ROLE ` + role + ` LOGIN PASSWORD '` + pw + `'`,
-	}
-	for _, s := range stmts {
-		if _, err := owner.Exec(s); err != nil {
-			t.Fatalf("testdb: ensure %s: %v\nstmt: %s", role, err, s)
-		}
-	}
-	u, err := url.Parse(os.Getenv(testdb.URLEnv))
-	if err != nil {
-		t.Fatalf("testdb: parse %s: %v", testdb.URLEnv, err)
-	}
-	u.User = url.UserPassword(role, pw)
-	db, err := sql.Open("postgres", u.String())
-	if err != nil {
-		t.Fatalf("testdb: open as %s: %v", role, err)
-	}
-	if err := db.Ping(); err != nil {
-		t.Fatalf("testdb: ping as %s: %v", role, err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return testdb.ConnectAsBypassRole(t, owner)
 }
 
 // TestIntegration_InvitationAccept_FailClosedUnderAppRole proves the RLS

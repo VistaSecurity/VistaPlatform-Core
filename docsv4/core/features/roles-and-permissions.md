@@ -79,10 +79,6 @@ some other role behind your back. The dialog tells you how many members hold it
 and asks which role they should move to. Pick one and click **Reassign and
 delete** — members who already hold your chosen role simply lose the deleted one.
 
-One case has no retry from this dialog: if the role is referenced by your **SSO
-group mappings** or is your SSO **default role**, deleting it would silently stop
-provisioning federated users. Update **Settings → People & Access → Security &
-SSO** first, then come back and delete it.
 
 ## Assigning roles to people
 

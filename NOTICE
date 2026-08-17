@@ -20,9 +20,11 @@ package-lock.json for the npm packages. Those are generated and stay current;
 this file records only the points that need a stated position.
 
 The Go and npm dependency trees were audited before publication and contain no
-copyleft-licensed components: no GPL, AGPL, LGPL, SSPL, CDDL, EPL, BUSL or
-Elastic-licensed code is present. The Go dependencies are MIT, Apache-2.0 and
-BSD; the npm dependencies are predominantly MIT and ISC.
+strong or network copyleft components: no GPL, AGPL, LGPL, SSPL, CDDL, EPL, BUSL
+or Elastic-licensed code is present. The Go dependencies are MIT, Apache-2.0 and
+BSD; the npm dependencies are predominantly MIT and ISC. The one file-level
+copyleft licence present is MPL-2.0, on build-time tooling only — see the
+MPL-2.0 section below.
 
 
 Dual-licensed components — our election

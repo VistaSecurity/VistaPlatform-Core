@@ -38,7 +38,7 @@ mkdir -p "$BIN_DIR"
 # Build the sensor binary
 echo -e "${BLUE}Building sensor binary...${NC}"
 cd "$SENSOR_DIR"
-CGO_ENABLED=1 go build -o "$BIN_DIR/crypto-sensor" cmd/main.go
+CGO_ENABLED=1 go build -o "$BIN_DIR/crypto-sensor" ./cmd
 
 if [[ $? -eq 0 ]]; then
     echo -e "${GREEN}✅ Success: crypto-sensor built successfully${NC}"

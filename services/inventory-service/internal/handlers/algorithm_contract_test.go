@@ -92,12 +92,13 @@ func newAlgorithmEngine(svc *stubAlgorithmReader) *gin.Engine {
 	grp.GET("/algorithms/:code", h.GetAlgorithmByCode)
 	grp.GET("/algorithms/:code/recommendations", h.GetAlgorithmRecommendations)
 	grp.POST("/algorithms/recommendations/batch", h.GetBatchRecommendations)
-	// Source-of-truth editor write routes. The route gate
+	// Source-of-truth editor write routes. They live under /admin/ so the
+	// admin-plane host split covers them. The route gate
 	// (RequirePlatformPermission) is exercised in main.go, not here — these
 	// contract tests drive the handlers directly to validate request/response
 	// envelopes against the spec.
-	grp.POST("/algorithms", h.CreateAlgorithm)
-	grp.PUT("/algorithms/:code", h.UpdateAlgorithm)
+	grp.POST("/admin/algorithms", h.CreateAlgorithm)
+	grp.PUT("/admin/algorithms/:code", h.UpdateAlgorithm)
 	return r
 }
 
@@ -374,7 +375,7 @@ func TestContract_UpdateAlgorithm_200(t *testing.T) {
 		"remediation_guidance":{"summary":"upgrade"},
 		"compliance_mappings":{"fips":"not-approved"}
 	}`)
-	w := do(eng, http.MethodPut, "/api/v2/inventory-service/algorithms/RSA-1024", body)
+	w := do(eng, http.MethodPut, "/api/v2/inventory-service/admin/algorithms/RSA-1024", body)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
@@ -389,7 +390,7 @@ func TestContract_UpdateAlgorithm_Deprecate_200(t *testing.T) {
 	after.DeprecationStatus = "obsolete"
 	eng := newAlgorithmEngine(&stubAlgorithmReader{byCode: &before, updated: &after})
 	body := strings.NewReader(`{"deprecation_status":"obsolete"}`)
-	w := do(eng, http.MethodPut, "/api/v2/inventory-service/algorithms/AES-256-GCM", body)
+	w := do(eng, http.MethodPut, "/api/v2/inventory-service/admin/algorithms/AES-256-GCM", body)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
@@ -402,7 +403,7 @@ func TestContract_UpdateAlgorithm_400_badStrength(t *testing.T) {
 	before := sampleAlgorithm()
 	eng := newAlgorithmEngine(&stubAlgorithmReader{byCode: &before})
 	body := strings.NewReader(`{"strength":"bogus"}`)
-	w := do(eng, http.MethodPut, "/api/v2/inventory-service/algorithms/AES-256-GCM", body)
+	w := do(eng, http.MethodPut, "/api/v2/inventory-service/admin/algorithms/AES-256-GCM", body)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
 	}
@@ -414,7 +415,7 @@ func TestContract_UpdateAlgorithm_404(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newAlgorithmEngine(&stubAlgorithmReader{byCode: nil})
 	body := strings.NewReader(`{"strength":"strong"}`)
-	w := do(eng, http.MethodPut, "/api/v2/inventory-service/algorithms/NOPE", body)
+	w := do(eng, http.MethodPut, "/api/v2/inventory-service/admin/algorithms/NOPE", body)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body=%s", w.Code, w.Body.String())
 	}
@@ -442,7 +443,7 @@ func TestContract_CreateAlgorithm_201(t *testing.T) {
 		"strength":"recommended",
 		"risk_score":5
 	}`)
-	w := do(eng, http.MethodPost, "/api/v2/inventory-service/algorithms", body)
+	w := do(eng, http.MethodPost, "/api/v2/inventory-service/admin/algorithms", body)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body=%s", w.Code, w.Body.String())
 	}
@@ -454,7 +455,7 @@ func TestContract_CreateAlgorithm_400_missingCategory(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newAlgorithmEngine(&stubAlgorithmReader{})
 	body := strings.NewReader(`{"code":"FOO","name":"Foo"}`)
-	w := do(eng, http.MethodPost, "/api/v2/inventory-service/algorithms", body)
+	w := do(eng, http.MethodPost, "/api/v2/inventory-service/admin/algorithms", body)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
 	}
@@ -466,7 +467,7 @@ func TestContract_CreateAlgorithm_400_badCategory(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newAlgorithmEngine(&stubAlgorithmReader{})
 	body := strings.NewReader(`{"code":"FOO","name":"Foo","category":"nope"}`)
-	w := do(eng, http.MethodPost, "/api/v2/inventory-service/algorithms", body)
+	w := do(eng, http.MethodPost, "/api/v2/inventory-service/admin/algorithms", body)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
 	}
@@ -478,7 +479,7 @@ func TestContract_CreateAlgorithm_409(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newAlgorithmEngine(&stubAlgorithmReader{createdErr: services.ErrAlgorithmExists})
 	body := strings.NewReader(`{"code":"AES-256-GCM","name":"AES","category":"symmetric"}`)
-	w := do(eng, http.MethodPost, "/api/v2/inventory-service/algorithms", body)
+	w := do(eng, http.MethodPost, "/api/v2/inventory-service/admin/algorithms", body)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", w.Code, w.Body.String())
 	}

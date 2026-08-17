@@ -10,7 +10,17 @@ import (
 	"github.com/google/uuid"
 )
 
-const selfServiceTierQueryPattern = `SELECT 1\s+FROM subscription_tiers\s+WHERE id = \$1\s+AND is_active = true\s+AND COALESCE\(is_custom, false\) = false\s+AND owner_tenant_id IS NULL\s+AND COALESCE\(is_trial, false\) = true`
+// The pattern must carry EVERY predicate the query relies on for safety.
+// sqlmock matches it as an UNANCHORED regexp, so a pattern that stops early
+// matches whether or not the remaining clauses are present — which is how the
+// `price_cents = 0` guard sat here completely unpinned: these tests stub the DB
+// answer, so they prove "if no row comes back we reject", never "a paid tier
+// produces no row". Dropping the clause from the query changed no test.
+//
+// Extend this pattern whenever the query grows a predicate, and pair it with
+// the real-Postgres test in select_tier_gate_integration_test.go, which proves
+// the behaviour rather than the text.
+const selfServiceTierQueryPattern = `SELECT 1\s+FROM subscription_tiers\s+WHERE id = \$1\s+AND is_active = true\s+AND COALESCE\(is_custom, false\) = false\s+AND owner_tenant_id IS NULL\s+AND COALESCE\(is_trial, false\) = true\s+AND COALESCE\(price_cents, 0\) = 0`
 
 func TestValidateSelfServiceTierSelectionAllowsFreePublicTrialTier(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))

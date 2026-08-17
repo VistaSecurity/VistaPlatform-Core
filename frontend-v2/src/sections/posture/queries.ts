@@ -2,8 +2,9 @@
 // Framework Transparency). All read-only; all surface data that already exists.
 // Local row types decouple these components from the generated contract types
 // (the responses are cast to them) so the JSX stays readable.
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { clients } from '../../lib/clients';
+import type { complianceEngineComponents } from '@vistasecurity/api-contract';
 
 // ---- Algorithm Reference -------------------------------------------------
 
@@ -101,6 +102,57 @@ export function useAvailableFrameworks() {
       return (data.frameworks ?? []) as AvailableFrameworkRow[];
     },
     staleTime: 60_000,
+  });
+}
+
+// ---- Manual re-evaluation (cooldown-gated) --------------------------------
+
+export type ReevaluationState = complianceEngineComponents['schemas']['ReevaluationState'];
+
+/**
+ * The tenant's re-evaluation cooldown. The control reads this so it can be
+ * DISABLED before the user clicks — a button that is clickable and then answers
+ * 429 is the defect this release just spent a dozen fixes removing.
+ *
+ * Refetched on an interval short enough that the button re-enables on its own
+ * when the hour is up, without the user reloading the page.
+ */
+export function useReevaluationState() {
+  return useQuery({
+    queryKey: ['posture', 'reevaluation'],
+    queryFn: async () => {
+      const { data, error } = await clients.compliance.GET('/reevaluation', {});
+      if (error || !data) throw new Error('Failed to load re-evaluation state');
+      return data;
+    },
+    staleTime: 15_000,
+    refetchInterval: 30_000,
+  });
+}
+
+/**
+ * Trigger a re-evaluation. The reconcile is asynchronous, so success means
+ * "queued", not "done" — the caller says so in the UI rather than implying the
+ * numbers on screen have already moved.
+ */
+export function useReevaluate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const { data, error, response } = await clients.compliance.POST('/reevaluate', {});
+      if (error || !response.ok) {
+        // 429 carries the cooldown state; surface the server's own sentence
+        // rather than inventing one.
+        const msg = (error as { error?: string } | undefined)?.error;
+        throw new Error(msg ?? 'Could not start a re-evaluation.');
+      }
+      return data;
+    },
+    onSettled: () => {
+      // Re-read the cooldown either way: on success it has just been consumed,
+      // and on a 429 our copy was evidently stale.
+      void qc.invalidateQueries({ queryKey: ['posture', 'reevaluation'] });
+    },
   });
 }
 

@@ -20198,6 +20198,33 @@ UPDATE public.tenant_notification_rules
    AND severity_filter = ARRAY['medium','low']::varchar[];
 
 
+-- Tenant-triggered compliance re-evaluation: the persisted per-tenant cooldown.
+-- One row per tenant, holding the last ACCEPTED manual re-evaluation request.
+--
+-- Persisted, not in-process, deliberately: compliance-engine runs multiple
+-- replicas and its Deployment rolls on every config change, so an in-memory
+-- timer resets on restart and disagrees between pods — a tenant could retry
+-- until it hit a fresh pod. The claim is a single conditional upsert, so the
+-- database arbitrates and two concurrent requests on two pods cannot both win.
+--
+-- Platform-admin re-evaluation (/admin/tenants/{id}/reevaluate) deliberately
+-- does NOT touch this table: it is the unbounded escape hatch after an engine
+-- fix or a bulk import (owner decision, 2026-08).
+CREATE TABLE IF NOT EXISTS public.tenant_reevaluation_requests (
+    tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    last_requested_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_requested_by uuid,
+    request_count integer DEFAULT 0 NOT NULL,
+    CONSTRAINT tenant_reevaluation_requests_pkey PRIMARY KEY (tenant_id)
+);
+
+ALTER TABLE public.tenant_reevaluation_requests ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_reevaluation_requests_tenant_isolation ON public.tenant_reevaluation_requests;
+CREATE POLICY tenant_reevaluation_requests_tenant_isolation ON public.tenant_reevaluation_requests
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+
 -- ============================================================================
 -- ROLE GRANTS — THIS BLOCK MUST BE THE LAST THING IN THIS FILE
 -- ============================================================================

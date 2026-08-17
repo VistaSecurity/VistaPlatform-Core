@@ -105,6 +105,33 @@ func TestPublishAlertNotification_FallsBackToHTTPWhenNATSUnavailable(t *testing.
 	}
 }
 
+func TestPublishPlatformAlertNotification_FallbackOmitsTenantID(t *testing.T) {
+	const secret = "internal-auth-test-secret"
+	t.Setenv("INTERNAL_AUTH_SECRET", secret)
+	t.Setenv("USE_MTLS", "false")
+
+	stub := newNotifyStub(t, secret)
+	t.Setenv("NOTIFICATION_SERVICE_URL", stub.server.URL)
+
+	s := NewAlertEngineService(nil, nil, nil, nil)
+	alertID := uuid.New()
+	s.publishAlertNotification(PlatformAlertTenantID, "monitoring", "service_down", "critical",
+		"Service down: auth-service", "auth-service is failing health checks", alertID, "opened", nil)
+
+	if stub.hits != 1 {
+		t.Fatalf("notification-service received %d request(s), want 1", stub.hits)
+	}
+	if !stub.accepted {
+		t.Fatal("serviceauth verifier rejected the fallback POST")
+	}
+	if got, ok := stub.body["tenant_id"]; ok && got != nil {
+		t.Fatalf("tenant_id = %v, want omitted/null for platform notifications", got)
+	}
+	if got := stub.body["alert_type"]; got != "service_down" {
+		t.Errorf("alert_type = %v, want service_down", got)
+	}
+}
+
 // A non-2xx from notification-service must be reported as an error by the
 // transport helper (the caller logs it as a lost notification) rather than being
 // swallowed as success — the "check that cannot fail" shape.

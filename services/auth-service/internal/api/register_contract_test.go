@@ -319,7 +319,7 @@ func TestContract_CompleteRegistration_201_appliesFreeTierSelection(t *testing.T
 
 // --- POST /auth/select-tier -------------------------------------------------
 
-func TestContract_SelectTier_400_paidTierRejectedBeforeTenantUpdate(t *testing.T) {
+func TestContract_SelectTier_402_paidTierRejectedBeforeTenantUpdate(t *testing.T) {
 	sv := loadSpec(t)
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	if err != nil {
@@ -336,12 +336,16 @@ func TestContract_SelectTier_400_paidTierRejectedBeforeTenantUpdate(t *testing.T
 	tenantID := uuid.New()
 	tierID := uuid.New()
 	expectUserTenantLookup(bypassMock, userID, tenantID)
-	expectSelfServiceTierValidation(mock, tierID, false)
+	// A paid tier the tenant holds no active subscription for: 402, and the
+	// tenant UPDATE is never reached (no ExpectExec is registered for it, so a
+	// regression that wrote the tier anyway fails on an unexpected statement).
+	expectTierLookup(mock, tierID, "pro", 19900, false)
+	expectEntitlementLookup(mock, tenantID, tierID, "pro", false)
 	stub := &stubAuthServiceStore{db: db, bypassDB: bypassDB}
 
 	w := do(newSelectTierEngine(stub, true, userID.String()), http.MethodPost, "/api/v1/auth-service/auth/select-tier", strings.NewReader(`{"subscription_tier_id":"`+tierID.String()+`"}`))
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusPaymentRequired {
+		t.Fatalf("status = %d, want 402; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -369,7 +373,7 @@ func TestContract_SelectTier_200_updatesTenantForFreeTier(t *testing.T) {
 	tenantID := uuid.New()
 	tierID := uuid.New()
 	expectUserTenantLookup(bypassMock, userID, tenantID)
-	expectSelfServiceTierValidation(mock, tierID, true)
+	expectTierLookup(mock, tierID, "free", 0, true)
 	expectTenantTierUpdate(mock, tierID, tenantID)
 	stub := &stubAuthServiceStore{db: db, bypassDB: bypassDB}
 

@@ -19,6 +19,7 @@ import { Icon, RiskChip, RiskGauge, LevelBar, Pill, heatColor, levelFromScore, t
 import { Loading, EmptyState } from '../findings/bits';
 import { useAssetFacts, useBatchEvaluate, useFrameworkContext, usePostureByControl, usePostureTrend, useRiskSummary, type AssetFacts } from '../findings/queries';
 import { PostureTrendChart } from '../../components/posture-trend-chart';
+import { ReevaluateControl } from './reevaluate-control';
 import { sevLevel, type BatchFinding } from '../findings/model';
 import { buildControlGrid } from '../findings/posture-grid';
 import { coverageLine, formatScore, isUnscored, normalizeControlStatus, notAssessedReasonText, NOT_ASSESSED_LABEL } from '../findings/control-status';
@@ -149,14 +150,20 @@ export function PostureOverview() {
               <h3 style={{ margin: 0, fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 15, color: 'var(--app-t1)' }}>Posture trend · 30 days</h3>
               <span style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>risk index · lower is better</span>
             </div>
-            <div style={{ textAlign: 'right' }}>
-              {/* The service returns null here when no framework produced a
-                  score at all (#1369) — render "—" and drop the % sign with it,
-                  rather than "0%". */}
-              <div className="mono accent-text" style={{ fontSize: 26, fontWeight: 800, lineHeight: 1, color: isUnscored(overall) ? 'var(--app-t3)' : undefined }} title={isUnscored(overall) ? 'No framework has an assessed control yet, so there is no overall score.' : undefined}>
-                {formatScore(overall)}{!isUnscored(overall) && <span style={{ fontSize: 15 }}>%</span>}
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 18 }}>
+              {/* Manual re-evaluation sits beside the score it refreshes: this is
+                  where a stale number is noticed. Renders nothing without
+                  compliance.manage. */}
+              <ReevaluateControl />
+              <div style={{ textAlign: 'right' }}>
+                {/* The service returns null here when no framework produced a
+                    score at all (#1369) — render "—" and drop the % sign with it,
+                    rather than "0%". */}
+                <div className="mono accent-text" style={{ fontSize: 26, fontWeight: 800, lineHeight: 1, color: isUnscored(overall) ? 'var(--app-t3)' : undefined }} title={isUnscored(overall) ? 'No framework has an assessed control yet, so there is no overall score.' : undefined}>
+                  {formatScore(overall)}{!isUnscored(overall) && <span style={{ fontSize: 15 }}>%</span>}
+                </div>
+                <div style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>Overall compliance</div>
               </div>
-              <div style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>Overall compliance</div>
             </div>
           </div>
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', marginTop: 10 }}>

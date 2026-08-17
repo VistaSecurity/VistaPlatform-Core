@@ -252,8 +252,17 @@ func main() {
 		// Algorithm source-of-truth edits (ADR-0003 Phase 1): create/edit/deprecate
 		// rows in the global crypto rating catalog. Gated on the seeded
 		// algorithms.manage platform permission and audited.
-		api.POST("/inventory-service/algorithms", sharedrbac.RequirePlatformPermission(rawDB, rbac.PermissionAlgorithmsManage), algorithmHandler.CreateAlgorithm)
-		api.PUT("/inventory-service/algorithms/:code", sharedrbac.RequirePlatformPermission(rawDB, rbac.PermissionAlgorithmsManage), algorithmHandler.UpdateAlgorithm)
+		//
+		// These live under /inventory-service/admin/ rather than beside the
+		// tenant-facing GETs. They are platform-admin surface, and the
+		// admin plane is split off the public tenant host by PATH —
+		// a platform-gated *method* on a tenant-facing path cannot be split,
+		// so it stayed reachable on the public host with the RBAC check as its
+		// only control. The distinct prefix is declared in
+		// standards/service-registry.yaml admin_plane.prefixes, which makes the
+		// generated Traefik deny/allow pair cover them.
+		api.POST("/inventory-service/admin/algorithms", sharedrbac.RequirePlatformPermission(rawDB, rbac.PermissionAlgorithmsManage), algorithmHandler.CreateAlgorithm)
+		api.PUT("/inventory-service/admin/algorithms/:code", sharedrbac.RequirePlatformPermission(rawDB, rbac.PermissionAlgorithmsManage), algorithmHandler.UpdateAlgorithm)
 		// PQC migration progress
 		api.GET("/inventory-service/pqc/progress", algorithmHandler.GetPQCProgress)
 		// Unified inventory endpoint
@@ -477,11 +486,10 @@ func main() {
 		apiv2.GET("/inventory-service/algorithms/:code/recommendations", algorithmHandler.GetAlgorithmRecommendations)
 		apiv2.GET("/inventory-service/algorithms/:code/usage", algorithmHandler.GetAlgorithmUsage)
 		apiv2.POST("/inventory-service/algorithms/recommendations/batch", algorithmHandler.GetBatchRecommendations)
-		// Algorithm source-of-truth edits (ADR-0003 Phase 1): create/edit/deprecate
-		// rows in the global crypto rating catalog. Gated on the seeded
-		// algorithms.manage platform permission and audited.
-		apiv2.POST("/inventory-service/algorithms", sharedrbac.RequirePlatformPermission(rawDB, rbac.PermissionAlgorithmsManage), algorithmHandler.CreateAlgorithm)
-		apiv2.PUT("/inventory-service/algorithms/:code", sharedrbac.RequirePlatformPermission(rawDB, rbac.PermissionAlgorithmsManage), algorithmHandler.UpdateAlgorithm)
+		// Algorithm source-of-truth edits (ADR-0003 Phase 1) — see the v1 block
+		// above for why these sit under /inventory-service/admin/.
+		apiv2.POST("/inventory-service/admin/algorithms", sharedrbac.RequirePlatformPermission(rawDB, rbac.PermissionAlgorithmsManage), algorithmHandler.CreateAlgorithm)
+		apiv2.PUT("/inventory-service/admin/algorithms/:code", sharedrbac.RequirePlatformPermission(rawDB, rbac.PermissionAlgorithmsManage), algorithmHandler.UpdateAlgorithm)
 
 		// Unified inventory
 		apiv2.GET("/inventory-service/crypto-inventory", unifiedInventoryHandler.GetUnifiedInventory)
