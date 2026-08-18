@@ -1312,6 +1312,20 @@ func (s *AssetService) processDiscoveryCryptoData(
 	lifecycleCertExpiring *[]*events.CertificateExpiringPayload,
 ) error {
 	var materializationErrs []error
+
+	// AT-REST resources short-circuit here.
+	//
+	// An S3 bucket or an RDS instance is not a network endpoint: it negotiates
+	// no protocol, no cipher suite and no version. Falling through would
+	// manufacture a crypto_implementations row whose protocol is whatever
+	// normalizeProtocol defaults to (TLS) with every crypto column NULL —
+	// which is precisely the phantom TLS endpoint this replaces. Its
+	// encryption posture is at-rest, so it belongs in crypto_applications.
+	if posture, ok := atRestPostureFromFinding(f); ok {
+		s.produceAtRestApplication(tenantID, assetID, posture)
+		return nil
+	}
+
 	// Extract and process certificate chain from discovery finding
 	var certIDs []uuid.UUID
 	var primaryCertID *uuid.UUID

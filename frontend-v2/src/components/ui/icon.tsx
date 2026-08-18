@@ -10,7 +10,7 @@ import {
   Plug, BellRing, ScrollText, Recycle, Archive, Crop, History,
   MapPin, ArrowLeft, UserRound, MonitorSmartphone, Link2, Accessibility,
   ShieldAlert, DraftingCompass, ImagePlus, Smartphone, UploadCloud, FileUp, UserPlus,
-  Sun, Moon, Play, RefreshCw,
+  Sun, Moon, Play, RefreshCw, Vault,
 } from 'lucide-react';
 import { Route, Binary, Ruler, Key, Scale, OctagonAlert, ListChecks, CalendarClock, Gauge, CircleDot, User, Ticket, FolderPlus, ShieldOff, TrendingUp, TrendingDown, Info, SearchX, CheckCheck, Gem, ExternalLink, CircleHelp, CircleDashed } from 'lucide-react';
 
@@ -42,6 +42,8 @@ const MAP: Record<string, LucideIcon> = {
   gem: Gem, 'external-link': ExternalLink, sun: Sun, moon: Moon, play: Play,
   // Manual re-evaluation (Risk & Compliance → Posture).
   refresh: RefreshCw,
+  // Data Protection lens (Inventory) — at-rest, keyed-and-durable protection.
+  vault: Vault,
   // "we can't answer that" / "offered but not observed" — the honest-absence
   // pair used by the crypto-configuration drawer's risk explanation.
   'circle-help': CircleHelp, 'circle-dashed': CircleDashed,

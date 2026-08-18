@@ -49,6 +49,11 @@ func (s *stubCooldown) Claim(_ context.Context, tenantID, userID uuid.UUID) (ser
 type spyEnqueuer struct {
 	calls   int
 	tenants []uuid.UUID
+	ready   bool
+}
+
+func (s *spyEnqueuer) Ready() bool {
+	return s.ready
 }
 
 func (s *spyEnqueuer) EnqueueTenant(tenantID uuid.UUID, _ string) {
@@ -91,7 +96,7 @@ func TestContract_GetReevaluationState(t *testing.T) {
 
 	t.Run("never re-evaluated", func(t *testing.T) {
 		cd := &stubCooldown{state: services.ReevaluationState{Allowed: true, Cooldown: time.Hour}}
-		e := newReevaluationEngine(cd, &spyEnqueuer{}, uuid.New(), uuid.New())
+		e := newReevaluationEngine(cd, &spyEnqueuer{ready: true}, uuid.New(), uuid.New())
 		w := do(e, http.MethodGet, "/api/v1/compliance-engine/reevaluation", nil)
 		if w.Code != http.StatusOK {
 			t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
@@ -106,7 +111,7 @@ func TestContract_GetReevaluationState(t *testing.T) {
 
 	t.Run("in cooldown", func(t *testing.T) {
 		cd := &stubCooldown{state: blockedState()}
-		e := newReevaluationEngine(cd, &spyEnqueuer{}, uuid.New(), uuid.New())
+		e := newReevaluationEngine(cd, &spyEnqueuer{ready: true}, uuid.New(), uuid.New())
 		w := do(e, http.MethodGet, "/api/v1/compliance-engine/reevaluation", nil)
 		if w.Code != http.StatusOK {
 			t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
@@ -119,7 +124,7 @@ func TestContract_ReevaluateAccepted(t *testing.T) {
 	sv := loadSpec(t)
 	tenant, user := uuid.New(), uuid.New()
 	cd := &stubCooldown{state: allowedState(), claimed: true}
-	enq := &spyEnqueuer{}
+	enq := &spyEnqueuer{ready: true}
 	e := newReevaluationEngine(cd, enq, tenant, user)
 
 	w := do(e, http.MethodPost, "/api/v1/compliance-engine/reevaluate", nil)
@@ -144,7 +149,7 @@ func TestContract_ReevaluateAccepted(t *testing.T) {
 func TestContract_ReevaluateBlockedByCooldown(t *testing.T) {
 	sv := loadSpec(t)
 	cd := &stubCooldown{state: blockedState(), claimed: false}
-	enq := &spyEnqueuer{}
+	enq := &spyEnqueuer{ready: true}
 	e := newReevaluationEngine(cd, enq, uuid.New(), uuid.New())
 
 	w := do(e, http.MethodPost, "/api/v1/compliance-engine/reevaluate", nil)
@@ -174,6 +179,23 @@ func TestContract_ReevaluateWithoutTransportDoesNotConsumeCooldown(t *testing.T)
 	}
 	if cd.claimCalls != 0 {
 		t.Fatalf("cooldown was consumed %d times with no transport, want 0", cd.claimCalls)
+	}
+}
+
+func TestContract_ReevaluateWithDisabledWorkerDoesNotConsumeCooldown(t *testing.T) {
+	cd := &stubCooldown{state: allowedState(), claimed: true}
+	enq := &spyEnqueuer{ready: false}
+	e := newReevaluationEngine(cd, enq, uuid.New(), uuid.New())
+
+	w := do(e, http.MethodPost, "/api/v1/compliance-engine/reevaluate", nil)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("want 503, got %d: %s", w.Code, w.Body.String())
+	}
+	if cd.claimCalls != 0 {
+		t.Fatalf("cooldown was consumed %d times while the worker was disabled, want 0", cd.claimCalls)
+	}
+	if enq.calls != 0 {
+		t.Fatalf("disabled worker enqueued %d reconciles, want 0", enq.calls)
 	}
 }
 

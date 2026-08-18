@@ -36,6 +36,7 @@ type reevaluationCooldown interface {
 
 // reconcileEnqueuer is the one reconcile path (*services.ReconcileEnqueuer).
 type reconcileEnqueuer interface {
+	Ready() bool
 	EnqueueTenant(tenantID uuid.UUID, reason string)
 }
 
@@ -109,7 +110,7 @@ func (h *ReevaluationHandler) Reevaluate(c *gin.Context) {
 	// Check the transport BEFORE consuming the cooldown: burning an hour on a
 	// request that could never have run is exactly the kind of silent nothing this
 	// endpoint exists to avoid.
-	if h.enqueuer == nil {
+	if h.enqueuer == nil || !h.enqueuer.Ready() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Re-evaluation is unavailable right now (the reconcile worker is not running)"})
 		return
 	}

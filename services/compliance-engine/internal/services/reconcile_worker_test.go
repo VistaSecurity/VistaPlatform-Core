@@ -42,6 +42,9 @@ func TestReconcileEnqueuerNilSafe(t *testing.T) {
 	if noClient.ready() {
 		t.Fatal("enqueuer with nil client should not be ready")
 	}
+	if noClient.Ready() {
+		t.Fatal("public Ready() should match readiness for callers that must fail closed")
+	}
 	noClient.EnqueueTenant(uuid.New(), "x") // must not panic, must not touch db
 	noClient.EnqueueAllTenants("x")
 	noClient.EnqueueTenantScoped(uuid.New(), uuid.New(), "x")

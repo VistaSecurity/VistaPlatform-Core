@@ -814,10 +814,24 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 				continue
 			}
 
+			// Protocol/port for the fallback row.
+			//
+			// This branch used to hardcode TLS:443 for EVERY device with no
+			// crypto config, which put an S3 bucket in Inventory as a TLS
+			// endpoint on port 443 with no version and no cipher suite. A
+			// bucket is not a TLS endpoint; the invented protocol is worse
+			// than no protocol, because the UI renders it as a measurement.
+			// At-rest resources therefore carry the at-rest protocol marker
+			// and no port. They still arrive as assets: identity for these
+			// rows is the per-resource hostname plus device_id, and the
+			// unspecified dest_ip keeps them on inventory-service's
+			// isCloudManagedPlaceholder path exactly as before.
+			protocol, port := atRestProtocolPort(device.DeviceType)
+
 			err = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
 				_, e := tx.ExecContext(ctx, insertQuery,
 					uuid.New(), systemSensorID, tenantID, batchID,
-					"TLS", destIP, 443,
+					protocol, destIP, port,
 					0.8, metadataJSON, stringPtr(hostname),
 					now, now,
 				)
@@ -833,6 +847,41 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 
 	log.Printf("WriteSensorDiscoveries: inserted %d sensor_discoveries for batch %s (%d devices)", inserted, batchID, len(devices))
 	return inserted, nil
+}
+
+// atRestDeviceTypes are the cloud resources whose cryptography is AT REST, not
+// in transit: object storage, managed databases and key stores. They have no
+// negotiated protocol and no port, so the TLS:443 fallback every other
+// crypto-config-less device gets is a fabrication for them.
+//
+// Listed explicitly per provider rather than inferred, because getting this
+// wrong in the other direction (marking a real endpoint as at-rest) would
+// suppress a genuine TLS measurement.
+var atRestDeviceTypes = map[string]bool{
+	"aws_s3_bucket":         true,
+	"aws_rds_instance":      true,
+	"aws_kms":               true,
+	"azure_storage_account": true,
+	"azure_sql_database":    true,
+	"azure_keyvault_key":    true,
+	"gcp_storage_bucket":    true,
+	"gcp_cloudsql_instance": true,
+	"gcp_kms_crypto_key":    true,
+}
+
+// atRestProtocolPort returns the protocol marker and port to record for a
+// device with no crypto configuration. At-rest resources get the "AT-REST"
+// marker and port 0 (no listening port); everything else keeps the historical
+// TLS:443 fallback.
+//
+// "AT-REST" is deliberately NOT a protocol inventory-service will normalize
+// into TLS — inventory-service routes these findings to crypto_applications by
+// their resource_type before protocol normalization is ever reached.
+func atRestProtocolPort(deviceType string) (string, int) {
+	if atRestDeviceTypes[deviceType] {
+		return "AT-REST", 0
+	}
+	return "TLS", 443
 }
 
 // canonicalCertPEMs extracts the certificate PEMs from a canonical "certificates"

@@ -530,6 +530,37 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/crypto-applications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List cryptographic application (at-rest) posture rows
+         * @description Returns the tenant's cryptographic-application posture rows — the at-rest
+         *     encryption state of managed cloud resources — highest-risk first.
+         *
+         *     `encrypted` is only meaningful when `encryption_determined` is true. A row
+         *     with `encryption_determined: false` means the posture could NOT be measured
+         *     (AccessDenied on the encryption API, transport failure); it carries
+         *     `risk_score: 0`, which per platform convention means NOT ASSESSED — not
+         *     safe, and not a failure either. Clients must render it as unknown.
+         *
+         *     `risk_score` follows the at-rest ladder: 0 not assessed, 10 encrypted under
+         *     a customer-managed key, 40 encrypted under a provider-managed key, 90
+         *     unencrypted. `risk_level` is the CVSS-anchored band of that score.
+         */
+        get: operations["listCryptoApplications"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/crypto-risks": {
         parameters: {
             query?: never;
@@ -2409,6 +2440,47 @@ export interface components {
             algorithm_issues: number;
             certificate_issues: number;
             key_size_issues: number;
+        };
+        /**
+         * @description One resource's cryptographic posture in one encryption context
+         *     (models.CryptoApplication). POSTURE ONLY — `kms_key_id` is a key
+         *     IDENTIFIER (the ARN/id the provider prints in its own console), never key
+         *     material.
+         */
+        CryptoApplication: {
+            /** Format: uuid */
+            id: string;
+            /**
+             * Format: uuid
+             * @description The inventory asset this resource materialized as, when known.
+             */
+            asset_id: string | null;
+            resource_type: string;
+            resource_name: string;
+            /** @description ARN or fully-qualified resource id — the natural key. */
+            resource_identifier: string;
+            encryption_context: string;
+            /** @description Only meaningful when encryption_determined is true. */
+            encrypted: boolean;
+            encryption_determined: boolean;
+            encryption_type: string;
+            algorithm: string | null;
+            /** @enum {string|null} */
+            key_manager: "customer" | "provider" | null;
+            kms_key_id: string | null;
+            cloud_provider: string | null;
+            cloud_region: string | null;
+            /** @description 0 means NOT ASSESSED, not safe. */
+            risk_score: number;
+            risk_level: string;
+            /** Format: date-time */
+            last_verified_at: string | null;
+        };
+        /** @description List envelope for GET /crypto-applications. */
+        CryptoApplicationsResponse: {
+            items: components["schemas"]["CryptoApplication"][];
+            /** @description Total matching rows, ignoring limit/offset. */
+            total: number;
         };
         /**
          * @description CURRENT list envelope for GET /crypto-risks (services.CryptoRisksResponse).
@@ -4436,6 +4508,54 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    listCryptoApplications: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Encryption context to list. Defaults to `at_rest`, the only context with a
+                 *     producer today.
+                 */
+                encryption_context?: "at_rest" | "in_transit" | "in_use" | "key_storage" | "signing" | "hashing" | "authentication" | "other";
+                /** @description Filter to one resource type. */
+                resource_type?: "disk_volume" | "file" | "database" | "cloud_storage" | "hsm" | "application" | "build_artifact" | "container" | "vm_image" | "backup" | "communication" | "other";
+                /**
+                 * @description Tri-state. Omit for no filter; `false` isolates the resources whose posture
+                 *     could not be measured.
+                 */
+                determined?: boolean;
+                /**
+                 * @description Risk band label; matches that band and everything above it. Unknown labels
+                 *     are ignored rather than matching nothing.
+                 */
+                risk_at_least?: "Critical" | "High" | "Medium" | "Low" | "Informational";
+                /** @description Case-insensitive substring match on resource name or identifier. */
+                search?: string;
+                /** @description Maximum rows to return (default 100, max 500). */
+                limit?: number;
+                /** @description Rows to skip (default 0). */
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The tenant's cryptographic application posture rows. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CryptoApplicationsResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
             500: components["responses"]["LegacyServerError"];
         };
     };

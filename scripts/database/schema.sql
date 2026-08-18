@@ -20134,6 +20134,24 @@ CREATE POLICY tenant_reevaluation_requests_tenant_isolation ON public.tenant_ree
 
 
 -- ============================================================================
+-- AT-REST ENCRYPTION POSTURE — crypto_applications natural key
+-- ============================================================================
+-- crypto_applications is the at-rest sibling of crypto_implementations: one row
+-- per managed resource (S3 bucket, RDS instance, …) per encryption context.
+-- inventory-service's at-rest producer UPSERTs on re-discovery, so the table
+-- needs a unique key to conflict on; without it every discovery run appended a
+-- duplicate row for the same bucket.
+--
+-- (tenant_id, resource_identifier, encryption_context) is the natural key: a
+-- resource ARN is globally unique, and the same resource can legitimately carry
+-- separate at_rest and in_transit rows. Partial on deleted_at IS NULL so a
+-- soft-deleted row never blocks re-discovery of the same resource.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_crypto_applications_tenant_resource_context
+    ON public.crypto_applications (tenant_id, resource_identifier, encryption_context)
+    WHERE deleted_at IS NULL;
+
+
+-- ============================================================================
 -- ROLE GRANTS — THIS BLOCK MUST BE THE LAST THING IN THIS FILE
 -- ============================================================================
 -- `GRANT ... ON ALL TABLES IN SCHEMA x` is not a standing rule: Postgres

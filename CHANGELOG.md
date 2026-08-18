@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-18
+
+### Added
+
+- **At-rest encryption posture is now visible.** A new **Inventory → Data
+  Protection** lens shows whether your cloud storage and databases are
+  encrypted, with what, and — crucially — *whose key*. S3 buckets and RDS
+  instances already reached Inventory after a cloud discovery, but their
+  encryption posture stayed in raw discovery metadata where nothing rendered
+  it, and they were listed as TLS endpoints, which they are not.
+  Encryption is presented as a custody ladder rather than a tick: a bucket
+  using an AWS-managed key and one using your own KMS key both read
+  "Encrypted", but at different severities, so the difference between a key
+  you hold and a key your provider holds cannot hide behind two identical
+  green ticks. Where the provider reports SSE-KMS without saying whose key it
+  is, the lens says "Key owner unknown" rather than assuming the better case.
+- **"Could not determine" is a first-class result.** If a credential cannot
+  read a bucket's encryption setting, that is reported as *not assessed* —
+  visually distinct from both encrypted and unencrypted, and never scored as
+  a pass or a failure. A missing IAM grant should not read as a clean bill of
+  health.
+- `GET /api/v1/inventory-service/crypto-applications` returns at-rest
+  encryption records, filterable by resource type, assessment state and risk.
+
+### Changed
+
+- At-rest resources no longer report a fabricated `TLS`/`443` endpoint. They
+  now carry `AT-REST` and no port. **Upgrade note:** the port is part of the
+  identity used to match a rediscovered asset, so buckets and databases
+  discovered under 0.9.0 will not match after upgrading and will be recreated
+  alongside the originals. Only installs that ran S3 or RDS discovery on
+  0.9.0 are affected; remove the superseded rows once rediscovery has run.
+
+### Fixed
+
+- Requesting a compliance re-evaluation while the reconcile worker is
+  disabled no longer consumes the hourly cooldown and reports acceptance for
+  work that could never run. It now reports the service as unavailable and
+  leaves the cooldown intact.
+
 ## [0.9.0] - 2026-08-18
 
 ### Added

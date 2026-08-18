@@ -60,6 +60,13 @@ func (e *ReconcileEnqueuer) ready() bool {
 	return e != nil && e.client != nil && ReconcileWorkerEnabled()
 }
 
+// Ready reports whether enqueue calls can publish work. Tenant-facing callers use
+// this before consuming persisted cooldowns; framework activation/publish paths
+// intentionally keep their best-effort no-op behavior when the worker is disabled.
+func (e *ReconcileEnqueuer) Ready() bool {
+	return e.ready()
+}
+
 // publish emits one reconcile job (best-effort; a publish error is logged, not fatal).
 func (e *ReconcileEnqueuer) publish(job ReconcileJob) {
 	if !e.ready() {

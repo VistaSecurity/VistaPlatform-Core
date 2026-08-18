@@ -101,6 +101,12 @@ tags:
     `web-ui/src/services/inventory-api.ts` (getKeys / getLibraries / getMappings).
     The attach-key / attach-library / create-library writes share the handler
     but are not part of this read surface.'
+- name: crypto-applications
+  description: 'At-rest encryption posture (the `crypto_applications` table) — one
+    row per managed cloud resource (S3 bucket, RDS instance, storage account, …)
+    recording whether it is encrypted, under which algorithm, and whose key holds
+    it. The at-rest sibling of crypto-configurations, which covers in-transit.
+    UI consumer: frontend-v2 Inventory → Data Protection lens.'
 paths:
   /operational/locations-summary:
     get:
@@ -885,6 +891,120 @@ paths:
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /crypto-applications:
+    get:
+      operationId: listCryptoApplications
+      tags:
+      - crypto-applications
+      summary: List cryptographic application (at-rest) posture rows
+      description: |
+        Returns the tenant's cryptographic-application posture rows — the at-rest
+        encryption state of managed cloud resources — highest-risk first.
+
+        `encrypted` is only meaningful when `encryption_determined` is true. A row
+        with `encryption_determined: false` means the posture could NOT be measured
+        (AccessDenied on the encryption API, transport failure); it carries
+        `risk_score: 0`, which per platform convention means NOT ASSESSED — not
+        safe, and not a failure either. Clients must render it as unknown.
+
+        `risk_score` follows the at-rest ladder: 0 not assessed, 10 encrypted under
+        a customer-managed key, 40 encrypted under a provider-managed key, 90
+        unencrypted. `risk_level` is the CVSS-anchored band of that score.
+      parameters:
+      - name: encryption_context
+        in: query
+        required: false
+        description: |
+          Encryption context to list. Defaults to `at_rest`, the only context with a
+          producer today.
+        schema:
+          type: string
+          default: at_rest
+          enum:
+          - at_rest
+          - in_transit
+          - in_use
+          - key_storage
+          - signing
+          - hashing
+          - authentication
+          - other
+      - name: resource_type
+        in: query
+        required: false
+        description: Filter to one resource type.
+        schema:
+          type: string
+          enum:
+          - disk_volume
+          - file
+          - database
+          - cloud_storage
+          - hsm
+          - application
+          - build_artifact
+          - container
+          - vm_image
+          - backup
+          - communication
+          - other
+      - name: determined
+        in: query
+        required: false
+        description: |
+          Tri-state. Omit for no filter; `false` isolates the resources whose posture
+          could not be measured.
+        schema:
+          type: boolean
+      - name: risk_at_least
+        in: query
+        required: false
+        description: |
+          Risk band label; matches that band and everything above it. Unknown labels
+          are ignored rather than matching nothing.
+        schema:
+          type: string
+          enum:
+          - Critical
+          - High
+          - Medium
+          - Low
+          - Informational
+      - name: search
+        in: query
+        required: false
+        description: Case-insensitive substring match on resource name or identifier.
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        description: Maximum rows to return (default 100, max 500).
+        schema:
+          type: integer
+          minimum: 1
+      - name: offset
+        in: query
+        required: false
+        description: Rows to skip (default 0).
+        schema:
+          type: integer
+          minimum: 0
+      responses:
+        '200':
+          description: The tenant's cryptographic application posture rows.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CryptoApplicationsResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
         '500':
           $ref: '#/components/responses/LegacyServerError'
   /crypto-risks:
@@ -4296,6 +4416,107 @@ components:
           type: integer
         key_size_issues:
           type: integer
+    CryptoApplication:
+      type: object
+      additionalProperties: false
+      description: |
+        One resource's cryptographic posture in one encryption context
+        (models.CryptoApplication). POSTURE ONLY — `kms_key_id` is a key
+        IDENTIFIER (the ARN/id the provider prints in its own console), never key
+        material.
+      required:
+      - id
+      - asset_id
+      - resource_type
+      - resource_name
+      - resource_identifier
+      - encryption_context
+      - encrypted
+      - encryption_determined
+      - encryption_type
+      - algorithm
+      - key_manager
+      - kms_key_id
+      - cloud_provider
+      - cloud_region
+      - risk_score
+      - risk_level
+      - last_verified_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        asset_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
+          description: The inventory asset this resource materialized as, when known.
+        resource_type:
+          type: string
+        resource_name:
+          type: string
+        resource_identifier:
+          type: string
+          description: ARN or fully-qualified resource id — the natural key.
+        encryption_context:
+          type: string
+        encrypted:
+          type: boolean
+          description: Only meaningful when encryption_determined is true.
+        encryption_determined:
+          type: boolean
+        encryption_type:
+          type: string
+        algorithm:
+          type:
+          - string
+          - 'null'
+        key_manager:
+          type:
+          - string
+          - 'null'
+          enum:
+          - customer
+          - provider
+          - null
+        kms_key_id:
+          type:
+          - string
+          - 'null'
+        cloud_provider:
+          type:
+          - string
+          - 'null'
+        cloud_region:
+          type:
+          - string
+          - 'null'
+        risk_score:
+          type: integer
+          description: 0 means NOT ASSESSED, not safe.
+        risk_level:
+          type: string
+        last_verified_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+    CryptoApplicationsResponse:
+      type: object
+      additionalProperties: false
+      description: List envelope for GET /crypto-applications.
+      required:
+      - items
+      - total
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/CryptoApplication'
+        total:
+          type: integer
+          description: Total matching rows, ignoring limit/offset.
     CryptoRisksResponse:
       type: object
       additionalProperties: false

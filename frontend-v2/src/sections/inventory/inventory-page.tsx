@@ -5,12 +5,17 @@ import toast from 'react-hot-toast';
 import type { Asset } from '@vistasecurity/api-contract';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
-import { Icon, Modal, RiskChip, LevelDot, levelFromScore, riskColor } from '../../components/ui';
+import { Icon, Modal, RiskChip, LevelDot, levelFromScore, riskColor, type RiskLevel } from '../../components/ui';
 import { findLens } from './lenses';
 import { AssetDrawer, CertDrawer, ConfigDrawer, KeyDrawer, type Certificate, type CryptoConfig, type Key, type OpenAsset, type OpenCert, type OpenConfig, type OpenKey } from './drawers';
 import { AssetFormModal } from './asset-form-modal';
 import { CertificateUploadModal } from './certificate-upload-modal';
 import { StaleRowActions, StaleBulkBar } from './bulk-actions';
+import {
+  DATA_PROTECTION_CSV_HEADER, dataProtectionCsvRow, resourceTypeParam, determinedParam,
+  RESOURCE_TYPE_OPTS, ASSESSMENT_OPTS, type CryptoApplication,
+} from './data-protection';
+import { DP_GRID, DataProtectionDrawer, DataProtectionRow, useCryptoApplications } from './data-protection-view';
 import {
   type Strength, STRENGTH_META, STRENGTH_OPTS, ENV_OPTS, RISK_OPTS, configStrength,
   segmentForAsset, stripInetMask, stripEmptyParens, keyAlgorithmLabel,
@@ -198,7 +203,8 @@ type DrawerEntry =
   | { kind: 'config'; config: CryptoConfig }
   | { kind: 'asset'; assetId: string; seed?: Partial<Asset> }
   | { kind: 'cert'; certId: string }
-  | { kind: 'key'; keyId: string };
+  | { kind: 'key'; keyId: string }
+  | { kind: 'data'; app: CryptoApplication };
 
 const CFG_GRID = '22px minmax(0,1.5fr) 1fr minmax(0,1.4fr) 1fr 110px';
 const CERT_GRID = '18px minmax(0,1.6fr) minmax(0,1.2fr) 1fr 90px 120px';
@@ -222,6 +228,10 @@ export function InventoryPage() {
   const [fStrength, setFStrength] = useState('All');
   // Cert-lens ownership filter: All | 3rd-party | Internal.
   const [fCertOwner, setFCertOwner] = useState('All');
+  // Data Protection lens filters — both are SERVER-side params
+  // (resource_type, determined) so counts and paging cover the whole set.
+  const [fResourceType, setFResourceType] = useState('All');
+  const [fAssessment, setFAssessment] = useState('All');
   const hasFilters = fEnv !== 'All' || fRisk !== 'All' || fStrength !== 'All';
   const clearFilters = () => { setFEnv('All'); setFRisk('All'); setFStrength('All'); };
   const [stack, setStack] = useState<DrawerEntry[]>([]);
@@ -238,11 +248,12 @@ export function InventoryPage() {
   const openAsset: OpenAsset = (assetId, seed) => setStack((s) => [...s, { kind: 'asset', assetId, seed }]);
   const openCert: OpenCert = (certId) => setStack((s) => [...s, { kind: 'cert', certId }]);
   const openKey: OpenKey = (keyId) => setStack((s) => [...s, { kind: 'key', keyId }]);
+  const openApp = (app: CryptoApplication) => setStack((s) => [...s, { kind: 'data', app }]);
   const popTop = () => setStack((s) => s.slice(0, -1));
 
   // Reset page + close any drawers whenever the lens changes (filters persist —
   // they describe the user's slice of interest, not the lens).
-  useEffect(() => { setPage(1); setStack([]); setFCertOwner('All'); }, [lens]);
+  useEffect(() => { setPage(1); setStack([]); setFCertOwner('All'); setFResourceType('All'); setFAssessment('All'); }, [lens]);
 
   // Re-seed search when the palette deep-links again while we're already mounted
   // (URL `?q=` changes without a remount). Only acts when q is present, so it
@@ -253,6 +264,7 @@ export function InventoryPage() {
   const isConn = lens === 'connections';
   const isCert = def.anchor === 'cert';
   const isKey = def.anchor === 'key';
+  const isData = def.anchor === 'data';
   // Stale lens: SERVER-SIDE staleness cut (/) — last_seen_before with an
   // hour-stable cutoff so the query key doesn't churn every render. The whole
   // dataset is filtered (correct totals + pagination), not just the page.
@@ -270,7 +282,16 @@ export function InventoryPage() {
   const configsQ = useConfigs(page, search, isConfig, def.protocol);
   const connsQ = useConnections(page, search, isConn);
   const segsQ = useSegments(lens === 'network');
-  const q = isConn ? connsQ : isCert ? certsQ : isKey ? keysQ : isConfig ? configsQ : assetsQ;
+  // Data Protection: at-rest crypto applications (buckets, databases). The risk
+  // filter is pushed to the server as `risk_at_least`, built from the SHARED
+  // band minimums (LEVEL_MIN) rather than a hand-typed threshold.
+  const appsQ = useCryptoApplications(isData, {
+    page, pageSize: PAGE_SIZE, search,
+    resourceType: resourceTypeParam(fResourceType),
+    determined: determinedParam(fAssessment),
+    riskAtLeast: fRisk !== 'All' ? (fRisk as RiskLevel) : undefined,
+  });
+  const q = isData ? appsQ : isConn ? connsQ : isCert ? certsQ : isKey ? keysQ : isConfig ? configsQ : assetsQ;
 
   const levelOfA = (a: Asset) => a.risk_level || levelFromScore(typeof a.risk_score === 'number' ? a.risk_score : 0);
   const levelOfC = (c: CryptoConfig) => (c.risk_level as string) || levelFromScore(typeof c.risk_score === 'number' ? c.risk_score : 0);
@@ -297,20 +318,24 @@ export function InventoryPage() {
   if (fStrength !== 'All') configs = configs.filter((c) => configStrength(c as CryptoConfig) === fStrength);
 
   const conns = connsQ.data?.connections ?? [];
+  const apps = appsQ.data?.items ?? [];
   // Server already applied the staleness cut for the stale lens.
   const staleAssets = assets;
 
   // Keys aren't server-paginated, so their total is just the (search-filtered) length.
-  const total = (isConn ? connsQ.data?.pagination?.total : isCert ? certsQ.data?.pagination?.total : isKey ? keys.length : isConfig ? configsQ.data?.pagination?.total : assetsQ.data?.pagination?.total) ?? 0;
+  const total = (isData ? appsQ.data?.total : isConn ? connsQ.data?.pagination?.total : isCert ? certsQ.data?.pagination?.total : isKey ? keys.length : isConfig ? configsQ.data?.pagination?.total : assetsQ.data?.pagination?.total) ?? 0;
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const unit = isConn ? 'connections' : isCert ? 'certs' : isKey ? 'keys' : isConfig ? 'configs' : 'assets';
-  const shown = isConn ? conns.length : isCert ? certs.length : isKey ? keys.length : isConfig ? configs.length : assets.length;
+  const unit = isData ? 'resources' : isConn ? 'connections' : isCert ? 'certs' : isKey ? 'keys' : isConfig ? 'configs' : 'assets';
+  const shown = isData ? apps.length : isConn ? conns.length : isCert ? certs.length : isKey ? keys.length : isConfig ? configs.length : assets.length;
   const countLabel = lens === 'stale' ? `${total} stale`
-    : hasFilters && !isConn ? `${shown} of ${total} ${unit}` : `${total} ${unit}`;
+    : hasFilters && !isConn && !isData ? `${shown} of ${total} ${unit}` : `${total} ${unit}`;
 
   const exportCsv = () => {
     const stamp = new Date().toISOString().slice(0, 10);
-    if (isConn) {
+    if (isData) {
+      downloadCsv(`vista-inventory-data-protection-${stamp}.csv`,
+        DATA_PROTECTION_CSV_HEADER, apps.map(dataProtectionCsvRow));
+    } else if (isConn) {
       downloadCsv(`vista-inventory-connections-${stamp}.csv`,
         ['destination', 'port', 'source', 'protocol', 'version', 'cipher_suite', 'crypto_strength', 'weak_reasons', 'cert_not_after', 'last_seen_at'],
         conns.map((cn) => [cn.dest_hostname ?? stripInetMask(cn.dest_ip), cn.dest_port, cn.source_hostname ?? stripInetMask(cn.source_ip), cn.protocol, stripEmptyParens(cn.protocol_version), cn.cipher_suite, cn.crypto_strength, ((cn as unknown as Record<string, unknown>).weak_reasons as string[] | undefined)?.join('; '), cn.cert_not_after, cn.last_seen_at]));
@@ -340,6 +365,32 @@ export function InventoryPage() {
   const renderBody = () => {
     if (q.isError) return <Center icon="alert-triangle" tone="var(--danger-text)" title="Couldn't load inventory" message={q.error instanceof Error ? q.error.message : 'Request failed'} />;
     if (q.isLoading) return <Center icon="loader" tone="var(--app-t3)" title="Loading…" message="Fetching the tenant's inventory." />;
+
+    if (isData) {
+      if (apps.length === 0) {
+        // Wording is deliberately not a clean bill of health. This endpoint
+        // cannot distinguish "discovery never ran" from "discovery ran and
+        // found no storage/database resources", so it says neither.
+        const filtered = !!search || fResourceType !== 'All' || fAssessment !== 'All' || fRisk !== 'All';
+        return (
+          <Center
+            icon="vault"
+            tone="var(--app-t3)"
+            title={filtered ? 'Nothing matches your filters' : 'No at-rest resources inventoried'}
+            message={filtered
+              ? 'Clear a filter to widen the view.'
+              : 'Nothing here means nothing has been inventoried — not that your data is encrypted. Object storage and databases appear once a cloud discovery reports them: run one from Discovery → Cloud.'}
+            action={filtered ? undefined : { label: 'Go to Discovery → Cloud', onClick: () => { void navigate('/discovery/cloud'); } }}
+          />
+        );
+      }
+      return (
+        <>
+          <Header grid={DP_GRID} cols={['', 'Resource', 'Type', 'Encryption', 'Key custody', 'Origin', 'Verified']} />
+          {apps.map((a) => <DataProtectionRow key={a.id} app={a} onClick={() => openApp(a)} />)}
+        </>
+      );
+    }
 
     if (isConn) {
       if (conns.length === 0) return <Center icon="link" tone="var(--accent)" title="No 3rd-party connections" message={search ? 'Nothing matches your search.' : 'Outbound TLS endpoints your assets talk to (SaaS, partners, APIs) appear here once discovered.'} />;
@@ -527,7 +578,19 @@ export function InventoryPage() {
         {isCert && (
           <FilterSelect label="Ownership" value={fCertOwner} onChange={setFCertOwner} options={['All', '3rd-party', 'Internal', 'Unknown']} />
         )}
-        {!isConn && !isCert && !isKey && (
+        {isData && (
+          <>
+            <FilterSelect label="Resource type" value={fResourceType} onChange={(v) => { setFResourceType(v); setPage(1); }} options={RESOURCE_TYPE_OPTS} />
+            <FilterSelect label="Assessment" value={fAssessment} onChange={(v) => { setFAssessment(v); setPage(1); }} options={ASSESSMENT_OPTS} />
+            <FilterSelect label="Risk" value={fRisk} onChange={(v) => { setFRisk(v); setPage(1); }} options={RISK_OPTS} />
+            {(fRisk !== 'All' || fResourceType !== 'All' || fAssessment !== 'All') && (
+              <button onClick={() => { setFRisk('All'); setFResourceType('All'); setFAssessment('All'); setPage(1); }} className="ui-btn ghost" style={{ height: 31, padding: '0 9px', fontSize: 12.5 }}>
+                <Icon name="x" size={13} />Clear
+              </button>
+            )}
+          </>
+        )}
+        {!isConn && !isCert && !isKey && !isData && (
           <>
             <FilterSelect label="Environment" value={fEnv} onChange={setFEnv} options={ENV_OPTS} />
             <FilterSelect label="Risk" value={fRisk} onChange={setFRisk} options={RISK_OPTS} />
@@ -590,6 +653,7 @@ export function InventoryPage() {
         const active = i === stack.length - 1;
         if (d.kind === 'config') return <ConfigDrawer key={i} config={d.config} onOpenAsset={openAsset} onOpenCert={openCert} onClose={popTop} active={active} depth={i} />;
         if (d.kind === 'asset') return <AssetDrawer key={i} assetId={d.assetId} seed={d.seed} onOpenConfig={openConfig} onClose={popTop} onEdit={(a) => { setEditAsset(a); setFormOpen(true); }} active={active} depth={i} />;
+        if (d.kind === 'data') return <DataProtectionDrawer key={i} app={d.app} onOpenAsset={(id) => openAsset(id)} onClose={popTop} active={active} depth={i} />;
         if (d.kind === 'key') return <KeyDrawer key={i} keyId={d.keyId} onOpenAsset={openAsset} onClose={popTop} active={active} depth={i} />;
         return <CertDrawer key={i} certId={d.certId} onClose={popTop} active={active} depth={i} />;
       })}
@@ -980,12 +1044,17 @@ function Txt({ v, cap }: { v?: string | null; cap?: boolean }) {
 function Mono({ v, small }: { v?: string | null; small?: boolean }) {
   return <span className="mono" style={{ fontSize: small ? 11 : 12, color: 'var(--app-t2)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{v || '—'}</span>;
 }
-function Center({ icon, tone, title, message }: { icon: string; tone: string; title: string; message: string }) {
+function Center({ icon, tone, title, message, action }: { icon: string; tone: string; title: string; message: string; action?: { label: string; onClick: () => void } }) {
   return (
     <div style={{ padding: '64px 24px', textAlign: 'center', color: 'var(--app-t3)' }}>
       <Icon name={icon} size={26} style={{ color: tone, opacity: 0.8 }} />
       <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--app-t1)', marginTop: 12 }}>{title}</div>
-      <div style={{ fontSize: 12.5, marginTop: 4 }}>{message}</div>
+      <div style={{ fontSize: 12.5, marginTop: 4, maxWidth: 520, marginLeft: 'auto', marginRight: 'auto', lineHeight: 1.5 }}>{message}</div>
+      {action && (
+        <button className="ui-btn sm" style={{ marginTop: 14 }} onClick={action.onClick}>
+          {action.label}<Icon name="chevron-right" size={13} />
+        </button>
+      )}
     </div>
   );
 }

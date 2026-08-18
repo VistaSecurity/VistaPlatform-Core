@@ -82,6 +82,7 @@ func main() {
 	discoveryHandler := handlers.NewDiscoveryHandler(assetService, discoveryService)
 	discoveryHandler.SetDB(db)
 	cryptoAssetsHandler := handlers.NewCryptoAssetsHandler(assetService)
+	cryptoApplicationsHandler := handlers.NewCryptoApplicationsHandler(assetService)
 	integrationsHandler := handlers.NewIntegrationsHandler(assetService)
 	networkSpaceHandler := handlers.NewNetworkSpaceHandler(networkSpaceService)
 	networkSpaceHandler.SetNetworkSegmentService(networkSegmentService)
@@ -280,6 +281,10 @@ func main() {
 		// Remediation guidance endpoints
 		api.GET("/inventory-service/remediation/algorithm/:code", remediationHandler.GetRemediationByAlgorithm)
 		// Crypto assets
+		// At-rest encryption posture (Data Protection lens). Read-gated on
+		// assets.read: these rows describe managed inventory, and every
+		// non-billing role that can see Inventory already holds it.
+		api.GET("/inventory-service/crypto-applications", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsRead), cryptoApplicationsHandler.ListCryptoApplications)
 		api.GET("/inventory-service/keys", cryptoAssetsHandler.ListKeys)
 		api.GET("/inventory-service/keys/:id", cryptoAssetsHandler.GetKeyByID)
 		api.GET("/inventory-service/keys/:id/implementations", cryptoAssetsHandler.GetKeyImplementations)
@@ -353,6 +358,7 @@ func main() {
 		api.GET("/risk/summary", assetHandler.GetRiskSummary)
 		api.GET("/risk/posture/trend", assetHandler.GetPostureTrend)
 		// Direct crypto
+		api.GET("/crypto-applications", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsRead), cryptoApplicationsHandler.ListCryptoApplications)
 		api.GET("/keys", cryptoAssetsHandler.ListKeys)
 		api.GET("/keys/:id", cryptoAssetsHandler.GetKeyByID)
 		api.GET("/keys/:id/implementations", cryptoAssetsHandler.GetKeyImplementations)
@@ -517,6 +523,7 @@ func main() {
 		apiv2.GET("/inventory-service/remediation/algorithm/:code", remediationHandler.GetRemediationByAlgorithm)
 
 		// Keys and Libraries (CMDB: cmdb_ci_credential / crypto components)
+		apiv2.GET("/inventory-service/crypto-applications", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsRead), cryptoApplicationsHandler.ListCryptoApplications)
 		apiv2.GET("/inventory-service/keys", cryptoAssetsHandler.ListKeys)
 		apiv2.GET("/inventory-service/keys/:id", cryptoAssetsHandler.GetKeyByID)
 		apiv2.GET("/inventory-service/keys/:id/implementations", cryptoAssetsHandler.GetKeyImplementations)
