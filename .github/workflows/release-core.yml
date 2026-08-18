@@ -409,7 +409,14 @@ jobs:
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
 
       - name: Sign the checksums
-        run: cosign sign-blob --yes --output-signature dist/SHA256SUMS.sig --output-certificate dist/SHA256SUMS.pem dist/SHA256SUMS
+        # --new-bundle-format=false is load-bearing, not legacy cruft. cosign v4
+        # defaults it ON, which makes --output-signature/--output-certificate
+        # no-ops and then fails on the empty --bundle path. Published verify
+        # instructions (public/INSTALL.md, docsv4 SENSOR_REGISTRATION.md) tell
+        # customers to pass --signature SHA256SUMS.sig --certificate
+        # SHA256SUMS.pem, so those two files have to keep existing. Moving to a
+        # bundle is a deliberate change to the published contract, not a flag flip.
+        run: cosign sign-blob --yes --new-bundle-format=false --output-signature dist/SHA256SUMS.sig --output-certificate dist/SHA256SUMS.pem dist/SHA256SUMS
 
       # Release notes come from the CHANGELOG section for this version, the same
       # source the commercial line uses. Absent (a Core-only tree restarts its

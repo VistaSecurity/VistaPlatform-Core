@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-08-18
+
+### Fixed
+
+- **Release artifacts are signed and published again.** The 0.10.0 release
+  published its container images and Helm chart but failed before attaching
+  the sensor and device-agent binaries and their signed checksums, because a
+  cosign upgrade silently changed the signature output format. Verification
+  instructions are unchanged — `SHA256SUMS.sig` and `SHA256SUMS.pem` are
+  produced exactly as before. Install 0.10.1 rather than 0.10.0 if you need
+  the pre-built binaries; the 0.10.0 images and chart are unaffected and
+  identical in content.
+
 ## [0.10.0] - 2026-08-18
 
 ### Added
