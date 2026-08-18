@@ -231,9 +231,24 @@ func (s *CloudDiscoveryService) discoverLoadBalancers(ctx context.Context, tenan
 							if hsErr != nil {
 								log.Printf("Warning: TLS handshake error for %s:%d: %v", lbHostname, cfg.Port, hsErr)
 							} else if handshakeResult != nil && handshakeResult.Success {
-								// Override API-reported values with actual negotiated values
-								configMap["protocol_version"] = &handshakeResult.TLSVersion
+								// The negotiated cipher is a real measurement
+								// from this endpoint — prefer it.
 								configMap["cipher_suite"] = &handshakeResult.CipherSuite
+								configMap["negotiated_protocol_version"] = handshakeResult.TLSVersion
+
+								// protocol_version must stay the WEAKEST
+								// version the listener permits, not the one
+								// our modern client happened to negotiate. A
+								// listener on ELBSecurityPolicy-TLS-1-0-2015-04
+								// negotiates TLS 1.2 with us and still accepts
+								// TLS 1.0 from anyone who asks; overwriting
+								// with the negotiated version hides exactly
+								// the finding we exist to produce. Only adopt
+								// the handshake version when the API told us
+								// nothing.
+								if cfg.ProtocolVersion == nil {
+									configMap["protocol_version"] = &handshakeResult.TLSVersion
+								}
 								if handshakeResult.ALPN != "" {
 									if cfgMeta, ok := configMap["metadata"].(map[string]interface{}); ok {
 										cfgMeta["alpn"] = handshakeResult.ALPN
@@ -393,6 +408,28 @@ func (s *CloudDiscoveryService) discoverAPIGateways(ctx context.Context, tenantI
 					"api_name": awsconfig.ToString(api.Name),
 				}
 
+				// Interrogate the mapped custom domains. TLS on API Gateway
+				// is a property of the domain, and its SecurityPolicy
+				// (TLS_1_0 / TLS_1_2) is a MINIMUM — a handshake against the
+				// endpoint cannot show that TLS 1.0 is still accepted.
+				cryptoConfigs := make([]map[string]interface{}, 0, 2)
+				interrogationService := NewAWSInterrogationService(awsClient)
+				domainConfigs, iErr := interrogationService.InterrogateAPIGateway(regionCtx, awsconfig.ToString(api.ApiId))
+				if iErr != nil {
+					log.Printf("Warning: failed to interrogate API Gateway %s: %v", awsconfig.ToString(api.ApiId), iErr)
+				}
+				for _, cfg := range domainConfigs {
+					cryptoConfigs = append(cryptoConfigs, map[string]interface{}{
+						"protocol":         cfg.Protocol,
+						"protocol_version": cfg.ProtocolVersion,
+						"cipher_suite":     cfg.CipherSuite,
+						"port":             cfg.Port,
+						"hostname":         cfg.Hostname,
+						"tls_versions":     cfg.Metadata["tls_versions"],
+						"metadata":         cfg.Metadata,
+					})
+				}
+
 				// Perform TLS handshake against the API Gateway endpoint
 				if hostname != "" {
 					tlsService := NewTLSHandshakeService(10 * time.Second)
@@ -405,13 +442,17 @@ func (s *CloudDiscoveryService) discoverAPIGateways(ctx context.Context, tenantI
 							"protocol_version":   handshakeResult.TLSVersion,
 							"cipher_suite":       handshakeResult.CipherSuite,
 							"port":               443,
+							"hostname":           hostname,
 							"certificates":       handshakeResult.Certificates,
 							"handshake_verified": true,
 						}
-						metadata["crypto_configs"] = []map[string]interface{}{cryptoConfig}
+						cryptoConfigs = append(cryptoConfigs, cryptoConfig)
 					} else if handshakeResult != nil {
 						log.Printf("TLS handshake skipped for API Gateway %s: %s", hostname, handshakeResult.Error)
 					}
+				}
+				if len(cryptoConfigs) > 0 {
+					metadata["crypto_configs"] = cryptoConfigs
 				}
 
 				integrationID := awsClient.GetIntegrationID()
@@ -497,6 +538,29 @@ func (s *CloudDiscoveryService) discoverCloudFrontDistributions(ctx context.Cont
 				"enabled":         dist.Enabled,
 			}
 
+			// Interrogate the distribution configuration. This is the only
+			// way to see the ORIGIN-side TLS settings: a distribution can
+			// serve viewers over TLS 1.2+ while reaching its origin over
+			// TLS 1.0 or cleartext, and no client-side handshake against the
+			// CloudFront domain can reveal that.
+			cryptoConfigs := make([]map[string]interface{}, 0, 2)
+			interrogationService := NewAWSInterrogationService(awsClient)
+			apiConfigs, iErr := interrogationService.InterrogateCloudFront(ctx, awsconfig.ToString(dist.Id))
+			if iErr != nil {
+				log.Printf("Warning: failed to interrogate CloudFront distribution %s: %v", awsconfig.ToString(dist.Id), iErr)
+			}
+			for _, cfg := range apiConfigs {
+				cryptoConfigs = append(cryptoConfigs, map[string]interface{}{
+					"protocol":         cfg.Protocol,
+					"protocol_version": cfg.ProtocolVersion,
+					"cipher_suite":     cfg.CipherSuite,
+					"port":             cfg.Port,
+					"hostname":         cfg.Hostname,
+					"tls_versions":     cfg.Metadata["tls_versions"],
+					"metadata":         cfg.Metadata,
+				})
+			}
+
 			// Perform TLS handshake against the CloudFront distribution domain
 			if hostname != "" {
 				tlsService := NewTLSHandshakeService(10 * time.Second)
@@ -509,13 +573,17 @@ func (s *CloudDiscoveryService) discoverCloudFrontDistributions(ctx context.Cont
 						"protocol_version":   handshakeResult.TLSVersion,
 						"cipher_suite":       handshakeResult.CipherSuite,
 						"port":               443,
+						"hostname":           hostname,
 						"certificates":       handshakeResult.Certificates,
 						"handshake_verified": true,
 					}
-					metadata["crypto_configs"] = []map[string]interface{}{cryptoConfig}
+					cryptoConfigs = append(cryptoConfigs, cryptoConfig)
 				} else if handshakeResult != nil {
 					log.Printf("TLS handshake skipped for CloudFront %s: %s", hostname, handshakeResult.Error)
 				}
+			}
+			if len(cryptoConfigs) > 0 {
+				metadata["crypto_configs"] = cryptoConfigs
 			}
 
 			integrationID := awsClient.GetIntegrationID()
@@ -586,17 +654,13 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 	now := time.Now()
 
 	for _, device := range devices {
-		// Extract crypto configs from device metadata
-		var cryptoConfigs []map[string]interface{}
-		if device.Metadata != nil {
-			if configs, ok := device.Metadata["crypto_configs"].([]interface{}); ok {
-				for _, cfgInterface := range configs {
-					if cfg, ok := cfgInterface.(map[string]interface{}); ok {
-						cryptoConfigs = append(cryptoConfigs, cfg)
-					}
-				}
-			}
-		}
+		// Extract crypto configs from device metadata.
+		cryptoConfigs := extractCryptoConfigs(device.Metadata)
+
+		// Region the resource lives in, for inventory-service's
+		// FindOrCreateCloudSegment (which requires BOTH cloud_provider and
+		// cloud_region and therefore never fired while this was unset).
+		cloudRegion := cloudRegionForDevice(device)
 
 		// Determine hostname
 		hostname := ""
@@ -640,6 +704,7 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 				metadata := map[string]interface{}{
 					"discovery_method": "cloud_api",
 					"cloud_provider":   cloudProvider,
+					"cloud_region":     cloudRegion,
 					"device_type":      device.DeviceType,
 					"device_id":        device.ID.String(),
 					"integration_id":   integrationID.String(),
@@ -684,6 +749,25 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 					metadata["handshake_verified"] = verified
 				}
 
+				// The full set of protocol versions the endpoint permits.
+				// discovery-processor's extractCryptoDetails reads
+				// "tls_versions" into SupportedTLSVersions, which is what
+				// inventory-service's hasWeakTLSVersion inspects to flag an
+				// endpoint that negotiates TLS 1.2 but still accepts TLS 1.0.
+				// It may sit on the config itself or inside its metadata.
+				if tv, ok := cfg["tls_versions"]; ok && tv != nil {
+					metadata["tls_versions"] = tv
+				} else if cfgMeta, ok := cfg["metadata"].(map[string]interface{}); ok {
+					if tv, ok := cfgMeta["tls_versions"]; ok && tv != nil {
+						metadata["tls_versions"] = tv
+					}
+				}
+
+				// vpc_id is the third input FindOrCreateCloudSegment takes.
+				if vpc := getStringFromMap(map[string]interface{}(device.Metadata), "vpc_id"); vpc != "" {
+					metadata["vpc_id"] = vpc
+				}
+
 				// Pass through ACM metadata from the crypto config's inner metadata
 				if cfgMeta, ok := cfg["metadata"].(map[string]interface{}); ok {
 					if acmCerts, ok := cfgMeta["certificates"]; ok {
@@ -717,6 +801,7 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 			metadata := map[string]interface{}{
 				"discovery_method": "cloud_api",
 				"cloud_provider":   cloudProvider,
+				"cloud_region":     cloudRegion,
 				"device_type":      device.DeviceType,
 				"device_id":        device.ID.String(),
 				"integration_id":   integrationID.String(),
@@ -795,6 +880,73 @@ func canonicalCertPEMs(certs interface{}) []string {
 func getStringFromMap(m map[string]interface{}, key string) string {
 	if val, ok := m[key].(string); ok {
 		return val
+	}
+	return ""
+}
+
+// extractCryptoConfigs pulls the crypto configs out of a device's metadata and
+// normalises them to the shape every downstream reader assumes: plain JSON
+// values ([]interface{} of map[string]interface{}, float64 numbers, no
+// pointers).
+//
+// This is load-bearing, not cosmetic. The discovery functions build
+// metadata["crypto_configs"] as a []map[string]interface{} holding *string /
+// *int fields, and this device value is passed to WriteSensorDiscoveries
+// IN MEMORY — it never round-trips through Postgres. The old
+// `.([]interface{})` type assertion therefore always failed, so EVERY cloud
+// discovery took the "no crypto configs" branch: one bare TLS/443 row per
+// device with no protocol version, no cipher suite and no certificates. And
+// even had the slice asserted, getStringFromMap would have returned "" for the
+// *string protocol_version. Marshalling through JSON here reproduces exactly
+// what a database round-trip would have produced, so the reader assumptions
+// downstream (float64 ports, []interface{} certificates) hold.
+func extractCryptoConfigs(metadata map[string]interface{}) []map[string]interface{} {
+	if metadata == nil {
+		return nil
+	}
+	raw, ok := metadata["crypto_configs"]
+	if !ok || raw == nil {
+		return nil
+	}
+
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		log.Printf("Warning: failed to normalize crypto_configs: %v", err)
+		return nil
+	}
+	var configs []map[string]interface{}
+	if err := json.Unmarshal(encoded, &configs); err != nil {
+		log.Printf("Warning: failed to decode crypto_configs: %v", err)
+		return nil
+	}
+
+	out := make([]map[string]interface{}, 0, len(configs))
+	for _, cfg := range configs {
+		if cfg != nil {
+			out = append(out, cfg)
+		}
+	}
+	return out
+}
+
+// cloudRegionForDevice resolves the region to stamp on a device's discoveries.
+//
+// Every regional discovery path already records metadata["region"]. Two AWS
+// resource kinds are genuinely global and have no region: CloudFront
+// distributions and (for the purposes of the bucket namespace) nothing else —
+// S3 buckets DO have a home region and DiscoverS3BucketEncryption now resolves
+// it per bucket. For the global ones we write the literal "global" rather than
+// the integration's default region, which would claim the resource lives
+// somewhere it does not.
+func cloudRegionForDevice(device models.Device) string {
+	if device.Metadata != nil {
+		if region := getStringFromMap(map[string]interface{}(device.Metadata), "region"); region != "" {
+			return region
+		}
+	}
+	switch device.DeviceType {
+	case "aws_cloudfront":
+		return "global"
 	}
 	return ""
 }

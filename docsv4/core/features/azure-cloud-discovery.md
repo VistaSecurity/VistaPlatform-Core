@@ -303,7 +303,7 @@ Resources are filtered case-insensitively to the specified resource groups.
 - **Authentication Errors**: Logged with status `connection_error` - verify credentials
 - **Permission Errors**: Logged with details - verify RBAC permissions
 - **API Errors**: Non-fatal, discovery continues for other resources
-- **Rate Limiting**: Azure API rate limits are respected with backoff
+- **Retries and throttling**: the platform configures no retry or backoff policy of its own; it relies on the Azure SDK's default retry behaviour for throttled and transient responses. There is no platform-level pacing across a run.
 
 ---
 
@@ -313,8 +313,7 @@ Resources are filtered case-insensitively to the specified resource groups.
 
 - Credentials encrypted at rest in `platform_integrations` table
 - Decrypted only when needed for API calls
-- Never logged or exposed in responses
-- Credentials cleared from memory after use
+- Never logged, and masked in API responses
 
 ### Azure RBAC Permissions Required
 

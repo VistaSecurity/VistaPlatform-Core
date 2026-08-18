@@ -113,36 +113,6 @@ type sshKeyRow struct {
 	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
-type codeFindingRow struct {
-	ID              uuid.UUID  `json:"id"`
-	TenantID        uuid.UUID  `json:"tenant_id"`
-	IntegrationID   uuid.UUID  `json:"integration_id"`
-	RepositoryURL   string     `json:"repository_url"`
-	RepositoryName  string     `json:"repository_name"`
-	Branch          string     `json:"branch"`
-	CommitSHA       *string    `json:"commit_sha,omitempty"`
-	FilePath        string     `json:"file_path"`
-	LineNumber      *int       `json:"line_number,omitempty"`
-	LineContent     *string    `json:"line_content,omitempty"`
-	AlgorithmID     *uuid.UUID `json:"algorithm_id,omitempty"`
-	FindingType     string     `json:"finding_type"`
-	Severity        string     `json:"severity"`
-	Language        *string    `json:"language,omitempty"`
-	RuleID          string     `json:"rule_id"`
-	RuleDescription *string    `json:"rule_description,omitempty"`
-	MatchedPattern  *string    `json:"matched_pattern,omitempty"`
-	RiskScore       int        `json:"risk_score"`
-	ConfidenceScore float64    `json:"confidence_score"`
-	Status          string     `json:"status"`
-	SuppressionRsn  *string    `json:"suppression_reason,omitempty"`
-	FixedAt         *time.Time `json:"fixed_at,omitempty"`
-	FixedInCommit   *string    `json:"fixed_in_commit,omitempty"`
-	FirstDetectedAt time.Time  `json:"first_detected_at"`
-	LastDetectedAt  time.Time  `json:"last_detected_at"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-}
-
 // parsePagination extracts page and page_size from query params with defaults.
 func parsePagination(c *gin.Context) (page, pageSize, offset int) {
 	page, _ = strconv.Atoi(c.DefaultQuery("page", "1"))
@@ -415,106 +385,7 @@ func (h *ExperimentalHandlers) ListSSHKeys(c *gin.Context) {
 	})
 }
 
-// ListCodeFindings handles GET - returns crypto code scan findings for the tenant
-func (h *ExperimentalHandlers) ListCodeFindings(c *gin.Context) {
-	tenantID, ok := getTenantID(c)
-	if !ok {
-		return
-	}
-
-	page, pageSize, offset := parsePagination(c)
-
-	query := `
-		SELECT id, tenant_id, integration_id,
-		       repository_url, repository_name, branch, commit_sha,
-		       file_path, line_number, line_content,
-		       algorithm_id, finding_type, severity, language,
-		       rule_id, rule_description, matched_pattern,
-		       risk_score, confidence_score,
-		       status, suppression_reason, fixed_at, fixed_in_commit,
-		       first_detected_at, last_detected_at, created_at, updated_at
-		FROM crypto_code_findings
-		WHERE tenant_id = $1 AND deleted_at IS NULL
-	`
-	countQuery := `SELECT COUNT(*) FROM crypto_code_findings WHERE tenant_id = $1 AND deleted_at IS NULL`
-	args := []interface{}{tenantID}
-	argNum := 2
-
-	if severity := c.Query("severity"); severity != "" {
-		query += " AND severity = $" + strconv.Itoa(argNum)
-		countQuery += " AND severity = $" + strconv.Itoa(argNum)
-		args = append(args, severity)
-		argNum++
-	}
-
-	if findingType := c.Query("finding_type"); findingType != "" {
-		query += " AND finding_type = $" + strconv.Itoa(argNum)
-		countQuery += " AND finding_type = $" + strconv.Itoa(argNum)
-		args = append(args, findingType)
-		argNum++
-	}
-
-	if status := c.Query("status"); status != "" {
-		query += " AND status = $" + strconv.Itoa(argNum)
-		countQuery += " AND status = $" + strconv.Itoa(argNum)
-		args = append(args, status)
-		argNum++
-	}
-
-	if repoName := c.Query("repository_name"); repoName != "" {
-		query += " AND repository_name = $" + strconv.Itoa(argNum)
-		countQuery += " AND repository_name = $" + strconv.Itoa(argNum)
-		args = append(args, repoName)
-		argNum++
-	}
-
-	// Paginated query
-	query += " ORDER BY created_at DESC LIMIT $" + strconv.Itoa(argNum) + " OFFSET $" + strconv.Itoa(argNum+1) //nolint:gosec // intentional — placeholder concatenation only; values are parameterized via args slice
-
-	// RLS-scoped reads on `crypto_code_findings`: count + page in one WithTenantTx.
-	var total int
-	findings := make([]codeFindingRow, 0)
-	if err := shareddatabase.WithTenantTx(c.Request.Context(), h.db, tenantID, func(tx *sql.Tx) error {
-		if e := tx.QueryRowContext(c.Request.Context(), countQuery, args...).Scan(&total); e != nil {
-			return e
-		}
-		pageArgs := append(append([]interface{}{}, args...), pageSize, offset)
-		rows, e := tx.QueryContext(c.Request.Context(), query, pageArgs...)
-		if e != nil {
-			return e
-		}
-		defer func() { _ = rows.Close() }()
-		for rows.Next() {
-			var f codeFindingRow
-			if scanErr := rows.Scan(
-				&f.ID, &f.TenantID, &f.IntegrationID,
-				&f.RepositoryURL, &f.RepositoryName, &f.Branch, &f.CommitSHA,
-				&f.FilePath, &f.LineNumber, &f.LineContent,
-				&f.AlgorithmID, &f.FindingType, &f.Severity, &f.Language,
-				&f.RuleID, &f.RuleDescription, &f.MatchedPattern,
-				&f.RiskScore, &f.ConfidenceScore,
-				&f.Status, &f.SuppressionRsn, &f.FixedAt, &f.FixedInCommit,
-				&f.FirstDetectedAt, &f.LastDetectedAt, &f.CreatedAt, &f.UpdatedAt,
-			); scanErr != nil {
-				continue
-			}
-			findings = append(findings, f)
-		}
-		return rows.Err()
-	}); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query code findings"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"findings":  findings,
-		"total":     total,
-		"page":      page,
-		"page_size": pageSize,
-	})
-}
-
-// GetExperimentalStats handles GET - returns summary counts for all 4 experimental features
+// GetExperimentalStats handles GET - returns summary counts for the experimental features
 func (h *ExperimentalHandlers) GetExperimentalStats(c *gin.Context) {
 	tenantID, ok := getTenantID(c)
 	if !ok {
@@ -533,24 +404,18 @@ func (h *ExperimentalHandlers) GetExperimentalStats(c *gin.Context) {
 		(SELECT COUNT(*) FROM database_encryption_states WHERE tenant_id = $1 AND deleted_at IS NULL AND ssl_enabled = false),
 		(SELECT COUNT(*) FROM database_encryption_states WHERE tenant_id = $1 AND deleted_at IS NULL AND risk_score >= 70),
 		(SELECT COUNT(*) FROM ssh_keys WHERE tenant_id = $1 AND deleted_at IS NULL),
-		(SELECT COUNT(*) FROM ssh_keys WHERE tenant_id = $1 AND deleted_at IS NULL AND is_weak = true),
-		(SELECT COUNT(*) FROM crypto_code_findings WHERE tenant_id = $1 AND deleted_at IS NULL),
-		(SELECT COUNT(*) FROM crypto_code_findings WHERE tenant_id = $1 AND deleted_at IS NULL AND severity = 'critical' AND status = 'open'),
-		(SELECT COUNT(*) FROM crypto_code_findings WHERE tenant_id = $1 AND deleted_at IS NULL AND severity = 'high' AND status = 'open'),
-		(SELECT COUNT(*) FROM crypto_code_findings WHERE tenant_id = $1 AND deleted_at IS NULL AND status = 'open')
+		(SELECT COUNT(*) FROM ssh_keys WHERE tenant_id = $1 AND deleted_at IS NULL AND is_weak = true)
 	`
 
 	var kmsCount, weakKMSKeys, unrotatedKMS int
 	var dbStatesCount, sslDisabledDBs, highRiskDBs int
 	var sshKeysCount, weakSSHKeys int
-	var codeFindingsCount, criticalFindings, highFindings, openFindings int
 
 	err := shareddatabase.WithTenantTx(ctx, h.db, tenantID, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, statsQuery, tenantID).Scan(
 			&kmsCount, &weakKMSKeys, &unrotatedKMS,
 			&dbStatesCount, &sslDisabledDBs, &highRiskDBs,
 			&sshKeysCount, &weakSSHKeys,
-			&codeFindingsCount, &criticalFindings, &highFindings, &openFindings,
 		)
 	})
 	if err != nil {
@@ -573,12 +438,6 @@ func (h *ExperimentalHandlers) GetExperimentalStats(c *gin.Context) {
 		"ssh_keys": gin.H{
 			"total": sshKeysCount,
 			"weak":  weakSSHKeys,
-		},
-		"code_findings": gin.H{
-			"total":    codeFindingsCount,
-			"critical": criticalFindings,
-			"high":     highFindings,
-			"open":     openFindings,
 		},
 	})
 }

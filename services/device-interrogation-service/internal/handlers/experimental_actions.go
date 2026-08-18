@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -14,10 +13,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/services"
-	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/services/codescan"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/network"
-	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -455,150 +452,4 @@ func assessSSHKey(keyType string, keySize int) (isWeak bool, riskScore int) {
 		}
 		return false, 30
 	}
-}
-
-// --- Code Scanning ---
-
-type scanRepositoryRequest struct {
-	GithubToken string `json:"github_token" binding:"required"`
-	Owner       string `json:"owner" binding:"required"`
-	Repo        string `json:"repo" binding:"required"`
-	Branch      string `json:"branch"`
-}
-
-// ScanRepository scans a GitHub repository for weak crypto patterns
-func (h *ExperimentalActionHandlers) ScanRepository(c *gin.Context) {
-	tenantID, ok := getTenantID(c)
-	if !ok {
-		return
-	}
-
-	var req scanRepositoryRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "github_token, owner, and repo are required"})
-		return
-	}
-
-	if req.Branch == "" {
-		req.Branch = "main"
-	}
-
-	// Create or find a GitHub integration for this token
-	integrationID, err := h.ensureGitHubIntegration(c.Request.Context(), tenantID, req.Owner, req.GithubToken)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to set up integration: %v", err)})
-		return
-	}
-
-	// Run the scan
-	scanner := codescan.NewScanner(h.db)
-
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 120*time.Second)
-	defer cancel()
-
-	result, err := scanner.ScanGitHubRepository(ctx, req.GithubToken, req.Owner, req.Repo, req.Branch)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Scan failed: %v", err)})
-		return
-	}
-
-	// Store results
-	if err := scanner.StoreScanResults(ctx, tenantID, integrationID, result); err != nil {
-		log.Printf("Warning: failed to store some scan results: %v", err)
-	}
-
-	// Summarize by severity
-	severityCounts := make(map[string]int)
-	for _, f := range result.Findings {
-		severityCounts[f.Severity]++
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message":         fmt.Sprintf("Scanned %d files, found %d findings", result.FilesScanned, len(result.Findings)),
-		"files_scanned":   result.FilesScanned,
-		"total_findings":  len(result.Findings),
-		"duration_ms":     result.Duration.Milliseconds(),
-		"severity_counts": severityCounts,
-		"repository":      fmt.Sprintf("%s/%s", req.Owner, req.Repo),
-		"branch":          req.Branch,
-		"commit_sha":      result.CommitSHA,
-	})
-}
-
-// ensureGitHubIntegration creates or finds a GitHub integration for the given
-// owner. The whole find-or-create flow is tenant-owned (tenant_id = caller), so
-// it runs inside one WithTenantTx (platform_integrations is RLS-scoped).
-func (h *ExperimentalActionHandlers) ensureGitHubIntegration(
-	ctx context.Context, tenantID uuid.UUID, owner string, token string,
-) (uuid.UUID, error) {
-	var resultID uuid.UUID
-	err := shareddatabase.WithTenantTx(ctx, h.db, tenantID, func(tx *sql.Tx) error {
-		// Check if one already exists for this owner
-		var existingID uuid.UUID
-		selErr := tx.QueryRowContext(ctx,
-			`SELECT id FROM platform_integrations
-			 WHERE tenant_id = $1 AND integration_type = 'github' AND account_id = $2 AND deleted_at IS NULL`,
-			tenantID, owner,
-		).Scan(&existingID)
-
-		if selErr == nil {
-			// Update the token in case it changed
-			encToken, encErr := h.encryptField(token)
-			if encErr != nil {
-				resultID = existingID // Use existing even if we can't update token
-				return nil
-			}
-			config := map[string]interface{}{"access_token": encToken}
-			configJSON, _ := json.Marshal(config)
-			if _, e := tx.ExecContext(ctx,
-				`UPDATE platform_integrations SET config = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3`,
-				configJSON, existingID, tenantID,
-			); e != nil {
-				return e
-			}
-			resultID = existingID
-			return nil
-		}
-		if selErr != sql.ErrNoRows {
-			return selErr
-		}
-
-		// Create a new integration
-		newID := uuid.New()
-		encToken, encErr := h.encryptField(token)
-		if encErr != nil {
-			return fmt.Errorf("failed to encrypt token: %w", encErr)
-		}
-		config := map[string]interface{}{"access_token": encToken}
-		configJSON, _ := json.Marshal(config)
-		if _, e := tx.ExecContext(ctx,
-			`INSERT INTO platform_integrations (
-				id, tenant_id, integration_type, integration_name, provider,
-				config, account_id, status, is_enabled,
-				created_at, updated_at
-			) VALUES ($1, $2, 'github', $3, 'saas', $4, $5, 'connected', true, NOW(), NOW())`,
-			newID, tenantID,
-			fmt.Sprintf("GitHub - %s", owner),
-			configJSON, owner,
-		); e != nil {
-			return fmt.Errorf("failed to create integration: %w", e)
-		}
-		resultID = newID
-		return nil
-	})
-	if err != nil {
-		return uuid.Nil, err
-	}
-	return resultID, nil
-}
-
-func (h *ExperimentalActionHandlers) encryptField(value string) (string, error) {
-	if h.encryptionKey == "" {
-		return value, nil // No encryption key configured
-	}
-	enc, err := encryption.NewService(h.encryptionKey)
-	if err != nil {
-		return "", err
-	}
-	return enc.Encrypt(value)
 }

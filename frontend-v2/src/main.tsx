@@ -1,4 +1,5 @@
 import React from 'react';
+import { isPublicPath } from './app/public-routes';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router';
 import { QueryClientProvider } from '@tanstack/react-query';
@@ -30,7 +31,10 @@ setSessionExpiredHandler(
     refresh: () => sessionAuthClient.refresh(),
     onSessionExpired: (reason) => {
       tokenManager.clearTokens();
-      if (window.location.pathname !== '/login') {
+      // Only bounce off APP routes. Public routes (signup / invite / reset /
+      // SSO callback / legal) are reachable signed out by design, and a stale
+      // cookie must not evict a visitor from the link they just followed.
+      if (!isPublicPath(window.location.pathname)) {
         window.location.assign(`/login?reason=${reason === 'expired' ? 'session-expired' : 'signed-out'}`);
       }
     },

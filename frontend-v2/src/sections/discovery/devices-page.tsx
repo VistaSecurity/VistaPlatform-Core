@@ -4,7 +4,7 @@ import toast from 'react-hot-toast';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import type { deviceInterrogationComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
-import { DTable, CellMono, CellTxt, PageWrap, queryNote, relTime, isCloudSourced } from './kit';
+import { DTable, CellMono, CellTxt, PageWrap, queryNote, relTime, isCloudSourced, deviceTypeLabel } from './kit';
 import { Icon } from '../../components/ui';
 import { useDevices } from './queries';
 import { DeviceFormModal, DeviceDeleteModal, TestConnectionModal, DiscoverDeviceModal } from './device-modals';
@@ -135,7 +135,7 @@ export function DevicesPage() {
                   </div>
                 </div>
                 <CellMono v={d.ip_address} c="var(--app-t3)" />
-                <CellTxt v={d.device_type} />
+                <CellTxt v={deviceTypeLabel(d.device_type)} />
                 <CellTxt v={d.firmware_version} />
                 <CellTxt v={d.last_interrogated_at ? relTime(d.last_interrogated_at) : 'never'} c="var(--app-t3)" />
                 <span style={{ textAlign: 'right', fontSize: 11.5, fontWeight: 600, color: connColor(d.connection_status) }} title={d.interrogation_error || ''}>

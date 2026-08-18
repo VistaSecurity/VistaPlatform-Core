@@ -263,27 +263,73 @@ func (w *PlatformAgentWorker) executeCloudDiscovery(ctx context.Context, job *mo
 		return nil, fmt.Errorf("ENCRYPTION_MASTER_KEY not configured")
 	}
 
-	// Discover AWS resources
-	devices, err := w.cloudService.DiscoverAWSResources(ctx, job.TenantID, integrationID, resourceTypes, regions)
-	if err != nil {
-		return nil, fmt.Errorf("failed to discover AWS resources: %w", err)
+	resourceGroups := []string{}
+	if rg, ok := job.Parameters["resource_groups"].([]interface{}); ok {
+		for _, g := range rg {
+			if str, ok := g.(string); ok {
+				resourceGroups = append(resourceGroups, str)
+			}
+		}
 	}
 
-	// Convert devices to discovered assets
+	// Dispatch on the integration's actual provider. This path used to call
+	// DiscoverAWSResources unconditionally, so a SCHEDULED Azure or GCP
+	// discovery was executed against the AWS client and either failed
+	// obscurely or reported nothing. The interactive handler
+	// (api/router.go discoverCloudResourcesHandler) has always resolved the
+	// provider from the integration; do the same here.
+	cloudProvider := ""
+	if p, ok := job.Parameters["cloud_provider"].(string); ok {
+		cloudProvider = p
+	}
+	if cloudProvider == "" {
+		detected, detErr := w.cloudService.GetIntegrationCloudProvider(ctx, job.TenantID, integrationID)
+		if detErr != nil {
+			return nil, fmt.Errorf("failed to detect cloud provider for integration %s: %w", integrationID, detErr)
+		}
+		cloudProvider = detected
+	}
+
+	var devices []models.Device
+	var err error
+	switch cloudProvider {
+	case "aws":
+		devices, err = w.cloudService.DiscoverAWSResources(ctx, job.TenantID, integrationID, resourceTypes, regions)
+	case "azure":
+		devices, err = w.cloudService.DiscoverAzureResources(ctx, job.TenantID, integrationID, resourceTypes, resourceGroups)
+	case "gcp":
+		devices, err = w.cloudService.DiscoverGCPResources(ctx, job.TenantID, integrationID, resourceTypes)
+	default:
+		return nil, fmt.Errorf("unknown cloud provider: %s", cloudProvider)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover %s resources: %w", cloudProvider, err)
+	}
+
+	// Convert devices to discovered assets.
+	//
+	// NOTE (divergence, deliberately not unified here): the interactive
+	// handler routes cloud discovery through
+	// CloudDiscoveryService.WriteSensorDiscoveries -> sensor_discoveries ->
+	// discovery-processor, which carries certificates, certificate quality
+	// flags, OCSP status, cloud_provider/cloud_region and the cloud
+	// device_type -> asset_type mapping. This scheduled path instead builds
+	// DiscoveredAssets, which carry none of that. Unifying them means
+	// changing what result_processor.ProcessJobResults does with an empty
+	// asset list (and risks the double-processing failure),
+	// which is outside this change's blast radius. Reported rather than
+	// half-done.
 	assets := []models.DiscoveredAsset{}
 	for i := range devices {
 		device := &devices[i]
-		// Extract crypto configs from metadata
-		if device.Metadata != nil {
-			if configs, ok := device.Metadata["crypto_configs"].([]interface{}); ok {
-				for _, cfgInterface := range configs {
-					if cfg, ok := cfgInterface.(map[string]interface{}); ok {
-						asset := w.convertCryptoConfigToAsset(device, cfg)
-						if asset != nil {
-							assets = append(assets, *asset)
-						}
-					}
-				}
+		// extractCryptoConfigs normalises the in-memory []map / pointer
+		// shape the discovery functions build; the old
+		// .([]interface{}) assertion never matched it, so this loop
+		// produced zero assets on every scheduled run.
+		for _, cfg := range extractCryptoConfigs(device.Metadata) {
+			asset := w.convertCryptoConfigToAsset(device, cfg)
+			if asset != nil {
+				assets = append(assets, *asset)
 			}
 		}
 	}
@@ -294,8 +340,9 @@ func (w *PlatformAgentWorker) executeCloudDiscovery(ctx context.Context, job *mo
 		Assets:      assets,
 		CompletedAt: time.Now(),
 		Metadata: map[string]interface{}{
-			"devices_count": len(devices),
-			"assets_count":  len(assets),
+			"cloud_provider": cloudProvider,
+			"devices_count":  len(devices),
+			"assets_count":   len(assets),
 		},
 	}
 

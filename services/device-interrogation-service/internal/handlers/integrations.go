@@ -9,11 +9,10 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	awsclient "github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/cloud/aws"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 	audithelpers "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
@@ -467,17 +466,24 @@ func getTenantID(c *gin.Context) (uuid.UUID, bool) {
 	return tid, true
 }
 
+// sensitiveKeys is the single list of integration-config keys stored encrypted
+// and masked in responses. The AWS half comes from awsclient.SensitiveConfigKeys
+// so client construction and the handler cannot disagree about what is a secret
+// (they used to keep independent copies, which is how external_id came to be
+// encrypted in one place and plaintext in the other).
+//
+// NOTE: assume_role_arn is intentionally absent — a role ARN is not a secret and
+// the UI displays it.
+var sensitiveKeys = append([]string{
+	"client_id", "client_secret",
+	"service_account_json", "api_key",
+	"password", // Network device credentials - username is NOT sensitive
+}, awsclient.SensitiveConfigKeys...)
+
 func (h *IntegrationHandlers) encryptConfig(config map[string]interface{}) (map[string]interface{}, error) {
 	enc, err := encryption.NewService(h.encryptionKey)
 	if err != nil {
 		return nil, err
-	}
-
-	sensitiveKeys := []string{
-		"access_key_id", "secret_access_key", "session_token",
-		"client_id", "client_secret",
-		"service_account_json", "api_key",
-		"password", // Network device credentials - username is NOT sensitive
 	}
 
 	encrypted := make(map[string]interface{})
@@ -516,13 +522,6 @@ func (h *IntegrationHandlers) decryptConfig(config map[string]interface{}) (map[
 		return nil, err
 	}
 
-	sensitiveKeys := []string{
-		"access_key_id", "secret_access_key", "session_token",
-		"client_id", "client_secret",
-		"service_account_json", "api_key",
-		"password", // Network device credentials - username is NOT sensitive
-	}
-
 	decrypted := make(map[string]interface{})
 	for key, value := range config {
 		strValue, ok := value.(string)
@@ -556,12 +555,6 @@ func (h *IntegrationHandlers) decryptConfig(config map[string]interface{}) (map[
 }
 
 func maskSensitiveFields(config map[string]interface{}) map[string]interface{} {
-	sensitiveKeys := []string{
-		"access_key_id", "secret_access_key", "session_token",
-		"client_id", "client_secret",
-		"service_account_json", "api_key",
-		"password", // Network device credentials (username is not sensitive)
-	}
 
 	masked := make(map[string]interface{})
 	for key, value := range config {
@@ -595,12 +588,10 @@ func maskSensitiveFields(config map[string]interface{}) map[string]interface{} {
 func validateIntegrationConfig(integrationType string, config map[string]interface{}) error {
 	switch integrationType {
 	case "aws":
-		if _, ok := config["access_key_id"]; !ok {
-			return fmt.Errorf("AWS integration requires access_key_id")
-		}
-		if _, ok := config["secret_access_key"]; !ok {
-			return fmt.Errorf("AWS integration requires secret_access_key")
-		}
+		// Delegated so the handler and the discovery client cannot disagree on
+		// what an AWS integration must carry. access_key mode still requires
+		// both keys; assume_role mode requires assume_role_arn and neither key.
+		return awsclient.ValidateConfigMap(config)
 	case "azure":
 		if _, ok := config["tenant_id"]; !ok {
 			return fmt.Errorf("Azure integration requires tenant_id")
@@ -630,75 +621,61 @@ func validateIntegrationConfig(integrationType string, config map[string]interfa
 	return nil
 }
 
-func testAWSConnection(config map[string]interface{}) struct {
+type awsTestResult = struct {
 	Success bool                   `json:"success"`
 	Message string                 `json:"message"`
 	Details map[string]interface{} `json:"details,omitempty"`
-} {
-	accessKey, ok1 := config["access_key_id"].(string)
-	secretKey, ok2 := config["secret_access_key"].(string)
+}
 
-	if !ok1 || !ok2 || accessKey == "" || secretKey == "" {
-		return struct {
-			Success bool                   `json:"success"`
-			Message string                 `json:"message"`
-			Details map[string]interface{} `json:"details,omitempty"`
-		}{
+// testAWSConnection validates an AWS integration's credentials by calling STS
+// GetCallerIdentity.
+//
+// It builds its aws.Config through awsclient.BuildAWSConfig — the SAME function
+// the discovery path uses — so a green "Test Connection" actually proves
+// discovery will authenticate, in access_key AND assume_role mode. It used to
+// assemble its own static-credentials config, which meant the test could pass
+// while discovery failed (and, for assume_role integrations, tested credentials
+// discovery would never use).
+func testAWSConnection(config map[string]interface{}) awsTestResult {
+	credCfg := awsclient.CredentialConfigFromMap(config)
+
+	if err := credCfg.Validate(); err != nil {
+		return awsTestResult{
 			Success: false,
-			Message: "Missing AWS credentials",
+			Message: fmt.Sprintf("Missing AWS credentials: %v", err),
 		}
 	}
 
-	// Test connection using AWS STS GetCallerIdentity
+	region := credCfg.Region
+	if region == "" {
+		region = awsclient.DefaultRegion
+		credCfg.Region = region
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Get region from config or use default
-	region, ok := config["region"].(string)
-	if !ok || region == "" {
-		region = "us-east-1"
-	}
-
-	// Create AWS config
-	cfg, err := awsconfig.LoadDefaultConfig(ctx,
-		awsconfig.WithRegion(region),
-		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-			accessKey,
-			secretKey,
-			"", // Session token if needed
-		)),
-	)
+	cfg, err := awsclient.BuildAWSConfig(ctx, credCfg)
 	if err != nil {
-		return struct {
-			Success bool                   `json:"success"`
-			Message string                 `json:"message"`
-			Details map[string]interface{} `json:"details,omitempty"`
-		}{
+		return awsTestResult{
 			Success: false,
 			Message: fmt.Sprintf("Failed to create AWS config: %v", err),
 		}
 	}
 
-	// Call STS GetCallerIdentity to verify credentials
+	// Call STS GetCallerIdentity to verify credentials. In assume_role mode this
+	// resolves through the AssumeRole provider first, so the identity reported
+	// back is the assumed role session — exactly what discovery will act as.
 	stsClient := sts.NewFromConfig(cfg)
 	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err != nil {
-		return struct {
-			Success bool                   `json:"success"`
-			Message string                 `json:"message"`
-			Details map[string]interface{} `json:"details,omitempty"`
-		}{
+		return awsTestResult{
 			Success: false,
 			Message: fmt.Sprintf("AWS authentication failed: %v", err),
 		}
 	}
 
-	// Success - return account details
-	return struct {
-		Success bool                   `json:"success"`
-		Message string                 `json:"message"`
-		Details map[string]interface{} `json:"details,omitempty"`
-	}{
+	return awsTestResult{
 		Success: true,
 		Message: "AWS credentials validated successfully",
 		Details: map[string]interface{}{

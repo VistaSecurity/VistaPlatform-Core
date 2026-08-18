@@ -10,7 +10,7 @@
 // instead of only in a pod's stdout.
 import type { deviceInterrogationComponents } from '@vistasecurity/api-contract';
 import { Modal } from '../../components/ui';
-import { jobMeta, relTime, durationFmt, shortId } from './kit';
+import { jobMeta, relTime, durationFmt, shortId, deviceTypeLabel } from './kit';
 import { useJobResults } from './queries';
 
 type Job = deviceInterrogationComponents['schemas']['InterrogationJob'];
@@ -175,7 +175,7 @@ export function JobDetailModal({ job, onClose }: { job: Job | null; onClose: () 
       <Section title="Execution">
         <Row label="Status" value={m.l} color={m.c} />
         <Row label="Target" value={firstText(job.device_name, job.integration_name)} />
-        <Row label="Device type" value={firstText(job.device_type, job.cloud_provider)} mono />
+        <Row label="Device type" value={firstText(deviceTypeLabel(job.device_type), job.cloud_provider)} />
         {/* Which executor ran this job — a platform-agent-executed job has no
             row on Sensors & Agents that owns it (the agent's job columns are
             all zero), so this is the only place attribution is visible. */}

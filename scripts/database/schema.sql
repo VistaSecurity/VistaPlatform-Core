@@ -2475,42 +2475,6 @@ CREATE TABLE IF NOT EXISTS public.crypto_applications (
 );
 
 
--- TABLE: crypto_code_findings
-CREATE TABLE IF NOT EXISTS public.crypto_code_findings (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    tenant_id uuid NOT NULL,
-    integration_id uuid NOT NULL,
-    repository_url character varying(500) NOT NULL,
-    repository_name character varying(255) NOT NULL,
-    branch character varying(255) DEFAULT 'main'::character varying NOT NULL,
-    commit_sha character varying(64),
-    file_path character varying(1000) NOT NULL,
-    line_number integer,
-    line_content text,
-    algorithm_id uuid,
-    finding_type character varying(50) NOT NULL,
-    severity character varying(20) DEFAULT 'medium'::character varying NOT NULL,
-    language character varying(50),
-    rule_id character varying(100) NOT NULL,
-    rule_description text,
-    matched_pattern text,
-    risk_score integer DEFAULT 50,
-    confidence_score numeric(3,2) DEFAULT 0.85,
-    status character varying(20) DEFAULT 'open'::character varying,
-    suppression_reason text,
-    fixed_at timestamp with time zone,
-    fixed_in_commit character varying(64),
-    first_detected_at timestamp with time zone DEFAULT now(),
-    last_detected_at timestamp with time zone DEFAULT now(),
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    deleted_at timestamp with time zone,
-    CONSTRAINT valid_finding_confidence CHECK (((confidence_score >= 0.0) AND (confidence_score <= 1.0))),
-    CONSTRAINT valid_finding_risk_score CHECK (((risk_score >= 0) AND (risk_score <= 100))),
-    CONSTRAINT valid_finding_severity CHECK (((severity)::text = ANY ((ARRAY['critical'::character varying, 'high'::character varying, 'medium'::character varying, 'low'::character varying, 'info'::character varying])::text[]))),
-    CONSTRAINT valid_finding_status CHECK (((status)::text = ANY ((ARRAY['open'::character varying, 'acknowledged'::character varying, 'suppressed'::character varying, 'fixed'::character varying])::text[]))),
-    CONSTRAINT valid_finding_type CHECK (((finding_type)::text = ANY ((ARRAY['weak_algorithm'::character varying, 'insecure_pattern'::character varying, 'hardcoded_secret'::character varying, 'deprecated_library'::character varying])::text[])))
-);
 
 
 -- TABLE: crypto_implementation_algorithms
@@ -7834,17 +7798,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: crypto_code_findings crypto_code_findings_pkey
-DO $$ BEGIN
-  IF to_regclass('public.crypto_code_findings') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'crypto_code_findings_pkey' AND conrelid = to_regclass('public.crypto_code_findings')
-     ) THEN
-    ALTER TABLE ONLY public.crypto_code_findings
-        ADD CONSTRAINT crypto_code_findings_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
 
 
 -- CONSTRAINT: crypto_implementation_algorithms crypto_implementation_algorithms_pkey
@@ -11666,32 +11619,18 @@ CREATE INDEX IF NOT EXISTS idx_crypto_app_resource_type ON public.crypto_applica
 CREATE INDEX IF NOT EXISTS idx_crypto_app_tenant ON public.crypto_applications USING btree (tenant_id);
 
 
--- INDEX: idx_crypto_code_findings_algorithm
-CREATE INDEX IF NOT EXISTS idx_crypto_code_findings_algorithm ON public.crypto_code_findings USING btree (algorithm_id) WHERE ((algorithm_id IS NOT NULL) AND (deleted_at IS NULL));
 
 
--- INDEX: idx_crypto_code_findings_integration
-CREATE INDEX IF NOT EXISTS idx_crypto_code_findings_integration ON public.crypto_code_findings USING btree (integration_id) WHERE (deleted_at IS NULL);
 
 
--- INDEX: idx_crypto_code_findings_repo
-CREATE INDEX IF NOT EXISTS idx_crypto_code_findings_repo ON public.crypto_code_findings USING btree (tenant_id, repository_name) WHERE (deleted_at IS NULL);
 
 
--- INDEX: idx_crypto_code_findings_severity
-CREATE INDEX IF NOT EXISTS idx_crypto_code_findings_severity ON public.crypto_code_findings USING btree (severity) WHERE ((deleted_at IS NULL) AND ((status)::text = 'open'::text));
 
 
--- INDEX: idx_crypto_code_findings_status
-CREATE INDEX IF NOT EXISTS idx_crypto_code_findings_status ON public.crypto_code_findings USING btree (status) WHERE (deleted_at IS NULL);
 
 
--- INDEX: idx_crypto_code_findings_tenant
-CREATE INDEX IF NOT EXISTS idx_crypto_code_findings_tenant ON public.crypto_code_findings USING btree (tenant_id) WHERE (deleted_at IS NULL);
 
 
--- INDEX: idx_crypto_code_findings_type
-CREATE INDEX IF NOT EXISTS idx_crypto_code_findings_type ON public.crypto_code_findings USING btree (finding_type) WHERE (deleted_at IS NULL);
 
 
 -- INDEX: idx_crypto_impl_algorithms_algorithm_id
@@ -15663,43 +15602,10 @@ DO $$ BEGIN
 END $$;
 
 
--- FK CONSTRAINT: crypto_code_findings crypto_code_findings_algorithm_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.crypto_code_findings') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'crypto_code_findings_algorithm_id_fkey' AND conrelid = to_regclass('public.crypto_code_findings')
-     ) THEN
-    ALTER TABLE ONLY public.crypto_code_findings
-        ADD CONSTRAINT crypto_code_findings_algorithm_id_fkey FOREIGN KEY (algorithm_id) REFERENCES public.algorithms(id) ON DELETE SET NULL;
-  END IF;
-END $$;
 
 
--- FK CONSTRAINT: crypto_code_findings crypto_code_findings_integration_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.crypto_code_findings') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'crypto_code_findings_integration_id_fkey' AND conrelid = to_regclass('public.crypto_code_findings')
-     ) THEN
-    ALTER TABLE ONLY public.crypto_code_findings
-        ADD CONSTRAINT crypto_code_findings_integration_id_fkey FOREIGN KEY (integration_id) REFERENCES public.platform_integrations(id) ON DELETE CASCADE;
-  END IF;
-END $$;
 
 
--- FK CONSTRAINT: crypto_code_findings crypto_code_findings_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.crypto_code_findings') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'crypto_code_findings_tenant_id_fkey' AND conrelid = to_regclass('public.crypto_code_findings')
-     ) THEN
-    ALTER TABLE ONLY public.crypto_code_findings
-        ADD CONSTRAINT crypto_code_findings_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
 
 
 -- FK CONSTRAINT: crypto_implementation_algorithms crypto_implementation_algorithms_algorithm_id_fkey
@@ -19038,11 +18944,6 @@ DROP POLICY IF EXISTS crypto_applications_tenant_isolation ON public.crypto_appl
 CREATE POLICY crypto_applications_tenant_isolation ON public.crypto_applications
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.crypto_code_findings ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS crypto_code_findings_tenant_isolation ON public.crypto_code_findings;
-CREATE POLICY crypto_code_findings_tenant_isolation ON public.crypto_code_findings
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.crypto_implementations_partitioned ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS crypto_implementations_partitioned_tenant_isolation ON public.crypto_implementations_partitioned;
 CREATE POLICY crypto_implementations_partitioned_tenant_isolation ON public.crypto_implementations_partitioned
@@ -20022,6 +19923,13 @@ END $$;
 DROP TABLE IF EXISTS public.crypto_implementations_legacy CASCADE;
 DROP TABLE IF EXISTS public.sensor_discoveries_legacy CASCADE;
 DROP TABLE IF EXISTS public.network_assets_legacy CASCADE;
+
+-- Retired: the experimental source-code crypto scanner was removed
+-- from the product (unreachable — it had no UI, no feature flag and no consumer
+-- outside its own handler). Nothing in this file creates or references
+-- crypto_code_findings any more, so on a fresh install this is a no-op; it
+-- exists so a cluster installed before the removal drops the orphaned table.
+DROP TABLE IF EXISTS public.crypto_code_findings CASCADE;
 
 
 -- ============================================================================

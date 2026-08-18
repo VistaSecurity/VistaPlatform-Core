@@ -59,6 +59,62 @@ export function isCloudSourced(d: { discovery_method?: string | null }): boolean
   return (d.discovery_method || '').toLowerCase() === 'cloud_api';
 }
 
+// Human labels for `device_type`. The Devices table and the job drawer used to
+// render the raw enum (`aws_s3_bucket`, `gcp_kms_crypto_key`), which reads as a
+// database value rather than as the thing the customer owns — and for the cloud
+// resource types there is no other place in the UI that names them at all.
+// Anything not listed falls through to a title-cased prettifier, so a device
+// type we have not met yet still renders sensibly rather than shouting snake_case.
+const DEVICE_TYPE_LABELS: Record<string, string> = {
+  // Network appliances (the interrogation service's own canonical set).
+  f5: 'F5 BIG-IP',
+  cisco: 'Cisco',
+  cisco_ios: 'Cisco IOS',
+  palo_alto: 'Palo Alto',
+  fortinet: 'Fortinet',
+  unifi: 'UniFi',
+  other: 'Other',
+
+  // AWS
+  aws_alb: 'AWS Application Load Balancer',
+  aws_nlb: 'AWS Network Load Balancer',
+  aws_elb: 'AWS Classic Load Balancer',
+  aws_api_gateway: 'AWS API Gateway',
+  aws_cloudfront: 'AWS CloudFront',
+  aws_kms: 'AWS KMS key',
+  aws_s3_bucket: 'AWS S3 bucket',
+  aws_rds_instance: 'AWS RDS instance',
+
+  // Azure
+  azure_application_gateway: 'Azure Application Gateway',
+  azure_load_balancer: 'Azure Load Balancer',
+  azure_keyvault_key: 'Azure Key Vault key',
+  azure_storage_account: 'Azure Storage account',
+  azure_sql_database: 'Azure SQL database',
+
+  // GCP
+  gcp_https_load_balancer: 'GCP HTTPS Load Balancer',
+  gcp_ssl_proxy: 'GCP SSL Proxy',
+  gcp_kms_crypto_key: 'GCP Cloud KMS key',
+  gcp_storage_bucket: 'GCP Cloud Storage bucket',
+  gcp_cloudsql_instance: 'GCP Cloud SQL instance',
+};
+
+const DEVICE_TYPE_ACRONYMS = new Set(['aws', 'gcp', 'kms', 'rds', 's3', 'elb', 'alb', 'nlb', 'sql', 'ssl', 'tls', 'api']);
+
+/** Human label for a `device_type`; undefined when there is nothing to show. */
+export function deviceTypeLabel(t?: string | null): string | undefined {
+  if (!t || !t.trim()) return undefined;
+  const key = t.trim().toLowerCase();
+  const known = DEVICE_TYPE_LABELS[key];
+  if (known) return known;
+  return key
+    .split(/[_\-\s]+/)
+    .filter(Boolean)
+    .map((w) => (DEVICE_TYPE_ACRONYMS.has(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
+    .join(' ');
+}
+
 export interface FleetMember {
   status?: string | null;
   last_heartbeat?: string | null;

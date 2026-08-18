@@ -243,14 +243,12 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 			experimental.GET("/kms-keys", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryRead), experimentalHandlers.ListKMSKeys)
 			experimental.GET("/database-encryption", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryRead), experimentalHandlers.ListDatabaseEncryptionStates)
 			experimental.GET("/ssh-keys", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryRead), experimentalHandlers.ListSSHKeys)
-			experimental.GET("/code-findings", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryRead), experimentalHandlers.ListCodeFindings)
 			experimental.GET("/aws-integrations", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryRead), experimentalActionHandlers.ListAWSIntegrations)
 
 			// Action endpoints — these actively scan/interrogate using cloud creds.
 			experimental.POST("/kms-keys/discover", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryManage), experimentalActionHandlers.DiscoverKMSKeys)
 			experimental.POST("/database-encryption/interrogate", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryManage), experimentalActionHandlers.InterrogateDatabase)
 			experimental.POST("/ssh-keys/scan", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryManage), experimentalActionHandlers.ScanSSHKeys)
-			experimental.POST("/code-findings/scan", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryManage), experimentalActionHandlers.ScanRepository)
 		}
 	}
 

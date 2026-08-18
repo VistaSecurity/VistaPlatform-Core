@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-18
+
+### Added
+
+- **AWS integrations can authenticate by assuming a role, not just by access
+  key.** Discovery → Cloud now offers an **Authentication** choice on an AWS
+  integration: an access key (long-lived, or temporary with a session token) or
+  **`sts:AssumeRole`** against a role in your own account, with an optional
+  **external ID** and role session name (default `vistaplatform-discovery`).
+  Static keys are optional in assume-role mode — supply them and the AssumeRole
+  call is signed with them, leave them blank and the platform's own ambient AWS
+  identity is used. Session tokens now actually work in access-key mode; they
+  were accepted by the form and silently dropped before reaching AWS.
+
+  **Test connection** now builds its credentials through the same code path
+  discovery uses, so a green test proves discovery will authenticate the same
+  way — previously it assembled its own static-key config and could pass while
+  discovery failed, and for an assume-role integration it tested credentials
+  discovery would never use. Cross-account setup, the trust policy, and why the
+  external ID exists are documented in
+  `docsv4/core/features/aws-cloud-discovery.md`.
+
+- **KMS, S3 and RDS are selectable in the AWS discovery dialog.** All three were
+  implemented in the backend but absent from Discovery → Cloud, so no user could
+  start a run for them. The dialog now offers all eight AWS resource types and
+  marks the two that are enumerated account-wide — CloudFront and S3 — as
+  `GLOBAL`, disabling the region picker (and omitting `regions` from the
+  request) when the selection contains only those.
+
+### Fixed
+
+- **API Gateway and CloudFront were interrogated for real.** Both returned a
+  hard-coded "HTTPS on port 443" stub with no TLS detail at all. API Gateway now
+  reads the custom domains mapped to the API and reports each domain's minimum
+  security policy, endpoint type, status and bound ACM certificate. CloudFront
+  now reports the viewer-side minimum protocol version, SSL support method and
+  certificate, **plus one record per custom origin** — a distribution can serve
+  viewers over TLS 1.2+ while reaching its origin over TLS 1.0 or cleartext, and
+  no client-side handshake against the CloudFront domain can reveal that.
+  Requires the new `cloudfront:GetDistributionConfig` grant.
+
+- **ELB SSL-policy TLS versions were fabricated.** Any policy with any cipher
+  was reported as permitting TLS 1.2 and TLS 1.3, regardless of what it actually
+  permits — so `ELBSecurityPolicy-TLS-1-0-2015-04`, which still accepts TLS 1.0,
+  was reported as modern-only. Reporting a weak protocol as strong is the worst
+  failure this pipeline can have. Protocol versions now come from the policy's
+  own `SslProtocols`.
+
+- **The reported TLS version is now the minimum the endpoint permits.** It was
+  whichever version happened to come first out of a Go map iteration, and was
+  then overwritten by whatever our own client negotiated during the handshake
+  verification — which hides exactly the finding this feature exists to produce.
+  The permitted set is recorded alongside it, and the negotiated version is kept
+  separately rather than overwriting the permitted minimum.
+
+- **An unreadable S3 bucket is no longer reported as encrypted.** Any failure to
+  read the bucket encryption configuration — `AccessDenied`, a throttle, a
+  network blip — was treated as "no configuration, so AWS default SSE-S3
+  applies" and recorded as a measured encrypted bucket. Only S3's specific
+  "no bucket-level configuration" response licenses that conclusion now;
+  everything else is recorded as **could not determine**. Bucket regions are
+  also resolved per bucket instead of being stamped with the integration's
+  default region (requires the new `s3:GetBucketLocation` grant, one extra call
+  per bucket per run).
+
+- **The AWS region list covers the commercial partition.** It was 15 regions;
+  regions added since are now selectable. GovCloud and China remain unsupported
+  — separate partitions, credentials and endpoints.
+
+- **Documentation corrected.** `docsv4/core/features/aws-cloud-discovery.md`
+  claimed regions were scanned in parallel (they are sequential), that AWS rate
+  limits were "respected with exponential backoff" (there is no platform-side
+  retry configuration — only the AWS SDK's standard retryer defaults), and that
+  credentials were "cleared from memory after use" (they are not; the claim is
+  removed rather than replaced). The documented minimum IAM policy was also
+  insufficient: it omitted `sts:GetCallerIdentity`, which the Test Connection
+  button calls, and `acm:DescribeCertificate`, which certificate enrichment
+  calls, and named a non-existent `apigatewayv2:` IAM namespace instead of
+  `apigateway:GET`. The doc now also states plainly that KMS results have no
+  key-inventory view in the tenant UI, that KMS/S3/RDS failures leave a job
+  reporting success with zero results, and that nothing here has been verified
+  against a live AWS account.
+
 ## [0.8.0] - 2026-08-17
 
 ### Added

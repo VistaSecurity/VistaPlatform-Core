@@ -17,6 +17,7 @@
 import { describe, expect, it } from 'vitest';
 import { isValidElement, type ReactElement } from 'react';
 import { Routes, createRoutesFromElements, matchRoutes } from 'react-router';
+import { PUBLIC_PATHS } from './public-routes';
 import pkg from '../../package.json' with { type: 'json' };
 import App from '../App';
 
@@ -46,6 +47,15 @@ const routes = createRoutesFromElements((routesEl.props as { children: ReactElem
  * readable string: each ancestor contributes its `path`, or `~layout` for a
  * pathless layout route (RequireAuth / AppShell), or `index` for an index route.
  */
+// Paths declared OUTSIDE the RequireAuth layout route — i.e. the ones a signed
+// out visitor can reach. Read from the real route table rather than restated,
+// so the guard below cannot drift from App.tsx.
+function publicRoutePaths(): string[] {
+  return routes
+    .filter((r) => typeof (r as { path?: string }).path === 'string')
+    .map((r) => (r as { path: string }).path);
+}
+
 function resolve(url: string): string {
   const matches = matchRoutes(routes, url);
   if (!matches) return '(no match)';
@@ -73,6 +83,24 @@ describe('tenant console route table (react-router v8)', () => {
     ['/legal/privacy', '/legal/privacy'],
   ])('public %s resolves outside the auth gate', (url, expected) => {
     expect(resolve(url)).toBe(expected);
+  });
+
+  // Every route declared OUTSIDE RequireAuth must also be listed in
+  // PUBLIC_PATHS, because main.tsx's session-expiry handler uses that list to
+  // decide whether a stale cookie should bounce the visitor to /login.
+  //
+  // These two lists drifting is not hypothetical: the handler originally
+  // exempted only '/login', so a visitor with an expired or
+  // wrong-key-signed cookie was redirected off /signup, /accept-invite and
+  // /reset-password — the email landings whose whole point is that they work
+  // signed out. A route added outside the gate but missing from PUBLIC_PATHS
+  // reintroduces exactly that, invisibly.
+  it('every route outside RequireAuth is listed in PUBLIC_PATHS', () => {
+    const declared = publicRoutePaths();
+    expect(declared.length).toBeGreaterThan(0); // a scan that finds nothing must fail
+    for (const path of declared) {
+      expect(PUBLIC_PATHS).toContain(path);
+    }
   });
 
   // Authenticated routes sit under two pathless layout routes: RequireAuth

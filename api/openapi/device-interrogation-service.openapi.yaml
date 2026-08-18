@@ -1223,12 +1223,25 @@ components:
           type: array
           items:
             type: string
-          description: 'Provider-specific resource types to discover (e.g. alb, api_gateway, cloudfront for AWS).'
+          description: |
+            Provider-specific resource types to discover.
+            AWS (8): alb, elb, nlb, api_gateway, cloudfront, kms, s3, rds.
+            Azure: application_gateway, load_balancer, key_vault, storage_account, sql_database.
+            GCP: load_balancer, ssl_proxy, kms, storage, cloudsql.
+            Unknown values are ignored rather than rejected, so a run naming
+            only unknown types succeeds with zero results.
         regions:
           type: array
           items:
             type: string
-          description: 'AWS regions to scan (e.g. us-east-1). Ignored for GCP.'
+          description: |
+            AWS regions to scan (e.g. us-east-1), commercial partition only —
+            GovCloud (aws-us-gov) and China (aws-cn) are not supported. Applies
+            only to the REGIONAL AWS resource types (alb, elb, nlb,
+            api_gateway, kms, rds); each is scanned once per region,
+            sequentially. s3 and cloudfront are enumerated account-wide and
+            IGNORE this field entirely. When omitted, the integration's default
+            region is used. Ignored for Azure and GCP.
         resource_groups:
           type: array
           items:
@@ -1377,7 +1390,23 @@ components:
         config:
           type: [object, 'null']
           additionalProperties: true
-          description: Credential map with sensitive values masked.
+          description: |
+            Credential map with sensitive values masked. Untyped because the
+            keys are provider-specific.
+            AWS: `auth_mode` selects the credential shape — "access_key"
+            (the default when the key is absent or empty) requires
+            access_key_id + secret_access_key, with an optional session_token
+            for temporary STS credentials; "assume_role" requires
+            assume_role_arn and optionally external_id and role_session_name
+            (default "vistaplatform-discovery"), with access_key_id /
+            secret_access_key optional — when present the sts:AssumeRole call
+            is signed with them, when absent the platform's ambient AWS
+            credential chain is used.
+            Masked keys (never returned in plaintext): access_key_id,
+            secret_access_key, session_token, external_id, client_id,
+            client_secret, service_account_json, api_key, password.
+            assume_role_arn and role_session_name are NOT secret and are
+            returned as stored.
         account_id:
           type: string
         region:
@@ -1429,6 +1458,12 @@ components:
         config:
           type: object
           additionalProperties: true
+          description: |
+            Provider-specific credential map; see CloudIntegration.config for
+            the AWS auth_mode contract and the list of keys stored encrypted.
+            An AWS config is rejected unless it satisfies the resolved
+            auth_mode: access_key needs access_key_id + secret_access_key,
+            assume_role needs assume_role_arn.
         account_id:
           type: string
         region:
@@ -1453,6 +1488,10 @@ components:
         config:
           type: object
           additionalProperties: true
+          description: |
+            Merged into the stored decrypted config, so omitted keys keep their
+            existing values and secrets can be left untouched. See
+            CloudIntegration.config for the AWS auth_mode contract.
         account_id:
           type: string
         region:

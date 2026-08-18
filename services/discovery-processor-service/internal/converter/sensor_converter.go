@@ -191,15 +191,35 @@ func isPQCKexAlgorithm(algo string) bool {
 }
 
 // mapCloudDeviceTypeToAssetType maps cloud device types to valid asset_type enum values.
-// Valid values are: server, endpoint, service, appliance
+// Valid values are exactly those in the public.asset_type Postgres enum
+// (scripts/database/schema.sql): server, endpoint, service, appliance. Do not
+// return anything else — the insert will be rejected.
+//
+// Everything not listed here used to fall through to "server", so aws_kms,
+// aws_s3_bucket and every other managed resource showed up in Inventory as a
+// server, which reads as nonsense and mis-groups the CMDB view
+// (v_ci_inventory maps server -> cmdb_ci_server, service -> cmdb_ci_service).
 func mapCloudDeviceTypeToAssetType(deviceType string) string {
 	switch deviceType {
-	case "aws_alb", "aws_nlb", "aws_elb", "azure_load_balancer", "azure_application_gateway":
-		return "appliance" // Load balancers/gateways map to appliance
-	case "aws_api_gateway":
-		return "service" // API Gateways map to service
-	case "aws_cloudfront":
-		return "service" // CDNs map to service
+	// Traffic-handling network devices -> appliance.
+	case "aws_alb", "aws_nlb", "aws_elb",
+		"azure_load_balancer", "azure_application_gateway",
+		"gcp_https_load_balancer", "gcp_ssl_proxy":
+		return "appliance"
+
+	// Managed platform services (API front doors, CDNs, key management,
+	// object storage) -> service. These have no host to speak of; they are
+	// consumed as endpoints of a provider-run service.
+	case "aws_api_gateway", "aws_cloudfront",
+		"aws_kms", "azure_keyvault_key", "gcp_kms_crypto_key",
+		"aws_s3_bucket", "azure_storage_account", "gcp_storage_bucket":
+		return "service"
+
+	// Managed database instances -> server. Unlike the above these really are
+	// addressable database hosts with their own endpoint and engine version.
+	case "aws_rds_instance", "azure_sql_database", "gcp_cloudsql_instance":
+		return "server"
+
 	default:
 		return "server" // Default for unknown cloud resources
 	}
