@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestNormalizeProtocol(t *testing.T) {
+func TestResolveProtocol(t *testing.T) {
 	cases := []struct {
 		in   string
 		want string
@@ -19,6 +19,8 @@ func TestNormalizeProtocol(t *testing.T) {
 		{"ssh", "SSH"},
 		{"IPSec", "IPSec"},
 		{"ike", "IPSec"},
+		{"IKEv2", "IPSec"},
+		{"ikev2", "IPSec"},
 		{"WireGuard", "VPN"},
 		{"openvpn", "VPN"},
 		{"SMB", "SMB"},
@@ -62,14 +64,59 @@ func TestNormalizeProtocol(t *testing.T) {
 		{"TASE.2", "ICCP"},
 		{"IEC62351", "IEC62351"},
 		{"iec-62351", "IEC62351"},
-
-		// Unknown protocols still default to TLS (with warning log).
-		{"Custom-Vendor-Thing", "TLS"},
-		{"", "TLS"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
-			assert.Equal(t, tc.want, normalizeProtocol(tc.in))
+			got, verdict := resolveProtocol(tc.in)
+			assert.Equal(t, protocolEnum, verdict, "%q must resolve to a modelled protocol", tc.in)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestResolveProtocol_DoesNotFabricate is the negative polarity of the table
+// above, and the whole point of the change: a string the enum does not model
+// must come back with NO protocol, never with "TLS". Every case here used to
+// return "TLS" and only log a warning, which is how a scanned-but-silent port,
+// a database with SSL switched OFF, and a vendor string nobody had wired up all
+// arrived in inventory as negotiated-TLS endpoints.
+func TestResolveProtocol_DoesNotFabricate(t *testing.T) {
+	cases := []struct {
+		in   string
+		want protocolVerdict
+	}{
+		// Transports. "The port completed a TCP handshake" is not crypto.
+		{"tcp", protocolTransport},
+		{"TCP", protocolTransport},
+		{"udp", protocolTransport},
+
+		// Explicitly unencrypted — the inverse of a TLS observation.
+		{"NONE", protocolPlaintext},
+		{"none", protocolPlaintext},
+		{"HTTP", protocolPlaintext},
+		{"http", protocolPlaintext},
+
+		// Real protocols with no enum home. Named here so the list is visible
+		// in code: they are a MODELLING gap, not a normalization bug, and they
+		// must not be quietly filed as something they are not while it is open.
+		{"QUIC", protocolUnrecognized},
+		{"SNMP", protocolUnrecognized},
+		{"SSL VPN", protocolUnrecognized},
+		{"PPTP", protocolUnrecognized},
+		{"L2TP/IPSec", protocolUnrecognized},
+		{"STARTTLS", protocolUnrecognized},
+
+		// Genuinely unknown, and empty.
+		{"Custom-Vendor-Thing", protocolUnrecognized},
+		{"", protocolUnrecognized},
+		{"   ", protocolUnrecognized},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got, verdict := resolveProtocol(tc.in)
+			assert.Equal(t, tc.want, verdict)
+			assert.Empty(t, got, "an unmodelled protocol must yield no enum value, got %q", got)
+			assert.NotEqual(t, "TLS", got)
 		})
 	}
 }

@@ -1,4 +1,4 @@
-// Public entry point for the generated VistaPlatform TypeScript client.
+// Public entry point for the generated Vista Platform TypeScript client.
 //
 // Usage:
 //   import { createCbomServiceClient } from "@vistasecurity/api-contract";

@@ -11,6 +11,11 @@ import { StatTile, MiniBar, StatusDot, StatusTag, Tag, num, relTime } from '../.
 import { useFleetSensors, useFleetAgents, type FleetRow } from './queries';
 import { useScope } from '../../app/scope';
 
+// /admin/metrics is explicitly cross-tenant and takes no tenant filter (unlike
+// /admin/sensors and /admin/agents below it), so this query never varies with
+// the tenant scope selector — no scopeId in the key. The headline tiles and
+// breakdowns are labeled "platform-wide" in the JSX below so they don't read
+// as a shrunken-but-wrong version of the scoped FleetTable beneath them.
 function useFleetMetrics() {
   return useQuery({
     queryKey: ['platform', 'fleet-metrics'],
@@ -113,16 +118,21 @@ export function FleetPage() {
 
   return (
     <div className="op-fade" style={{ padding: '20px 24px 40px', display: 'flex', flexDirection: 'column', gap: 18 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12 }}>
-        <StatTile label="Connected" value={isLoading ? '…' : num(m?.connected_devices ?? 0)} sub={`${num(m?.total_devices ?? 0)} total`} icon={Wifi} accent="var(--ok)" />
-        <StatTile label="Disconnected" value={isLoading ? '…' : num(m?.disconnected_devices ?? 0)} sub="devices" icon={WifiOff} accent={(m?.disconnected_devices ?? 0) > 0 ? 'var(--warn)' : undefined} />
-        <StatTile label="Active integrations" value={isLoading ? '…' : num(m?.active_integrations ?? 0)} sub={`${num(m?.total_integrations ?? 0)} total · ${num(m?.error_integrations ?? 0)} error`} icon={Cable} />
-        <StatTile label="Jobs · 24h" value={isLoading ? '…' : num(m?.jobs_last_24h ?? 0)} sub={`${(m?.success_rate ?? 0).toFixed(0)}% success`} icon={Workflow} />
+      <div>
+        <div className="op-eyebrow" style={{ marginBottom: 10 }}>
+          Platform-wide — all tenants, regardless of the tenant scope selector above
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12 }}>
+          <StatTile label="Connected" value={isLoading ? '…' : num(m?.connected_devices ?? 0)} sub={`${num(m?.total_devices ?? 0)} total · platform-wide`} icon={Wifi} accent="var(--ok)" />
+          <StatTile label="Disconnected" value={isLoading ? '…' : num(m?.disconnected_devices ?? 0)} sub="devices · platform-wide" icon={WifiOff} accent={(m?.disconnected_devices ?? 0) > 0 ? 'var(--warn)' : undefined} />
+          <StatTile label="Active integrations" value={isLoading ? '…' : num(m?.active_integrations ?? 0)} sub={`${num(m?.total_integrations ?? 0)} total · ${num(m?.error_integrations ?? 0)} error · platform-wide`} icon={Cable} />
+          <StatTile label="Jobs · 24h" value={isLoading ? '…' : num(m?.jobs_last_24h ?? 0)} sub={`${(m?.success_rate ?? 0).toFixed(0)}% success · platform-wide`} icon={Workflow} />
+        </div>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-        <Breakdown title="Devices by type" data={(m?.devices_by_type ?? {}) as Record<string, number>} />
-        <Breakdown title="Integrations by provider" data={(m?.integrations_by_provider ?? {}) as Record<string, number>} />
+        <Breakdown title="Devices by type (platform-wide)" data={(m?.devices_by_type ?? {}) as Record<string, number>} />
+        <Breakdown title="Integrations by provider (platform-wide)" data={(m?.integrations_by_provider ?? {}) as Record<string, number>} />
       </div>
 
       <FleetTable />

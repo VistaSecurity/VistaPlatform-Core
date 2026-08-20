@@ -9,7 +9,7 @@ import { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { Icon, Pill, DrawerShell, DrawerCloseBtn, riskColor } from '../../components/ui';
 import { EmptyState, Loading } from '../findings/bits';
-import { coverageLine, formatScore, isUnscored } from '../findings/control-status';
+import { coverageLine, formatScore, isUnscored, notAssessedReasonText } from '../findings/control-status';
 import { describeMeasurement } from './measurement-language';
 import { useAvailableFrameworks, useFrameworkDetail, type AvailableFrameworkRow, type FrameworkControlRow } from './queries';
 
@@ -189,7 +189,7 @@ function ControlRow({ control, open, onToggle }: { control: FrameworkControlRow;
           {control.description && <p style={{ fontSize: 12.5, color: 'var(--app-t2)', lineHeight: 1.55, margin: '10px 0 12px' }}>{control.description}</p>}
           <div className="eyebrow-app" style={{ marginBottom: 6 }}>How it's measured</div>
           {measurements.length === 0 && (
-            <p style={{ fontSize: 12, color: 'var(--app-t3)', margin: 0 }}>No measurement rule is configured, so this control passes by default.</p>
+            <p style={{ fontSize: 12, color: 'var(--app-t3)', margin: 0 }}>{notAssessedReasonText('no_measurements')} It's scored Not assessed and excluded from the framework score — never treated as a pass.</p>
           )}
           {measurements.map((m) => (
             <div key={m.id} style={{ display: 'flex', gap: 9, padding: '7px 0', borderBottom: '1px solid var(--app-border)' }}>

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -344,7 +343,7 @@ func CreateUser(db *sql.DB, bypassDB *sql.DB, cfg *config.Config) gin.HandlerFun
 		}
 
 		// Validate password strength
-		if err := passwordsvc.ValidatePasswordStrength(req.Password); err != nil {
+		if err := passwordsvc.ValidatePasswordStrengthWithPolicy(db, req.Password); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 			return
 		}
@@ -875,6 +874,12 @@ func InviteTenantMember(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, authSe
 			if writeRoleGrantError(c, err) {
 				return
 			}
+			// The role name is resolved against the tenant's own tenant_roles, so
+			// "no such role" is a client error, not a server one.
+			if errors.Is(err, errTenantRoleNotFound) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid role", "details": req.Role})
+				return
+			}
 			logrus.WithError(err).WithField("role", roleName).Error("Failed to validate invited role")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate role"})
 			return
@@ -934,6 +939,17 @@ func InviteTenantMember(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, authSe
 	}
 }
 
+// mapInviteRoleName normalizes the role name an invite request carries to the
+// internal tenant_roles.name it refers to.
+//
+// It deliberately does NOT decide which roles exist — that is the tenant's
+// tenant_roles table, and the caller settles it with ensureRoleGrantableByName
+// (roleIDByName + grant-bounds check). A hardcoded allowlist of four system
+// roles used to live here, which meant the invite dialog offered options the
+// endpoint always rejected with 400: billing_admin is seeded into EVERY tenant
+// by ensureTenantRoles, and custom tenant roles could never match at all. The
+// dropdown is populated from the unfiltered GET /tenant/{id}/roles list, so any
+// row it shows must be invitable.
 func mapInviteRoleName(in string) (string, error) {
 	s := strings.ToLower(strings.TrimSpace(in))
 	switch s {
@@ -944,13 +960,10 @@ func mapInviteRoleName(in string) (string, error) {
 		return "viewer", nil
 	case "admin":
 		return "tenant_admin", nil
+	case "":
+		return "", fmt.Errorf("role is required")
 	}
-	for _, allowed := range []string{"tenant_admin", "viewer", "security_admin", "api_user"} {
-		if s == allowed {
-			return allowed, nil
-		}
-	}
-	return "", fmt.Errorf("unsupported role")
+	return s, nil
 }
 
 // --- RBAC helper functions ---
@@ -1020,6 +1033,12 @@ func ensureRoleGrantableByName(ctx context.Context, db *sql.DB, tenantID, actorI
 	})
 }
 
+// errTenantRoleNotFound reports that a role name does not exist in the tenant's
+// tenant_roles. Since roles are now resolved from the table rather than a
+// hardcoded allowlist, this is the "you asked for a role that isn't real"
+// signal, and callers must answer 400 rather than 500.
+var errTenantRoleNotFound = errors.New("role not found for tenant")
+
 func roleIDByName(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, roleName string) (uuid.UUID, error) {
 	var roleID uuid.UUID
 	err := tx.QueryRowContext(ctx, `
@@ -1028,79 +1047,19 @@ func roleIDByName(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, roleName 
 	`, tenantID, roleName).Scan(&roleID)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return uuid.Nil, fmt.Errorf("role %s not found for tenant", roleName)
+			return uuid.Nil, fmt.Errorf("%w: %s", errTenantRoleNotFound, roleName)
 		}
 		return uuid.Nil, fmt.Errorf("failed to get role ID: %w", err)
 	}
 	return roleID, nil
 }
 
+// validateRoleGrantable is the package-local alias for the shared ceiling in
+// authrbac.ValidateRoleGrantable. The implementation moved there when the SSO
+// provider-config write path had to enforce the same rule (see that function's
+// doc comment); this stays so the call sites below read unchanged.
 func validateRoleGrantable(ctx context.Context, tx *sql.Tx, tenantID, actorID, roleID uuid.UUID) error {
-	rows, err := tx.QueryContext(ctx, `
-		SELECT p.id, p.name
-		FROM tenant_role_permissions rp
-		JOIN tenant_permissions p ON p.id = rp.permission_id
-		WHERE rp.role_id = $1
-	`, roleID)
-	if err != nil {
-		return fmt.Errorf("read role grants: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	rolePermissions := map[uuid.UUID]string{}
-	permissionIDs := []uuid.UUID{}
-	for rows.Next() {
-		var id uuid.UUID
-		var name string
-		if err := rows.Scan(&id, &name); err != nil {
-			return fmt.Errorf("scan role grant: %w", err)
-		}
-		rolePermissions[id] = name
-		permissionIDs = append(permissionIDs, id)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	if len(permissionIDs) == 0 {
-		return nil
-	}
-
-	heldRows, err := tx.QueryContext(ctx, `
-		SELECT DISTINCT p.id
-		FROM tenant_permissions p
-		JOIN tenant_role_permissions rp ON p.id = rp.permission_id
-		JOIN tenant_roles r ON rp.role_id = r.id
-		JOIN user_tenant_roles ur ON r.id = ur.role_id
-		WHERE ur.user_id = $1 AND r.tenant_id = $2 AND ur.is_active = true
-	`, actorID, tenantID)
-	if err != nil {
-		return fmt.Errorf("resolve caller permissions: %w", err)
-	}
-	defer func() { _ = heldRows.Close() }()
-
-	held := map[uuid.UUID]struct{}{}
-	for heldRows.Next() {
-		var id uuid.UUID
-		if err := heldRows.Scan(&id); err != nil {
-			return fmt.Errorf("scan caller permission: %w", err)
-		}
-		held[id] = struct{}{}
-	}
-	if err := heldRows.Err(); err != nil {
-		return err
-	}
-
-	var denied []string
-	for _, id := range permissionIDs {
-		if _, ok := held[id]; !ok {
-			denied = append(denied, rolePermissions[id])
-		}
-	}
-	if len(denied) > 0 {
-		sort.Strings(denied)
-		return &authrbac.ErrPermissionNotHeld{Names: denied}
-	}
-	return nil
+	return authrbac.ValidateRoleGrantable(ctx, tx, tenantID, actorID, roleID)
 }
 
 // assignUserRole assigns an RBAC role to a user in a tenant.

@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: VistaPlatform — cbom-service API
+  title: Vista Platform — cbom-service API
   version: "0.2.0"
   description: |
     Spec-first contract for cbom-service (ADR-0001). Covers the cbom-service
@@ -24,7 +24,7 @@ info:
     consumes them (ADR-0001 step 5), at which point this file and the contract
     tests move together.
   contact:
-    name: VistaPlatform Platform
+    name: Vista Security
 servers:
   - url: /api/v1/cbom-service
     description: cbom-service, mounted behind the API gateway.

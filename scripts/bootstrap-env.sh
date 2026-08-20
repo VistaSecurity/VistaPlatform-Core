@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Create a .env for a local VistaPlatform deployment, with real secrets.
+# Create a .env for a local Vista Platform deployment, with real secrets.
 #
 # env.example ships memorable placeholders (crypto_pass_dev, admin123,
 # dev-secret-key-change-in-production) so the file reads clearly and diffs
@@ -31,7 +31,7 @@ if [[ -f .env ]]; then
 fi
 
 if [[ ! -f env.example ]]; then
-  echo "❌ env.example not found. Run this from a VistaPlatform checkout." >&2
+  echo "❌ env.example not found. Run this from a Vista Platform checkout." >&2
   exit 1
 fi
 

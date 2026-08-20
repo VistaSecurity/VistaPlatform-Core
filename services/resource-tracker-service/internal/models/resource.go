@@ -6,17 +6,25 @@ import (
 	"github.com/google/uuid"
 )
 
-// ResourceUsage represents resource consumption for a tenant
+// ResourceUsage represents resource consumption for a tenant.
+//
+// The measurement fields are pointers, and nil means NOT MEASURED — the
+// corresponding column is written NULL. A non-nil zero means "measured, and it
+// was zero". Preserving that distinction is the point: every one of these
+// columns used to be written with a fabricated value (CPU derived from Go's
+// MemStats, disk from a hardcoded constant, database queries guessed from the
+// request's URL length), and a fabricated number is indistinguishable from a
+// real one once it is in the table.
 type ResourceUsage struct {
 	ID              uuid.UUID `json:"id" db:"id"`
 	TenantID        uuid.UUID `json:"tenant_id" db:"tenant_id"`
 	Timestamp       time.Time `json:"timestamp" db:"timestamp"`
-	APICalls        int       `json:"api_calls" db:"api_calls"`
-	DatabaseQueries int       `json:"database_queries" db:"database_queries"`
-	MemoryUsageMB   int       `json:"memory_usage_mb" db:"memory_usage_mb"`
-	CPUUsagePercent float64   `json:"cpu_usage_percent" db:"cpu_usage_percent"`
-	StorageUsedMB   int       `json:"storage_used_mb" db:"storage_used_mb"`
-	NetworkBytes    int64     `json:"network_bytes" db:"network_bytes"`
+	APICalls        *int64    `json:"api_calls" db:"api_calls"`
+	DatabaseQueries *int64    `json:"database_queries" db:"database_queries"`
+	MemoryUsageMB   *int64    `json:"memory_usage_mb" db:"memory_usage_mb"`
+	CPUUsagePercent *float64  `json:"cpu_usage_percent" db:"cpu_usage_percent"`
+	StorageUsedMB   *int64    `json:"storage_used_mb" db:"storage_used_mb"`
+	NetworkBytes    *int64    `json:"network_bytes" db:"network_bytes"`
 	CostUSD         float64   `json:"cost_usd" db:"cost_usd"`
 	CreatedAt       time.Time `json:"created_at" db:"created_at"`
 }
@@ -33,14 +41,20 @@ type CostAnalysis struct {
 	CreatedAt               time.Time                `json:"created_at" db:"created_at"`
 }
 
-// ResourceBreakdown provides detailed cost breakdown
+// ResourceBreakdown provides a detailed cost breakdown.
+//
+// A nil component cost means that component was not measured over the period
+// and therefore was not priced; NotMeasured names those components so a
+// consumer can render "not measured" instead of a confident $0.00. TotalCost
+// is the sum of the priced components only — see shared/costing.
 type ResourceBreakdown struct {
-	APICost      float64 `json:"api_cost"`
-	DatabaseCost float64 `json:"database_cost"`
-	StorageCost  float64 `json:"storage_cost"`
-	ComputeCost  float64 `json:"compute_cost"`
-	NetworkCost  float64 `json:"network_cost"`
-	TotalCost    float64 `json:"total_cost"`
+	APICost      *float64 `json:"api_cost"`
+	DatabaseCost *float64 `json:"database_cost"`
+	StorageCost  *float64 `json:"storage_cost"`
+	ComputeCost  *float64 `json:"compute_cost"`
+	NetworkCost  *float64 `json:"network_cost"`
+	TotalCost    float64  `json:"total_cost"`
+	NotMeasured  []string `json:"not_measured"`
 }
 
 // OptimizationSuggestion provides cost optimization recommendations
@@ -66,15 +80,20 @@ type ResourceAlert struct {
 	ResolvedAt   *time.Time `json:"resolved_at" db:"resolved_at"`
 }
 
-// ResourceMetricsRequest represents a request to record resource metrics
+// ResourceMetricsRequest represents a request to record resource metrics.
+//
+// Every measurement is optional and nil means the producer did not measure it.
+// An absent field must NOT be recorded as zero: "this tenant made no API
+// calls" and "nobody counted this tenant's API calls" are different facts, and
+// only the first one may be priced.
 type ResourceMetricsRequest struct {
 	TenantID        uuid.UUID `json:"tenant_id"`
-	APICalls        int       `json:"api_calls,omitempty"`
-	DatabaseQueries int       `json:"database_queries,omitempty"`
-	MemoryUsageMB   int       `json:"memory_usage_mb,omitempty"`
-	CPUUsagePercent float64   `json:"cpu_usage_percent,omitempty"`
-	StorageUsedMB   int       `json:"storage_used_mb,omitempty"`
-	NetworkBytes    int64     `json:"network_bytes,omitempty"`
+	APICalls        *int64    `json:"api_calls,omitempty"`
+	DatabaseQueries *int64    `json:"database_queries,omitempty"`
+	MemoryUsageMB   *int64    `json:"memory_usage_mb,omitempty"`
+	CPUUsagePercent *float64  `json:"cpu_usage_percent,omitempty"`
+	StorageUsedMB   *int64    `json:"storage_used_mb,omitempty"`
+	NetworkBytes    *int64    `json:"network_bytes,omitempty"`
 }
 
 // ResourceUsageResponse represents aggregated resource usage data

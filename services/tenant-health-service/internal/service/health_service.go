@@ -16,6 +16,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/services/tenant-health-service/internal/repository"
 	"github.com/vistasecurity/vistaplatform/services/tenant-health-service/internal/scoring"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
+	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 )
 
@@ -29,6 +30,13 @@ type HealthService struct {
 	resourceTrackerServiceURL string
 }
 
+// NewHealthService wires the collectors' HTTP client to the service mesh.
+//
+// This client MUST present a client certificate when serviceMtls is on: every
+// peer URL below resolves through PeerURL(..., MTLSEnabled()) to
+// https://<svc>:8443, which is RequireAndVerifyClientCert. A bare
+// &http.Client{} fails the handshake against all four peers, and every failure
+// used to become a fabricated constant.
 func NewHealthService(repo *repository.HealthRepository) *HealthService {
 	getURL := func(env, def string) string {
 		if v := os.Getenv(env); v != "" {
@@ -37,12 +45,28 @@ func NewHealthService(repo *repository.HealthRepository) *HealthService {
 		return def
 	}
 
+	useMTLS := sharedconfig.GetEnvAsBool("USE_MTLS", true)
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	if useMTLS {
+		clientCertPath := sharedconfig.GetEnv("CLIENT_CERT_PATH", "/app/certs/client-cert.pem")
+		clientKeyPath := sharedconfig.GetEnv("CLIENT_KEY_PATH", "/app/certs/client-key.pem")
+		platformCACertPath := sharedconfig.GetEnv("PLATFORM_CA_CERT_PATH", "/app/certs/platform-ca-cert.pem")
+		c, err := sharedhttp.NewMTLSClient(clientCertPath, clientKeyPath, platformCACertPath)
+		if err != nil {
+			// Not fatal: the collectors now report UNKNOWN rather than
+			// inventing numbers, so a certless service degrades visibly
+			// instead of silently.
+			logrus.WithError(err).Error("USE_MTLS is set but the mTLS client could not be built — peer metrics will be reported UNKNOWN")
+		} else {
+			c.Timeout = 10 * time.Second
+			httpClient = c
+		}
+	}
+
 	return &HealthService{
-		repo:   repo,
-		scorer: scoring.NewHealthScorer(),
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		repo:                      repo,
+		scorer:                    scoring.NewHealthScorer(),
+		httpClient:                httpClient,
 		monitoringServiceURL:      getURL("MONITORING_SERVICE_URL", sharedconfig.PeerURL("monitoring-service", sharedconfig.MTLSEnabled())),
 		authServiceURL:            getURL("AUTH_SERVICE_URL", sharedconfig.PeerURL("auth-service", sharedconfig.MTLSEnabled())),
 		inventoryServiceURL:       getURL("INVENTORY_SERVICE_URL", sharedconfig.PeerURL("inventory-service", sharedconfig.MTLSEnabled())),
@@ -120,6 +144,21 @@ func (s *HealthService) collectMetricsFromServices(tenantID uuid.UUID) (*models.
 		FeatureUsage: make(map[string]int),
 	}
 
+	// Every collector below either MEASURES its metrics or records its peer as
+	// unavailable. It never substitutes a plausible constant: the previous
+	// placeholders (Uptime 99.9, ErrorRate 0.005, CPU 50, Memory 60,
+	// ComplianceScore 85) were indistinguishable from measurements, identical
+	// for every tenant, persisted every 30 minutes, and fed the
+	// tenant_health_degraded alert. An unmeasured factor is scored as UNKNOWN
+	// by the scorer instead (see scoring.CalculateHealthScore).
+	markUnavailable := func(source string, err error) {
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"tenant_id": tenantID,
+			"source":    source,
+		}).Warn("Peer unreachable — the health factors it feeds are reported UNKNOWN, not defaulted")
+		metrics.UnavailableSources = append(metrics.UnavailableSources, source)
+	}
+
 	// Collect performance metrics from monitoring-service
 	if perfMetrics, err := s.getPerformanceMetrics(tenantID); err == nil {
 		metrics.AvgResponseTime = perfMetrics.AvgResponseTime
@@ -127,12 +166,7 @@ func (s *HealthService) collectMetricsFromServices(tenantID uuid.UUID) (*models.
 		metrics.Throughput = perfMetrics.Throughput
 		metrics.Uptime = perfMetrics.Uptime
 	} else {
-		logrus.WithError(err).WithField("tenant_id", tenantID).Warn("Failed to get performance metrics, using defaults")
-		// Use defaults if monitoring-service is unavailable
-		metrics.AvgResponseTime = 150.0
-		metrics.ErrorRate = 0.005
-		metrics.Throughput = 100.0
-		metrics.Uptime = 99.9
+		markUnavailable(models.SourceMonitoring, err)
 	}
 
 	// Collect security metrics from auth-service
@@ -142,12 +176,7 @@ func (s *HealthService) collectMetricsFromServices(tenantID uuid.UUID) (*models.
 		metrics.ComplianceScore = secMetrics.ComplianceScore
 		metrics.LastSecurityUpdate = secMetrics.LastSecurityUpdate
 	} else {
-		logrus.WithError(err).WithField("tenant_id", tenantID).Warn("Failed to get security metrics, using defaults")
-		// Use defaults if auth-service is unavailable
-		metrics.FailedLogins = 0
-		metrics.SecurityAlerts = 0
-		metrics.ComplianceScore = 85.0
-		metrics.LastSecurityUpdate = time.Now()
+		markUnavailable(models.SourceAuth, err)
 	}
 
 	// Collect activity metrics from inventory-service
@@ -156,12 +185,12 @@ func (s *HealthService) collectMetricsFromServices(tenantID uuid.UUID) (*models.
 		metrics.APICalls = actMetrics.APICalls
 		metrics.FeatureUsage = actMetrics.FeatureUsage
 		metrics.UserEngagement = actMetrics.UserEngagement
+		// inventory-service reports its OWN unreachable peers (it polls
+		// resource-tracker-service for the API-call count). Propagate them so a
+		// downstream gap is not silently absorbed into this tenant's score.
+		metrics.UnavailableSources = append(metrics.UnavailableSources, actMetrics.UnavailableSources...)
 	} else {
-		logrus.WithError(err).WithField("tenant_id", tenantID).Warn("Failed to get activity metrics, using defaults")
-		// Use defaults if inventory-service is unavailable
-		metrics.ActiveUsers = 0
-		metrics.APICalls = 0
-		metrics.UserEngagement = 50.0
+		markUnavailable(models.SourceInventory, err)
 	}
 
 	// Collect resource metrics from resource-tracker-service
@@ -180,18 +209,29 @@ func (s *HealthService) collectMetricsFromServices(tenantID uuid.UUID) (*models.
 		metrics.StorageUtilization = 50.0 // Default - could be enhanced with actual storage data
 		metrics.NetworkUtilization = 60.0 // Default - could be enhanced with actual network data
 	} else {
-		logrus.WithError(err).WithField("tenant_id", tenantID).Warn("Failed to get resource metrics, using defaults")
-		// Use defaults if resource-tracker-service is unavailable
-		metrics.CPUUtilization = 50.0
-		metrics.MemoryUtilization = 60.0
-		metrics.StorageUtilization = 50.0
-		metrics.NetworkUtilization = 60.0
-		metrics.ResourceCost = 0.0
-		metrics.CostPerUser = 0.0
-		metrics.CostEfficiency = 75.0
+		markUnavailable(models.SourceResourceTracker, err)
 	}
 
+	metrics.UnavailableSources = dedupeSources(metrics.UnavailableSources)
 	return metrics, nil
+}
+
+// dedupeSources removes duplicates while preserving order. A peer can be
+// reported twice — once by our own poll and once relayed by inventory-service.
+func dedupeSources(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 // PerformanceMetrics represents performance metrics from monitoring-service
@@ -299,6 +339,10 @@ type ActivityMetrics struct {
 	APICalls       int            `json:"api_calls"`
 	FeatureUsage   map[string]int `json:"feature_usage"`
 	UserEngagement float64        `json:"user_engagement"`
+	// UnavailableSources are peers inventory-service itself could not reach
+	// while assembling this summary (it polls resource-tracker-service for the
+	// API-call count). Relayed so a gap two hops away is still visible here.
+	UnavailableSources []string `json:"unavailable_sources,omitempty"`
 }
 
 // getActivityMetrics retrieves activity metrics from inventory-service
@@ -642,6 +686,14 @@ func (s *HealthService) generateHealthAlerts(health *models.TenantHealth) error 
 	return nil
 }
 
+// factorBelow reports whether a MEASURED breakdown factor is under a
+// threshold. A nil factor means the peer feeding it was unreachable — we do
+// not know, so no insight is drawn from it. (Before the pointer change, an
+// unreachable peer's fabricated placeholder produced a confident insight.)
+func factorBelow(v *float64, threshold float64) bool {
+	return v != nil && *v < threshold
+}
+
 // generateInsights creates AI-driven insights based on health data
 func (s *HealthService) generateInsights(health *models.TenantHealth, metrics []models.HealthMetrics) []models.Insight {
 	var insights []models.Insight
@@ -670,7 +722,7 @@ func (s *HealthService) generateInsights(health *models.TenantHealth, metrics []
 	}
 
 	// Resource efficiency insights
-	if health.ScoreBreakdown.ResourceEfficiency < 60 {
+	if factorBelow(health.ScoreBreakdown.ResourceEfficiency, 60) {
 		insights = append(insights, models.Insight{
 			Type:        "recommendation",
 			Category:    "resource",
@@ -683,7 +735,7 @@ func (s *HealthService) generateInsights(health *models.TenantHealth, metrics []
 	}
 
 	// Performance insights
-	if health.ScoreBreakdown.PerformanceMetrics < 70 {
+	if factorBelow(health.ScoreBreakdown.PerformanceMetrics, 70) {
 		insights = append(insights, models.Insight{
 			Type:        "anomaly",
 			Category:    "performance",
@@ -696,7 +748,7 @@ func (s *HealthService) generateInsights(health *models.TenantHealth, metrics []
 	}
 
 	// Security insights
-	if health.ScoreBreakdown.SecurityPosture < 80 {
+	if factorBelow(health.ScoreBreakdown.SecurityPosture, 80) {
 		insights = append(insights, models.Insight{
 			Type:        "recommendation",
 			Category:    "security",

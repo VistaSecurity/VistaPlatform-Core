@@ -506,15 +506,6 @@ type DiscoveryJob struct {
 	ErrorMessage       *string    `json:"error_message" db:"error_message"`
 }
 
-// DiscoveryJobInput represents input for creating a discovery job
-type DiscoveryJobInput struct {
-	ExecutionMode      string   `json:"execution_mode" binding:"required,oneof=cloud sensors auto"`
-	RequestedSensorIDs []string `json:"requested_sensor_ids"`
-	Fanout             *bool    `json:"fanout"`
-	RetentionCapMB     *int     `json:"retention_cap_mb"`
-	RetentionTTLHours  *int     `json:"retention_ttl_hours"`
-}
-
 // DiscoveryJobResult represents results submitted for a discovery job
 type DiscoveryJobResult struct {
 	Findings []DiscoveryFinding `json:"findings"`

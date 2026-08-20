@@ -4,13 +4,13 @@ import "sort"
 
 // Edition identifies a product edition in the open-core model.
 //
-// The platform ships as an open-source Core plus two paid editions. An
+// The platform ships as a source-available Core plus two paid editions. An
 // edition is not a tier: tiers are a commercial packaging concept that a
 // deployment's operator authors (and that only the MSP edition can author),
 // whereas an edition is a build/licensing boundary that decides whether a
 // capability's code and grant can exist at all.
 //
-//	EditionCore       — free, open source. Ships with every capability below
+//	EditionCore       — free, source-available. Ships with every capability below
 //	                    that is NOT listed in editionByItem.
 //	EditionEnterprise — paid. Compliance authoring, SSO, CBOM evidence,
 //	                    white-label, and the regulated framework catalog.

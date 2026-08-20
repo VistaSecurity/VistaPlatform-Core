@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"sort"
 	"testing"
 
 	"github.com/google/uuid"
@@ -57,6 +58,142 @@ func tierID(t *testing.T, db *sql.DB, name string) uuid.UUID {
 		t.Fatalf("tier %q lookup: %v", name, err)
 	}
 	return id
+}
+
+// ---------------------------------------------------------------------------
+// Restoring shared reference state
+//
+// These tests run against a SHARED TEST_DATABASE_URL, and setup()'s
+// testdb.ApplySchemaAndSeed CANNOT undo a mutated seed row: seed.sql inserts
+// both billable_items and tier_entitlements with ON CONFLICT DO NOTHING, so a
+// row that still exists is never rewritten. Anything this package UPDATEs in
+// place on a seeded catalogue row therefore leaks — out of the test, out of the
+// package, and into every other service's DB-integration suite.
+//
+// That is not hypothetical. TestUpdateBillableItem_RewritesNonKeyFields left
+// max_sensors.default_value at {"quantity": 42}, and a tier-less tenant
+// resolves max_sensors straight from that default, so auth-service's
+// TestIntegration_UnknownDefaultSignupTier_DoesNotFailSignup then failed with
+// "tier-less tenant was allowed a sensor; capacity caps must fail closed" —
+// reading exactly like an auth-service bug.
+//
+// Any test here that mutates a seeded global row must register one of these.
+// ---------------------------------------------------------------------------
+
+// restoreBillableItem snapshots a catalogue row and writes it back verbatim
+// when the test ends.
+func restoreBillableItem(t *testing.T, db *sql.DB, id uuid.UUID) {
+	t.Helper()
+	before := snapshotRow(t, db, `SELECT to_jsonb(bi) FROM billable_items bi WHERE id = $1`, id)
+
+	t.Cleanup(func() {
+		// updated_at is trigger-owned and deliberately not restored.
+		_, err := db.Exec(`
+			UPDATE billable_items bi SET
+				key                       = r.key,
+				display_name              = r.display_name,
+				description               = r.description,
+				category                  = r.category,
+				kind                      = r.kind,
+				unit                      = r.unit,
+				default_value             = r.default_value,
+				is_addon_eligible         = r.is_addon_eligible,
+				default_addon_price_cents = r.default_addon_price_cents,
+				is_active                 = r.is_active,
+				sort_order                = r.sort_order,
+				created_at                = r.created_at
+			FROM jsonb_populate_record(NULL::billable_items, $2::jsonb) r
+			WHERE bi.id = $1`, id, before)
+		if err != nil {
+			t.Errorf("restore billable_items row %s: %v", id, err)
+			return
+		}
+		// Self-check: the SET list above enumerates columns, so a column added
+		// to billable_items later would silently stop being restored. Diffing
+		// the whole row against the snapshot makes that fail loudly here
+		// instead of in some other service's suite.
+		after := snapshotRow(t, db, `SELECT to_jsonb(bi) FROM billable_items bi WHERE id = $1`, id)
+		if drifted := diffRowKeys(t, before, after, "updated_at"); len(drifted) > 0 {
+			t.Errorf("billable_items row %s not fully restored; columns still differing: %v "+
+				"(add them to restoreBillableItem's SET list)", id, drifted)
+		}
+	})
+}
+
+// restoreTierEntitlements snapshots a tier's whole entitlement matrix and
+// restores it when the test ends. Whole-matrix rather than per-row because
+// ReplaceTierEntitlements deletes every row for the tier before writing.
+func restoreTierEntitlements(t *testing.T, db *sql.DB, tier uuid.UUID) {
+	t.Helper()
+	before := snapshotRow(t, db,
+		`SELECT coalesce(jsonb_agg(to_jsonb(te)), '[]'::jsonb) FROM tier_entitlements te WHERE tier_id = $1`, tier)
+
+	t.Cleanup(func() {
+		tx, err := db.Begin()
+		if err != nil {
+			t.Errorf("restore tier_entitlements for %s: begin: %v", tier, err)
+			return
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		if _, err := tx.Exec(`DELETE FROM tier_entitlements WHERE tier_id = $1`, tier); err != nil {
+			t.Errorf("restore tier_entitlements for %s: clear: %v", tier, err)
+			return
+		}
+		// SELECT * is column-proof: no enumeration to keep in sync.
+		if _, err := tx.Exec(`
+			INSERT INTO tier_entitlements
+			SELECT * FROM jsonb_populate_recordset(NULL::tier_entitlements, $1::jsonb)`, before); err != nil {
+			t.Errorf("restore tier_entitlements for %s: reinsert: %v", tier, err)
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			t.Errorf("restore tier_entitlements for %s: commit: %v", tier, err)
+		}
+	})
+}
+
+func snapshotRow(t *testing.T, db *sql.DB, query string, args ...any) []byte {
+	t.Helper()
+	var raw []byte
+	if err := db.QueryRow(query, args...).Scan(&raw); err != nil {
+		t.Fatalf("snapshot for restore (%s): %v", query, err)
+	}
+	return raw
+}
+
+// diffRowKeys returns the column names whose values differ between two
+// to_jsonb() row snapshots, ignoring the named columns.
+func diffRowKeys(t *testing.T, before, after []byte, ignore ...string) []string {
+	t.Helper()
+	var b, a map[string]json.RawMessage
+	if err := json.Unmarshal(before, &b); err != nil {
+		t.Errorf("decode snapshot: %v", err)
+		return nil
+	}
+	if err := json.Unmarshal(after, &a); err != nil {
+		t.Errorf("decode restored row: %v", err)
+		return nil
+	}
+	skip := make(map[string]bool, len(ignore))
+	for _, k := range ignore {
+		skip[k] = true
+	}
+	seen := make(map[string]bool, len(b)+len(a))
+	var drifted []string
+	for _, m := range []map[string]json.RawMessage{b, a} {
+		for k := range m {
+			if skip[k] || seen[k] {
+				continue
+			}
+			seen[k] = true
+			if string(b[k]) != string(a[k]) {
+				drifted = append(drifted, k)
+			}
+		}
+	}
+	sort.Strings(drifted)
+	return drifted
 }
 
 func TestListBillableItems_SeededRows(t *testing.T) {
@@ -156,6 +293,7 @@ func TestGetTierEntitlements_SeededTier(t *testing.T) {
 func TestReplaceTierEntitlements_ReplacesCompletely(t *testing.T) {
 	svc, db := setup(t)
 	pro := tierID(t, db, "pro")
+	restoreTierEntitlements(t, db, pro)
 
 	// Start with a minimal replacement set — only one item. Anything else
 	// previously composed for this tier should be deleted.
@@ -189,6 +327,7 @@ func TestReplaceTierEntitlements_ReplacesCompletely(t *testing.T) {
 func TestReplaceTierEntitlements_Idempotent(t *testing.T) {
 	svc, db := setup(t)
 	pro := tierID(t, db, "pro")
+	restoreTierEntitlements(t, db, pro)
 
 	inputs := []TierEntitlementInput{
 		{ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{"quantity": 25}`)},
@@ -211,6 +350,9 @@ func TestReplaceTierEntitlements_Idempotent(t *testing.T) {
 func TestReplaceTierEntitlements_UnknownKeyRejected(t *testing.T) {
 	svc, db := setup(t)
 	pro := tierID(t, db, "pro")
+	// Nothing should change here — the restore is the belt to that braces, and
+	// keeps the test honest if validation ever moves after the DELETE.
+	restoreTierEntitlements(t, db, pro)
 
 	priorCount := func() int {
 		var n int
@@ -245,6 +387,7 @@ func TestReplaceTierEntitlements_UnknownKeyRejected(t *testing.T) {
 func TestReplaceTierEntitlements_OverageFieldsPersist(t *testing.T) {
 	svc, db := setup(t)
 	pro := tierID(t, db, "pro")
+	restoreTierEntitlements(t, db, pro)
 
 	cents := 25
 	size := 1
@@ -277,6 +420,7 @@ func TestReplaceTierEntitlements_OverageFieldsPersist(t *testing.T) {
 func TestReplaceTierEntitlements_EmptyClearsAll(t *testing.T) {
 	svc, db := setup(t)
 	free := tierID(t, db, "free")
+	restoreTierEntitlements(t, db, free)
 
 	if err := svc.ReplaceTierEntitlements(free, nil); err != nil {
 		t.Fatalf("ReplaceTierEntitlements(nil): %v", err)
@@ -353,6 +497,10 @@ func TestUpdateBillableItem_RewritesNonKeyFields(t *testing.T) {
 	if err := db.QueryRow(`SELECT id FROM billable_items WHERE key = 'max_sensors'`).Scan(&id); err != nil {
 		t.Fatalf("lookup id: %v", err)
 	}
+	// max_sensors is the catalogue entry a tier-less tenant's sensor cap falls
+	// back to. Leaving it rewritten breaks other services' suites — see the
+	// restore-helper block above.
+	restoreBillableItem(t, db, id)
 
 	in := BillableItemInput{
 		Key:             "ignored_on_update",

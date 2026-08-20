@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/sirupsen/logrus"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/auth"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/models"
 )
@@ -154,8 +155,11 @@ func InitiateAdminImpersonation(c *gin.Context) {
 		return
 	}
 
-	// Audit log entry (actor, target, reason) — best-effort.
-	_ = svc.RecordImpersonationStart(c.Request.Context(), auth.ImpersonationStartParams{
+	// Audit log entry (actor, target, reason). Best-effort — the token is already
+	// minted, so a failed audit write must not 500 the caller — but it is NOT
+	// discarded: a silent `_ =` here is what hid two SQL parse errors that left
+	// the impersonation trail permanently empty.
+	if auditErr := svc.RecordImpersonationStart(c.Request.Context(), auth.ImpersonationStartParams{
 		TenantID:     tenantID,
 		TargetUserID: targetUser.ID,
 		TargetEmail:  targetUser.Email,
@@ -166,7 +170,13 @@ func InitiateAdminImpersonation(c *gin.Context) {
 		IP:           ip,
 		UA:           ua,
 		TTLSeconds:   int(ttl.Seconds()),
-	})
+	}); auditErr != nil {
+		logrus.WithError(auditErr).WithFields(logrus.Fields{
+			"actor_id":       actorID,
+			"target_user_id": targetUser.ID.String(),
+			"jti":            jti,
+		}).Error("Failed to record impersonation_start audit entry")
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"access_token": token,
@@ -225,13 +235,21 @@ func StopAdminImpersonation(c *gin.Context) {
 		}
 	}
 	if ttl > 0 {
-		_ = svc.RevokeJTI(c.Request.Context(), jti, ttl)
+		if revokeErr := svc.RevokeJTI(c.Request.Context(), jti, ttl); revokeErr != nil {
+			logrus.WithError(revokeErr).WithField("jti", jti).Error("Failed to add impersonation token to the revocation denylist")
+		}
 	}
 
-	// Audit stop — best-effort.
+	// Audit stop. Best-effort (the token is already denylisted), but logged
+	// rather than discarded — see RecordImpersonationStart above.
 	actorIDVal, _ := c.Get("userID")
 	actorID, _ := actorIDVal.(string)
-	_ = svc.RecordImpersonationStop(c.Request.Context(), actorID, jti, c.ClientIP(), c.Request.UserAgent())
+	if auditErr := svc.RecordImpersonationStop(c.Request.Context(), actorID, jti, c.ClientIP(), c.Request.UserAgent()); auditErr != nil {
+		logrus.WithError(auditErr).WithFields(logrus.Fields{
+			"actor_id": actorID,
+			"jti":      jti,
+		}).Error("Failed to record impersonation_stop audit entry")
+	}
 
 	c.Status(http.StatusNoContent)
 }

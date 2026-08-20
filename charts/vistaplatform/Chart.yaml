@@ -2,12 +2,12 @@ apiVersion: v2
 name: vistaplatform
 description: Vista cryptographic asset inventory and compliance platform
 type: application
-version: 0.10.2
-appVersion: "v0.10.2"
+version: 0.11.0
+appVersion: "v0.11.0"
 kubeVersion: ">=1.27.0-0"
 home: https://vistasecurity.io
 maintainers:
-  - name: VistaPlatform
+  - name: Vista Security
     email: support@vistasecurity.io
 keywords:
   - cryptography

@@ -231,7 +231,7 @@ export function MeasurementRulesModal({ control, onClose }: { control: { id: str
       {!form ? (
         <>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 12, color: 'var(--op-t3)' }}>A control passes when all its rules pass. With no rules, it passes by default.</span>
+            <span style={{ fontSize: 12, color: 'var(--op-t3)' }}>A control passes when all its rules pass and fails if any fail. With no rules configured it is scored Not assessed and excluded from the score — never treated as a pass.</span>
             <div style={{ flex: 1 }} />
             <button className="op-btn sm" disabled={types.length === 0} onClick={startAdd}><Plus size={13} />Add rule</button>
           </div>

@@ -1,12 +1,12 @@
 // Thin runtime wrapper around the generated cbom-service types.
 //
 // This file is hand-written (the *.d.ts beside it is generated — do not edit
-// that one). It wires `openapi-fetch` to VistaPlatform's auth model:
+// that one). It wires `openapi-fetch` to Vista Platform's auth model:
 //   - httpOnly cookies are sent automatically via `credentials: "include"`
 //   - the JS-readable `csrf_token` cookie is echoed as the `X-CSRF-Token`
 //     header on every request (matches services/.../web-ui axios interceptor)
 //
-// Every VistaPlatform TS consumer (frontend-v2, and the old web-ui during the
+// Every Vista Platform TS consumer (frontend-v2, and the old web-ui during the
 // transition) should create its client through here so the auth wiring lives
 // in exactly one place.
 import createClient, { type Client, type Middleware } from "openapi-fetch";

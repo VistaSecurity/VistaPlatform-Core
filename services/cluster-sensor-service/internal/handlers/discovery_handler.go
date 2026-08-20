@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -134,6 +135,15 @@ func (h *DiscoveryHandler) CreateJob(c *gin.Context) {
 	job, err := h.discoveryService.CreateJob(tenantID, userID, req)
 	if err != nil {
 		log.Printf("[DiscoveryHandler] CreateJob error: %v", err)
+		// Sensor dispatch is not implemented; say so instead of collapsing it
+		// into the generic message. A caller must be able to tell "you asked
+		// for something that does not exist" from "your request was malformed",
+		// because the previous behaviour was to accept it and run the scan
+		// somewhere else entirely.
+		if errors.Is(err, services.ErrSensorDispatchUnsupported) {
+			sharedapi.BadRequest(c, err.Error())
+			return
+		}
 		sharedapi.BadRequest(c, "failed to create job")
 		return
 	}

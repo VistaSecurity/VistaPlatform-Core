@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -100,55 +101,18 @@ type panResponse struct {
 }
 
 // panResult represents the result section of a PAN-OS response.
+//
+// Only the keygen `<key>` is bound positionally here. A `type=config&action=get`
+// response does NOT echo the queried xpath: PAN-OS returns the sub-tree rooted
+// at the LAST node of the xpath, so `<result>` holds `<ssl-decrypt>` or
+// `<rules>` directly. Modelling it as `<result><config><devices>…` — the shape
+// the xpath is written in — bound nothing, and both extractors returned an
+// empty slice on every real device while the interrogation reported success.
+// Config sub-trees are located with panFindElements instead, which tolerates
+// either nesting.
 type panResult struct {
-	XMLName xml.Name  `xml:"result"`
-	Config  panConfig `xml:"config"`
-	Key     string    `xml:"key"`
-}
-
-// panConfig represents the config section.
-type panConfig struct {
-	XMLName xml.Name   `xml:"config"`
-	Devices panDevices `xml:"devices"`
-}
-
-// panDevices represents the devices section.
-type panDevices struct {
-	XMLName xml.Name   `xml:"devices"`
-	Entry   []panEntry `xml:"entry"`
-}
-
-// panEntry represents a device entry.
-type panEntry struct {
-	XMLName xml.Name   `xml:"entry"`
-	Name    string     `xml:"name,attr"`
-	VSys    panVSys    `xml:"vsys"`
-	Network panNetwork `xml:"network"`
-}
-
-// panVSys represents virtual systems.
-type panVSys struct {
-	XMLName xml.Name       `xml:"vsys"`
-	Entry   []panVSysEntry `xml:"entry"`
-}
-
-// panVSysEntry represents a vsys entry.
-type panVSysEntry struct {
-	XMLName  xml.Name    `xml:"entry"`
-	Name     string      `xml:"name,attr"`
-	Rulebase panRulebase `xml:"rulebase"`
-}
-
-// panRulebase represents a security rulebase.
-type panRulebase struct {
-	XMLName  xml.Name    `xml:"rulebase"`
-	Security panSecurity `xml:"security"`
-}
-
-// panSecurity represents the security section.
-type panSecurity struct {
-	XMLName xml.Name `xml:"security"`
-	Rules   panRules `xml:"rules"`
+	XMLName xml.Name `xml:"result"`
+	Key     string   `xml:"key"`
 }
 
 // panRules represents the security rules collection.
@@ -170,18 +134,6 @@ type panSSL struct {
 	Decrypt string   `xml:"decrypt"`
 }
 
-// panNetwork represents the network section.
-type panNetwork struct {
-	XMLName  xml.Name    `xml:"network"`
-	Profiles panProfiles `xml:"profiles"`
-}
-
-// panProfiles represents the profiles section.
-type panProfiles struct {
-	XMLName    xml.Name      `xml:"profiles"`
-	SSLDecrypt panSSLDecrypt `xml:"ssl-decrypt"`
-}
-
 // panSSLDecrypt represents the ssl-decrypt profiles collection.
 type panSSLDecrypt struct {
 	XMLName xml.Name             `xml:"ssl-decrypt"`
@@ -199,6 +151,52 @@ type panSSLDecryptEntry struct {
 type panCertificate struct {
 	XMLName xml.Name `xml:"certificate"`
 	CA      string   `xml:"ca"`
+}
+
+// panFindElements decodes every element with local name `name` that appears
+// anywhere inside the `<result>` element of a PAN-OS response body into T.
+//
+// PAN-OS roots a config-get result at the LAST node of the requested xpath, but
+// the depth is not something a caller can rely on: a multi-vsys device returns
+// one block per match, and some code paths (and `xpath=/config`) return the
+// full `<config><devices>…` tree instead. Walking for the element by name
+// handles every one of those with a single code path, and decoding through the
+// existing typed structs keeps the projection intact — unknown vendor fields
+// are still discarded structurally, so nothing new is collected.
+//
+// A matched element is consumed whole, so a same-named descendant is never
+// counted twice.
+func panFindElements[T any](body, name string) ([]T, error) {
+	dec := xml.NewDecoder(strings.NewReader(body))
+	var out []T
+	inResult := false
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan PAN-OS response for <%s>: %w", name, err)
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			switch {
+			case !inResult && t.Name.Local == "result":
+				inResult = true
+			case inResult && t.Name.Local == name:
+				var v T
+				if err := dec.DecodeElement(&v, &t); err != nil {
+					return nil, fmt.Errorf("failed to decode <%s>: %w", name, err)
+				}
+				out = append(out, v)
+			}
+		case xml.EndElement:
+			if inResult && t.Name.Local == "result" {
+				inResult = false
+			}
+		}
+	}
+	return out, nil
 }
 
 func (c *panClient) interrogate(ctx context.Context) (*InterrogateResult, error) {
@@ -321,11 +319,14 @@ func (c *panClient) getSSLDecryptProfiles(ctx context.Context) ([]panSSLDecryptE
 		return nil, fmt.Errorf("failed to get SSL decrypt profiles: %s", panosResp.Code)
 	}
 
+	// PAN-OS roots the result at the last xpath node, i.e. <result><ssl-decrypt>.
+	blocks, err := panFindElements[panSSLDecrypt](resp, "ssl-decrypt")
+	if err != nil {
+		return nil, err
+	}
 	var profiles []panSSLDecryptEntry
-	// Extract profiles from XML structure.
-	if len(panosResp.Result.Config.Devices.Entry) > 0 {
-		entry := panosResp.Result.Config.Devices.Entry[0]
-		profiles = entry.Network.Profiles.SSLDecrypt.Entry
+	for _, b := range blocks {
+		profiles = append(profiles, b.Entry...)
 	}
 
 	return profiles, nil
@@ -350,14 +351,16 @@ func (c *panClient) getSecurityRules(ctx context.Context) ([]panRuleEntry, error
 		return nil, fmt.Errorf("failed to get security rules: %s", panosResp.Code)
 	}
 
+	// PAN-OS roots the result at the last xpath node, i.e. <result><rules>.
+	// A device with several vsys returns one <rules> block per match, so every
+	// block contributes — taking only the first would silently drop the rest.
+	blocks, err := panFindElements[panRules](resp, "rules")
+	if err != nil {
+		return nil, err
+	}
 	var rules []panRuleEntry
-	// Extract rules from XML structure.
-	if len(panosResp.Result.Config.Devices.Entry) > 0 {
-		entry := panosResp.Result.Config.Devices.Entry[0]
-		if len(entry.VSys.Entry) > 0 {
-			vsysEntry := entry.VSys.Entry[0]
-			rules = vsysEntry.Rulebase.Security.Rules.Entry
-		}
+	for _, b := range blocks {
+		rules = append(rules, b.Entry...)
 	}
 
 	return rules, nil

@@ -42,6 +42,14 @@ func (s *ExternalConnectionsService) Upsert(tenantID uuid.UUID, input models.Ext
 		return nil, fmt.Errorf("source_ip, dest_ip, dest_port, and protocol are required")
 	}
 
+	// Canonicalize the protocol spelling BEFORE anything reads it. external_connections.protocol
+	// is varchar, not the protocol_type enum, and it is part of the row's unique key — so an
+	// "EtherNet/IP" observation and an "EtherNet_IP" observation of the same endpoint would
+	// otherwise upsert into two separate rows, each with its own observation_count and history.
+	// Doing it here rather than in the SQL args also means assessCrypto and the port-heuristic
+	// service lookup below see the same canonical value the row stores.
+	input.Protocol = cryptoparse.NormalizeProtocol(input.Protocol)
+
 	// --- Crypto assessment ---
 	cryptoStrength, isPQC, kexAlgorithm, weakReasons := s.assessCrypto(input)
 	if input.KeyExchangeAlgorithm == nil && kexAlgorithm != "" {
@@ -566,8 +574,7 @@ func (s *ExternalConnectionsService) checkRSAKeySize(kexType string, keySize int
 func legacyTLSVersions(versions []string) []string {
 	var legacy []string
 	for _, v := range versions {
-		upper := strings.ToUpper(strings.TrimSpace(v))
-		if strings.Contains(upper, "SSL") || upper == "TLS 1.0" || upper == "TLS 1.1" {
+		if isLegacyProtocolVersion(v) {
 			legacy = append(legacy, v)
 		}
 	}
@@ -692,11 +699,12 @@ func isWeakProtocol(protocol string, version *string) bool {
 	if strings.Contains(p, "SSL") {
 		return true
 	}
+	// The version half is compared through the shared fold, not against a bare
+	// "1.0": every producer writes the spaced "TLS 1.0", so the old literal
+	// comparison never matched a stored value and the "weak protocol" reason
+	// never appeared on any external connection.
 	if p == "TLS" && version != nil {
-		v := strings.TrimSpace(*version)
-		if v == "1.0" || v == "1.1" || v == "1" {
-			return true
-		}
+		return isLegacyProtocolVersion(*version)
 	}
 	return false
 }
@@ -706,12 +714,7 @@ func isWeakProtocol(protocol string, version *string) bool {
 // servers that negotiate TLS 1.2+ but still accept legacy versions.
 func hasWeakTLSVersion(versions []string) bool {
 	for _, v := range versions {
-		upper := strings.ToUpper(strings.TrimSpace(v))
-		if strings.Contains(upper, "SSL") {
-			return true
-		}
-		// "TLS 1.0", "TLS 1.1" from the enumerator
-		if upper == "TLS 1.0" || upper == "TLS 1.1" {
+		if isLegacyProtocolVersion(v) {
 			return true
 		}
 	}
@@ -844,7 +847,7 @@ func (s *ExternalConnectionsService) List(tenantID uuid.UUID, f models.ExternalC
 		where = append(where, "(cert_validation_status IS NOT NULL AND LOWER(TRIM(cert_validation_status)) <> 'valid')")
 	}
 	if f.HasLegacyTLS != nil && *f.HasLegacyTLS {
-		where = append(where, "supported_tls_versions && ARRAY['TLS 1.0','TLS 1.1']::text[]")
+		where = append(where, legacyTLSVersionsArraySQL("supported_tls_versions"))
 	}
 	if f.SourceAssetID != nil {
 		where = append(where, fmt.Sprintf("source_asset_id = $%d", argIdx))
@@ -1095,7 +1098,7 @@ func (s *ExternalConnectionsService) GetSummary(tenantID uuid.UUID) (*models.Ext
 				COUNT(*) FILTER (WHERE crypto_strength = 'weak') AS weak_crypto,
 				COUNT(*) FILTER (WHERE is_pqc_resistant = true) AS pqc_resistant,
 				COUNT(*) FILTER (WHERE cert_is_expired = true) AS expired_certs,
-				COUNT(*) FILTER (WHERE supported_tls_versions && ARRAY['TLS 1.0','TLS 1.1']::text[]) AS legacy_tls,
+				COUNT(*) FILTER (WHERE `+legacyTLSVersionsArraySQL("supported_tls_versions")+`) AS legacy_tls,
 				COUNT(DISTINCT source_ip) AS source_hosts
 			FROM external_connections
 			WHERE tenant_id = $1`,

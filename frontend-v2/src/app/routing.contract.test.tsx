@@ -18,6 +18,7 @@ import { describe, expect, it } from 'vitest';
 import { isValidElement, type ReactElement } from 'react';
 import { Routes, createRoutesFromElements, matchRoutes } from 'react-router';
 import { PUBLIC_PATHS } from './public-routes';
+import { SECTIONS } from './nav';
 import pkg from '../../package.json' with { type: 'json' };
 import App from '../App';
 
@@ -119,7 +120,6 @@ describe('tenant console route table (react-router v8)', () => {
     ['/risk-compliance/cbom', '~layout > ~layout > /risk-compliance/cbom'],
     ['/risk-compliance/cbom/compare', '~layout > ~layout > /risk-compliance/cbom/compare'],
     ['/remediation/alerts', '~layout > ~layout > /remediation/alerts'],
-    ['/remediation/triage', '~layout > ~layout > /remediation/triage'],
     ['/getting-started', '~layout > ~layout > /getting-started'],
     ['/settings', '~layout > ~layout > /settings'],
     ['/profile', '~layout > ~layout > /profile'],
@@ -145,6 +145,38 @@ describe('tenant console route table (react-router v8)', () => {
   it('unknown gated URLs fall through to the catch-all, not off the table', () => {
     expect(resolve('/definitely-not-a-page')).toBe('~layout > ~layout > *');
     expect(resolve('/discovery/not-a-thing')).toBe('~layout > ~layout > *');
+  });
+
+  // Reachability: the left rail may not advertise a page that does not exist,
+  // and a removed page may not be left in the rail pointing at a redirect.
+  it('every primary-nav entry resolves to a real page', () => {
+    const navPaths = SECTIONS.flatMap((s) => [s.path, ...(s.groups ?? []).flatMap((g) => g.items.map((i) => i.path))]);
+    expect(navPaths.length).toBeGreaterThan(0); // a scan that finds nothing must fail
+    for (const path of navPaths) {
+      const resolved = resolve(path);
+      expect(resolved, `${path} falls through to the catch-all`).not.toBe('~layout > ~layout > *');
+      const matches = matchRoutes(routes, path)!;
+      const el = matches[matches.length - 1].route.element as ReactElement<{ to?: string }>;
+      expect(el.props.to, `${path} is a nav entry pointing at a redirect`).toBeUndefined();
+    }
+  });
+
+  it('Triage is gone from the rail', () => {
+    const navPaths = SECTIONS.flatMap((s) => [s.path, ...(s.groups ?? []).flatMap((g) => g.items.map((i) => i.path))]);
+    expect(navPaths).not.toContain('/remediation/triage');
+  });
+
+  it('the retired /remediation/triage deep link redirects to Alerts', () => {
+    // Triage was removed: its only data source (audit-service GET /alerts)
+    // returned a hardcoded empty list, so the page read "Inbox zero" forever
+    // and its Acknowledge stored nothing. Alerts is the surface that actually
+    // holds alert state, so the documented link must land there rather than on
+    // the catch-all — and must not render a page again.
+    expect(resolve('/remediation/triage')).toBe('~layout > ~layout > /remediation/triage');
+    const matches = matchRoutes(routes, '/remediation/triage')!;
+    const el = matches[matches.length - 1].route.element as ReactElement<{ to: string; replace?: boolean }>;
+    expect(el.props.to).toBe('/remediation/alerts');
+    expect(el.props.replace).toBe(true);
   });
 
   it('the documented /cbom deep links still redirect into risk-compliance', () => {

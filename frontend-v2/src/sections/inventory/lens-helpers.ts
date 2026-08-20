@@ -176,6 +176,53 @@ export function assetService(a: InfraRowAsset): { name: string | null; version: 
   return { name, version: version ? `v${version.replace(/^v/i, '')}` : null };
 }
 
+/** How sure we are of the service name, and why.
+ *
+ *  The backend has always sent this — `service_confidence` (high/medium/low)
+ *  and `service_identification_method` (banner/ja3s/port_heuristic/http_header/
+ *  manual) ride along with every asset — and nothing rendered them, so a name
+ *  inferred from nothing but a port number appeared exactly as certain as one
+ *  read out of a server banner.
+ *
+ *  We will never be at 100%, so the honest thing is to say which it is. Returns
+ *  a short qualifier for the drawer's Service row plus a fuller `title` for the
+ *  hover. Both are null when the backend sent no method — an older row, or an
+ *  operator-entered name from before those columns were populated — because
+ *  inventing a confidence for it would be the same overclaim in reverse. */
+const CONFIDENCE_WORD: Record<string, string> = {
+  high: 'Confirmed',
+  medium: 'Likely',
+  low: 'Best guess',
+};
+const METHOD_SOURCE: Record<string, string> = {
+  banner: 'from banner',
+  ja3s: 'from TLS fingerprint',
+  port_heuristic: 'from port',
+  http_header: 'from HTTP header',
+};
+const METHOD_TITLE: Record<string, string> = {
+  banner: 'The service announced itself in its banner.',
+  ja3s: 'Matched on the TLS handshake fingerprint, not on anything the service said.',
+  port_heuristic: 'Inferred from the port number alone. The port is the only evidence, so treat the name as a guess.',
+  http_header: 'Read from an HTTP response header.',
+  manual: 'Entered by a user, not discovered.',
+};
+export function serviceConfidence(a: { service_confidence?: string | null; service_identification_method?: string | null }):
+  { qualifier: string | null; title: string | null } {
+  const method = clean(a.service_identification_method).toLowerCase();
+  if (!method) return { qualifier: null, title: null };
+  if (method === 'manual') {
+    return { qualifier: 'Set manually', title: METHOD_TITLE.manual };
+  }
+  const word = CONFIDENCE_WORD[clean(a.service_confidence).toLowerCase()];
+  const source = METHOD_SOURCE[method];
+  if (!word && !source) return { qualifier: null, title: null };
+  return {
+    qualifier: [word, source].filter(Boolean).join(' · ') || null,
+    title: METHOD_TITLE[method] ?? null,
+  };
+}
+
 /** Risk segment. `assessed` is the load-bearing flag: a score of 0 means the
  *  asset resolved NOTHING against the algorithms catalogue and no size rule
  *  fired. It must not be presented as a low-risk result. */

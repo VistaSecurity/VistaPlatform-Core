@@ -100,7 +100,17 @@ export function CustomPoliciesPage({ meta }: { meta: SettingsNavItem }) {
   // all mounted behind RequireTenantPermission(ComplianceUpdate) in
   // services/compliance-engine/ee/policyauthoring/handlers.go. Gating on
   // .manage hid controls the route would have allowed.
-  const canManage = hasPermission(TENANT_PERMISSIONS.compliance.update);
+  //
+  // `!meta.authoringDisabled` folds in the interim, edition-independent
+  // kill-switch (audit finding B-05, tracking — see nav.ts):
+  // custom policies are never evaluated today, so nobody — however
+  // entitled — should be able to author one and believe it does something.
+  // This is read down through CustomPolicyControls too, which currently
+  // couples "view a control's rules" to the same manage gate, so rule
+  // detail is unavailable while this is on. The policy and control list
+  // itself (name, id, severity) stays visible regardless — nothing here
+  // deletes or hides existing data.
+  const canManage = hasPermission(TENANT_PERMISSIONS.compliance.update) && !meta.authoringDisabled;
   const [modal, setModal] = useState<ModalState>({ kind: 'closed' });
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const policies = data ?? [];
@@ -121,11 +131,19 @@ export function CustomPoliciesPage({ meta }: { meta: SettingsNavItem }) {
     <SPage
       eyebrow="Policies" title="Custom Policies" job={meta.job} maxWidth={1000}
       actions={
-        <PermissionGate permission={TENANT_PERMISSIONS.compliance.update}>
-          <button className="ui-btn sm accent" onClick={() => setModal({ kind: 'create' })}><Icon name="plus" size={14} />New custom policy</button>
-        </PermissionGate>
+        !meta.authoringDisabled && (
+          <PermissionGate permission={TENANT_PERMISSIONS.compliance.update}>
+            <button className="ui-btn sm accent" onClick={() => setModal({ kind: 'create' })}><Icon name="plus" size={14} />New custom policy</button>
+          </PermissionGate>
+        )
       }
     >
+      {meta.authoringDisabled && (
+        <SCard style={{ marginBottom: 16 }}>
+          <StateNote icon="alert-triangle" tone="var(--warn-strong)"
+            title={meta.authoringDisabled.title} message={meta.authoringDisabled.message} />
+        </SCard>
+      )}
       {isError ? (
         <SCard><StateNote icon="alert-triangle" tone="var(--danger-text)" title="Couldn't load custom policies" message="The custom-policy list failed to load." /></SCard>
       ) : isLoading ? (
@@ -154,15 +172,17 @@ export function CustomPoliciesPage({ meta }: { meta: SettingsNavItem }) {
                       {p.controls_count} control{p.controls_count !== 1 ? 's' : ''}{p.description ? ` · ${p.description}` : ''}
                     </div>
                   </div>
-                  <PermissionGate permission={TENANT_PERMISSIONS.compliance.update}>
-                    <div style={{ display: 'flex', gap: 8, flex: 'none' }}>
-                      <button className="ui-btn sm" onClick={() => setModal({ kind: 'edit', policy: p })}>Edit</button>
-                      <button className="ui-btn sm ghost" style={{ color: 'var(--danger-text)' }} title="Delete custom policy" disabled={mut.remove.isPending}
-                        onClick={() => { if (window.confirm(`Delete custom policy "${p.name}"? This cannot be undone.`)) mut.remove.mutate(p.id); }}>
-                        <Icon name="x" size={14} />
-                      </button>
-                    </div>
-                  </PermissionGate>
+                  {!meta.authoringDisabled && (
+                    <PermissionGate permission={TENANT_PERMISSIONS.compliance.update}>
+                      <div style={{ display: 'flex', gap: 8, flex: 'none' }}>
+                        <button className="ui-btn sm" onClick={() => setModal({ kind: 'edit', policy: p })}>Edit</button>
+                        <button className="ui-btn sm ghost" style={{ color: 'var(--danger-text)' }} title="Delete custom policy" disabled={mut.remove.isPending}
+                          onClick={() => { if (window.confirm(`Delete custom policy "${p.name}"? This cannot be undone.`)) mut.remove.mutate(p.id); }}>
+                          <Icon name="x" size={14} />
+                        </button>
+                      </div>
+                    </PermissionGate>
+                  )}
                 </SCard>
                 {expanded && (
                   <div style={{ border: '1px solid var(--app-border)', borderTop: 'none', borderRadius: '0 0 10px 10px', background: 'var(--app-panel2)' }}>
@@ -174,9 +194,11 @@ export function CustomPoliciesPage({ meta }: { meta: SettingsNavItem }) {
           })}
         </div>
       )}
-      <p style={{ fontSize: 12, color: 'var(--app-t3)', marginTop: 16 }}>
-        Custom policies are evaluated against your inventory alongside platform frameworks. Control &amp; measurement-rule authoring is added next; for now you can define and version the policies.
-      </p>
+      {!meta.authoringDisabled && (
+        <p style={{ fontSize: 12, color: 'var(--app-t3)', marginTop: 16 }}>
+          Custom policies are evaluated against your inventory alongside platform frameworks.
+        </p>
+      )}
 
       {(modal.kind === 'create' || modal.kind === 'edit') && (
         <PolicyFormModal key={modal.kind === 'edit' ? modal.policy.id : 'new'} policy={modal.kind === 'edit' ? modal.policy : null} onClose={close} mut={mut} />

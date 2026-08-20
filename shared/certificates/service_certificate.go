@@ -107,8 +107,8 @@ func (s *ServiceCertificateService) IssueServiceCertificates(serviceName string)
 	serverTemplate := x509.Certificate{
 		SerialNumber: serverSerial,
 		Subject: pkix.Name{
-			Organization:       []string{"VistaPlatform"},
-			OrganizationalUnit: []string{"VistaPlatform"},
+			Organization:       []string{"Vista Platform"},
+			OrganizationalUnit: []string{"Vista Platform"},
 			Country:            []string{"US"},
 			Province:           []string{"Florida"},
 			Locality:           []string{"Orlando"},
@@ -152,8 +152,8 @@ func (s *ServiceCertificateService) IssueServiceCertificates(serviceName string)
 	clientTemplate := x509.Certificate{
 		SerialNumber: clientSerial,
 		Subject: pkix.Name{
-			Organization:       []string{"VistaPlatform"},
-			OrganizationalUnit: []string{"VistaPlatform"},
+			Organization:       []string{"Vista Platform"},
+			OrganizationalUnit: []string{"Vista Platform"},
 			Country:            []string{"US"},
 			Province:           []string{"Florida"},
 			Locality:           []string{"Orlando"},

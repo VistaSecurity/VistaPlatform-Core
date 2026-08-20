@@ -13,26 +13,36 @@ import { usePlatformPermissions, PLATFORM_PERMISSIONS } from '@vistasecurity/pri
 import { usePlatformSettings, useUpdateSecuritySettings, errMsg } from './queries';
 
 // The security-owned subset of PlatformSettings this page edits.
+//
+// EVERY field here is enforced. That was not previously true: the four numeric
+// fields persisted and redisplayed while auth-service kept its hardcoded
+// 5 attempts / 15 minutes / 8 characters, and a "Maintenance mode" toggle
+// round-tripped as a constant false that no service read even in principle.
+// If you add a field, wire its consumer in the same change — a control that
+// saves and does nothing is worse than no control, because the operator
+// believes it.
+//
+// (Maintenance mode is gone rather than persisted: a real one is a request gate
+// across every service with an operator bypass. Storing the flag alone would
+// only have made the false belief durable.)
 interface SecurityForm {
   password_min_length: number;
   session_timeout_minutes: number;
   max_login_attempts: number;
   lockout_duration_minutes: number;
-  maintenance_mode: boolean;
   registration_enabled: boolean;
   email_verification_required: boolean;
   admin_email_verification_required: boolean;
 }
 
-const NUMERIC_FIELDS: { key: keyof SecurityForm; label: string; desc: string }[] = [
-  { key: 'password_min_length', label: 'Minimum password length', desc: 'Minimum length for user passwords.' },
-  { key: 'session_timeout_minutes', label: 'Session timeout (minutes)', desc: 'How long user sessions remain active.' },
-  { key: 'max_login_attempts', label: 'Maximum login attempts', desc: 'Failed attempts allowed before lockout.' },
-  { key: 'lockout_duration_minutes', label: 'Lockout duration (minutes)', desc: 'How long accounts stay locked after max attempts.' },
+const NUMERIC_FIELDS: { key: keyof SecurityForm; label: string; desc: string; min: number; max: number }[] = [
+  { key: 'password_min_length', label: 'Minimum password length', desc: 'Minimum length for every new or changed password, tenant and platform. Cannot go below 8 — the built-in floor.', min: 8, max: 72 },
+  { key: 'session_timeout_minutes', label: 'Session timeout (minutes)', desc: 'How long a session survives without activity before sign-in is required again.', min: 5, max: 129600 },
+  { key: 'max_login_attempts', label: 'Maximum login attempts', desc: 'Consecutive failed sign-ins before the account is locked. Applies to tenant users and platform admins alike.', min: 1, max: 100 },
+  { key: 'lockout_duration_minutes', label: 'Lockout duration (minutes)', desc: 'How long a locked account stays locked.', min: 1, max: 10080 },
 ];
 
 const TOGGLE_FIELDS: { key: keyof SecurityForm; label: string; desc: string }[] = [
-  { key: 'maintenance_mode', label: 'Maintenance mode', desc: 'Restrict platform access during maintenance.' },
   { key: 'registration_enabled', label: 'Registration enabled', desc: 'Allow new tenant registrations.' },
   { key: 'email_verification_required', label: 'Tenant email verification required', desc: 'Require email verification for new tenant users.' },
   { key: 'admin_email_verification_required', label: 'Admin email verification required', desc: 'Require email verification for new platform admins.' },
@@ -44,7 +54,6 @@ function fromSettings(s: Partial<Record<keyof SecurityForm, number | boolean | n
     session_timeout_minutes: Number(s.session_timeout_minutes ?? 0),
     max_login_attempts: Number(s.max_login_attempts ?? 0),
     lockout_duration_minutes: Number(s.lockout_duration_minutes ?? 0),
-    maintenance_mode: !!s.maintenance_mode,
     registration_enabled: !!s.registration_enabled,
     email_verification_required: !!s.email_verification_required,
     admin_email_verification_required: !!s.admin_email_verification_required,
@@ -122,7 +131,7 @@ export function SecurityPolicyPage() {
                       <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--op-t1)' }}>{f.label}</div>
                       <div style={{ fontSize: 11.5, color: 'var(--op-t3)' }}>{f.desc}</div>
                     </div>
-                    <input type="number" min={0} style={numStyle} value={String(current[f.key] as number)} onChange={(e) => set({ [f.key]: parseInt(e.target.value, 10) || 0 } as Partial<SecurityForm>)} />
+                    <input type="number" min={f.min} max={f.max} style={numStyle} value={String(current[f.key] as number)} onChange={(e) => set({ [f.key]: parseInt(e.target.value, 10) || 0 } as Partial<SecurityForm>)} />
                   </div>
                 ))}
               </div>
@@ -146,7 +155,7 @@ export function SecurityPolicyPage() {
         )}
       </div>
       <div style={{ fontSize: 11.5, color: 'var(--op-t3)', marginTop: 12 }}>
-        These fields write the security-owned keys of the platform settings object. Email delivery settings live under the platform <strong>Settings</strong> section and are persisted independently (partial-merge save).
+        These fields write the security-owned keys of the platform settings object and take effect on the next sign-in, password change or token refresh — existing sessions are not retroactively shortened. Email delivery settings live under the platform <strong>Settings</strong> section and are persisted independently (partial-merge save).
       </div>
     </div>
   );

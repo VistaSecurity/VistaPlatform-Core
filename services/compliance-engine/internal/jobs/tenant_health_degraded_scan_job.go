@@ -16,6 +16,11 @@ const (
 	tenantHealthDegradedAlertType = "tenant_health_degraded"
 	tenantHealthDegradedThreshold = 60 // overall_score below this = degraded
 	tenantHealthCriticalThreshold = 40 // below this escalates to high
+
+	// tenantHealthStatusUnknown mirrors tenant-health-service's
+	// models.HealthStatusUnknown: no factor could be measured, so the stored
+	// overall_score is 0 for want of data and must not be read as a score.
+	tenantHealthStatusUnknown = "unknown"
 )
 
 // healthDegradedSeverity maps a health score to alert severity: medium for a
@@ -89,12 +94,21 @@ func (j *TenantHealthDegradedScanJob) Scan() {
 	}
 
 	// Degraded tenants (global read via bypass; tenant_health is RLS-isolated).
+	//
+	// health_status = 'unknown' is EXCLUDED: it means tenant-health-service
+	// could not measure a single factor (its peers were unreachable), so
+	// overall_score is 0 for want of data, not because the tenant is unwell.
+	// Alerting on it would report every tenant as critically degraded the
+	// moment the mesh hiccups — the mirror image of the bug where unreachable
+	// peers were filled in with a healthy-looking constant and NOTHING ever
+	// alerted. Neither direction is acceptable; "we do not know" gets no alert.
 	rows, err := j.bypassDB.QueryContext(ctx, `
 		SELECT th.tenant_id, COALESCE(t.name, ''), th.overall_score
 		FROM tenant_health th
 		LEFT JOIN tenants t ON t.id = th.tenant_id
 		WHERE th.overall_score < $1
-	`, tenantHealthDegradedThreshold)
+		  AND th.health_status <> $2
+	`, tenantHealthDegradedThreshold, tenantHealthStatusUnknown)
 	if err != nil {
 		log.Printf("[TenantHealthDegradedScan] query failed: %v", err)
 		return

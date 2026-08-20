@@ -4,7 +4,7 @@ render_macros: false
 
 # Releases & Versioning
 
-How VistaPlatform Core releases are versioned, what they contain, and how to
+How Vista Platform Core releases are versioned, what they contain, and how to
 verify them.
 
 ## Versioning

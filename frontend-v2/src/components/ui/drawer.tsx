@@ -25,12 +25,16 @@ export function DrawerShell({ onClose, width = 480, active = true, depth = 0, ch
   );
 }
 
-export function MetaRow({ k, v, mono }: { k: string; v?: string | number | null; mono?: boolean }) {
-  const val = v === 0 || v ? String(v) : '—';
+// `v` accepts a node, not just a string, so a row can carry a muted qualifier
+// beside its value (see the Service row's confidence label). Emptiness is still
+// judged on the primitive cases — '', null, undefined — so every existing
+// caller renders exactly as before.
+export function MetaRow({ k, v, mono, title }: { k: string; v?: React.ReactNode; mono?: boolean; title?: string }) {
+  const empty = v === null || v === undefined || v === '';
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid var(--app-border)', gap: 16 }}>
+    <div title={title} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid var(--app-border)', gap: 16 }}>
       <span style={{ fontSize: 12.5, color: 'var(--app-t3)', flex: 'none' }}>{k}</span>
-      <span className={mono ? 'mono' : ''} style={{ fontSize: 12.5, color: 'var(--app-t1)', fontWeight: 500, textAlign: 'right', wordBreak: 'break-word' }}>{val}</span>
+      <span className={mono ? 'mono' : ''} style={{ fontSize: 12.5, color: 'var(--app-t1)', fontWeight: 500, textAlign: 'right', wordBreak: 'break-word' }}>{empty ? '—' : v}</span>
     </div>
   );
 }

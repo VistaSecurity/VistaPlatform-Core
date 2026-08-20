@@ -158,13 +158,13 @@ func tenantIDFromContext(c *gin.Context) (uuid.UUID, bool) {
 // trial phase. Returns trials.PhaseNone for tenants with no trial
 // row (paid signups), keeping the middleware permissive for non-trial
 // customers.
+// It reads through trials.RowSelectSQL / trials.ResolvePhase — the SAME
+// statement and the SAME interpretation the /tenant/trial-status endpoint uses.
+// This used to be a second, shorter SELECT here that omitted st.is_trial and
+// btt.trial_end, so the lock and the status endpoint returned opposite answers
+// for the same tenant (see trials.RowSelectSQL for what each omission broke).
 func resolveTenantPhase(ctx context.Context, db *sql.DB, tenantID uuid.UUID, now time.Time) (trials.Phase, error) {
-	var (
-		trialDaysFull sql.NullInt64
-		trialDaysSoft sql.NullInt64
-		trialStart    sql.NullTime
-		converted     sql.NullBool
-	)
+	var row trials.Row
 	// billing_trial_tracking is RLS-scoped, and it is reached through a LEFT
 	// JOIN — so on the RLS-scoped handle without app.tenant_id the join simply
 	// contributes NULLs instead of raising. trial_start comes back NULL, the
@@ -173,17 +173,9 @@ func resolveTenantPhase(ctx context.Context, db *sql.DB, tenantID uuid.UUID, now
 	// tenantID is an INPUT here, so wrapping is correct (and keeps RLS enforcing)
 	// rather than reaching for the bypass role.
 	err := database.WithTenantTx(ctx, db, tenantID, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, `
-			SELECT
-			    st.trial_days_full,
-			    st.trial_days_soft,
-			    btt.trial_start,
-			    btt.converted_to_paid
-			FROM tenants t
-			LEFT JOIN subscription_tiers st ON st.id = t.subscription_tier_id
-			LEFT JOIN billing_trial_tracking btt ON btt.tenant_id = t.id
-			WHERE t.id = $1
-		`, tenantID).Scan(&trialDaysFull, &trialDaysSoft, &trialStart, &converted)
+		var scanErr error
+		row, scanErr = trials.ScanRow(tx.QueryRowContext(ctx, trials.RowSelectSQL, tenantID))
+		return scanErr
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		// Unknown tenant ID — treat as no trial. The actual auth
@@ -195,20 +187,6 @@ func resolveTenantPhase(ctx context.Context, db *sql.DB, tenantID uuid.UUID, now
 		return trials.PhaseNone, err
 	}
 
-	inputs := trials.Inputs{Now: now}
-	if trialStart.Valid {
-		inputs.TrialStart = trialStart.Time
-	}
-	if converted.Valid {
-		inputs.ConvertedToPaid = converted.Bool
-	}
-	if trialDaysFull.Valid {
-		v := int(trialDaysFull.Int64)
-		inputs.TrialDaysFull = &v
-	}
-	if trialDaysSoft.Valid {
-		v := int(trialDaysSoft.Int64)
-		inputs.TrialDaysSoft = &v
-	}
-	return trials.Compute(inputs), nil
+	phase, _ := trials.ResolvePhase(row, now)
+	return phase, nil
 }

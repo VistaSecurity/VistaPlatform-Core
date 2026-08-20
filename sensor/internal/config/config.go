@@ -387,7 +387,7 @@ func LoadFromFile(filePath string) (*Config, error) {
 		cfg.Profile = "datacenter_host"
 	}
 	if cfg.Description == "" {
-		cfg.Description = "VistaPlatform Network Sensor"
+		cfg.Description = "Vista Platform Network Sensor"
 	}
 
 	// Merge with environment variables (env vars override config file)
@@ -549,7 +549,7 @@ func Load() *Config {
 		SensorID:          sharedconfig.GetEnv("SENSOR_ID", ""),
 		TenantID:          sharedconfig.GetEnv("TENANT_ID", "default-tenant"),
 		Name:              sharedconfig.GetEnv("SENSOR_NAME", "crypto-sensor"),
-		Description:       sharedconfig.GetEnv("SENSOR_DESCRIPTION", "VistaPlatform Network Sensor"),
+		Description:       sharedconfig.GetEnv("SENSOR_DESCRIPTION", "Vista Platform Network Sensor"),
 		Platform:          sharedconfig.GetEnv("SENSOR_PLATFORM", "linux"),
 		Version:           sharedconfig.GetEnv("SENSOR_VERSION", "dev"),
 		Profile:           sharedconfig.GetEnv("SENSOR_PROFILE", "datacenter_host"),

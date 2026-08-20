@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
@@ -21,71 +22,6 @@ type DiscoveryJobService struct {
 // NewDiscoveryJobService creates a new discovery job service
 func NewDiscoveryJobService(db *sql.DB) *DiscoveryJobService {
 	return &DiscoveryJobService{db: db}
-}
-
-// CreateDiscoveryJob creates a new discovery job
-func (s *DiscoveryJobService) CreateDiscoveryJob(tenantID, userID uuid.UUID, input *models.DiscoveryJobInput) (*models.DiscoveryJob, error) {
-	job := &models.DiscoveryJob{
-		ID:                 uuid.New(),
-		TenantID:           tenantID,
-		CreatedBy:          userID,
-		ExecutionMode:      input.ExecutionMode,
-		Status:             "queued",
-		RequestedSensorIDs: input.RequestedSensorIDs,
-		Fanout:             true,
-		RetentionCapMB:     25,
-		RetentionTTLHours:  24,
-		CreatedAt:          time.Now(),
-		UpdatedAt:          time.Now(),
-	}
-
-	if input.Fanout != nil {
-		job.Fanout = *input.Fanout
-	}
-	if input.RetentionCapMB != nil {
-		job.RetentionCapMB = *input.RetentionCapMB
-	}
-	if input.RetentionTTLHours != nil {
-		job.RetentionTTLHours = *input.RetentionTTLHours
-	}
-
-	query := `
-		INSERT INTO discovery_jobs (
-			id, tenant_id, created_by, execution_mode, status,
-			requested_sensor_ids, fanout, retention_cap_mb, retention_ttl_hours,
-			created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-		RETURNING id, tenant_id, created_by, execution_mode, status,
-		          requested_sensor_ids, fanout, retention_cap_mb, retention_ttl_hours,
-		          created_at, updated_at, started_at, completed_at, error_message
-	`
-
-	// RLS-scoped write on `discovery_jobs`: WithTenantTx sets app.tenant_id so the
-	// INSERT's tenant_id satisfies WITH CHECK. context.Background() because this
-	// method has no ctx parameter.
-	ctx := context.Background()
-	var sensorIDsArray pq.StringArray
-	err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(
-			ctx,
-			query,
-			job.ID, job.TenantID, job.CreatedBy, job.ExecutionMode, job.Status,
-			pq.Array(job.RequestedSensorIDs), job.Fanout, job.RetentionCapMB, job.RetentionTTLHours,
-			job.CreatedAt, job.UpdatedAt,
-		).Scan(
-			&job.ID, &job.TenantID, &job.CreatedBy, &job.ExecutionMode, &job.Status,
-			&sensorIDsArray, &job.Fanout, &job.RetentionCapMB, &job.RetentionTTLHours,
-			&job.CreatedAt, &job.UpdatedAt, &job.StartedAt, &job.CompletedAt, &job.ErrorMessage,
-		)
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create discovery job: %w", err)
-	}
-
-	// Convert array
-	job.RequestedSensorIDs = []string(sensorIDsArray)
-
-	return job, nil
 }
 
 // GetDiscoveryJob retrieves a discovery job by ID
@@ -187,6 +123,23 @@ func (s *DiscoveryJobService) ReceiveDiscoveryResults(tenantID, jobID uuid.UUID,
 				confidenceScore = *finding.ConfidenceScore
 			}
 
+			// discovery_findings.raw_blob_size is `integer DEFAULT 0 NOT NULL`,
+			// but the model carries it as *int and this INSERT names the column
+			// explicitly — and an explicitly-bound NULL does NOT fall back to
+			// the column default. A submitter that omitted raw_blob_size (every
+			// producer that stores no raw blob) therefore violated the NOT NULL
+			// constraint, and because all findings share one transaction, that
+			// aborted the WHOLE batch: one field-less finding discarded every
+			// finding in the same submission. Resolved the same way
+			// confidence_score already is — the column's own default, applied
+			// in Go. raw_blob_size is the only column here whose Go field is
+			// nullable while the column is not; the rest (resolved_ip,
+			// hostname, details, raw_blob_ref, error_code) are nullable in both.
+			rawBlobSize := 0
+			if finding.RawBlobSize != nil {
+				rawBlobSize = *finding.RawBlobSize
+			}
+
 			// Build a combined details JSON that includes all TLS/crypto probe
 			// data (tls_versions, cipher_suite, certificates, etc.) so downstream
 			// processors can extract it from discovery_findings.details JSONB.
@@ -195,8 +148,11 @@ func (s *DiscoveryJobService) ReceiveDiscoveryResults(tenantID, jobID uuid.UUID,
 			if _, e := tx.ExecContext(
 				ctx,
 				query,
-				uuid.New(), jobID, tenantID, targetID, finding.ExecutedVia, finding.Protocol, finding.Port,
-				finding.ResolvedIP, finding.Hostname, details, finding.RawBlobRef, finding.RawBlobSize,
+				// Protocol is canonicalized on the way in so every discovery path
+				// stores one spelling — see cryptoparse.NormalizeProtocol.
+				uuid.New(), jobID, tenantID, targetID, finding.ExecutedVia,
+				cryptoparse.NormalizeProtocol(finding.Protocol), finding.Port,
+				finding.ResolvedIP, finding.Hostname, details, finding.RawBlobRef, rawBlobSize,
 				finding.ErrorCode, confidenceScore, time.Now(),
 			); e != nil {
 				return fmt.Errorf("failed to insert finding: %w", e)

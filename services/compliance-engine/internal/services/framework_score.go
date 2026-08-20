@@ -41,6 +41,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -70,6 +71,7 @@ const (
 	reasonNoMeasurements = "no_measurements"  // no measurements configured on the control
 	reasonNothingInScope = "nothing_in_scope" // measurement extraction produced no values
 	reasonCheckError     = "check_error"      // extraction failed; logged and counted, never silent
+	reasonNotEvaluated   = "not_evaluated"    // control changed since the tenant's last evaluation of it
 )
 
 // controlAssessment is one control's outcome plus, when it was NOT assessed, why.
@@ -173,12 +175,75 @@ func statusForFindings(hasFindings bool) string {
 // never towards a false "not assessed", and the check is intentionally NOT
 // filtered by deleted_at so it stays a superset of what extractors can see.
 //
+// # Fact 4: a configured measurement is not an evaluation (B-08)
+//
+// Facts 1–3 still let a control that has NEVER BEEN EVALUATED report PASS: having
+// a measurement row plus a tenant with any inventory was enough. So a platform
+// admin adding a Critical control to the already-published Best Practices
+// framework instantly RAISED every tenant's score — weight 4 added to both sides
+// of the fraction as a free pass, for a control nothing had ever run. Tightening
+// a threshold was the same shape: the stored rollup did not move, and the number
+// it showed was a claim about the OLD predicate.
+//
+// The fourth fact closes it without a schema change: compare the control's
+// evaluable content against tenant_framework_scores.computed_at, which the
+// reconcile stamps for this (tenant, framework) every time it folds the framework.
+// If the content is newer than the last fold, this tenant has not been evaluated
+// against it and we say so.
+//
+// It FAILS OPEN when there is no rollup row at all. "Never folded" is not the same
+// claim as "folded before this control existed", and a tenant with no rollup is
+// already covered by fact 3 in the case that matters (no inventory → nothing in
+// scope). Treating a missing row as staleness would put every control of every
+// framework into NOT_ASSESSED on any install whose rollups have not been written
+// yet — a far bigger and less defensible move than the one bug being closed.
+//
+// "Evaluable content" is deliberately `GREATEST(control.created_at,
+// MAX(measurement.updated_at))` and NOT control.updated_at:
+//
+//   - created_at answers "is this control new?" and never moves afterwards.
+//   - measurement.updated_at answers "did a predicate/threshold change?" — the
+//     trigger update_control_measurements_updated_at maintains it.
+//   - control.updated_at is unusable here because seed.sql re-runs on EVERY helm
+//     upgrade and its `ON CONFLICT ... DO UPDATE SET ..., updated_at = NOW()`
+//     bumps every seeded control's updated_at. Keying on it would flip every
+//     framework on every install to NOT_ASSESSED (score "—") until the next
+//     reconcile, for an edit that changed only a title. Titles and descriptions
+//     are not evaluable content; baseline_severity is the control's WEIGHT, not
+//     its verdict.
+//
+// The check is scoped to PLATFORM frameworks, because tenant_framework_scores is
+// keyed by platform_framework_id and the reconcile evaluates published platform
+// frameworks only. Applying it to tenant-authored custom policies would flip all
+// of them to NOT_ASSESSED — arguably honest, but a much larger change than this
+// one, and it belongs with the separate decision about making custom policies
+// evaluate at all.
+//
+// Note the ordering in the switch below: a violation (fact 1) still wins, because
+// a stored finding is itself proof the control was evaluated. The new fact can
+// only move a would-be PASS to NOT_ASSESSED — never to FAIL, and never the other
+// way.
+//
 // The remaining gap — per-control emptiness and extraction errors — is only
 // observable where extraction actually runs, i.e. the rule evaluator, which
 // reports both (see evaluateControlCached). Closing it in the materialized path
 // would mean persisting per-control assessment state; that is a schema-shaped
 // follow-up, not something to fake here.
 func loadControlAssessments(ctx context.Context, db *sql.DB, tenantID uuid.UUID, controlIDs []uuid.UUID, frameworkType string) (map[uuid.UUID]controlAssessment, error) {
+	return loadControlAssessmentsAt(ctx, db, tenantID, controlIDs, frameworkType, time.Time{})
+}
+
+// loadControlAssessmentsAt is loadControlAssessments for a caller that has JUST
+// evaluated these controls and has not yet stamped the rollup.
+//
+// Without it fact 4 is self-defeating: recomputeFrameworkScore folds the findings
+// the reconcile just wrote, but tenant_framework_scores.computed_at still holds
+// the PREVIOUS fold's timestamp at that moment, so a control the reconcile had
+// genuinely just evaluated would be recorded as not-evaluated and only come right
+// on the following pass. evaluatedAt is that in-flight evaluation's instant; the
+// zero value means "no evaluation in flight; judge by the stored rollup alone",
+// which is what every read path passes.
+func loadControlAssessmentsAt(ctx context.Context, db *sql.DB, tenantID uuid.UUID, controlIDs []uuid.UUID, frameworkType string, evaluatedAt time.Time) (map[uuid.UUID]controlAssessment, error) {
 	assessments := make(map[uuid.UUID]controlAssessment, len(controlIDs))
 	if len(controlIDs) == 0 {
 		return assessments, nil
@@ -194,6 +259,7 @@ func loadControlAssessments(ctx context.Context, db *sql.DB, tenantID uuid.UUID,
 
 	violated := make(map[uuid.UUID]bool, len(controlIDs))
 	measured := make(map[uuid.UUID]bool, len(controlIDs))
+	unevaluated := make(map[uuid.UUID]bool, len(controlIDs))
 	var hasInventory bool
 
 	err := shareddatabase.WithTenantTx(ctx, db, tenantID, func(tx *sql.Tx) error {
@@ -240,10 +306,52 @@ func loadControlAssessments(ctx context.Context, db *sql.DB, tenantID uuid.UUID,
 			return err
 		}
 
-		return tx.QueryRowContext(ctx, `
-			SELECT EXISTS (SELECT 1 FROM crypto_implementations WHERE tenant_id = $1)
+		if err := tx.QueryRowContext(ctx, `
+			SELECT EXISTS (
+					SELECT 1
+					FROM crypto_implementations ci
+					JOIN network_assets na ON na.id = ci.asset_id
+					WHERE ci.tenant_id = $1
+						AND na.tenant_id = $1
+						AND ci.deleted_at IS NULL
+						AND na.deleted_at IS NULL
+				)
 			    OR EXISTS (SELECT 1 FROM certificates WHERE tenant_id = $1)
-		`, tenantID).Scan(&hasInventory)
+		`, tenantID).Scan(&hasInventory); err != nil {
+			return err
+		}
+
+		// Fact 4 — platform frameworks only (see the doc comment). 'epoch' floors
+		// the nullable timestamps so a NULL never silently wins a comparison.
+		if frameworkType != "platform" {
+			return nil
+		}
+		urows, err := tx.QueryContext(ctx, `
+			SELECT pfc.id
+			FROM platform_framework_controls pfc
+			LEFT JOIN control_measurements cm
+			  ON cm.control_id = pfc.id AND cm.framework_type = 'platform'
+			LEFT JOIN tenant_framework_scores tfs
+			  ON tfs.platform_framework_id = pfc.framework_id AND tfs.tenant_id = $1
+			WHERE pfc.id = ANY($2)
+			GROUP BY pfc.id, pfc.created_at, tfs.computed_at
+			HAVING tfs.computed_at IS NOT NULL
+			   AND GREATEST(tfs.computed_at, $3::timestamptz) < GREATEST(
+			         COALESCE(pfc.created_at, 'epoch'::timestamptz),
+			         COALESCE(MAX(cm.updated_at), 'epoch'::timestamptz))
+		`, tenantID, pq.Array(ids), evaluatedAt)
+		if err != nil {
+			return fmt.Errorf("load unevaluated controls: %w", err)
+		}
+		defer func() { _ = urows.Close() }()
+		for urows.Next() {
+			var controlID uuid.UUID
+			if err := urows.Scan(&controlID); err != nil {
+				return fmt.Errorf("scan unevaluated control: %w", err)
+			}
+			unevaluated[controlID] = true
+		}
+		return urows.Err()
 	})
 	if err != nil {
 		return nil, err
@@ -258,6 +366,8 @@ func loadControlAssessments(ctx context.Context, db *sql.DB, tenantID uuid.UUID,
 			assessments[id] = controlAssessment{Status: statusNotAssessed, Reason: reasonNoMeasurements}
 		case !hasInventory:
 			assessments[id] = controlAssessment{Status: statusNotAssessed, Reason: reasonNothingInScope}
+		case unevaluated[id]:
+			assessments[id] = controlAssessment{Status: statusNotAssessed, Reason: reasonNotEvaluated}
 		default:
 			assessments[id] = controlAssessment{Status: statusPass}
 		}

@@ -121,25 +121,59 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 	}
 
 	if filters.UsesDeprecatedAlgorithms != nil && *filters.UsesDeprecatedAlgorithms {
-		// Filter for deprecated algorithms: old protocol versions, weak hash algorithms, or small key sizes
-		whereConditions = append(whereConditions, `(
-			ci.protocol_version IN ('TLSv1.0', 'TLSv1.1', 'SSLv2', 'SSLv3')
-			OR ci.hash_algorithm IN ('SHA1', 'MD5')
-			OR (ci.key_size IS NOT NULL AND ci.key_size < 2048)
-		)`)
+		// Filter for deprecated algorithms: old protocol versions, weak hash
+		// algorithms, or family-appropriate weak key sizes.
+		whereConditions = append(whereConditions, deprecatedAlgorithmsSQL("ci."))
 	}
 
 	if filters.Search != "" {
 		argCount++
+		// ci.protocol is the protocol_type ENUM and a.ip_address is INET. Neither
+		// type has an ILIKE (~~*) operator, so a bare `col ILIKE $n` aborts the
+		// whole statement at plan time ("operator does not exist:
+		// protocol_type ~~* unknown" / "inet ~~* unknown") — which 500'd both the
+		// count and the page query for ANY non-empty search on the Configuration
+		// lens. Cast both to text, matching the asset-list search
+		// (asset_query_builder.go, `a.ip_address::text ILIKE`) so the two search
+		// boxes behave identically.
 		whereConditions = append(whereConditions, fmt.Sprintf(`(
-			ci.protocol ILIKE $%d
+			ci.protocol::text ILIKE $%d
 			OR ci.protocol_version ILIKE $%d
 			OR ci.cipher_suite ILIKE $%d
 			OR a.hostname ILIKE $%d
-			OR a.ip_address ILIKE $%d
+			OR a.ip_address::text ILIKE $%d
 		)`, argCount, argCount, argCount, argCount, argCount))
 		searchPattern := "%" + filters.Search + "%"
 		args = append(args, searchPattern)
+	}
+
+	// Risk level (B-44a): this used to be applied in the Go row-scan loop with a
+	// `continue`, AFTER the SQL had already applied LIMIT/OFFSET and AFTER an
+	// unfiltered COUNT(*) — then `total` was overwritten with the surviving page
+	// count. So `?risk_level=Critical&page=1` on a tenant whose Critical rows all
+	// sort past page 1 answered "0 results, 0 pages", and where some did land
+	// has_next was always false, making the rest unreachable. Banding in SQL
+	// makes count, page and pagination agree.
+	//
+	// models.RiskBandSQL is the single source for the ladder (CLAUDE.md), and the
+	// half-open band it emits is exactly what GetRiskLevel(score) returns for the
+	// same value — which is what the removed Go filter compared against. The
+	// score is per crypto configuration, which is the row this endpoint returns,
+	// so there is no per-asset rollup to do here.
+	if len(filters.RiskLevel) > 0 {
+		riskConds := []string{}
+		for _, rl := range filters.RiskLevel {
+			if cond, ok := models.RiskBandSQL("COALESCE(ci.risk_score, 0)", rl); ok {
+				riskConds = append(riskConds, "("+cond+")")
+			}
+		}
+		if len(riskConds) > 0 {
+			whereConditions = append(whereConditions, "("+strings.Join(riskConds, " OR ")+")")
+		} else {
+			// Every supplied label was junk. The old Go filter matched nothing in
+			// that case; preserve that rather than silently widening to "all".
+			whereConditions = append(whereConditions, "FALSE")
+		}
 	}
 
 	// Build WHERE clause
@@ -159,13 +193,6 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 	` + whereClause
 
 	var total int
-
-	// Apply risk level filter (must be done after we have risk_score)
-	// We'll filter in application code after calculating risk_level
-	var riskLevelFilter []string
-	if len(filters.RiskLevel) > 0 {
-		riskLevelFilter = filters.RiskLevel
-	}
 
 	// Add ordering
 	orderBy := "ORDER BY "
@@ -330,33 +357,12 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 			}
 			impl.RiskLevel = models.GetRiskLevel(score)
 
-			// Filter by risk level if specified (after calculating it)
-			if len(riskLevelFilter) > 0 {
-				riskLevelMatch := false
-				for _, level := range riskLevelFilter {
-					if strings.EqualFold(impl.RiskLevel, level) {
-						riskLevelMatch = true
-						break
-					}
-				}
-				if !riskLevelMatch {
-					continue // Skip this implementation
-				}
-			}
-
 			implementations = append(implementations, impl)
 		}
 		return rows.Err()
 	})
 	if txErr != nil {
 		return nil, 0, txErr
-	}
-
-	// If we filtered by risk level, we need to adjust the total count
-	// For now, we'll return the filtered count (which may be less than total)
-	// In a production system, you might want to calculate this more efficiently
-	if len(riskLevelFilter) > 0 {
-		total = len(implementations)
 	}
 
 	if err := enrichCryptoImplementationsWithRelations(s.db, tenantID, implementations); err != nil {

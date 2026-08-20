@@ -313,6 +313,9 @@ services:
       - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
       - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
       - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      # Required to decrypt the AWS integration credentials behind S3 artifact
+      # storage. Without it cbom-service silently falls back to inline JSONB.
+      - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:?Set ENCRYPTION_MASTER_KEY in .env}
       - LICENSE_TOKEN=${LICENSE_TOKEN:-}
       - LOG_LEVEL=debug
       # mTLS Configuration

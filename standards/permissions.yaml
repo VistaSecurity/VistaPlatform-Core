@@ -14,6 +14,9 @@
 #        - TENANT_PERMISSIONS + TenantPermissionKey       (whole file)
 #   5. scripts/lib/role-grants.gen.mjs
 #        - the ROLE_GRANTS predicates used by scripts/audit-permissions.mjs
+#   6. services/auth-service/internal/rbac/role_delegations_gen.go
+#        - the named role-delegation exceptions read by the role-ASSIGNMENT
+#          grantability guard (see `role_delegations:` near the bottom)
 #
 # DO NOT hand-edit any of those regions. Edit here and run `make generate`.
 #
@@ -191,6 +194,52 @@ retired:
       reference now. reports.read and reports.manage are kept — the web-ui
       still uses them as frontend route gates for the CBOM and
       scheduled-reports pages.
+
+# ---------------------------------------------------------------------------
+# Role-delegation exceptions.
+#
+# These do NOT change what any role HOLDS — they are read only by the
+# role-ASSIGNMENT grantability guard (validateRoleGrantable in
+# services/auth-service/internal/api/users.go and AssignUserRole in
+# services/auth-service/internal/rbac/rbac.go).
+#
+# The general guard is unchanged and still applies everywhere else: an actor
+# may not hand someone a role that holds a permission the actor does not
+# personally hold. Each entry below names ONE grantor/grantee pairing that is
+# exempt from that rule, and enumerates exactly which permissions the
+# exemption covers. Nothing is exempt that is not named here.
+#
+# Deliberately narrow shape. An exception is keyed on the PAIR of roles, not
+# on the permission — `tenant_admin` may hand out `billing.update` by
+# assigning the `billing_admin` role and by no other means. It still cannot
+# put billing.update on a custom role, cannot add it to its own role, and
+# does not hold it. Both roles must be system roles (is_system_role = true),
+# so a same-named custom role cannot impersonate either end of the pairing.
+#
+# `permissions` must be EXACTLY the set the grantee holds and the grantor
+# lacks — the generator computes that gap from the grant filters above and
+# fails if the list disagrees. So an exception cannot silently widen when a
+# role's grant filter changes, and cannot rot into a dead entry that no
+# longer unblocks anything.
+# ---------------------------------------------------------------------------
+role_delegations:
+  - grantor: tenant_admin
+    grantee: billing_admin
+    permissions: [billing.update]
+    note: |
+      A tenant admin already controls the tenant; delegating billing authority
+      to a finance contact INSIDE that tenant is administration, not privilege
+      escalation. Without this, the documented "assign Billing Admin to your
+      finance contact" flow was unreachable: tenant_admin is denied
+      billing.update by its own grant filter, so the guard refused the role in
+      every picker that offered it, and a paid subscription could not be
+      managed by anyone in the tenant without an out-of-band database grant.
+
+      Note what is NOT being done here. Dropping billing.update from
+      tenant_admin's except_names would give tenant admins the permission
+      ITSELF — the ability to change payment methods and cancel the
+      subscription. Being able to delegate a power and holding that power are
+      different things, and the separation is the point.
 
 # ---------------------------------------------------------------------------
 # System roles and their grant filters.

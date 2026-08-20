@@ -25,7 +25,7 @@
 
 export type ControlStatus = 'PASS' | 'FAIL' | 'NOT_ASSESSED';
 
-export type NotAssessedReason = 'no_measurements' | 'nothing_in_scope' | 'check_error';
+export type NotAssessedReason = 'no_measurements' | 'nothing_in_scope' | 'check_error' | 'not_evaluated';
 
 /** The single user-facing bucket for all three not-assessed reasons (D2). */
 export const NOT_ASSESSED_LABEL = 'Not assessed';
@@ -45,6 +45,7 @@ const REASON_TEXT: Record<NotAssessedReason, string> = {
   no_measurements: 'No measurement rule is configured for this control.',
   nothing_in_scope: 'Nothing in scope to check.',
   check_error: 'The check failed. This usually clears on the next evaluation.',
+  not_evaluated: 'This control has not been evaluated since it last changed.',
 };
 
 /** Fallback when the server sends NOT_ASSESSED without a reason we recognise. */

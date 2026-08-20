@@ -23,6 +23,7 @@ import (
 	azureclient "github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/cloud/azure"
 	gcpclient "github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/cloud/gcp"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/discovery"
 )
@@ -31,18 +32,19 @@ import (
 type CloudDiscoveryService struct {
 	db *sql.DB
 	// bypassDB is the BYPASSRLS (crypto_bypass) connection threaded into the KMS
-	// and storage sub-services and the cloud-client integration lookups (which
-	// run under the caller's tenantID via WithTenantTx). Pre-flip it resolves to
-	// the same connection as db.
+	// and storage sub-services and the cloud-client integration lookups. Shared
+	// platform integrations have tenant_id NULL, so callers must explicitly
+	// authorize integration IDs before decrypting credentials. Pre-flip it
+	// resolves to the same connection as db.
 	bypassDB  *sql.DB
 	masterKey string
 }
 
 // NewCloudDiscoveryService creates a new cloud discovery service. db is the
 // RLS-scoped (crypto_app) connection; bypassDB is the BYPASSRLS (crypto_bypass)
-// connection. All cloud discovery runs under a known tenantID, so device writes
-// and integration reads use WithTenantTx; bypassDB is carried for the
-// sub-services. Pre-flip both handles resolve to the same connection.
+// connection. All cloud discovery runs under a known tenantID; device writes use
+// tenant-scoped transactions, and integration reads use explicit tenant/shared
+// predicates on bypassDB. Pre-flip both handles resolve to the same connection.
 func NewCloudDiscoveryService(db, bypassDB *sql.DB, masterKey string) *CloudDiscoveryService {
 	return &CloudDiscoveryService{
 		db:        db,
@@ -51,29 +53,20 @@ func NewCloudDiscoveryService(db, bypassDB *sql.DB, masterKey string) *CloudDisc
 	}
 }
 
-// GetIntegrationCloudProvider retrieves the cloud provider type from a platform
-// integration. tenantID is threaded from the caller so the read is RLS-scoped.
+// GetIntegrationCloudProvider retrieves the cloud provider type from an integration
+// the caller can use. Shared platform integrations have tenant_id NULL, so the
+// authorization check runs on the bypass connection with an explicit tenant/shared
+// predicate instead of relying on RLS alone.
 func (s *CloudDiscoveryService) GetIntegrationCloudProvider(ctx context.Context, tenantID, integrationID uuid.UUID) (string, error) {
-	query := `
-		SELECT integration_type
-		FROM platform_integrations
-		WHERE id = $1 AND deleted_at IS NULL
-	`
-	var integrationType string
-	err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, query, integrationID).Scan(&integrationType)
-	})
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return "", fmt.Errorf("integration not found")
-		}
-		return "", fmt.Errorf("failed to query integration: %w", err)
-	}
-	return integrationType, nil
+	return authorizeCloudIntegration(ctx, s.bypassDB, tenantID, integrationID, "")
 }
 
 // DiscoverAWSResources discovers AWS resources and creates devices
 func (s *CloudDiscoveryService) DiscoverAWSResources(ctx context.Context, tenantID uuid.UUID, integrationID uuid.UUID, resourceTypes []string, regions []string) ([]models.Device, error) {
+	if _, err := authorizeCloudIntegration(ctx, s.bypassDB, tenantID, integrationID, "aws"); err != nil {
+		return nil, fmt.Errorf("AWS integration not authorized: %w", err)
+	}
+
 	// Create AWS client
 	awsClient, err := awsclient.NewClient(ctx, s.bypassDB, integrationID, s.masterKey)
 	if err != nil {
@@ -784,7 +777,9 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 				err = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
 					_, e := tx.ExecContext(ctx, insertQuery,
 						uuid.New(), systemSensorID, tenantID, batchID,
-						protocol, destIP, port,
+						// Canonical protocol_type spelling — see
+						// cryptoparse.NormalizeProtocol.
+						cryptoparse.NormalizeProtocol(protocol), destIP, port,
 						1.0, metadataJSON, stringPtr(cfgHostname),
 						now, now,
 					)
@@ -831,7 +826,12 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 			err = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
 				_, e := tx.ExecContext(ctx, insertQuery,
 					uuid.New(), systemSensorID, tenantID, batchID,
-					protocol, destIP, port,
+					// Canonical protocol_type spelling. NOTE the at-rest marker
+					// is NOT a protocol_type value and is deliberately left
+					// alone — NormalizeProtocol passes an unrecognised value
+					// through unchanged, which is what keeps isAtRestProtocol
+					// working downstream.
+					cryptoparse.NormalizeProtocol(protocol), destIP, port,
 					0.8, metadataJSON, stringPtr(hostname),
 					now, now,
 				)
@@ -874,9 +874,23 @@ var atRestDeviceTypes = map[string]bool{
 // marker and port 0 (no listening port); everything else keeps the historical
 // TLS:443 fallback.
 //
-// "AT-REST" is deliberately NOT a protocol inventory-service will normalize
-// into TLS — inventory-service routes these findings to crypto_applications by
-// their resource_type before protocol normalization is ever reached.
+// "AT-REST" is deliberately NOT a protocol. inventory-service must never
+// materialize it as one — see isAtRestProtocol in inventory-service's
+// asset_service.go, which short-circuits on this exact sentinel. Its
+// resolveProtocol is a second line of defence: an unrecognised protocol yields
+// no protocol at all rather than defaulting to "TLS", which is what used to
+// turn this sentinel into a phantom TLS endpoint.
+//
+// B-22: this comment used to assert that inventory-service "routes these
+// findings to crypto_applications by their resource_type before protocol
+// normalization is ever reached." That is true only for the six device types
+// whose collectors write a resource_type metadata key (s3_bucket,
+// storage_account, gcs_bucket, rds_instance, sql_database, cloudsql_instance).
+// The three key stores below write none, so they fell through to the TLS
+// default and were materialized as phantom TLS endpoints. They are now dropped
+// rather than fabricated; giving key stores a first-class at-rest posture is
+// separate work (crypto_applications models whether a resource's DATA is
+// encrypted and whose key, which does not describe a resource that IS the key).
 func atRestProtocolPort(deviceType string) (string, int) {
 	if atRestDeviceTypes[deviceType] {
 		return "AT-REST", 0
@@ -1088,6 +1102,10 @@ func (s *CloudDiscoveryService) updateDevice(ctx context.Context, device *models
 
 // DiscoverAzureResources discovers Azure resources and creates devices
 func (s *CloudDiscoveryService) DiscoverAzureResources(ctx context.Context, tenantID uuid.UUID, integrationID uuid.UUID, resourceTypes []string, resourceGroups []string) ([]models.Device, error) {
+	if _, err := authorizeCloudIntegration(ctx, s.bypassDB, tenantID, integrationID, "azure"); err != nil {
+		return nil, fmt.Errorf("azure integration not authorized: %w", err)
+	}
+
 	// Create Azure client
 	azureClient, err := azureclient.NewClient(ctx, s.bypassDB, integrationID, s.masterKey)
 	if err != nil {
@@ -1468,6 +1486,10 @@ func (s *CloudDiscoveryService) discoverAzureLoadBalancers(ctx context.Context, 
 
 // DiscoverGCPResources discovers GCP resources and creates devices
 func (s *CloudDiscoveryService) DiscoverGCPResources(ctx context.Context, tenantID uuid.UUID, integrationID uuid.UUID, resourceTypes []string) ([]models.Device, error) {
+	if _, err := authorizeCloudIntegration(ctx, s.bypassDB, tenantID, integrationID, "gcp"); err != nil {
+		return nil, fmt.Errorf("GCP integration not authorized: %w", err)
+	}
+
 	gcpCli, err := gcpclient.NewClient(ctx, s.bypassDB, integrationID, s.masterKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GCP client: %w", err)

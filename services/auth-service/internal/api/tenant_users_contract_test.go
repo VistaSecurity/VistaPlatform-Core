@@ -178,11 +178,21 @@ func TestContract_InviteTenantMember_400_badBody(t *testing.T) {
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
 }
 
-// A well-formed body with an unsupported role -> 400 (returns before auth deps).
-func TestContract_InviteTenantMember_400_invalidRole(t *testing.T) {
+// A well-formed body with a blank role -> 400 (returns before auth deps).
+//
+// This used to send "emperor" and rely on a hardcoded four-name allowlist in
+// mapInviteRoleName. That allowlist was the bug: it rejected billing_admin
+// (seeded into every tenant) and every custom tenant role, both of which the
+// invite dropdown offers. Role EXISTENCE is now settled against the tenant's
+// tenant_roles table, which needs a database — so the dependency-free 400 this
+// contract test can still assert is the purely syntactic one. The
+// allowlist-removal regression is covered by
+// TestMapInviteRoleName_AcceptsSeededAndCustomRoles and
+// TestEnsureRoleGrantableByName_UnknownRoleIsNotFound.
+func TestContract_InviteTenantMember_400_blankRole(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newTenantUsersEngine(&stubTenantUsersStore{}, true, aTenantID)
-	body := strings.NewReader(`{"email":"new@example.com","role":"emperor"}`)
+	body := strings.NewReader(`{"email":"new@example.com","role":"   "}`)
 	w := do(eng, http.MethodPost, "/api/v1/auth-service/tenant/"+aTenantID+"/users/invite", body)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -29,6 +30,50 @@ var legalDocTypes = map[string]bool{
 // constraint.
 func IsLegalDocType(s string) bool { return legalDocTypes[s] }
 
+// placeholderPattern matches the `[BRACKETED]` fill-in markers carried by the
+// seeded Terms of Service and Privacy Policy. Those documents ship as
+// TEMPLATES — the operator running the deployment is the service provider, so
+// the agreement has to name them, not us — and an unedited template published
+// verbatim would have users clicking through terms that name
+// `[YOUR LEGAL ENTITY]`. An agreement naming a party that does not exist is
+// unlikely to be enforceable, which is the opposite of what click-through
+// acceptance is for.
+//
+// Deliberately narrow: an upper-case run inside square brackets. Markdown link
+// labels are lower- or mixed-case, and `[x]`/`[ ]` checkboxes are too short to
+// match, so neither trips it. A genuinely upper-case bracketed phrase in real
+// legal prose is rare, and the acknowledgement flag exists for that case.
+//
+// The punctuation set is load-bearing, not decoration. Many of the seeded
+// markers are whole instructions rather than single slots — for example
+// "[LIST YOUR SUB-PROCESSORS, OR STATE THAT THERE ARE NONE.]" — and an earlier
+// class without the comma missed every one of them. A document whose only
+// surviving placeholder was an instruction would have published clean.
+var placeholderPattern = regexp.MustCompile(`\[[A-Z][A-Z0-9 ,.:;_/&'-]{2,}\]`)
+
+// maxReportedPlaceholders caps what the API echoes back. The seeded template
+// carries dozens; the caller needs enough to recognise the problem, not a
+// second copy of the document.
+const maxReportedPlaceholders = 10
+
+// findPlaceholders returns the distinct placeholder markers in body, in order
+// of first appearance, capped at maxReportedPlaceholders.
+func findPlaceholders(body string) []string {
+	found := []string{}
+	seen := map[string]bool{}
+	for _, m := range placeholderPattern.FindAllString(body, -1) {
+		if seen[m] {
+			continue
+		}
+		seen[m] = true
+		found = append(found, m)
+		if len(found) == maxReportedPlaceholders {
+			break
+		}
+	}
+	return found
+}
+
 type legalDocumentDTO struct {
 	ID            uuid.UUID  `json:"id"`
 	DocType       string     `json:"doc_type"`
@@ -40,6 +85,10 @@ type legalDocumentDTO struct {
 	EffectiveDate time.Time  `json:"effective_date"`
 	PublishedAt   time.Time  `json:"published_at"`
 	PublishedBy   *uuid.UUID `json:"published_by,omitempty"`
+	// Placeholders is the unedited-template marker list for THIS version's
+	// body. Computed server-side so the console never has to re-derive what
+	// counts as a placeholder — one definition, one behaviour.
+	Placeholders []string `json:"placeholders"`
 }
 
 type legalVersionDTO struct {
@@ -77,6 +126,7 @@ func ListLegalDocuments(db *sql.DB) gin.HandlerFunc {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load legal documents"})
 				return
 			}
+			d.Placeholders = findPlaceholders(d.Body)
 			current = append(current, d)
 		}
 
@@ -126,6 +176,10 @@ func PublishLegalDocument(db *sql.DB) gin.HandlerFunc {
 			DocType string `json:"doc_type" binding:"required"`
 			Title   string `json:"title" binding:"required"`
 			Body    string `json:"body" binding:"required"`
+			// AcknowledgePlaceholders publishes a body that still contains
+			// `[BRACKETED]` template markers. The console sets it only after an
+			// explicit confirmation naming what was found.
+			AcknowledgePlaceholders bool `json:"acknowledge_placeholders"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "doc_type, title and body are required"})
@@ -138,6 +192,18 @@ func PublishLegalDocument(db *sql.DB) gin.HandlerFunc {
 		req.Title = strings.TrimSpace(req.Title)
 		if req.Title == "" || strings.TrimSpace(req.Body) == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Title and body cannot be empty"})
+			return
+		}
+
+		// Refuse an unedited template unless the caller has explicitly said they
+		// mean it. Enforced HERE rather than only in the console because the
+		// API is the real surface: a UI-only check is bypassable by anyone
+		// calling the endpoint directly, which includes any future automation.
+		if placeholders := findPlaceholders(req.Body); len(placeholders) > 0 && !req.AcknowledgePlaceholders {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{
+				"error":        "This document still contains template placeholders. Replace them, or publish again acknowledging them.",
+				"placeholders": placeholders,
+			})
 			return
 		}
 
@@ -191,8 +257,11 @@ func PublishLegalDocument(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 
+		out.Placeholders = findPlaceholders(out.Body)
+
 		logrus.WithFields(logrus.Fields{
 			"doc_type": out.DocType, "version": out.Version, "published_by": userID,
+			"placeholders": len(out.Placeholders),
 		}).Info("Published new legal document version")
 		c.JSON(http.StatusOK, out)
 	}

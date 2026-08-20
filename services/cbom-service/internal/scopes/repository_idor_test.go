@@ -110,3 +110,67 @@ func TestIDOR_DeleteScopeForeignTenantNotFound(t *testing.T) {
 		t.Fatalf("unmet expectations (query not tenant-scoped?): %v", err)
 	}
 }
+
+// The two set-returning queries were left out of the fix: List filtered
+// only on deleted_at with no bind parameters at all, and CountForTenant did the
+// same. Both were covered by RLS *when RLS is live* — but it is bypassed
+// wherever the service connects as the table owner (docker-compose dev, and any
+// install with serviceRls disabled, which is mandatory on managed Postgres).
+// There, List returned every tenant's scopes and CountForTenant returned a
+// global count, which additionally suppressed default seeding for every tenant
+// after the first.
+//
+// These assert the shape that cannot be satisfied without the predicate: the
+// caller's tenant id must be *bound* to the query.
+
+func TestIDOR_ListScopesIsTenantScoped(t *testing.T) {
+	repo, mock := newMockRepo(t)
+	callerTenant := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("set_config").WithArgs(callerTenant.String()).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("tenant_id = $1")).
+		WithArgs(callerTenant).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "tenant_id", "name", "description", "predicate", "version",
+			"is_default", "is_system", "deleted_at", "created_by", "updated_by",
+			"created_at", "updated_at",
+		}))
+	mock.ExpectCommit()
+
+	got, err := repo.List(context.Background(), callerTenant)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("List returned %d scopes, want 0", len(got))
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations (list not tenant-scoped?): %v", err)
+	}
+}
+
+func TestIDOR_CountForTenantIsTenantScoped(t *testing.T) {
+	repo, mock := newMockRepo(t)
+	callerTenant := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("set_config").WithArgs(callerTenant.String()).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("tenant_id = $1")).
+		WithArgs(callerTenant).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectCommit()
+
+	n, err := repo.CountForTenant(context.Background(), callerTenant)
+	if err != nil {
+		t.Fatalf("CountForTenant: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("CountForTenant = %d, want 0", n)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations (count not tenant-scoped?): %v", err)
+	}
+}

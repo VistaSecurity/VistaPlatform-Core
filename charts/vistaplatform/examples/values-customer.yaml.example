@@ -20,7 +20,7 @@ fullnameOverride: vista
 # at the bottom. See values.yaml for the full set of knobs.
 
 # -----------------------------------------------------------------------------
-# REQUIRED: two external hostnames your users reach VistaPlatform at, and how the
+# REQUIRED: two external hostnames your users reach Vista Platform at, and how the
 # chart should obtain its TLS cert.
 #
 # The tenant host (dnsName) serves the tenant web-UI, the REST API, uploads,
@@ -156,14 +156,14 @@ platform:
 # -----------------------------------------------------------------------------
 image:
   registry: docker.io
-  repoPrefix: vistasecurity            # URL namespace of the VistaPlatform Docker Hub org
+  repoPrefix: vistasecurity            # URL namespace of the Vista Platform Docker Hub org
   tag: <image-tag>                        # FIXME: e.g. v2.2.0 (from your license package)
   pullSecrets: [vistaplatform-registry]
 
 # ECR delivery — only if your contract specifically delivers via ECR.
 # Comment out the Docker Hub block above and uncomment this block instead.
 # Substitute <your-ecr-account> and <your-region> with the values your
-# VistaPlatform contact provided.
+# Vista Platform contact provided.
 # image:
 #   registry: <your-ecr-account>.dkr.ecr.<your-region>.amazonaws.com
 #   repoPrefix: vistaplatform                # ECR repo prefix (not the Docker Hub URL namespace)

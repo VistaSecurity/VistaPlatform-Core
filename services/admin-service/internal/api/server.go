@@ -512,22 +512,26 @@ func (s *Server) setupRouter() {
 				monitoring.GET("/logs", handlers.GetSystemLogs(s.db))     // System logs (future)
 			}
 
-			// Security endpoints - Threat detection, compliance, and incident management
-			// These endpoints provide security monitoring and compliance tracking
+			// Security endpoints — the security-relevant view of the platform
+			// activity trail (audit.activity_logs) that backs Security ▸ Dashboard.
+			//
+			// There is deliberately no /compliance route here any more: it read
+			// public.compliance_framework_status, which has no writer anywhere in
+			// the product, so the panel it fed was empty on every deployment
+			// forever. Platform-compliance posture is not something we measure yet;
+			// tenant framework scores live in compliance-engine and are a different
+			// question. Do not re-add a route without a producer.
 			security := protected.Group("/security")
 			security.Use(rbacMiddleware.RequirePlatformPermission(rbac.PermissionPlatformSecurity))
 			{
-				// Security events
 				security.GET("/events", handlers.GetSecurityEvents(handlers.SecurityService))
 				security.GET("/dashboard-stats", handlers.GetSecurityDashboardStats(handlers.SecurityService))
-
-				// Compliance frameworks
-				security.GET("/compliance", handlers.GetAllComplianceFrameworks(handlers.SecurityService))
-				security.GET("/compliance/:framework", handlers.GetComplianceFrameworkStatus(handlers.SecurityService))
 			}
 
 			// Platform Settings endpoints - Platform-wide configuration
-			// Manage platform-wide settings like maintenance mode, limits, etc.
+			// Manage platform-wide settings: branding, email delivery, access
+			// control, and the authentication policy enforced by
+			// shared/security/authpolicy.
 			platformSettings := protected.Group("/settings")
 			platformSettings.Use(rbacMiddleware.RequirePlatformPermission(rbac.PermissionPlatformSettings))
 			{

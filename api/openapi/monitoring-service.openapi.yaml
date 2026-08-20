@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: VistaPlatform — monitoring-service API
+  title: Vista Platform — monitoring-service API
   version: 0.1.0
   description: |
     Spec-first contract for monitoring-service (ADR-0001). First slice for this

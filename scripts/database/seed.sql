@@ -1,5 +1,5 @@
 -- =================================================================
--- VistaPlatform - Tier 1 Core Seed Data
+-- Vista Platform - Tier 1 Core Seed Data
 -- =================================================================
 -- This file contains core system data required for the platform to function.
 -- It should be loaded in ALL environments (dev, smoke, prod).
@@ -560,7 +560,7 @@ ON CONFLICT (email) DO UPDATE SET
     deleted_at = NULL,
     updated_at = NOW();
 
--- Create VistaPlatform platform admin user
+-- Create Vista Platform platform admin user
 -- SECURITY: seeded with force_password_change = true — see note above.
 -- Default dev password: 'PlatformAdm!n2026' (hashed with Argon2id)
 INSERT INTO platform_users (id, email, password_hash, first_name, last_name, role_id, is_active, email_verified, force_password_change)
@@ -1699,7 +1699,7 @@ BEGIN
         'Security Best Practices',
         '1.0',
         'Core security best practices for cryptographic configurations. Available to all subscription tiers. Covers TLS configuration, certificate management, cipher selection, and key management.',
-        'VistaPlatform',
+        'Vista Platform',
         'published',
         true,
         NOW(),
@@ -2249,7 +2249,7 @@ BEGIN
     INSERT INTO platform_frameworks (id, code, name, version, description, organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at)
     VALUES (gen_random_uuid(), 'pqc-readiness', 'Post-Quantum Readiness', '1.0',
         'Tracks post-quantum exposure across certificates AND crypto-configurations. Quantum (Shor) breaks asymmetric crypto — certificate keys/signatures and config key-exchange/signatures — while symmetric ciphers only lose half their margin (Grover). Activate to inventory quantum-vulnerable crypto and prioritize migration to NIST PQC algorithms (ML-KEM, ML-DSA, SLH-DSA).',
-        'VistaPlatform', 'published', false, NOW(),
+        'Vista Platform', 'published', false, NOW(),
         COALESCE(platform_admin_id, '00000000-0000-0000-0000-000000000001'::uuid),
         COALESCE(platform_admin_id, '00000000-0000-0000-0000-000000000001'::uuid), NOW(), NOW())
     ON CONFLICT (code, version) DO UPDATE SET status='published', is_platform_default=false, description=EXCLUDED.description, updated_at=NOW()
@@ -2326,7 +2326,7 @@ BEGIN
     INSERT INTO platform_frameworks (id, code, name, version, description, organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at)
     VALUES (gen_random_uuid(), 'cert-hygiene', 'Certificate Hygiene', '1.0',
         'Baseline certificate cryptographic hygiene: minimum key size and maximum validity period. Activate to track certificates that fall short of modern issuance standards.',
-        'VistaPlatform', 'published', false, NOW(),
+        'Vista Platform', 'published', false, NOW(),
         COALESCE(platform_admin_id, '00000000-0000-0000-0000-000000000001'::uuid),
         COALESCE(platform_admin_id, '00000000-0000-0000-0000-000000000001'::uuid), NOW(), NOW())
     ON CONFLICT (code, version) DO UPDATE SET status='published', is_platform_default=false, description=EXCLUDED.description, updated_at=NOW()
@@ -2369,7 +2369,7 @@ BEGIN
     INSERT INTO platform_frameworks (id, code, name, version, description, organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at)
     VALUES (gen_random_uuid(), 'cert-expiry-not-expired', 'Certificate Expiry: Not Expired', '1.0',
         'Flags certificates that have already expired. Activate to track and alert on expired certificates in your inventory.',
-        'VistaPlatform', 'published', false, NOW(),
+        'Vista Platform', 'published', false, NOW(),
         COALESCE(platform_admin_id, '00000000-0000-0000-0000-000000000001'::uuid),
         COALESCE(platform_admin_id, '00000000-0000-0000-0000-000000000001'::uuid), NOW(), NOW())
     ON CONFLICT (code, version) DO UPDATE SET status='published', is_platform_default=false, description=EXCLUDED.description, updated_at=NOW()
@@ -2391,7 +2391,7 @@ BEGIN
     INSERT INTO platform_frameworks (id, code, name, version, description, organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at)
     VALUES (gen_random_uuid(), 'cert-expiry-30-day', 'Certificate Expiry: 30-Day Notice', '1.0',
         'Flags certificates expiring within 30 days. Activate for advance renewal warnings.',
-        'VistaPlatform', 'published', false, NOW(),
+        'Vista Platform', 'published', false, NOW(),
         COALESCE(platform_admin_id, '00000000-0000-0000-0000-000000000001'::uuid),
         COALESCE(platform_admin_id, '00000000-0000-0000-0000-000000000001'::uuid), NOW(), NOW())
     ON CONFLICT (code, version) DO UPDATE SET status='published', is_platform_default=false, description=EXCLUDED.description, updated_at=NOW()
@@ -2413,7 +2413,7 @@ BEGIN
     INSERT INTO platform_frameworks (id, code, name, version, description, organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at)
     VALUES (gen_random_uuid(), 'cert-expiry-90-day', 'Certificate Expiry: 90-Day Notice', '1.0',
         'Flags certificates expiring within 90 days. Activate for early renewal planning.',
-        'VistaPlatform', 'published', false, NOW(),
+        'Vista Platform', 'published', false, NOW(),
         COALESCE(platform_admin_id, '00000000-0000-0000-0000-000000000001'::uuid),
         COALESCE(platform_admin_id, '00000000-0000-0000-0000-000000000001'::uuid), NOW(), NOW())
     ON CONFLICT (code, version) DO UPDATE SET status='published', is_platform_default=false, description=EXCLUDED.description, updated_at=NOW()
@@ -3592,7 +3592,7 @@ WHERE cm.measurement_type_id = mt.id
 -- =================================================================
 -- Legal documents (Terms of Service + Privacy Policy) — seed v1
 -- =================================================================
--- TEMPLATE content, not legal advice. VistaPlatform is self-hosted: the
+-- TEMPLATE content, not legal advice. Vista Platform is self-hosted: the
 -- organization running the deployment is the service provider and the data
 -- controller, so these are THEIR terms with THEIR users. Every [BRACKETED]
 -- value must be replaced and the whole thing reviewed by counsel before anyone
@@ -3621,7 +3621,7 @@ FROM (VALUES
 
 _Last updated: [DATE]_
 
-> **This is a template, not legal advice.** VistaPlatform is self-hosted
+> **This is a template, not legal advice.** Vista Platform is self-hosted
 > software: **you**, the organization running this deployment, are the service
 > provider, and these are **your** terms with **your** users — not the software
 > author's. Replace every `[BRACKETED]` value and have counsel review the whole
@@ -3631,7 +3631,7 @@ _Last updated: [DATE]_
 
 ## 1. Who these terms are between
 
-These Terms govern use of the VistaPlatform deployment operated by
+These Terms govern use of the Vista Platform deployment operated by
 **[YOUR LEGAL ENTITY]** ("we", "us"), reachable at **[YOUR SERVICE URL]** (the
 "Service"). By creating an account or using the Service you ("you", "your")
 agree to them. If you are agreeing on behalf of an organization, you confirm you
@@ -3745,7 +3745,7 @@ $tos$),
 
 _Last updated: [DATE]_
 
-> **This is a template, not legal advice.** VistaPlatform is self-hosted:
+> **This is a template, not legal advice.** Vista Platform is self-hosted:
 > **you**, the organization running this deployment, are the data controller —
 > the software author neither operates this instance nor receives data from it.
 > Replace every `[BRACKETED]` value and have counsel review it against the law
@@ -3755,7 +3755,7 @@ _Last updated: [DATE]_
 ## 1. Who is responsible
 
 **[YOUR LEGAL ENTITY]**, **[YOUR ADDRESS]**, is the controller for personal data
-processed by the VistaPlatform deployment at **[YOUR SERVICE URL]**.
+processed by the Vista Platform deployment at **[YOUR SERVICE URL]**.
 [IF REQUIRED: name your Data Protection Officer and contact details.]
 
 Contact us about privacy at **[YOUR PRIVACY CONTACT]**.
@@ -3808,6 +3808,14 @@ We do not sell personal data. We share it only with:
   only as needed. [LIST YOUR SUB-PROCESSORS, OR STATE THAT THERE ARE NONE.]
 - **Authorities**, where the law requires it — and where we are permitted to,
   we will tell you first.
+- **AI assistants, if anyone connects one.** The Service exposes a read-only
+  Model Context Protocol (MCP) endpoint that an AI assistant can query for
+  inventory, compliance and CBOM data. Nothing reaches it until a user in your
+  organization creates an API token and authorizes a client; from that point,
+  what the assistant reads leaves this deployment and is processed by whichever
+  AI provider that user chose, under **that provider's** terms — not ours.
+  [STATE WHETHER YOU PERMIT THIS AND WHICH PROVIDERS, OR SAY YOU HAVE DISABLED
+  IT.]
 
 If you have configured integrations (SIEM forwarding, CMDB sync, ticketing,
 notifications), data flows to those systems because you told it to. **You**
@@ -4059,3 +4067,149 @@ WHERE  bi.id = te.item_id
          'cmdb_sync', 'siem_export', 'billing_portal'
        )
   AND  te.included_value IS DISTINCT FROM '{"enabled": false}'::jsonb;
+
+
+-- =================================================================
+-- Built-in service-identification rules (port heuristic)
+-- =================================================================
+-- inventory-service's ServiceIdentificationService.GetPortHeuristic is the only
+-- reader of service_identification_rules, and until this block nothing ever
+-- wrote a row: the built-ins were data statements inside schema.sql and a
+-- `pg_dump --schema-only` regeneration of that file dropped them. The table has
+-- been empty on every install since. Symptom, with nothing logged anywhere: a
+-- passively discovered TLS asset is labelled the literal "TLS Service", and
+-- every third-party external connection and every EnrichAllAssets backfill
+-- (both call IdentifyService with rawData=nil, so only the port heuristic can
+-- fire) leaves service_name / service_version / service_confidence /
+-- service_identification_method NULL — the asset drawer's Service row is blank.
+--
+-- They live in seed.sql, not schema.sql, precisely because schema.sql is the
+-- file that gets regenerated from a live database; these are data rows and
+-- belong with the other reference data (algorithms, measurement_types, tiers).
+-- The chart's seed-data Job runs post-install AND post-upgrade, so existing
+-- deployments pick the rules up on their next upgrade.
+--
+-- SHAPE. Columns are exactly (port, protocol, service_name, service_category,
+-- is_builtin, tenant_id) — there is no confidence column. Confidence is decided
+-- by the CONSUMER: a match here is always reported as `low` with method
+-- `port_heuristic`, while a parsed SSH/SMTP/FTP banner is reported `high`. So a
+-- rule can never overclaim in the UI; what a rule can do is put a WRONG name on
+-- an asset, and a confidently wrong service label is worse than a generic one.
+-- That is the whole selection criterion below, and it is why several rows from
+-- the pre-regeneration set are deliberately NOT restored:
+--   * 3000 "Node/Dev", 5000 "Flask/Dev", 8888 "Jupyter" — framework guesses.
+--     3000 is Grafana as often as node; 5000 is AirPlay/registry; 8888 is a
+--     generic alternate HTTP port.
+--   * 9090 — DELIBERATELY UNNAMED, decided rather than overlooked; do not
+--     re-litigate. The original "Prometheus" row was dropped because Prometheus
+--     serves plain HTTP by default, so a TLS listener on 9090 is more often
+--     Cockpit (which serves HTTPS there). Cockpit was NOT added in its place,
+--     because that argument stopped holding: Prometheus has shipped native TLS
+--     via --web.config.file since 2.24, and enabling it is exactly what a
+--     hardened estate — the kind that runs this product — does. TLS on 9090 is
+--     therefore genuinely ambiguous between at least two common services, and
+--     by this block's own selection rule a confidently wrong label is worse
+--     than none. 9090 falls through to a blank Service row, the same honest
+--     answer any unrecognised port gets. If it is ever named, it needs a
+--     stronger signal than the port — a banner or a JA3S match, not a guess.
+--   * 992 "Telnet-over-TLS" — effectively extinct; a TLS listener there today
+--     is more likely something else entirely.
+--   * 990 "FTPS-data" — simply wrong. 990 is the implicit-FTPS CONTROL port;
+--     989 is its data channel. Corrected below.
+--
+-- PROTOCOL VALUES ARE UPPERCASE on purpose. The lookup matches the caller's raw
+-- protocol OR its normalized form, and the normalized form is
+-- strings.ToUpper(protocol) for anything outside the TLS/SSH alias map — so an
+-- uppercase row matches "Modbus", "modbus" and "MODBUS" alike.
+--
+-- SCOPE. A rule only fires once the protocol is already known, so its job is to
+-- name the APPLICATION riding on that protocol. For TLS that is genuinely
+-- informative (TLS says nothing about the service). For SSH/SMB/OT the protocol
+-- already names the service, so only the ports the platform itself probes get a
+-- row — see the curated map in shared/discovery/sweep.go. OT protocols the
+-- platform does not port-probe (DNP3, S7/MMS, HART-IP) are named by the
+-- sensor's own protocol classification and are deliberately absent here rather
+-- than guessed at from a port.
+--
+-- Idempotent: ON CONFLICT targets the partial unique index over the built-in
+-- (tenant_id IS NULL) rows, so re-running the seed on every upgrade is a no-op
+-- and a tenant's own override row for the same port is untouched.
+INSERT INTO service_identification_rules (port, protocol, service_name, service_category, is_builtin, tenant_id) VALUES
+    -- Web. 443 is as close to certain as a port gets. The alternates are
+    -- named "HTTPS (alternate)" rather than guessing at a product, because
+    -- 8443/9443/10443/8080 host every admin console ever written.
+    (443,   'TLS', 'HTTPS',                     'web',           true, NULL),
+    (8443,  'TLS', 'HTTPS (alternate)',         'web',           true, NULL),
+    (9443,  'TLS', 'HTTPS (alternate)',         'web',           true, NULL),
+    (10443, 'TLS', 'HTTPS (alternate)',         'web',           true, NULL),
+    (8080,  'TLS', 'HTTPS (alternate)',         'web',           true, NULL),
+
+    -- Directory. 636 and 3269 are LDAP-only; 3269 is the AD Global Catalog.
+    (636,   'TLS', 'LDAPS',                     'directory',     true, NULL),
+    (3269,  'TLS', 'LDAPS (Global Catalog)',    'directory',     true, NULL),
+
+    -- Mail. 465 is implicit-TLS submission (RFC 8314), 587 is the STARTTLS
+    -- submission port; both are mail-only.
+    (465,   'TLS', 'SMTPS',                     'mail',          true, NULL),
+    (587,   'TLS', 'SMTP Submission',           'mail',          true, NULL),
+    (993,   'TLS', 'IMAPS',                     'mail',          true, NULL),
+    (995,   'TLS', 'POP3S',                     'mail',          true, NULL),
+    -- STARTTLS on the cleartext mail ports. TLS observed on 25/143/110 can only
+    -- be the STARTTLS upgrade of that port's own protocol — these ports serve
+    -- nothing else — which makes them a SAFER inference than the 8080 rule
+    -- above, where "HTTPS (alternate)" is a guess about an arbitrary admin
+    -- console. Named for the upgrade so the drawer says what was observed.
+    (25,    'TLS', 'SMTP (STARTTLS)',           'mail',          true, NULL),
+    (143,   'TLS', 'IMAP (STARTTLS)',           'mail',          true, NULL),
+    (110,   'TLS', 'POP3 (STARTTLS)',           'mail',          true, NULL),
+
+    -- File transfer. 990 = implicit FTPS control; TLS seen on 21 is explicit
+    -- FTPS (AUTH TLS) — the only way TLS appears on the FTP control port.
+    (990,   'TLS', 'FTPS (implicit)',           'file',          true, NULL),
+    (21,    'TLS', 'FTPS (explicit)',           'file',          true, NULL),
+
+    -- Network services. Each of these ports exists only for the TLS-wrapped
+    -- form of its protocol. The second 853 row covers callers that report the
+    -- protocol as "DoT" rather than "TLS".
+    (853,   'TLS', 'DNS over TLS',              'network',       true, NULL),
+    (853,   'DOT', 'DNS over TLS',              'network',       true, NULL),
+    (5061,  'TLS', 'SIP over TLS',              'voice',         true, NULL),
+    (2083,  'TLS', 'RADIUS over TLS (RadSec)',  'network',       true, NULL),
+    (6514,  'TLS', 'Syslog over TLS',           'logging',       true, NULL),
+
+    -- Remote access and management.
+    (3389,  'TLS', 'RDP',                       'remote_access', true, NULL),
+    (5986,  'TLS', 'WinRM over HTTPS',          'management',    true, NULL),
+    (2376,  'TLS', 'Docker daemon (TLS)',       'container',     true, NULL),
+    (6443,  'TLS', 'Kubernetes API',            'container',     true, NULL),
+
+    -- Datastores. Labelled by WIRE PROTOCOL, not product, where a fork shares
+    -- the port: 3306 is MariaDB as often as MySQL, 9200 is OpenSearch as often
+    -- as Elasticsearch, and 6379 carries Valkey/KeyDB as well as Redis.
+    (5432,  'TLS', 'PostgreSQL',                'database',      true, NULL),
+    (3306,  'TLS', 'MySQL/MariaDB',             'database',      true, NULL),
+    (1433,  'TLS', 'Microsoft SQL Server',      'database',      true, NULL),
+    (2484,  'TLS', 'Oracle Database (TCPS)',    'database',      true, NULL),
+    (27017, 'TLS', 'MongoDB',                   'database',      true, NULL),
+    (6379,  'TLS', 'Redis',                     'cache',         true, NULL),
+    (9200,  'TLS', 'Elasticsearch/OpenSearch',  'search',        true, NULL),
+
+    -- Messaging.
+    (5671,  'TLS', 'AMQPS',                     'messaging',     true, NULL),
+    (8883,  'TLS', 'MQTTS',                     'messaging',     true, NULL),
+
+    -- SSH. 2222 is the conventional alternate and is named as such rather than
+    -- being attributed to a particular appliance.
+    (22,    'SSH', 'SSH',                       'remote_access', true, NULL),
+    (2222,  'SSH', 'SSH (alternate)',           'remote_access', true, NULL),
+
+    -- SMB (probed by shared/discovery/sweep.go).
+    (445,   'SMB', 'SMB',                       'file',          true, NULL),
+    (139,   'SMB', 'SMB over NetBIOS',          'file',          true, NULL),
+
+    -- OT / ICS — exactly the OT ports shared/discovery/sweep.go probes.
+    (502,   'MODBUS',      'Modbus/TCP',        'ot',            true, NULL),
+    (4840,  'OPC_UA',      'OPC UA',            'ot',            true, NULL),
+    (44818, 'ETHERNET_IP', 'EtherNet/IP',       'ot',            true, NULL),
+    (47808, 'BACNET',      'BACnet/IP',         'ot',            true, NULL)
+ON CONFLICT (port, protocol) WHERE tenant_id IS NULL DO NOTHING;

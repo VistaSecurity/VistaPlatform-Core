@@ -30,9 +30,20 @@ func expectCeilingDenial(mock sqlmock.Sqlmock, tenantID, actorID uuid.UUID, role
 	mock.ExpectQuery(`SELECT id FROM tenant_roles`).
 		WithArgs(tenantID, roleName).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(roleID))
+	// The ceiling resolves the role's owning tenant before reading its grants,
+	// so a role id from another tenant can never reach the comparison.
+	mock.ExpectQuery(`SELECT tenant_id FROM tenant_roles`).
+		WithArgs(roleID).
+		WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow(tenantID))
 	mock.ExpectQuery(`SELECT p\.id, p\.name`).
 		WithArgs(roleID).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(uuid.New(), deniedPermission))
+	// The named role-delegation lookup. Callers pass a roleName that is not a
+	// delegation grantee, so nothing is exempted and the ceiling below is the
+	// unmodified one.
+	mock.ExpectQuery(`SELECT name, is_system_role FROM tenant_roles`).
+		WithArgs(roleID, tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"name", "is_system_role"}).AddRow(roleName, true))
 	mock.ExpectQuery(`SELECT DISTINCT p\.id`).
 		WithArgs(actorID, tenantID).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))

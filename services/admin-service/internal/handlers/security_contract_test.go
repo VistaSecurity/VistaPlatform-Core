@@ -1,14 +1,18 @@
 package handlers
 
-// Contract test for the security/compliance read surface (admin-ui Security
-// page): /admin/security/events, /dashboard-stats, /compliance,
-// /compliance/:framework.
+// Contract test for the security read surface (admin-ui Security ▸ Dashboard):
+// /admin/security/events and /admin/security/dashboard-stats.
 //
 // These handlers used a package-global *security.Service; this slice introduces
 // a securityProvider interface (the global→injected-interface refactor —
 // *security.Service satisfies it) so the real gin handlers run over httptest
 // with an in-memory stub — no DB — and their `{ data, meta }` envelope bodies
 // are asserted against api/openapi/admin-service.openapi.yaml.
+//
+// The /admin/security/compliance routes are GONE (they read
+// public.compliance_framework_status, which no code, seed or job ever writes).
+// TestContract_ComplianceFrameworkSchemas_AreGone below is the ratchet that
+// stops the schemas — and therefore the routes — from creeping back in.
 //
 // The spec-loading / assertConforms / doRequest harness and apiBase const
 // are shared with tenant_billing_contract_test.go (same package, same spec) and
@@ -29,15 +33,11 @@ import (
 // --- in-memory stub securityProvider ----------------------------------------
 
 type stubSecurityProvider struct {
-	events        []security.SecurityEvent
-	total         int
-	eventsErr     error
-	stats         map[string]interface{}
-	statsErr      error
-	framework     *security.ComplianceFrameworkStatus
-	frameworkErr  error
-	frameworks    []security.ComplianceFrameworkStatus
-	frameworksErr error
+	events    []security.SecurityEvent
+	total     int
+	eventsErr error
+	stats     map[string]interface{}
+	statsErr  error
 }
 
 func (s *stubSecurityProvider) GetSecurityEvents(map[string]interface{}, int, int) ([]security.SecurityEvent, int, error) {
@@ -45,12 +45,6 @@ func (s *stubSecurityProvider) GetSecurityEvents(map[string]interface{}, int, in
 }
 func (s *stubSecurityProvider) GetSecurityDashboardStats(string) (map[string]interface{}, error) {
 	return s.stats, s.statsErr
-}
-func (s *stubSecurityProvider) GetComplianceFrameworkStatus(string) (*security.ComplianceFrameworkStatus, error) {
-	return s.framework, s.frameworkErr
-}
-func (s *stubSecurityProvider) GetAllComplianceFrameworks() ([]security.ComplianceFrameworkStatus, error) {
-	return s.frameworks, s.frameworksErr
 }
 
 // --- engine -----------------------------------------------------------------
@@ -61,8 +55,6 @@ func securityEngine(svc securityProvider) *gin.Engine {
 	grp := r.Group(apiBase)
 	grp.GET("/admin/security/events", GetSecurityEvents(svc))
 	grp.GET("/admin/security/dashboard-stats", GetSecurityDashboardStats(svc))
-	grp.GET("/admin/security/compliance", GetAllComplianceFrameworks(svc))
-	grp.GET("/admin/security/compliance/:framework", GetComplianceFrameworkStatus(svc))
 	return r
 }
 
@@ -72,29 +64,37 @@ const securityBase = apiBase + "/admin/security"
 
 func sampleSecurityEvent() security.SecurityEvent {
 	now := time.Now().UTC()
-	corr := "corr-1"
-	desc := "Suspicious login"
+	desc := "invalid credentials"
+	email := "operator@example.com"
+	ip := "203.0.113.9"
+	ua := "Mozilla/5.0"
+	req := "req-1"
+	resType := "user"
+	resID := uuid.New()
+	userID := uuid.New()
+	tenantID := uuid.New()
 	return security.SecurityEvent{
 		ID:                uuid.New(),
-		EventID:           "evt-1",
-		CorrelationID:     &corr,
-		EventType:         "auth.failed",
-		Severity:          "high",
+		EventType:         "auth.login",
 		Category:          "authentication",
-		Title:             "Repeated failed logins",
+		Action:            "login",
+		ResourceType:      &resType,
+		ResourceID:        &resID,
 		Description:       &desc,
-		ServiceName:       "auth-service",
-		ThreatScore:       8.5,
-		IsAnomaly:         true,
-		RiskLevel:         "high",
-		Status:            "open",
+		Success:           false,
+		RequiresAttention: true,
+		UserID:            &userID,
+		UserEmail:         &email,
+		UserType:          "platform",
+		TenantID:          &tenantID,
+		SourceIP:          &ip,
+		UserAgent:         &ua,
+		RequestID:         &req,
 		Metadata:          map[string]interface{}{"attempts": 5},
 		Tags:              []string{"bruteforce"},
-		RequiresAttention: true,
+		ComplianceTags:    []string{"soc2"},
 		Timestamp:         now,
-		DetectedAt:        now,
 		CreatedAt:         now,
-		UpdatedAt:         now,
 	}
 }
 
@@ -102,40 +102,14 @@ func sampleSecurityEvent() security.SecurityEvent {
 func minimalSecurityEvent() security.SecurityEvent {
 	now := time.Now().UTC()
 	return security.SecurityEvent{
-		ID:          uuid.New(),
-		EventID:     "evt-2",
-		EventType:   "system.info",
-		Severity:    "info",
-		Category:    "system",
-		Title:       "Heartbeat",
-		ServiceName: "admin-service",
-		ThreatScore: 0,
-		RiskLevel:   "low",
-		Status:      "closed",
-		Timestamp:   now,
-		DetectedAt:  now,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-}
-
-func sampleFramework() security.ComplianceFrameworkStatus {
-	now := time.Now().UTC()
-	ver := "1.0"
-	return security.ComplianceFrameworkStatus{
-		ID:                       uuid.New(),
-		FrameworkName:            "SOC2",
-		FrameworkVersion:         &ver,
-		OverallStatus:            "compliant",
-		ComplianceScore:          92.5,
-		LastAssessedAt:           &now,
-		TotalRequirements:        100,
-		CompliantRequirements:    92,
-		NonCompliantRequirements: 5,
-		PendingRequirements:      3,
-		Findings:                 []string{"MFA gap"},
-		CreatedAt:                now,
-		UpdatedAt:                now,
+		ID:        uuid.New(),
+		EventType: "config.update",
+		Category:  "config",
+		Action:    "update_settings",
+		Success:   true,
+		UserType:  "platform",
+		Timestamp: now,
+		CreatedAt: now,
 	}
 }
 
@@ -178,60 +152,24 @@ func TestContract_GetSecurityEvents_503(t *testing.T) {
 
 // --- dashboard stats --------------------------------------------------------
 
+// The stat keys the dashboard tiles and breakdown panels actually read. If the
+// service stops emitting one, the tile silently renders 0 — which is exactly the
+// failure mode this whole change exists to remove — so pin the key set here.
 func TestContract_GetSecurityDashboardStats_200(t *testing.T) {
 	sv := loadSpec(t)
 	eng := securityEngine(&stubSecurityProvider{stats: map[string]interface{}{
-		"total_events": 42, "by_severity": map[string]interface{}{"high": 3},
+		"total_events":       42,
+		"failed_events":      3,
+		"requires_attention": 1,
+		"failed_logins":      2,
+		"events_by_category": map[string]int{"authentication": 40, "config": 2},
+		"events_by_outcome":  map[string]int{"succeeded": 39, "failed": 3},
 	}})
 	w := doRequest(eng, http.MethodGet, securityBase+"/dashboard-stats", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "SecurityDashboardResponse", w.Body.Bytes())
-}
-
-// --- compliance -------------------------------------------------------------
-
-func TestContract_GetAllComplianceFrameworks_200(t *testing.T) {
-	sv := loadSpec(t)
-	eng := securityEngine(&stubSecurityProvider{frameworks: []security.ComplianceFrameworkStatus{sampleFramework()}})
-	w := doRequest(eng, http.MethodGet, securityBase+"/compliance", nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
-	}
-	sv.assertConforms(t, "ComplianceFrameworkListResponse", w.Body.Bytes())
-}
-
-func TestContract_GetAllComplianceFrameworks_200_empty(t *testing.T) {
-	sv := loadSpec(t)
-	eng := securityEngine(&stubSecurityProvider{frameworks: nil})
-	w := doRequest(eng, http.MethodGet, securityBase+"/compliance", nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
-	}
-	sv.assertConforms(t, "ComplianceFrameworkListResponse", w.Body.Bytes())
-}
-
-func TestContract_GetComplianceFrameworkStatus_200(t *testing.T) {
-	sv := loadSpec(t)
-	f := sampleFramework()
-	eng := securityEngine(&stubSecurityProvider{framework: &f})
-	w := doRequest(eng, http.MethodGet, securityBase+"/compliance/SOC2", nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
-	}
-	sv.assertConforms(t, "ComplianceFrameworkResponse", w.Body.Bytes())
-}
-
-// Nil status (not found) → 404.
-func TestContract_GetComplianceFrameworkStatus_404(t *testing.T) {
-	sv := loadSpec(t)
-	eng := securityEngine(&stubSecurityProvider{framework: nil})
-	w := doRequest(eng, http.MethodGet, securityBase+"/compliance/NOPE", nil)
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404; body=%s", w.Code, w.Body.String())
-	}
-	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
 }
 
 // --- drift guards -----------------------------------------------------------
@@ -251,17 +189,38 @@ func TestContract_SecurityEvent_DriftIsCaught(t *testing.T) {
 	}
 }
 
-func TestContract_ComplianceFrameworkStatus_DriftIsCaught(t *testing.T) {
+// SecurityEvent must not regain the public.security_events fields. Those columns
+// live in a table with zero writers; re-declaring them here is how a permanently
+// empty panel gets rebuilt. If a real producer ever appears, delete this test
+// deliberately rather than letting it rot.
+func TestContract_SecurityEvent_HasNoProducerlessFields(t *testing.T) {
 	sv := loadSpec(t)
-	sch, err := sv.compiler.Compile(specBaseURI + "#/components/schemas/ComplianceFrameworkStatus")
+	sch, err := sv.compiler.Compile(specBaseURI + "#/components/schemas/SecurityEvent")
 	if err != nil {
-		t.Fatalf("compile ComplianceFrameworkStatus: %v", err)
+		t.Fatalf("compile SecurityEvent: %v", err)
 	}
-	bad, err := jsonschema.UnmarshalJSON(strings.NewReader(`{"id":"x","surprise_field":true}`))
-	if err != nil {
-		t.Fatalf("unmarshal bad body: %v", err)
+	for _, field := range []string{"severity", "threat_score", "is_anomaly", "risk_level", "status", "service_name"} {
+		body, err := jsonschema.UnmarshalJSON(strings.NewReader(`{
+			"id":"11111111-1111-1111-1111-111111111111","event_type":"a","category":"b","action":"c",
+			"success":true,"requires_attention":false,"user_type":"platform",
+			"timestamp":"2020-01-01T00:00:00Z","created_at":"2020-01-01T00:00:00Z",
+			"` + field + `":"anything"}`))
+		if err != nil {
+			t.Fatalf("unmarshal probe body for %q: %v", field, err)
+		}
+		if err := sch.Validate(body); err == nil {
+			t.Fatalf("SecurityEvent accepted %q — that field came from the producerless public.security_events table and must not return", field)
+		}
 	}
-	if err := sch.Validate(bad); err == nil {
-		t.Fatal("expected validation to FAIL for a drifted ComplianceFrameworkStatus, but it passed — the guardrail is not actually checking")
+}
+
+// The compliance-framework surface is deleted, not deprecated: no schema, no
+// route, no handler. Compiling the schema must FAIL.
+func TestContract_ComplianceFrameworkSchemas_AreGone(t *testing.T) {
+	sv := loadSpec(t)
+	for _, name := range []string{"ComplianceFrameworkStatus", "ComplianceFrameworkResponse", "ComplianceFrameworkListResponse"} {
+		if _, err := sv.compiler.Compile(specBaseURI + "#/components/schemas/" + name); err == nil {
+			t.Fatalf("schema %s still resolves in admin-service.openapi.yaml — the producerless compliance-framework surface is back", name)
+		}
 	}
 }

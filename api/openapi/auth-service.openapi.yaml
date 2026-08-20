@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: VistaPlatform — auth-service API
+  title: Vista Platform — auth-service API
   version: "0.1.0"
   description: |
     Spec-first contract for auth-service (ADR-0001). Eighth (and final
@@ -54,7 +54,7 @@ info:
     first consumes them (ADR-0001 step 5), at which point this file and the
     contract test move together.
   contact:
-    name: VistaPlatform Platform
+    name: Vista Security
 servers:
   - url: /api/v1/auth-service
     description: auth-service, mounted behind the API gateway.
@@ -1078,7 +1078,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/PlatformConfig"
       x-quirks:
-        - "Always 200: storage/parse failures are swallowed per-field and fall back to the built-in default (`platform_name: \"VistaPlatform\"`, logos omitted). The endpoint has no error path."
+        - "Always 200: storage/parse failures are swallowed per-field and fall back to the built-in default (`platform_name: \"Vista Platform\"`, logos omitted). The endpoint has no error path."
         - "Logo URLs are OMITTED (not present-but-null) when unset — they are `omitempty` pointers server-side. The web-ui reads them as possibly-undefined."
 
   /tenant/trial-status:
@@ -2346,6 +2346,106 @@ paths:
         "500":
           $ref: "#/components/responses/LegacyServerError"
 
+  /users/{id}/data-export:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+        description: The user whose data is exported. Must belong to the caller's tenant.
+    get:
+      operationId: exportUserData
+      tags:
+        - data-subject-requests
+      summary: Export everything held about one user (subject access request)
+      description: >-
+        Answers a data subject access request for a member of the caller's
+        tenant. Requires `users.manage` — exporting another person's data is an
+        administrative act, not a roster read. The tenant comes from the session
+        and is applied both through row-level security and as an explicit
+        predicate. Generated on demand and never stored: a saved export would be
+        a second copy of exactly the data the request is about. Secret material
+        (password hashes, token values, session state) is never included, and
+        the payload states what it omits.
+      responses:
+        "200":
+          description: The export document.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DataSubjectExport"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /users/{id}/erase:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+        description: The user to erase. Must belong to the caller's tenant, and may not be the caller.
+    post:
+      operationId: eraseUserData
+      tags:
+        - data-subject-requests
+      summary: Erase a user's personal data (right to erasure)
+      description: >-
+        Anonymize-in-place, not delete: the user row is referenced by tickets,
+        comments and audit events, so removing it would either cascade into
+        unrelated operational history or leave dangling references. The profile
+        is tombstoned, API tokens and invitations are deleted, and the audit
+        trail keeps its events with the identity removed. Legal acceptance
+        records are RETAINED — they are the evidence the person agreed to the
+        terms. The whole operation runs in one transaction that re-reads its own
+        work and rolls back rather than report an erasure that did not happen.
+        Requires `users.manage`. A caller cannot erase themselves.
+      responses:
+        "200":
+          description: What was erased, what was retained and why, and what this does not reach.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DataSubjectErasureResult"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+  /me/data-export:
+    get:
+      operationId: exportMyData
+      tags:
+        - data-subject-requests
+      summary: Download everything held about yourself
+      description: >-
+        The self-service half. No permission beyond being signed in — anyone may
+        ask what is held about them — and the subject is taken from the session,
+        never from a parameter. Same document as the administrative export.
+      responses:
+        "200":
+          description: The export document.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DataSubjectExport"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
 components:
   parameters:
     TenantId:
@@ -2397,6 +2497,125 @@ components:
             $ref: "#/components/schemas/LegacyError"
 
   schemas:
+    # --- Data subject requests --------------------------------------
+    DataSubjectExport:
+      type: object
+      additionalProperties: false
+      required: [subject, generated_at, profile, legal_acceptances, invitations, api_tokens, audit_events, audit_events_window, not_included, schema_version, generated_by]
+      properties:
+        subject:
+          type: object
+          additionalProperties: false
+          required: [user_id, tenant_id]
+          properties:
+            user_id: { type: string, format: uuid }
+            tenant_id: { type: string, format: uuid }
+        generated_at: { type: string, format: date-time }
+        profile:
+          type: [object, "null"]
+          additionalProperties: false
+          required: [email, first_name, last_name, is_active, email_verified, timezone, avatar_url, last_login_at, login_count, created_at, updated_at]
+          properties:
+            email: { type: string }
+            first_name: { type: [string, "null"] }
+            last_name: { type: [string, "null"] }
+            is_active: { type: boolean }
+            email_verified: { type: boolean }
+            timezone: { type: [string, "null"] }
+            avatar_url: { type: [string, "null"] }
+            last_login_at: { type: [string, "null"], format: date-time }
+            login_count: { type: integer }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+        legal_acceptances:
+          type: array
+          description: Which document version was accepted, when, and from where. Retained through an erasure — this is the evidence of agreement.
+          items:
+            type: object
+            additionalProperties: false
+            required: [doc_type, version, content_hash, accepted_at, accepted_ip, user_agent]
+            properties:
+              doc_type: { type: string }
+              version: { type: integer }
+              content_hash: { type: string }
+              accepted_at: { type: string, format: date-time }
+              accepted_ip: { type: [string, "null"] }
+              user_agent: { type: [string, "null"] }
+        invitations:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [email, role, status, created_at, accepted_at]
+            properties:
+              email: { type: string }
+              role: { type: string }
+              status: { type: string }
+              created_at: { type: [string, "null"], format: date-time }
+              accepted_at: { type: [string, "null"], format: date-time }
+        api_tokens:
+          type: array
+          description: Metadata only. The token value and its hash are never included.
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, token_prefix, created_at, last_used_at, expires_at, revoked_at]
+            properties:
+              name: { type: string }
+              token_prefix: { type: string }
+              created_at: { type: string, format: date-time }
+              last_used_at: { type: [string, "null"], format: date-time }
+              expires_at: { type: [string, "null"], format: date-time }
+              revoked_at: { type: [string, "null"], format: date-time }
+        audit_events:
+          type: array
+          description: What this person did, bounded by audit_events_window — the audit trail is the only unbounded category.
+          items:
+            type: object
+            additionalProperties: false
+            required: [occurred_at, event_type, action, resource_type, success, ip_address]
+            properties:
+              occurred_at: { type: string, format: date-time }
+              event_type: { type: string }
+              action: { type: string }
+              resource_type: { type: [string, "null"] }
+              success: { type: boolean }
+              ip_address: { type: [string, "null"] }
+        audit_events_window:
+          type: object
+          additionalProperties: false
+          required: [from, to]
+          properties:
+            from: { type: string, format: date-time }
+            to: { type: string, format: date-time }
+        not_included:
+          type: array
+          description: What this export deliberately omits, and why. Shipped inside the document — an access request is answered by what you hand over AND by being straight about what you did not.
+          items: { type: string }
+        schema_version: { type: integer }
+        generated_by: { type: string }
+    DataSubjectErasureResult:
+      type: object
+      additionalProperties: false
+      required: [user_id, tombstone_email, erased_at, profile_anonymized, api_tokens_deleted, invitations_deleted, audit_events_pseudonymized, retained, limitations]
+      properties:
+        user_id: { type: string, format: uuid }
+        tombstone_email:
+          type: string
+          description: The RFC 2606 .invalid address that replaced the person's email. Derived from the user id, so re-running an erasure is idempotent.
+        erased_at: { type: string, format: date-time }
+        profile_anonymized: { type: boolean }
+        api_tokens_deleted: { type: integer, format: int64 }
+        invitations_deleted: { type: integer, format: int64 }
+        audit_events_pseudonymized: { type: integer, format: int64 }
+        retained:
+          type: array
+          description: What was kept after the erasure, each with the reason. Retaining data is defensible only if the reason travels with it.
+          items: { type: string }
+        limitations:
+          type: array
+          description: What this erasure does NOT reach. Stated rather than discovered — an operator who believes erasure was total will tell a data subject something untrue.
+          items: { type: string }
     # --- Public sign-in helpers (login page) --------------------------------
     AuthMethodsRequest:
       type: object
@@ -4227,7 +4446,7 @@ components:
       additionalProperties: false
       description: >
         Public platform branding (api.PlatformConfig). Returned bare (not
-        wrapped). `platform_name` is always present (defaults to "VistaPlatform");
+        wrapped). `platform_name` is always present (defaults to "Vista Platform");
         the logo/favicon URLs are present only when configured (omitempty pointers).
         `signup_enabled` mirrors platform_settings.registration_enabled (default
         true) so the /signup page knows whether to render the form.

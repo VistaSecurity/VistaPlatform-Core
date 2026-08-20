@@ -168,6 +168,13 @@ func TestAssignUserRole_RejectsRoleWithUnheldPermission(t *testing.T) {
 	mock.ExpectQuery(`SELECT permission_id FROM tenant_role_permissions WHERE role_id = \$1`).
 		WithArgs(roleID).
 		WillReturnRows(sqlmock.NewRows([]string{"permission_id"}).AddRow(heldID).AddRow(unheldID))
+	// Delegation lookup: security_admin is named by no RoleDelegation, so the
+	// exemption set is empty and the guard below is the unchanged one. (No
+	// grantor-role query follows — the lookup short-circuits.)
+	mock.ExpectQuery(`SELECT name, is_system_role FROM tenant_roles`).
+		WithArgs(roleID, tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"name", "is_system_role"}).
+			AddRow("security_admin", true))
 	mock.ExpectQuery(`SELECT id, name FROM tenant_permissions WHERE id = ANY\(\$1\)`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).
 			AddRow(heldID, "users.manage").AddRow(unheldID, "billing.update"))
@@ -201,6 +208,9 @@ func TestAssignUserRole_AllowsRoleWhosePermissionsCallerHolds(t *testing.T) {
 	mock.ExpectQuery(`SELECT permission_id FROM tenant_role_permissions WHERE role_id = \$1`).
 		WithArgs(roleID).
 		WillReturnRows(sqlmock.NewRows([]string{"permission_id"}).AddRow(permID))
+	mock.ExpectQuery(`SELECT name, is_system_role FROM tenant_roles`).
+		WithArgs(roleID, tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"name", "is_system_role"}).AddRow("viewer", true))
 	mock.ExpectQuery(`SELECT id, name FROM tenant_permissions WHERE id = ANY\(\$1\)`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(permID, "users.manage"))
 	mock.ExpectQuery(`SELECT DISTINCT p.id`).WithArgs(actorID, tenantID).

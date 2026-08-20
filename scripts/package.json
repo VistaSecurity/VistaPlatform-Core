@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "version": "0.1.0",
-  "description": "Build and audit scripts for VistaPlatform",
+  "description": "Build and audit scripts for Vista Platform",
   "license": "SEE LICENSE IN LICENSE.md",
   "dependencies": {
     "fs-extra": "^11.2.0",

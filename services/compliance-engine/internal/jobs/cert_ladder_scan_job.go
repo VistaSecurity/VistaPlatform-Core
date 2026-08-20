@@ -266,7 +266,13 @@ func (j *CertLadderScanJob) raiseCertAlert(ctx context.Context, tenantID uuid.UU
 		message = fmt.Sprintf("Certificate %s expired on %s", commonName, c.notAfter.Format("2006-01-02"))
 	}
 	certID := c.id
-	if _, err := j.alertEngine.Raise(ctx, events.AlertRaiseEvent{
+	// RaisePolicyRung, not Raise: with the type disabled BuildLadder has already
+	// dropped the baseline/preference rungs, so anything still reaching here is a
+	// rung contributed by an ACTIVATED framework, which §8.3 says must keep
+	// opening/escalating the alert ("you can control noise; you can't fake
+	// posture"). Gating it again in the engine would silence exactly the rungs
+	// that are supposed to survive a disable.
+	if _, err := j.alertEngine.RaisePolicyRung(ctx, events.AlertRaiseEvent{
 		EventID:      uuid.New(),
 		TenantID:     tenantID,
 		AlertType:    "certificate_expiring",

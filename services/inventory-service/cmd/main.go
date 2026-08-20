@@ -668,10 +668,6 @@ func main() {
 	defer cancel()
 
 	staleDetector := jobs.NewStaleAssetDetector(db, bypassDB, lifecycleService)
-	if natsClient != nil {
-		staleDetector.SetNATSClient(natsClient)
-		log.Println("NATS client wired to StaleAssetDetector for audit job event publishing")
-	}
 	go staleDetector.Start(ctx)
 
 	// ADR-0015 §6: scheduled certificate-expiry scan. Escalating owner alerts via the

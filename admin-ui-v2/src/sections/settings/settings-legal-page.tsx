@@ -6,7 +6,7 @@
 // acceptance ledger is a cross-tenant audit read.
 import { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { FileText, CheckCircle, XCircle, History, ClipboardCheck } from 'lucide-react';
+import { FileText, CheckCircle, XCircle, History, ClipboardCheck, AlertTriangle } from 'lucide-react';
 import { clients } from '../../lib/clients';
 import { usePlatformEdition } from '../../lib/edition';
 
@@ -30,6 +30,8 @@ interface LegalDoc {
   is_current: boolean;
   effective_date: string;
   published_at: string;
+  /** Unedited-template markers found in this version's body. Server-computed. */
+  placeholders?: string[];
 }
 interface LegalVersion {
   doc_type: string;
@@ -105,12 +107,24 @@ const inputStyle: React.CSSProperties = {
   outline: 'none', width: '100%', boxSizing: 'border-box', fontFamily: 'inherit',
 };
 
+// Mirrors placeholderPattern in admin-service/internal/handlers/legal.go. The
+// server is the authority — it re-checks and answers 422 — but the console needs
+// to know BEFORE the request whether to raise the confirmation, and the live
+// document's markers come from the server on the `placeholders` field.
+const PLACEHOLDER_RE = /\[[A-Z][A-Z0-9 ,.:;_/&'-]{2,}\]/g;
+
+function draftPlaceholders(body: string): string[] {
+  return Array.from(new Set(body.match(PLACEHOLDER_RE) ?? [])).slice(0, 10);
+}
+
 export function SettingsLegalPage() {
   const { data, isLoading } = useLegalDocuments();
   const qc = useQueryClient();
   const [tab, setTab] = useState<DocType>('terms_of_service');
   const [draft, setDraft] = useState<{ title: string; body: string } | null>(null);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
+  const [confirmPlaceholders, setConfirmPlaceholders] = useState<string[] | null>(null);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
 
   const showToast = (msg: string, ok: boolean) => { setToast({ msg, ok }); setTimeout(() => setToast(null), 4000); };
 
@@ -126,9 +140,14 @@ export function SettingsLegalPage() {
   const dirty = draft !== null && (draft.title !== (current?.title ?? '') || draft.body !== (current?.body ?? ''));
 
   const publish = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (acknowledgePlaceholders: boolean) => {
       const { error } = await clients.admin.POST('/admin/legal/documents', {
-        body: { doc_type: tab, title: title.trim(), body },
+        body: {
+          doc_type: tab,
+          title: title.trim(),
+          body,
+          acknowledge_placeholders: acknowledgePlaceholders,
+        },
       });
       if (error) throw new Error((error as { error?: string })?.error ?? 'Publish failed');
     },
@@ -136,12 +155,23 @@ export function SettingsLegalPage() {
       qc.invalidateQueries({ queryKey: DOCS_KEY });
       qc.invalidateQueries({ queryKey: [...ACCEPT_KEY, tab] });
       setDraft(null);
+      setConfirmPlaceholders(null);
       showToast('New version published. Existing tenants will be re-prompted to accept.', true);
     },
-    onError: (e) => showToast((e as Error).message, false),
+    onError: (e) => { setConfirmPlaceholders(null); showToast((e as Error).message, false); },
   });
 
-  const switchTab = (t: DocType) => { setTab(t); setDraft(null); };
+  const switchTab = (t: DocType) => { setTab(t); setDraft(null); setBannerDismissed(false); };
+
+  // The live version's markers come from the server; an unsaved draft is judged
+  // on what is in the editor right now.
+  const livePlaceholders = current?.placeholders ?? [];
+  const pending = draftPlaceholders(body);
+
+  const attemptPublish = () => {
+    if (pending.length > 0) { setConfirmPlaceholders(pending); return; }
+    publish.mutate(false);
+  };
 
   return (
     <div className="op-fade" style={{ padding: 24, maxWidth: 900 }}>
@@ -178,6 +208,49 @@ export function SettingsLegalPage() {
                 : <>No version published yet — publishing creates v1.</>}
             </div>
 
+            {/* Unedited-template warning. The SEEDED v1 documents are templates
+                carrying [BRACKETED] markers, so this is the shipped default
+                state — an operator who never edits them has users clicking
+                through terms that name "[YOUR LEGAL ENTITY]". */}
+            {livePlaceholders.length > 0 && !bannerDismissed && (
+              <div
+                role="status"
+                data-testid="legal-placeholder-banner"
+                style={{
+                  border: '1px solid color-mix(in srgb, var(--op-warn, #d68b1f) 45%, transparent)',
+                  background: 'color-mix(in srgb, var(--op-warn, #d68b1f) 10%, transparent)',
+                  borderRadius: 'var(--r-btn)', padding: '12px 14px',
+                  display: 'flex', gap: 10, alignItems: 'flex-start',
+                }}
+              >
+                <AlertTriangle size={15} style={{ color: 'var(--op-warn, #d68b1f)', flex: 'none', marginTop: 1 }} />
+                <div style={{ fontSize: 12.5, color: 'var(--op-t2)', lineHeight: 1.5 }}>
+                  <strong style={{ color: 'var(--op-t1)' }}>
+                    The published version still contains template placeholders.
+                  </strong>
+                  <div style={{ marginTop: 4 }}>
+                    This document ships as a template for you to complete — your users
+                    are accepting it as written. Replace{' '}
+                    {livePlaceholders.slice(0, 4).map((ph, i) => (
+                      <span key={ph}>
+                        {i > 0 && ', '}
+                        <span className="mono" style={{ color: 'var(--op-t1)' }}>{ph}</span>
+                      </span>
+                    ))}
+                    {livePlaceholders.length > 4 && <> and {livePlaceholders.length - 4} more</>}
+                    {' '}and publish a new version.
+                  </div>
+                </div>
+                <button
+                  className="op-btn ghost sm"
+                  style={{ marginLeft: 'auto', flex: 'none' }}
+                  onClick={() => setBannerDismissed(true)}
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
             {/* editor */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--op-t2)' }}>Title</label>
@@ -197,12 +270,52 @@ export function SettingsLegalPage() {
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <button className="op-btn" onClick={() => publish.mutate()} disabled={publish.isPending || !title.trim() || !body.trim() || (current != null && !dirty)}>
+              <button className="op-btn" onClick={attemptPublish} disabled={publish.isPending || !title.trim() || !body.trim() || (current != null && !dirty)}>
                 {publish.isPending ? 'Publishing…' : current ? 'Publish new version' : 'Publish v1'}
               </button>
               {current && !dirty && <span style={{ fontSize: 12, color: 'var(--op-t3)' }}>Edit the title or body to publish a new version.</span>}
               {dirty && <span style={{ fontSize: 12, color: 'var(--op-accent)' }}>Unsaved changes — publishing creates v{(current?.version ?? 0) + 1}.</span>}
             </div>
+
+            {/* Blocking confirmation. The server rejects an unacknowledged
+                placeholder body with 422 regardless of this dialog — the dialog
+                exists so the admin sees WHAT was found before deciding. */}
+            {confirmPlaceholders && (
+              <div
+                role="alertdialog"
+                aria-label="Publish with placeholders?"
+                data-testid="legal-placeholder-confirm"
+                style={{
+                  border: '1px solid var(--op-border)', borderRadius: 'var(--r-btn)',
+                  padding: '14px 16px', background: 'var(--op-bg2, transparent)',
+                  display: 'flex', flexDirection: 'column', gap: 10,
+                }}
+              >
+                <div style={{ display: 'flex', gap: 9, alignItems: 'center' }}>
+                  <AlertTriangle size={15} style={{ color: 'var(--op-warn, #d68b1f)' }} />
+                  <strong style={{ fontSize: 13, color: 'var(--op-t1)' }}>
+                    This document still contains {confirmPlaceholders.length} template placeholder
+                    {confirmPlaceholders.length === 1 ? '' : 's'}
+                  </strong>
+                </div>
+                <div style={{ fontSize: 12.5, color: 'var(--op-t2)', lineHeight: 1.5 }}>
+                  Users will accept the text exactly as written, including:
+                  <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                    {confirmPlaceholders.map((ph) => (
+                      <span key={ph} className="mono" style={{ fontSize: 11.5, border: '1px solid var(--op-border)', borderRadius: 4, padding: '2px 6px', color: 'var(--op-t1)' }}>{ph}</span>
+                    ))}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button className="op-btn ghost sm" onClick={() => setConfirmPlaceholders(null)} disabled={publish.isPending}>
+                    Go back and edit
+                  </button>
+                  <button className="op-btn sm" onClick={() => publish.mutate(true)} disabled={publish.isPending}>
+                    {publish.isPending ? 'Publishing…' : 'Publish anyway'}
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* version history */}
             <div style={{ borderTop: '1px solid var(--op-border)', paddingTop: 16 }}>

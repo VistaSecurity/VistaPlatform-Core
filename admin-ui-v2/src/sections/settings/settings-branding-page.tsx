@@ -256,7 +256,7 @@ export function SettingsBrandingPage() {
                   <input
                     value={currentName}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="VistaPlatform"
+                    placeholder="Vista Platform"
                     style={{
                       background: 'var(--op-input-bg, rgba(255,255,255,.05))', border: '1px solid var(--op-border)',
                       borderRadius: 'var(--r-btn)', padding: '7px 10px', color: 'var(--op-t1)', fontSize: 13,

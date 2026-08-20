@@ -11,9 +11,16 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
-	"github.com/vistasecurity/vistaplatform/shared/events"
 	auditjoblogger "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 )
+
+// jobExecutionLog is the narrow slice of the shared audit JobLogger this job
+// uses. *auditjoblogger.JobLogger satisfies it; tests substitute a recorder.
+type jobExecutionLog interface {
+	LogStart(ctx context.Context, metadata map[string]interface{}) (uuid.UUID, error)
+	LogProgress(ctx context.Context, itemsProcessed, itemsSucceeded, itemsFailed int) error
+	LogCompletion(ctx context.Context, status string, itemsProcessed, itemsSucceeded, itemsFailed int, errorMessage *string, metadata map[string]interface{}) error
+}
 
 // StaleAssetDetector periodically detects and updates stale assets
 type StaleAssetDetector struct {
@@ -25,7 +32,12 @@ type StaleAssetDetector struct {
 	logger           *log.Logger
 	interval         time.Duration
 	auditServiceURL  string
-	natsClient       *events.NATSClient
+	// newJobLogger builds the audit job logger for one cycle. Overridable in
+	// tests so the run can be observed without an audit-service.
+	newJobLogger func(jobID uuid.UUID) jobExecutionLog
+	// listTenants enumerates the tenants to age. Overridable in tests so the
+	// early-return paths can be exercised without a database.
+	listTenants func() ([]uuid.UUID, error)
 }
 
 // NewStaleAssetDetector creates a new stale asset detector job
@@ -46,7 +58,7 @@ func NewStaleAssetDetector(
 		auditServiceURL = sharedconfig.PeerURL("audit-service", sharedconfig.MTLSEnabled())
 	}
 
-	return &StaleAssetDetector{
+	d := &StaleAssetDetector{
 		db:               db,
 		bypassDB:         bypassDB,
 		lifecycleService: lifecycleService,
@@ -54,11 +66,11 @@ func NewStaleAssetDetector(
 		interval:         interval,
 		auditServiceURL:  auditServiceURL,
 	}
-}
-
-// SetNATSClient wires a NATS client for event-driven audit job logging.
-func (j *StaleAssetDetector) SetNATSClient(client *events.NATSClient) {
-	j.natsClient = client
+	d.newJobLogger = func(jobID uuid.UUID) jobExecutionLog {
+		return auditjoblogger.NewJobLogger(d.auditServiceURL, jobID, "stale_asset_detection", "Stale Asset Detection", nil, nil)
+	}
+	d.listTenants = d.tenantsToProcess
+	return d
 }
 
 // Start begins the stale asset detection process
@@ -82,72 +94,47 @@ func (j *StaleAssetDetector) Start(ctx context.Context) {
 	}
 }
 
-// publishAuditJobEvent publishes an audit job execution event via NATS.
-// Returns true if successful (caller can skip HTTP fallback).
-func (j *StaleAssetDetector) publishAuditJobEvent(jobID, logID uuid.UUID, phase string, itemsProcessed, itemsSucceeded, itemsFailed int, status string, errorMessage *string, metadata map[string]interface{}) bool {
-	if j.natsClient == nil || !j.natsClient.IsConnected() {
-		return false
-	}
-
-	evt := events.AuditJobExecutionEvent{
-		EventID:        uuid.New(),
-		JobID:          jobID,
-		LogID:          logID,
-		JobType:        "stale_asset_detection",
-		JobName:        "Stale Asset Detection",
-		Phase:          phase,
-		Status:         status,
-		ItemsProcessed: itemsProcessed,
-		ItemsSucceeded: itemsSucceeded,
-		ItemsFailed:    itemsFailed,
-		ErrorMessage:   errorMessage,
-		Timestamp:      time.Now(),
-		Metadata:       metadata,
-	}
-
-	if err := events.PublishJSON(j.natsClient, events.SubjectAuditJobExecution, evt); err != nil {
-		j.logger.Printf("NATS audit job event publish failed: %v", err)
-		return false
-	}
-
-	j.logger.Printf("Audit job %s event published via NATS (phase=%s)", jobID, phase)
-	return true
-}
-
-// detectStaleAssets runs the detection cycle for all tenants
+// detectStaleAssets runs the detection cycle for all tenants.
+//
+// Job execution is logged over HTTP to audit-service, which is the ONLY
+// transport that reaches audit.job_execution_logs (and therefore Discovery →
+// Job Logs / the job-execution-logs API). This job used to try NATS
+// (audit.job-execution) first and treat a successful publish as a reason to
+// skip the HTTP logger — but nothing has ever subscribed to that subject, and
+// the publish always succeeds, so the working transport was disabled precisely
+// when the dead one worked and no row was ever written for this job.
+//
+// Every path out of this function emits a completion, including the two early
+// returns: a start with no completion is an execution that reads as still
+// running forever.
 func (j *StaleAssetDetector) detectStaleAssets(ctx context.Context) {
 	jobID := uuid.New()
-	logID := uuid.New() // Client-generated log ID for NATS correlation
 
-	// Try NATS for job start, fall back to HTTP JobLogger
-	useNATS := j.publishAuditJobEvent(jobID, logID, "start", 0, 0, 0, "", nil, map[string]interface{}{
+	jobLogger := j.newJobLogger(jobID)
+	logID, err := jobLogger.LogStart(ctx, map[string]interface{}{
 		"interval": j.interval.String(),
 	})
-
-	var jobLogger *auditjoblogger.JobLogger
-	if !useNATS {
-		// Fallback: HTTP-based audit job logger
-		jobLogger = auditjoblogger.NewJobLogger(j.auditServiceURL, jobID, "stale_asset_detection", "Stale Asset Detection", nil, nil)
-		httpLogID, err := jobLogger.LogStart(ctx, map[string]interface{}{
-			"interval": j.interval.String(),
-		})
-		if err != nil {
-			j.logger.Printf("WARNING: Failed to log job start: %v", err)
-		} else {
-			j.logger.Printf("Job execution logged with ID: %s", httpLogID)
-		}
+	if err != nil {
+		j.logger.Printf("WARNING: Failed to log job start: %v", err)
+	} else {
+		j.logger.Printf("Job execution logged with ID: %s", logID)
 	}
 
 	j.logger.Println("Running stale asset detection cycle")
 
-	tenantIDs, err := j.tenantsToProcess()
+	tenantIDs, err := j.listTenants()
 	if err != nil {
 		j.logger.Printf("ERROR: Failed to query tenants: %v", err)
+		errMsg := err.Error()
+		_ = jobLogger.LogCompletion(ctx, "failed", 0, 0, 0, &errMsg, nil)
 		return
 	}
 
 	if len(tenantIDs) == 0 {
 		j.logger.Println("No tenants with assets to age")
+		_ = jobLogger.LogCompletion(ctx, "completed", 0, 0, 0, nil, map[string]interface{}{
+			"tenants_processed": 0,
+		})
 		return
 	}
 
@@ -161,11 +148,7 @@ func (j *StaleAssetDetector) detectStaleAssets(ctx context.Context) {
 	for _, tenantID := range tenantIDs {
 		select {
 		case <-ctx.Done():
-			if useNATS {
-				j.publishAuditJobEvent(jobID, logID, "complete", totalProcessed, totalSucceeded, totalFailed, "cancelled", nil, nil)
-			} else if jobLogger != nil {
-				_ = jobLogger.LogCompletion(ctx, "cancelled", totalProcessed, totalSucceeded, totalFailed, nil, nil)
-			}
+			_ = jobLogger.LogCompletion(ctx, "cancelled", totalProcessed, totalSucceeded, totalFailed, nil, nil)
 			return
 		default:
 			totalProcessed++
@@ -177,24 +160,15 @@ func (j *StaleAssetDetector) detectStaleAssets(ctx context.Context) {
 			}
 			// Log progress periodically
 			if totalProcessed%10 == 0 {
-				if useNATS {
-					j.publishAuditJobEvent(jobID, logID, "progress", totalProcessed, totalSucceeded, totalFailed, "", nil, nil)
-				} else if jobLogger != nil {
-					_ = jobLogger.LogProgress(ctx, totalProcessed, totalSucceeded, totalFailed)
-				}
+				_ = jobLogger.LogProgress(ctx, totalProcessed, totalSucceeded, totalFailed)
 			}
 		}
 	}
 
 	j.logger.Println("Completed stale asset detection cycle")
-	completionMeta := map[string]interface{}{
+	_ = jobLogger.LogCompletion(ctx, "completed", totalProcessed, totalSucceeded, totalFailed, nil, map[string]interface{}{
 		"tenants_processed": len(tenantIDs),
-	}
-	if useNATS {
-		j.publishAuditJobEvent(jobID, logID, "complete", totalProcessed, totalSucceeded, totalFailed, "completed", nil, completionMeta)
-	} else if jobLogger != nil {
-		_ = jobLogger.LogCompletion(ctx, "completed", totalProcessed, totalSucceeded, totalFailed, nil, completionMeta)
-	}
+	})
 }
 
 // tenantsToProcess returns every tenant that has inventory to age — i.e. any

@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 )
 
 // billingUsageStore is the persistence seam GetCurrentUsage depends on.
@@ -27,6 +28,13 @@ type billingUsageStore interface {
 	GetCurrentMonthAPICalls(ctx context.Context, tenantID uuid.UUID, periodStart, periodEnd time.Time) int64
 	// GetTenantTierLimits returns the tenant's tier limits JSON + the max columns.
 	GetTenantTierLimits(ctx context.Context, tenantID uuid.UUID) (limitsJSON []byte, maxSensors, maxAssets, maxUsers sql.NullInt64, err error)
+	// ResolveNumericLimits returns the ENFORCED caps for max_sensors /
+	// max_assets / max_users, resolved through shared/entitlements
+	// (tenant override > tier entitlement > default). A key is present with a
+	// nil value when the resolved entitlement is "unlimited", and absent when
+	// it could not be resolved. See applyResolvedUsageLimits for why this
+	// exists.
+	ResolveNumericLimits(ctx context.Context, tenantID uuid.UUID) (map[string]*int, error)
 }
 
 // tenantBillingStore is the seam for GetTenantBilling (db-only — the Stripe
@@ -242,4 +250,33 @@ func (r *billingRepository) GetTenantTierLimits(ctx context.Context, tenantID uu
 		WHERE t.id = $1
 	`, tenantID).Scan(&limitsJSON, &maxSensors, &maxAssets, &maxUsers)
 	return limitsJSON, maxSensors, maxAssets, maxUsers, err
+}
+
+// The billable_items keys behind the three numeric caps these endpoints
+// report. They are the same keys shared/services.limitTypeToItemKey maps
+// "sensor"/"asset"/"user" onto for enforcement.
+const (
+	itemMaxSensors = "max_sensors"
+	itemMaxAssets  = "max_assets"
+	itemMaxUsers   = "max_users"
+)
+
+var usageLimitItemKeys = []string{itemMaxSensors, itemMaxAssets, itemMaxUsers}
+
+func (r *billingRepository) ResolveNumericLimits(ctx context.Context, tenantID uuid.UUID) (map[string]*int, error) {
+	resolver := entitlements.NewPostgresResolver(r.db)
+	resolved, err := resolver.ResolveMany(ctx, tenantID, usageLimitItemKeys)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]*int, len(resolved))
+	for key, ent := range resolved {
+		// QuantityValue returns (nil, true) for the catalog "unlimited"
+		// (quantity: null) shape — the same nil-means-unlimited convention the
+		// admin-side EffectiveLimits already uses.
+		if qty, ok := ent.QuantityValue(); ok {
+			out[key] = qty
+		}
+	}
+	return out, nil
 }

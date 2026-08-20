@@ -213,10 +213,7 @@ func (w *PlatformAgentWorker) processNextJob() {
 		if updateErr := w.jobQueue.UpdateJobStatus(updateCtx, deviceJob.ID, models.JobStatusCompleted, result, nil); updateErr != nil {
 			log.Printf("ERROR: Failed to update job status to completed for job %s: %v", deviceJob.ID, updateErr)
 		}
-		assetsCount := 0
-		if result != nil {
-			assetsCount = len(result.Assets)
-		}
+		assetsCount := jobResultAssetCount(result)
 		if logErr := jobLogger.LogCompletion(updateCtx, "completed", assetsCount, assetsCount, 0, nil, nil); logErr != nil {
 			log.Printf("[PlatformAgentWorker] Warning: failed to log job completion for %s: %v", deviceJob.ID, logErr)
 		}
@@ -371,8 +368,9 @@ func (w *PlatformAgentWorker) executeDeviceInterrogation(ctx context.Context, jo
 	systemUserID := uuid.MustParse("00000000-0000-0000-0000-000000000000")
 
 	// Interrogate device using device interrogation service. This creates its own
-	// discovery job and materializes the targets and findings there.
-	discoveryJobID, err := w.deviceInterrogation.InterrogateDevice(ctx, job.TenantID, systemUserID, *job.DeviceID)
+	// discovery job and materializes the targets, findings AND sensor_discoveries
+	// rows there.
+	discoveryJobID, materialized, err := w.deviceInterrogation.InterrogateDevice(ctx, job.TenantID, systemUserID, *job.DeviceID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to interrogate device: %w", err)
 	}
@@ -385,8 +383,11 @@ func (w *PlatformAgentWorker) executeDeviceInterrogation(ctx context.Context, jo
 	}
 
 	// The assets themselves are not carried in this payload — they were written
-	// straight to the discovery job above. The processing log reconciles against
-	// that job so the counts describe what actually landed.
+	// straight to the discovery job above, into BOTH sinks. Keeping this list
+	// empty is what stops ProcessJobResults re-materializing them: its per-asset
+	// loop is the only other writer of discovery_findings and sensor_discoveries
+	// rows for this job, and it iterates zero times here. The processing log
+	// reconciles against the discovery job so the counts describe what landed.
 	result := &models.JobResult{
 		JobID:       job.ID,
 		Success:     true,
@@ -396,6 +397,10 @@ func (w *PlatformAgentWorker) executeDeviceInterrogation(ctx context.Context, jo
 			"device_id":        device.ID.String(),
 			"device_type":      device.DeviceType,
 			"discovery_job_id": discoveryJobID.String(),
+			// What actually reached the inventory pipeline. Read by the audit
+			// job log and by the schedule-outcome recorder, neither of which can
+			// see the empty Assets list above for what it is.
+			"assets_count": materialized,
 		},
 	}
 

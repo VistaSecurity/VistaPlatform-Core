@@ -6,25 +6,21 @@
 
 ## Where to find it
 
-**Remediation** is a top-level section in the main navigation. Opening it lands you on **Triage**, with four sub-sections in the left nav:
+**Remediation** is a top-level section in the main navigation. Opening it lands you on **Alerts**, with three sub-sections in the left nav:
 
 | Sub-section | What it's for |
 |---|---|
-| **Alerts** | Stateful conditions the platform is tracking — certificate expiry today, with more types planned — each with a full lifecycle and audit-grade evidence trail |
-| **Triage** | The audit-rule alert inbox — decide what's signal and what's noise before it becomes work |
+| **Alerts** | Everything the platform is asking you to look at — each with a full lifecycle and an audit-grade evidence trail |
 | **Queue** | The unified ticket list — everything that's been turned into trackable work |
 | **Plans** | Group related work into an initiative (e.g. a PQC migration) and watch progress as one number |
 
-**Alerts** and **Triage** are both alert inboxes, but they're not the same
-thing. **Triage** is fed by audit-rule pattern detection (failed-login
-bursts, bulk exports) and its alerts are transient — acknowledge them or
-convert them to work, and they're done. **Alerts** is a persistent record of
-a *condition* — a certificate sliding toward expiry is one alert that
-escalates as the deadline approaches, not a fresh item every time the
-platform re-checks it, and its full history (who acknowledged it, when it
-escalated, how it was resolved) stays attached to it permanently. Think of
-Triage as "what just happened that might matter" and Alerts as "what's
-currently true and needs to stay watched."
+> **Where did Triage go?** Triage was a second alert inbox, fed by audit-rule
+> pattern detection. It never had anything to show: nothing persisted those
+> alerts, so the page reported "Inbox zero" permanently and acknowledging one
+> stored nothing. It has been removed, and `/remediation/triage` now takes you
+> to **Alerts** — the inbox that does hold state. Audit-rule alerts that the
+> platform tracks (failed-login bursts today) arrive there like any other
+> alert, and the rest still reach you as notifications.
 
 ---
 
@@ -33,9 +29,10 @@ currently true and needs to stay watched."
 An **alert** is different from a one-off notification: it's a condition the
 platform is actively tracking, with a status (Active, Acknowledged, Snoozed,
 or Resolved) and a permanent, append-only record of everything that's
-happened to it. The clearest example today is a certificate approaching
-expiry — the platform doesn't send you a new warning every time it re-checks
-the certificate; it raises one alert and escalates its severity as the
+happened to it. The clearest examples today are a certificate approaching
+expiry and a burst of failed logins against one account. Take the expiring
+certificate — the platform doesn't send you a new warning every time it
+re-checks it; it raises one alert and escalates its severity as the
 deadline gets closer, driven by a warning schedule your organization
 controls (see **Settings → Notifications & Alerts → Alert Rules**, described
 in the [Tenant Administrator Guide](../guides/tenant-admin-guide.md#notifications--alerts)).
@@ -81,23 +78,6 @@ closed can't accidentally mask a certificate that's still expiring.
 > Acting on an alert (acknowledge, snooze, resolve, create ticket) requires
 > permission to manage alerts. If you only see the Alerts list with no
 > action buttons, your role is read-only here.
-
----
-
-## Triage — what needs attention
-
-Triage is your inbox. As events arrive, your audit alert rules fire alerts, and they collect here so you can separate real work from noise *before* it clutters the Queue.
-
-At the top, filter the inbox by **Open**, **Acknowledged**, or **All**. Each alert row shows the message, a severity badge, the rule that fired it, how many events it represents, and how long ago it triggered.
-
-For each open alert you have two choices:
-
-- **Convert to work** — creates a remediation ticket pre-filled from the alert (title, description, and severity carried over) and acknowledges the alert in one step. You're taken straight to the Queue, where the new ticket is now waiting.
-- **Acknowledge** (the **✕** button) — dismisses the alert without creating a ticket. Use this for noise, duplicates, or things that resolved themselves.
-
-When the inbox is empty you'll see **Inbox zero** — nothing to triage right now.
-
-> Converting and acknowledging require permission to manage compliance work. If you don't see those buttons, your role is read-only for remediation.
 
 ---
 
@@ -147,7 +127,7 @@ Tickets can carry a **due date**. Vista Platform watches those dates continuousl
 
 You rarely start in the Queue — tickets flow *into* it:
 
-- **From Triage** — *Convert to work* on an alert (see above).
+- **From Alerts** — *Create ticket* on an alert (see above). The ticket inherits the alert's evidence and keeps a live link back to it.
 - **From Risk & Compliance → Crypto Risks** — each risk row has **Create ticket** / **View ticket** actions. Creating one opens a pre-filled ticket tied to that specific crypto configuration; it then lands in this same Queue (category **remediation**) and **View ticket** jumps you back to it. This is the same unified ticket — there's no separate tracking surface.
 - **From a finding or other surface** — wherever a *Create ticket* control appears, the resulting ticket lives here too.
 
@@ -186,7 +166,7 @@ One important rule: **an item's status mirrors its linked finding or ticket.** Y
 
 ## A typical flow
 
-1. An alert fires and shows up in **Triage**. You decide it's real and **Convert to work**.
+1. An alert fires and shows up in **Alerts**. You decide it's real and **Create ticket**.
 2. The new ticket appears in the **Queue**. You open it, **Start work**, assign it, and leave a comment.
 3. If it's part of a larger effort (say, retiring TLS 1.0 everywhere), you add its finding to a **Plan** so leadership can watch the whole campaign in one number.
 4. As you fix and verify, you **Mark resolved** then **Close** the ticket — and the plan's progress ticks up on its own.

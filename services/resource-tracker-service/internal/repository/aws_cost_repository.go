@@ -34,6 +34,14 @@ func NewAWSCostRepository(_, bypassDB *sql.DB, log *logrus.Logger) *AWSCostRepos
 	}
 }
 
+// aggregateTenantSentinel stands in for a NULL tenant_id in the
+// idx_aws_cost_data_unique_v2 arbiter below (platform-wide cost rows, e.g. the
+// full-account sync, carry no single tenant). It must match the sentinel baked
+// into that index's COALESCE in scripts/database/schema.sql byte-for-byte —
+// Postgres matches an ON CONFLICT target against an index by expression, not
+// by name.
+const aggregateTenantSentinel = "00000000-0000-0000-0000-000000000000"
+
 // StoreCostData stores AWS cost data in the database.
 //
 // RLS: cross-tenant — runs on the bypass role (Phase 4). The platform AWS
@@ -41,6 +49,15 @@ func NewAWSCostRepository(_, bypassDB *sql.DB, log *logrus.Logger) *AWSCostRepos
 // row's tenant_id comes from AWS, not a single caller tenant), so a single
 // app.tenant_id cannot scope the write. aws_cost_data is RLS-scoped, so this
 // path is deliberately assigned to bypassDB rather than WithTenantTx.
+//
+// ON CONFLICT targets idx_aws_cost_data_unique_v2 (the partial unique index
+// on aws_cost_data — see scripts/database/schema.sql), which requires both:
+//   - the same WHERE deleted_at IS NULL predicate the index carries (Postgres
+//     will not infer a partial index as an arbiter without it — 42P10); and
+//   - COALESCE(tenant_id, <sentinel>), because Postgres unique indexes treat
+//     NULL as distinct from every other value including another NULL, so a
+//     bare tenant_id column never lets a platform-wide (tenant_id IS NULL) row
+//     conflict with itself on a later sync.
 func (r *AWSCostRepository) StoreCostData(ctx context.Context, costs []aws.AWSCostData) error {
 	if len(costs) == 0 {
 		return nil
@@ -51,7 +68,8 @@ func (r *AWSCostRepository) StoreCostData(ctx context.Context, costs []aws.AWSCo
 			tenant_id, cost_date, service_name, amount, currency,
 			usage_quantity, usage_unit, usage_type, tags, account_id, region, synced_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		ON CONFLICT (tenant_id, cost_date, service_name, COALESCE(usage_type, ''))
+		ON CONFLICT (COALESCE(tenant_id, '` + aggregateTenantSentinel + `'::uuid), cost_date, service_name, COALESCE(usage_type, ''))
+		WHERE deleted_at IS NULL
 		DO UPDATE SET
 			amount = EXCLUDED.amount,
 			currency = EXCLUDED.currency,

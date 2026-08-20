@@ -7,6 +7,381 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-20
+
+A data-flow audit swept ~250k lines across 20 dimensions and found 60 defects
+that shared one shape: **something reported success while doing nothing**. All
+60 are fixed here, along with ten more found while fixing them, two dependency
+CVEs and a privilege-escalation path. Nothing in this release errored before —
+that is why it took an audit rather than a bug report to find it.
+
+### Upgrading
+
+Read these before upgrading an existing deployment. A fresh install is
+unaffected by all of them.
+
+- **Saved security-policy values now take effect.** Account-lockout threshold
+  and duration, minimum password length and session idle expiry were editable
+  and persisted on **Security → Policy**, and nothing read them. They are now
+  enforced for tenant and platform admins alike. If an operator once saved a
+  stricter setting believing it inert, that setting is now live — check the page
+  before upgrading. A deployment that never saved it keeps the previous
+  behaviour exactly (5 attempts / 15 min / 8 characters / 7 days).
+- **Audit-log retention now actually deletes.** The retention sweep could never
+  complete, so nothing was ever removed. It now works. On a deployment where S3
+  archival is **not** configured, creating a retention policy permanently
+  deletes audit logs past the window, with only a log warning — this is the
+  pre-existing documented behaviour, newly reachable. No retention policy is
+  seeded by default.
+- **Audit your SSO role mappings.** Tenant SSO assigned roles with no
+  authorization check (see Security, below). New and edited provider configs are
+  now guarded, but a mapping stored *before* this release is not retroactively
+  neutralised — the login path has no actor to authorize against. Review
+  `sso_group_role_mappings.role_id` and `sso_providers.default_role_id` on any
+  Enterprise deployment.
+- **Compliance scores will move.** A control with open violations now scores 0
+  rather than 100, and a control nothing has evaluated reports **Not assessed**
+  rather than counting as a pass. Scores change on upgrade; the new numbers are
+  the correct ones.
+- **Some numbers now read "unknown" instead of a value.** Tenant health factors
+  and MSP cost components that were never actually measured no longer display a
+  fabricated figure. A tenant-health score may read "—" where it previously read
+  a plausible number.
+
+### Security
+
+- **Tenant SSO could be used to escalate privilege.** SSO provider
+  configuration assigned roles with no grantability check at all. Both config
+  endpoints are gated on `settings.update`, which among seeded roles only
+  `tenant_admin` holds — so a tenant admin could map an IdP group they belong to
+  onto any role, or create a provider they control with `default_role_id` set to
+  any role, and reach permissions the direct-assignment guards deny them. With
+  custom roles shipped, that included roles with arbitrary permission sets. Role
+  targets are now authorized against the acting user at config-write time, using
+  the same grantability logic as direct assignment. Enterprise only.
+- **Signing out did not end your session everywhere.** auth-service never
+  consulted the JWT revocation denylist that its own Logout writes to, so a
+  revoked token kept working against auth-service for the rest of its lifetime —
+  reading profile and session data, mutating tenant users, and minting a
+  personal access token that outlived the revoked session. Every other service
+  already rejected it. auth-service now does too.
+- **Two vulnerabilities in the packet-capture library.** The sensor and
+  pcap-processor pinned `gopacket` v1.2.0, whose Diameter and sFlow decoders are
+  reachable from live capture (GO-2026-6121, GO-2026-6122). Bumped to v1.6.1.
+- **A deleted integration still handed out live credentials.** The storage
+  credential resolver did not exclude soft-deleted rows.
+- **Scope listings were not tenant-scoped in SQL.** `scopes` list and count
+  relied on row-level security alone, so a deployment running with
+  `serviceRls` disabled — required on some managed Postgres — could list another
+  tenant's scopes. Both queries now carry an explicit tenant predicate.
+
+### Added
+
+- **Tenants can serve a data subject request without a DBA.** The privacy policy
+  this platform seeds promises access, rectification, erasure and portability;
+  honouring any of them previously meant an administrator writing SQL against
+  production. **Settings → My Profile** now exports your own data, and
+  **Settings → People** lets a tenant administrator export a member's data or
+  erase them. Erasure tombstones the account and clears every free-text and
+  secret field, deletes their API tokens and invitations, and **pseudonymises
+  the audit trail rather than deleting it** — the events a tenant may need to
+  rely on survive, with the identity removed. The whole erasure runs in one
+  transaction, so an account is never left half-erased. The trade-off between
+  "delete everything about this person" and "keep an audit trail anyone can
+  trust" is a liability judgement, and it is written down rather than left
+  implicit.
+
+- **Services are named again on passively discovered assets.** The built-in
+  port-identification rules had been empty since a schema regeneration dropped
+  them, so every TLS endpoint read as a generic "TLS Service" and external
+  connections showed a blank service. 39 curated rules ship again — HTTPS,
+  LDAPS, SMTPS/IMAPS/POP3S, FTPS, RDP, Kubernetes API, the major databases,
+  AMQPS/MQTTS, SSH, SMB and the four OT protocols the platform probes — plus
+  STARTTLS on 25, 143 and 110.
+- **The asset drawer now says how sure it is.** A service name identified from a
+  port reads *Best guess · from port*; one read from a service banner reads
+  *Confirmed · from banner*. The distinction already existed in the API and was
+  never shown.
+- **Auto-approval can now include cloud discoveries.** Network segments gained a
+  per-source setting. Cloud-discovered assets could never auto-approve however
+  the segment was configured, while four documents said they could. Existing
+  segments keep sensor-only behaviour and change nothing on upgrade.
+- **Platform admins can author measurement rules again.** Adding or editing a
+  measurement rule on a framework control could never succeed — five JSONB
+  columns were declared as plain Go types the database driver cannot read — so
+  frameworks were only measurable via the seed file.
+- **Tenant admins can delegate Billing Admin.** The role appeared in both role
+  pickers and every attempt to grant it failed, so nobody inside a tenant could
+  manage billing. A bounded exception now permits exactly that one delegation;
+  a tenant admin still does not hold the permission itself.
+
+### Changed
+
+- **The licence is now held by a legal entity.** Core is still
+  FSL-1.1-ALv2 on identical terms, but the copyright line reads **LakeShore
+  Labs LLC (d/b/a Vista Security)** rather than an individual. The entity is
+  named alongside the trading name because a fictitious name cannot own
+  copyright or grant a licence. The public repository stays closed to code
+  contributions, but for a different reason than before: the old one — that
+  copyright sat with a person and no company held it — no longer applies, and
+  the honest reason now is that taking outside code responsibly needs a
+  contributor licence agreement and the review capacity to turn patches around.
+
+- **Cloud key stores, plaintext databases and OT targets are no longer recorded
+  as TLS endpoints.** Any protocol the platform did not recognise was silently
+  relabelled "TLS", producing a crypto configuration that asserted a negotiated
+  TLS session with a blank version and blank cipher suite. A silent OT device, a
+  database with SSL explicitly off, and a Cisco IKEv2 tunnel all became phantom
+  TLS endpoints that padded configuration counts and the PQC and risk
+  denominators. Unrecognised protocols now produce no configuration at all,
+  transports (`tcp`/`udp`) are recognised as transports, and IKEv2 correctly
+  reads IPSec.
+- **Protocol names are normalised where they are written.** The same protocol
+  arrived spelled `EtherNet/IP`, `EtherNet_IP`, `OPC UA`, `OPC-UA` and `OPCUA`
+  depending on producer, which split one endpoint into several rows with
+  separate observation counts and defeated service lookup. All ingest paths now
+  store one canonical spelling; an unrecognised protocol survives unchanged
+  rather than being coerced.
+- **CMDB sync updates existing items instead of creating duplicates.** All four
+  connectors posted a new configuration item on every sync and never consulted
+  the identifier they had already stored, so a customer's CMDB accumulated a
+  fresh copy of every asset, certificate and crypto configuration on each run
+  while the job history showed clean green runs.
+- **Tenant health reports what it measured.** Every health score was computed
+  from hardcoded constants because the service could not reach its peers — the
+  same values for every tenant, refreshed every 30 minutes, and driving a real
+  alert. Unreachable peers now leave their factor unmeasured, the score is
+  renormalised over what was measured, and a tenant with nothing measurable
+  reads "unknown" rather than a number. The degraded-tenant alert excludes
+  unknown, so a transient mesh fault raises nothing.
+- **MSP cost figures are honest or absent.** The headline and the itemised
+  breakdown beneath it were computed by four different formulas disagreeing by
+  three to four orders of magnitude, over inputs that were largely fabricated —
+  CPU derived from a garbage-collector counter, disk from a constant, database
+  load guessed from the length of a URL path. One costing helper now serves
+  every read path, the fabricated inputs are gone, and compute reports as not
+  measured pending a per-tenant attribution model.
+- **Custom Policy authoring is temporarily hidden.** Tenant-authored policies
+  were never evaluated — no finding, no score, ever — while the UI and docs
+  promised continuous evaluation. Authoring is disabled and the documentation
+  corrected until the evaluation gap is closed. Existing policies are
+  not deleted and remain listed.
+- **The platform-admin Security Dashboard shows real events.** It read a table
+  nothing has ever written to, so it was permanently empty. It now reads the
+  audit activity trail, which every service writes. Severity, risk-score and
+  anomaly fields are gone rather than being derived from data that cannot
+  support them.
+- **`execution_mode: sensors` is rejected rather than silently redirected.** A
+  discovery job requesting tenant-sensor execution ran in-cluster instead, with
+  no indication the user got something other than what they chose.
+- **Discovery jobs that cannot be identified no longer claim they were probed.**
+
+### Removed
+
+- **Remediation → Triage.** Its only data source returned a hardcoded empty
+  list, so the page read "Inbox zero" forever and its Acknowledge button stored
+  nothing. `/remediation/triage` redirects to Alerts, which has real state, an
+  evidence trail and ticket creation.
+- **Security → Dashboard's "Compliance frameworks" panel** and **Security →
+  Policy's "Maintenance mode" toggle.** Neither had any producer or enforcement
+  behind it; the maintenance toggle was persisted and ignored.
+- **The legacy compliance-check path** (six routes), whose inserts could never
+  succeed and whose summary counted a status string no evaluator ever wrote.
+- **A duplicate discovery-job endpoint on sensor-manager** that created a job
+  with no targets for the stuck-job sweeper to run against nothing.
+
+### Fixed
+
+- **Deleted assets no longer come back with their findings.** Deleting an asset
+  in Inventory correctly closed its compliance findings, but the next
+  re-evaluation of any kind — Posture → Re-evaluate, a framework publish, a
+  certificate change — measured the deleted asset again and reopened every one
+  of them, resetting triage state and dropping your score for something that no
+  longer exists. Deleted assets and deleted crypto configurations are now out of
+  scope for measurement everywhere.
+
+- **Editing a published framework's controls or rules now re-evaluates.**
+  Adding a control, changing a threshold or removing a measurement rule on a
+  published framework had no effect on any tenant's results until something else
+  happened to change their inventory. Every such edit now queues a
+  re-evaluation, and a control that has not been evaluated since it last changed
+  reports **Not assessed** rather than counting as a free pass — so adding a
+  control can no longer raise a score for a check nothing has run.
+
+- **Control detail now reports failing controls honestly.** The per-control API
+  (and the AI-agent tool built on it) could report `score: 100` and zero failing
+  findings beside a status of FAIL and a full list of violations, because it
+  counted only Critical/High/Medium findings. Every open violation now counts, a
+  failing control scores 0, and a control nothing checked has no score at all.
+
+- **Turning an alert type off now works everywhere.** Two alert producers —
+  certificate-expiry lifecycle events and failed-login-burst detection — ignored
+  the tenant's alert-catalog toggle, so switching those alerts off still
+  delivered notifications. The toggle is now enforced centrally. Rungs
+  contributed by a compliance framework you have activated still open the alert,
+  as documented.
+
+- **Snoozing an alert now pauses its notifications.** A snoozed alert that
+  escalated inside its snooze window still sent email/Slack/PagerDuty. It now
+  escalates silently until the snooze expires. Acknowledged alerts still notify
+  on escalation, which is intended.
+
+- **Inventory search returned an error on every keystroke.** Typing anything
+  into the search box on the Configuration, TLS or SSH lenses returned HTTP 500
+  and the page reported it could not load — a pattern match was applied to an
+  enumerated column and to an IP-address column, neither of which supports one.
+  The unsearched view worked, so it read as data disappearing.
+
+- **F5 and Palo Alto interrogations produced nothing while reporting success.**
+  F5 virtual-server addresses kept their partition prefix, which no address
+  column accepts, so every finding was discarded and IPv6 virtual servers were
+  dropped entirely. PAN-OS responses were decoded against a path the firewall
+  never returns, so SSL-decryption profiles and security rules always came back
+  empty. Both devices showed "connected · last interrogated now" throughout.
+
+- **In-cluster device interrogation never reached Inventory.** Results were
+  written where nothing downstream reads them, so an interrogation completed,
+  flipped the device to connected and reported a count while Inventory gained
+  nothing and Approvals showed no pending discoveries.
+
+- **Scheduled interrogations reached agents without a device type**, and could
+  not be completed by them. Schedules also never recorded an outcome — every run
+  stayed "pending" and the history was empty.
+
+- **Certificate quality flags were collected and never shown.** Certificate
+  Transparency, OCSP status and EV indicators were computed and stored but
+  omitted from every read, so they were permanently blank in the UI.
+  Certificate chain rebuilding was a permanent no-op for the same class of
+  reason, and its failures were reported as "no issuer found".
+
+- **Weak-protocol detection missed the spellings actually stored.** Legacy-TLS
+  and deprecated-algorithm checks matched protocol strings no producer writes,
+  so TLS 1.0 and 1.1 endpoints could pass a check designed to catch them.
+
+- **Risk levels were computed from a column nothing writes.** Location
+  summaries, the location asset list and the CMDB export all read a stored risk
+  level that has never been populated, reporting every asset at the default.
+  They now band the actual risk score.
+
+- **Crypto configurations multiplied on every re-observation.** An asset
+  observed for a week accumulated roughly 168 identical configuration rows,
+  inflating its drawer, the tenant's configuration counts and the PQC and risk
+  denominators. Re-observing an endpoint now updates the existing row. Pending
+  assets also accumulated an unbounded copy of every finding, including full
+  certificate chains, in a single database field.
+
+- **Severity buckets silently dropped rows.** Crypto-risk summary counts
+  excluded any configuration whose cipher suite or hash algorithm was unknown,
+  and two inventory risk filters were applied to the wrong aggregate — one
+  banding a whole facet bucket by its worst member, so a single high-risk asset
+  reported an entire business unit as high risk.
+
+- **Platform metrics queried a table that does not exist.** Two admin metrics
+  endpoints joined a non-existent relation and returned a zero-valued success
+  instead of an error.
+
+- **The CBOM artifact failed external validation.** Emitted CycloneDX documents
+  contained duplicate component identifiers when one configuration used the same
+  algorithm in two roles — an ordinary RSA key exchange with an RSA certificate
+  key was enough — so the evidence artifact was rejected by the tooling an
+  auditor runs. Verify also reported a red "Hash mismatch" when the artifact
+  bytes simply could not be read; that is now a distinct third state.
+
+- **Audit-log and platform-log retention could never run.** Both sweeps failed
+  on malformed database statements whose errors were discarded, so nothing was
+  ever archived or deleted while the job reported success. With S3 archival
+  enabled the same records were re-uploaded as a new object every cycle,
+  growing storage without bound.
+
+- **Impersonation was never recorded.** Both audit writes failed on every call
+  and their errors were discarded, so the oversight page that exists to show who
+  impersonated whom was permanently empty while impersonation itself worked.
+
+- **Invitations rejected valid roles.** The invite path accepted only four
+  hardcoded role names, so Billing Admin — seeded into every tenant — and every
+  custom role failed, although both appeared in the dropdown.
+
+- **Entitlement grants never reached tenants created after startup.** On a
+  licensed deployment, a tenant that signed up after the pod started silently
+  ran as Core: Custom Policies showed an upgrade prompt, SSO and Billing were
+  hidden, and CBOM signing and comparison refused. Assigning the Enterprise tier
+  did not help, and an unrelated restart silently repaired it.
+
+- **Plan and limit displays disagreed with what was enforced.** Usage panels
+  read legacy tier columns that nothing updates, so a tenant could be shown
+  "12 / 10 sensors" against an enforced limit of 25, or told they were at 80%
+  of a limit that was not the real one. Negotiated per-tenant overrides were
+  invisible.
+
+- **Trial locking used an incomplete view of the trial.** Paid tenants could be
+  locked and administratively extended trials ignored, because the middleware
+  read fewer columns than the endpoint that reports trial status — so the two
+  gave opposite answers.
+
+- **Dashboard tiles showed request failures as zeros.** Sensor, agent and ticket
+  panels rendered a failed request as a real count of zero, so a broken backend
+  looked like an empty fleet.
+
+- **The legal re-acceptance gate failed open.** Any server-side error resolved
+  as "nothing pending" and let the user straight through with acceptance
+  unrecorded.
+
+- **Inventory and Findings controls did not do what they said.** Changing the
+  certificate ownership filter left pagination on the old page, showing an empty
+  result; the Findings export always downloaded the same crypto-risk file
+  regardless of lens or filters, and silently did nothing when there was
+  nothing to export.
+
+- **The notification routing dropdown offered sources nothing emits**, and
+  omitted every source that does.
+
+- **Framework transparency claimed a rule-less control passes.** A control with
+  no measurement rule was described as passing by default; it is reported as
+  Not assessed.
+
+- **Platform-admin tenant statistics counted deleted records.** Users, assets
+  and sensors that had been removed were still included, so the tiles
+  contradicted the list beneath them.
+
+- **AWS cost synchronisation stored nothing.** Its upsert did not match the
+  index it targeted, so every run failed. Platform-wide rows also duplicated
+  rather than updating, and the index has been rebuilt to collapse them.
+
+- **Materialized inventory views were never rebuilt** after their definitions
+  changed, so upgrades kept stale results, and the remediation queue read from a
+  legacy table that is no longer populated.
+
+- **Denying an asset failed silently**, writing a suppression to a table that
+  was never created. MSP tenant offboarding could not complete for the same
+  reason.
+
+- **Cloud key stores never appeared in the Data Protection lens** and were
+  materialised as TLS endpoints instead.
+
+- **UDP-based OT probing never ran in-cluster.** BACnet listens only on UDP, but
+  probes were dispatched only for ports an open-TCP scan reported, so a BACnet
+  discovery returned zero findings and zero errors, reported success, and
+  recorded that the protocol had been probed. An operator would conclude the
+  segment had no BACnet devices. EtherNet/IP had the same defect. An unanswered
+  probe is now recorded as inconclusive rather than as an absence.
+
+- **The chart's opt-in egress policy blocked the traffic it exists for.** It
+  excluded all private address space — precisely the customer networks device
+  interrogation and sensor probing need — and permitted only five TCP ports, so
+  SSH probing, non-standard TLS ports and all UDP probing were blocked even to
+  public targets. It also omitted the services that send mail, so enabling it
+  broke password reset and invitations. The cluster's own ranges are now
+  configurable and excluded, and the policy remains off by default.
+
+- **Object storage for CBOM artifacts could never activate**, so every artifact
+  fell back to inline database storage, and the "Test connection" button
+  reported success without testing anything.
+
+- **Service-to-service health polling failed silently under mesh mTLS**, which
+  is what caused tenant health to be computed from constants.
+
+- **A discovery finding without a raw-payload size aborted its entire batch.**
+
 ## [0.10.2] - 2026-08-18
 
 ### Fixed

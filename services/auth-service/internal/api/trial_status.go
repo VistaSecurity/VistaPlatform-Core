@@ -40,16 +40,10 @@ type trialStatusResponse struct {
 	TrialDaysSoft *int `json:"trial_days_soft,omitempty"`
 }
 
-// trialStatusRow holds the raw nullable columns read for a tenant's trial
-// state, before they are interpreted into a phase.
-type trialStatusRow struct {
-	isTrial       sql.NullBool
-	trialDaysFull sql.NullInt64
-	trialDaysSoft sql.NullInt64
-	trialStart    sql.NullTime
-	trialEnd      sql.NullTime
-	converted     sql.NullBool
-}
+// trialStatusRow is the raw nullable columns read for a tenant's trial state.
+// It is trials.Row — the SAME shape the trial-lock middleware reads — so the
+// two halves of the trial system cannot drift apart again.
+type trialStatusRow = trials.Row
 
 // trialStatusStore is the narrow read interface the trial-status handler
 // depends on. The concrete repository runs the join; the contract test drives a
@@ -67,25 +61,16 @@ func (r *trialStatusRepository) GetTrialStatusRow(tenantID uuid.UUID) (trialStat
 	// Single statement joins tenants → subscription_tiers → optional
 	// billing_trial_tracking. LEFT JOIN on trial tracking so paid
 	// tenants (no row) still produce a result we can interpret as
-	// "no trial."
+	// "no trial." The SQL lives in shared/trials so the trial-lock middleware
+	// reads exactly the same columns.
 	//
 	// RLS-scoped: the LEFT JOIN pulls billing_trial_tracking (tenant_isolation
 	// policy); without app.tenant_id that row would drop once RLS enforces. The
 	// lead tenants/subscription_tiers tables are global. Tenant is known.
 	err := shareddatabase.WithTenantTx(context.Background(), r.db, tenantID, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(context.Background(), `
-			SELECT
-			    st.is_trial,
-			    st.trial_days_full,
-			    st.trial_days_soft,
-			    btt.trial_start,
-			    btt.trial_end,
-			    btt.converted_to_paid
-			FROM tenants t
-			LEFT JOIN subscription_tiers st ON st.id = t.subscription_tier_id
-			LEFT JOIN billing_trial_tracking btt ON btt.tenant_id = t.id
-			WHERE t.id = $1
-		`, tenantID).Scan(&row.isTrial, &row.trialDaysFull, &row.trialDaysSoft, &row.trialStart, &row.trialEnd, &row.converted)
+		var scanErr error
+		row, scanErr = trials.ScanRow(tx.QueryRowContext(context.Background(), trials.RowSelectSQL, tenantID))
+		return scanErr
 	})
 	return row, err
 }
@@ -135,57 +120,29 @@ func resolveTrialStatusFromStore(store trialStatusStore, tenantID uuid.UUID, now
 		log.Printf("getTenantTrialStatusHandler: tenant %s lookup failed: %v", tenantID, err)
 		return trialStatusResponse{Phase: trials.PhaseNone}
 	}
-	isTrial := row.isTrial
-	trialDaysFull := row.trialDaysFull
-	trialDaysSoft := row.trialDaysSoft
-	trialStart := row.trialStart
-	trialEnd := row.trialEnd
-	converted := row.converted
 
-	inputs := trials.Inputs{Now: now}
-	if trialStart.Valid {
-		inputs.TrialStart = trialStart.Time
-	}
-	if trialEnd.Valid {
-		te := trialEnd.Time
-		inputs.TrialEnd = &te
-	}
-	if converted.Valid {
-		inputs.ConvertedToPaid = converted.Bool
-	}
-	if trialDaysFull.Valid {
-		v := int(trialDaysFull.Int64)
-		inputs.TrialDaysFull = &v
-	}
-	if trialDaysSoft.Valid {
-		v := int(trialDaysSoft.Int64)
-		inputs.TrialDaysSoft = &v
-	}
+	// Onboarding (no tier), paid tiers, and any tier with is_trial = false are
+	// resolved to PhaseNone inside ResolvePhase — even when an obsolete
+	// billing_trial_tracking row survives a tier migration. The trial-lock
+	// middleware calls the same function, so it can no longer 423 a tenant this
+	// endpoint reports as "none".
+	phase, inputs := trials.ResolvePhase(row, now)
 
 	resp := trialStatusResponse{
-		Phase:         trials.Compute(inputs),
-		DaysRemaining: trials.DaysRemaining(inputs),
+		Phase:         phase,
 		TrialDaysFull: inputs.TrialDaysFull,
 		TrialDaysSoft: inputs.TrialDaysSoft,
 	}
-	if trialStart.Valid {
-		t := trialStart.Time
+	if phase != trials.PhaseNone {
+		resp.DaysRemaining = trials.DaysRemaining(inputs)
+	}
+	if row.TrialStart.Valid {
+		t := row.TrialStart.Time
 		resp.TrialStart = &t
 	}
-	if trialEnd.Valid {
-		t := trialEnd.Time
+	if row.TrialEnd.Valid {
+		t := row.TrialEnd.Time
 		resp.TrialEnd = &t
 	}
-
-	// Onboarding (no tier), paid tiers, and any tier with is_trial = false must
-	// not be trial-gated — even when an obsolete billing_trial_tracking row
-	// survives a tier migration.
-	onTrialTier := isTrial.Valid && isTrial.Bool
-	if !onTrialTier {
-		resp.Phase = trials.PhaseNone
-		resp.DaysRemaining = 0
-		return resp
-	}
-
 	return resp
 }

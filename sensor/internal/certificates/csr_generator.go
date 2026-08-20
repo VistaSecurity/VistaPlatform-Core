@@ -41,7 +41,7 @@ func (g *CSRGenerator) GenerateCSR(sensorID uuid.UUID, privateKey *rsa.PrivateKe
 	// Create CSR template
 	csrTemplate := x509.CertificateRequest{
 		Subject: pkix.Name{
-			Organization: []string{"VistaPlatform Sensor"},
+			Organization: []string{"Vista Platform Sensor"},
 			Country:      []string{"US"},
 			CommonName:   sensorID.String(), // Use sensor ID as CN
 		},

@@ -14,10 +14,6 @@ import (
 // silently strip enrichment from device-interrogated assets.
 func TestBuildSensorDiscoveryMetadata_KeyContract(t *testing.T) {
 	deviceID := uuid.New()
-	job := &models.DeviceJob{
-		TenantID: uuid.New(),
-		DeviceID: &deviceID,
-	}
 	asset := models.DiscoveredAsset{
 		Hostname:        "vip.example.com",
 		ProtocolVersion: "TLS 1.2",
@@ -31,7 +27,7 @@ func TestBuildSensorDiscoveryMetadata_KeyContract(t *testing.T) {
 		},
 	}
 
-	meta := buildSensorDiscoveryMetadata(job, asset)
+	meta := buildSensorDiscoveryMetadata(&deviceID, asset)
 
 	if got := meta["discovery_method"]; got != "device_interrogation" {
 		t.Errorf("discovery_method = %v, want device_interrogation", got)

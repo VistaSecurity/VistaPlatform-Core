@@ -1,5 +1,6 @@
-// Package handlers provides HTTP handlers for security and compliance endpoints.
-// These handlers serve security events, compliance status, and incident management.
+// Package handlers provides HTTP handlers for the platform-admin security
+// endpoints: the security-relevant view of the activity trail and its
+// dashboard aggregates.
 package handlers
 
 import (
@@ -21,14 +22,12 @@ func InitializeSecurityService(db, bypassDB *sql.DB) {
 	SecurityService = security.NewService(db, bypassDB)
 }
 
-// securityProvider is the dependency of the security/compliance read handlers
-// (admin-ui Security page). *security.Service satisfies it; the interface lets
-// the handlers be contract-tested with an in-memory stub and no DB.
+// securityProvider is the dependency of the security read handlers (admin-ui
+// Security ▸ Dashboard). *security.Service satisfies it; the interface lets the
+// handlers be contract-tested with an in-memory stub and no DB.
 type securityProvider interface {
 	GetSecurityEvents(filters map[string]interface{}, limit, offset int) ([]security.SecurityEvent, int, error)
 	GetSecurityDashboardStats(timeRange string) (map[string]interface{}, error)
-	GetComplianceFrameworkStatus(frameworkName string) (*security.ComplianceFrameworkStatus, error)
-	GetAllComplianceFrameworks() ([]security.ComplianceFrameworkStatus, error)
 }
 
 // GetSecurityEvents returns security events with optional filters
@@ -56,24 +55,26 @@ func GetSecurityEvents(svc securityProvider) gin.HandlerFunc {
 			}
 		}
 
-		// Build filters
+		// Build filters. The severity/status/risk_level/is_anomaly filters that
+		// used to live here went with public.security_events — audit.activity_logs
+		// records no such columns, so accepting them would be a query parameter
+		// that silently does nothing.
 		filters := make(map[string]interface{})
 		if eventType := c.Query("event_type"); eventType != "" {
 			filters["event_type"] = eventType
 		}
-		if severity := c.Query("severity"); severity != "" {
-			filters["severity"] = severity
+		if category := c.Query("category"); category != "" {
+			filters["category"] = category
 		}
-		if status := c.Query("status"); status != "" {
-			filters["status"] = status
-		}
-		if isAnomaly := c.Query("is_anomaly"); isAnomaly != "" {
-			if parsed, err := strconv.ParseBool(isAnomaly); err == nil {
-				filters["is_anomaly"] = parsed
+		if success := c.Query("success"); success != "" {
+			if parsed, err := strconv.ParseBool(success); err == nil {
+				filters["success"] = parsed
 			}
 		}
-		if riskLevel := c.Query("risk_level"); riskLevel != "" {
-			filters["risk_level"] = riskLevel
+		if requiresAttention := c.Query("requires_attention"); requiresAttention != "" {
+			if parsed, err := strconv.ParseBool(requiresAttention); err == nil {
+				filters["requires_attention"] = parsed
+			}
 		}
 		if tenantID := c.Query("tenant_id"); tenantID != "" {
 			filters["tenant_id"] = tenantID
@@ -137,76 +138,6 @@ func GetSecurityDashboardStats(svc securityProvider) gin.HandlerFunc {
 			"meta": gin.H{
 				"time_range": timeRange,
 				"timestamp":  time.Now(),
-			},
-		})
-	}
-}
-
-// GetComplianceFrameworkStatus returns compliance framework status
-// GET /api/v1/admin-service/security/compliance/:framework
-func GetComplianceFrameworkStatus(svc securityProvider) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if svc == nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{
-				"error": "Security service not initialized",
-			})
-			return
-		}
-
-		frameworkName := c.Param("framework")
-		if frameworkName == "" {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "Framework name is required",
-			})
-			return
-		}
-
-		// Get compliance framework status
-		status, err := svc.GetComplianceFrameworkStatus(frameworkName)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to get compliance framework status",
-			})
-			return
-		}
-
-		if status == nil {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": "Compliance framework not found",
-			})
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"data": status,
-		})
-	}
-}
-
-// GetAllComplianceFrameworks returns all compliance framework statuses
-// GET /api/v1/admin-service/security/compliance
-func GetAllComplianceFrameworks(svc securityProvider) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if svc == nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{
-				"error": "Security service not initialized",
-			})
-			return
-		}
-
-		// Get all compliance frameworks
-		frameworks, err := svc.GetAllComplianceFrameworks()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to get compliance frameworks",
-			})
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"data": frameworks,
-			"meta": gin.H{
-				"count": len(frameworks),
 			},
 		})
 	}

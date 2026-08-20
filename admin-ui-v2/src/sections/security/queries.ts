@@ -6,17 +6,23 @@ import type { adminServiceComponents, authServiceComponents } from '@vistasecuri
 import { clients } from '../../lib/clients';
 
 export type SecurityEvent = adminServiceComponents['schemas']['SecurityEvent'];
-export type ComplianceFrameworkStatus = adminServiceComponents['schemas']['ComplianceFrameworkStatus'];
 export type PlatformSettings = adminServiceComponents['schemas']['PlatformSettings'];
 export type ImpersonationEvent = authServiceComponents['schemas']['ImpersonationEvent'];
 
-/** Free-form dashboard-stats blob (admin-service returns `data` as a metrics object). */
+/**
+ * Free-form dashboard-stats blob (admin-service returns `data` as a metrics
+ * object). These keys are what audit.activity_logs can answer honestly. The
+ * previous shape (events_by_severity / events_by_status / anomalies_detected /
+ * high_risk_events) came from public.security_events, a table nothing ever
+ * wrote to — every one of those numbers was a confident zero.
+ */
 export interface SecurityDashboardStats {
   total_events?: number;
-  events_by_severity?: Record<string, number>;
-  events_by_status?: Record<string, number>;
-  anomalies_detected?: number;
-  high_risk_events?: number;
+  failed_events?: number;
+  requires_attention?: number;
+  failed_logins?: number;
+  events_by_category?: Record<string, number>;
+  events_by_outcome?: Record<string, number>;
   [k: string]: unknown;
 }
 
@@ -50,19 +56,6 @@ export function useSecurityEvents(limit = 25) {
       return data.data ?? [];
     },
     staleTime: 30 * 1000,
-    retry: 0,
-  });
-}
-
-export function useComplianceFrameworks() {
-  return useQuery({
-    queryKey: ['platform', 'security', 'compliance'],
-    queryFn: async (): Promise<ComplianceFrameworkStatus[]> => {
-      const { data, error } = await clients.admin.GET('/admin/security/compliance', {});
-      if (error || !data) throw new Error('Failed to load compliance frameworks');
-      return data.data ?? [];
-    },
-    staleTime: 5 * 60 * 1000,
     retry: 0,
   });
 }

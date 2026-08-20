@@ -68,7 +68,7 @@ func main() {
 
 	// Show version and exit
 	if *version {
-		fmt.Printf("VistaPlatform Device Agent v%s\n", Version)
+		fmt.Printf("Vista Platform Device Agent v%s\n", Version)
 		fmt.Printf("Platform: %s/%s\n", runtime.GOOS, runtime.GOARCH)
 		fmt.Printf("Go version: %s\n", runtime.Version())
 		os.Exit(0)
@@ -81,7 +81,7 @@ func main() {
 		log.SetFlags(log.LstdFlags)
 	}
 
-	log.Printf("🚀 Starting VistaPlatform Device Agent v%s", Version)
+	log.Printf("🚀 Starting Vista Platform Device Agent v%s", Version)
 	log.Printf("Platform: %s/%s", runtime.GOOS, runtime.GOARCH)
 
 	// Resolve the configuration file up front: an existing configuration is
@@ -522,7 +522,7 @@ func saveConfigFile(configPath string, cfg *config.Config) error {
 	var configContent strings.Builder
 
 	// Add header
-	configContent.WriteString("# VistaPlatform Device Agent Configuration\n")
+	configContent.WriteString("# Vista Platform Device Agent Configuration\n")
 	configContent.WriteString(fmt.Sprintf("# Generated after registration\n\n"))
 
 	// Write config with proper quoting for Windows paths
@@ -652,7 +652,7 @@ func testPlatformConnectivity(rawURL string) connectivityResult {
 func runInteractiveSetup(caFingerprint string) (*config.Config, string, *api.OutboundClient, error) {
 	reader := bufio.NewReader(os.Stdin)
 
-	fmt.Println("🔧 VistaPlatform Device Agent - Interactive Configuration")
+	fmt.Println("🔧 Vista Platform Device Agent - Interactive Configuration")
 	fmt.Println("===========================================================")
 	fmt.Println()
 

@@ -29,6 +29,15 @@ export interface SettingsNavItem {
   feature?: FeatureName;
   /** Upgrade-card copy shown when `feature` is off. Required alongside it. */
   lock?: { title: string; message: string };
+  /**
+   * Interim, edition-INDEPENDENT kill-switch: the page still mounts (entitled
+   * tenants keep read access to whatever they already have), but the page is
+   * expected to hide every create/edit/delete affordance and show this notice
+   * instead — a known-broken capability, not an entitlement gate. Distinct
+   * from `lock`, which replaces the whole page body when the tenant simply
+   * isn't entitled. Unlike `lock`, nothing here is edition-conditional.
+   */
+  authoringDisabled?: { title: string; message: string };
 }
 export interface SettingsNavSection {
   section: string;
@@ -95,6 +104,20 @@ export const SETTINGS_NAV: SettingsNavSection[] = [
       lock: {
         title: 'An Enterprise feature',
         message: 'Custom policies let you author your own compliance frameworks — controls and measurement rules evaluated against your inventory, alongside the platform frameworks. Upgrade to Enterprise to enable them.',
+      },
+      // Interim mitigation for audit finding B-05, NOT the fix:
+      // custom policies (`tenant_frameworks`) are never evaluated today — no
+      // finding, no score, for any tenant, regardless of this entitlement.
+      // compliance-engine's reconcile engine hardcodes "platform" at every
+      // call site and has no "tenant" path, and tenant_framework_scores has
+      // no row shape a custom-policy score could occupy. Rather than let a
+      // tenant believe a policy they wrote is doing something, authoring is
+      // disabled here until the real fix lands. Existing policies are NOT
+      // deleted or hidden — see pages-custom-policies.tsx for what stays
+      // visible. Tracking:
+      authoringDisabled: {
+        title: 'Authoring is temporarily disabled',
+        message: 'Custom policies are not evaluated yet — they produce no finding and no score for any tenant. Authoring (new policies, controls, and measurement rules) is disabled until that is fixed. Anything you already authored stays here and has not been deleted. Tracking: issue #1439.',
       },
     },
     { key: 'ratings', label: 'Severity Ratings', icon: 'gauge', job: 'The source-of-truth registry that rates every cryptographic value consistently over time.' },

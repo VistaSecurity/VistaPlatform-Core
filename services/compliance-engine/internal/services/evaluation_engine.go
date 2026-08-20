@@ -13,6 +13,21 @@ package services
 // activated-only write gate; drill-down is gated at the read layer) and write a
 // per-(tenant, framework) score rollup, so unactivated frameworks show an instant
 // preview score. Measurement extraction is shared (extract-once / fold-all).
+//
+// KNOWN GAP (audit finding B-05,: despite its name,
+// EvaluateTenantFrameworks never touches tenant-authored frameworks
+// (`tenant_frameworks`, i.e. Custom Policies) — every call below to
+// getControlsForFramework / EvaluateControlsBatch(ForAsset) passes the
+// literal "platform", and this file has no "tenant" call path at all. It
+// only walks `platform_frameworks WHERE status = 'published'`. Custom
+// policies are therefore never scored and never produce a finding, for any
+// tenant. Compounding it, tenant_framework_scores' primary key is
+// (tenant_id, platform_framework_id) — there is no row shape a
+// custom-policy score could occupy without a schema change.
+// The frontend-v2 authoring UI is gated off pending the real fix (do not
+// re-enable it without this file changing too). for the full
+// evidence and what the real fix needs — it is a spec-first change, not a
+// literal swap.
 
 import (
 	"context"
@@ -137,6 +152,10 @@ func (s *FindingsService) EvaluateTenantFrameworks(ctx context.Context, tenantID
 	// the persisted finding.
 
 	// Load controls per framework + a flat list for one shared-extraction batch.
+	// NOTE: `published` above is queried from platform_frameworks only, and every
+	// "platform" literal in this file (here and below) is why — see the file
+	// header (B-05 /). Custom Policies (tenant_frameworks) are not in
+	// `published` and are never enumerated here.
 	controlsByFramework := make(map[uuid.UUID][]models.Control, len(published))
 	var allControls []models.Control
 	for _, fw := range published {
@@ -469,7 +488,11 @@ func (s *FindingsService) recomputeFrameworkScore(ctx context.Context, tenantID,
 	for i, c := range controls {
 		controlIDs[i] = c.ID
 	}
-	assessments, err := loadControlAssessments(ctx, s.db.DB, tenantID, controlIDs, "platform")
+	// evaluatedAt = now: this fold runs immediately after the reconcile evaluated
+	// these controls, and the rollup timestamp it is about to write does not exist
+	// yet. Passing it stops a control the reconcile just checked from being scored
+	// as "not evaluated since it changed" for one extra pass.
+	assessments, err := loadControlAssessmentsAt(ctx, s.db.DB, tenantID, controlIDs, "platform", time.Now())
 	if err != nil {
 		return err
 	}

@@ -6,6 +6,22 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
+)
+
+// archivedPredicate matches a log row that MarkLogsAsArchived has already
+// stamped; notArchivedPredicate is its exact complement. They are kept together
+// so the "select for archival" exclusion and the "verify before delete" filter
+// can never drift apart — if they disagree, the sweep either re-uploads rows
+// forever or deletes rows it never archived.
+//
+// notArchivedPredicate is IS DISTINCT FROM rather than NOT (… = 'true'):
+// metadata is nullable and the key is absent on every unarchived row, so
+// metadata->>'archived' is NULL there and a plain NOT(...) would evaluate to
+// NULL and filter out precisely the rows that still need archiving.
+const (
+	archivedPredicate    = `metadata->>'archived' = 'true'`
+	notArchivedPredicate = `metadata->>'archived' IS DISTINCT FROM 'true'`
 )
 
 type RetentionService struct {
@@ -129,12 +145,18 @@ func (s *RetentionService) UpdateRetentionPolicy(ctx context.Context, policy *Re
 func (s *RetentionService) GetLogsForArchival(ctx context.Context, policy *RetentionPolicy) ([]uuid.UUID, error) {
 	cutoffDate := time.Now().AddDate(0, 0, -policy.HotStorageDays)
 
+	// The NOT-already-archived predicate is what makes the sweep make progress.
+	// Without it the batch is capped at LIMIT 1000 over the *same* oldest rows
+	// every cycle: ArchiveLogs mints a fresh S3 key each run (generateKey
+	// appends a new uuid), so the identical rows are re-uploaded as a new
+	// object forever and storage grows without bound.
 	query := `
 		SELECT id
 		FROM audit.activity_logs
 		WHERE occurred_at < $1
 		  AND ($2::text IS NULL OR event_type = $2::text)
 		  AND ($3::text IS NULL OR compliance_tags && ARRAY[$3::text])
+		  AND ` + notArchivedPredicate + `
 		LIMIT 1000
 	`
 
@@ -151,9 +173,12 @@ func (s *RetentionService) GetLogsForArchival(ctx context.Context, policy *Reten
 	for rows.Next() {
 		var id uuid.UUID
 		if err := rows.Scan(&id); err != nil {
-			continue
+			return nil, err
 		}
 		logIDs = append(logIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return logIDs, nil
@@ -199,19 +224,24 @@ func (s *RetentionService) MarkLogsAsArchived(ctx context.Context, logIDs []uuid
 		return nil
 	}
 
+	// $1 must be cast: inside jsonb_build_object every argument position is
+	// "any", so Postgres cannot infer a type for a bare parameter and rejects
+	// the statement at Parse time with 42P18. $2 must be pq.Array: lib/pq
+	// cannot bind a raw []uuid.UUID ("unsupported type []uuid.UUID, a slice of
+	// array") and never reaches the server at all.
 	query := `
 		UPDATE audit.activity_logs
 		SET metadata = COALESCE(metadata, '{}')::jsonb || jsonb_build_object(
 			'archived', true,
 			'archived_at', NOW(),
-			's3_key', $1
+			's3_key', $1::text
 		)
-		WHERE id = ANY($2)
+		WHERE id = ANY($2::uuid[])
 	`
 
 	// RLS: cross-tenant — the retention job marks logs archived by id across all
 	// tenants (no single tenant in hand), runs on the bypass role (Phase 4).
-	_, err := s.bypassDB.ExecContext(ctx, query, s3Key, logIDs)
+	_, err := s.bypassDB.ExecContext(ctx, query, s3Key, pq.Array(logIDs))
 	return err
 }
 
@@ -224,25 +254,32 @@ func (s *RetentionService) FilterArchivedLogs(ctx context.Context, logIDs []uuid
 	query := `
 		SELECT id
 		FROM audit.activity_logs
-		WHERE id = ANY($1)
-		  AND metadata->>'archived' = 'true'
+		WHERE id = ANY($1::uuid[])
+		  AND ` + archivedPredicate + `
 	`
 
 	// RLS: cross-tenant — the retention job filters archived logs by id across all
 	// tenants (no single tenant in hand), runs on the bypass role (Phase 4).
-	rows, err := s.bypassDB.QueryContext(ctx, query, logIDs)
+	rows, err := s.bypassDB.QueryContext(ctx, query, pq.Array(logIDs))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
+	// A scan error must NOT be swallowed here: this is the gate that decides
+	// which rows are safe to delete, and dropping an id silently would only
+	// ever under-report — but an unnoticed error is how a broken gate stays
+	// invisible. Fail the sweep instead.
 	var archivedIDs []uuid.UUID
 	for rows.Next() {
 		var id uuid.UUID
 		if err := rows.Scan(&id); err != nil {
-			continue
+			return nil, err
 		}
 		archivedIDs = append(archivedIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return archivedIDs, nil
@@ -254,9 +291,9 @@ func (s *RetentionService) DeleteLogs(ctx context.Context, logIDs []uuid.UUID) e
 		return nil
 	}
 
-	query := `DELETE FROM audit.activity_logs WHERE id = ANY($1)`
+	query := `DELETE FROM audit.activity_logs WHERE id = ANY($1::uuid[])`
 	// RLS: cross-tenant — the retention job deletes expired logs by id across all
 	// tenants (no single tenant in hand), runs on the bypass role (Phase 4).
-	_, err := s.bypassDB.ExecContext(ctx, query, logIDs)
+	_, err := s.bypassDB.ExecContext(ctx, query, pq.Array(logIDs))
 	return err
 }

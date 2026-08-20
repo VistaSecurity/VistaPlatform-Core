@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -295,6 +297,44 @@ func resolveUsageLimits(tierLimitsJSON []byte, maxSensors, maxAssets, maxUsers s
 	return limits
 }
 
+// applyResolvedUsageLimits overlays the ENFORCED numeric caps onto a
+// tier-column-derived UsageLimits.
+//
+// The subscription_tiers.max_sensors / max_assets / max_users columns this
+// endpoint used to report are legacy: shared/services.LimitEnforcementService
+// states plainly that they "are no longer consulted", and the admin plan editor
+// never writes them. So the number the tenant was SHOWN and the number that
+// actually gated them came from different places, and they disagreed — a Pro
+// tenant saw "Discovery sensors 12 / 10" while 25 was enforced, and a tenant on
+// an admin-created plan (NULL max_*) was shown "unlimited" right up to a hard
+// 402. Negotiated per-tenant overrides were invisible here entirely.
+//
+// Best-effort by design: a resolver failure leaves the tier-derived values in
+// place rather than failing the endpoint, exactly as the admin-side equivalent
+// (TierService.applyResolvedLimits) does. -1 remains "unlimited", which
+// is what a nil resolved quantity means.
+func applyResolvedUsageLimits(ctx context.Context, store billingUsageStore, tenantID uuid.UUID, limits *UsageLimits) {
+	resolved, err := store.ResolveNumericLimits(ctx, tenantID)
+	if err != nil {
+		log.Printf("auth-service: usage-limit resolve failed for tenant %s: %v — reporting tier columns", tenantID, err)
+		return
+	}
+	overlay := func(key string, dst *int) {
+		qty, ok := resolved[key]
+		if !ok {
+			return
+		}
+		if qty == nil {
+			*dst = -1 // unlimited
+			return
+		}
+		*dst = *qty
+	}
+	overlay(itemMaxSensors, &limits.SensorsCount)
+	overlay(itemMaxAssets, &limits.AssetsCount)
+	overlay(itemMaxUsers, &limits.UsersCount)
+}
+
 // GetCurrentUsage handles GET /billing/usage/current - Get current usage
 func GetCurrentUsage(db *sql.DB) gin.HandlerFunc {
 	return GetCurrentUsageWithStore(newBillingRepo(db))
@@ -355,6 +395,8 @@ func GetCurrentUsageWithStore(store billingUsageStore) gin.HandlerFunc {
 		}
 
 		limits := resolveUsageLimits(tierLimitsJSON, maxSensors, maxAssets, maxUsers)
+		// Report what is ENFORCED, not what the legacy tier columns say.
+		applyResolvedUsageLimits(c.Request.Context(), store, tenantID, &limits)
 
 		// Calculate percentages
 		percentages := make(map[string]float64)
@@ -464,6 +506,13 @@ func GetUsageHistory(db *sql.DB) gin.HandlerFunc {
 
 // CheckLimits handles POST /billing/check-limits - Check resource limits
 func CheckLimits(db *sql.DB) gin.HandlerFunc {
+	return CheckLimitsWithStore(newBillingRepo(db))
+}
+
+// CheckLimitsWithStore is the store-backed implementation of CheckLimits,
+// mirroring GetCurrentUsageWithStore so tests can pin the same enforced-limit
+// contract without a database.
+func CheckLimitsWithStore(store billingUsageStore) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Get tenant ID from context
 		tenantIDStr := c.GetString("tenantID")
@@ -490,64 +539,22 @@ func CheckLimits(db *sql.DB) gin.HandlerFunc {
 		periodStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
 		periodEnd := periodStart.AddDate(0, 1, 0).Add(-time.Second)
 
-		var usage UsageMetrics
-		// RLS-scoped: tenant_usage, users, sensors, and tenant_resource_usage all
-		// carry tenant_isolation policies (network_assets is global). Tenant is
-		// known, so the usage reads run inside one WithTenantTx.
-		//
-		// users_count is the only real column on tenant_usage (trigger-maintained);
-		// the rest are DEFAULT 0 and never written, so we read them from
-		// their real sources below instead of trusting this row.
-		err = shareddatabase.WithTenantTx(c.Request.Context(), db, tenantID, func(tx *sql.Tx) error {
-			scanErr := tx.QueryRowContext(c.Request.Context(), `
-				SELECT COALESCE(users_count, 0)
-				FROM tenant_usage
-				WHERE tenant_id = $1
-					AND billing_period_start = $2
-					AND billing_period_end = $3
-			`, tenantID, periodStart, periodEnd).Scan(&usage.UsersCount)
-
-			if scanErr == sql.ErrNoRows {
-				// No usage row yet — derive users from a live count too.
-				// Best-effort: leave 0 on error (errcheck: deliberately ignored).
-				_ = tx.QueryRowContext(c.Request.Context(), `SELECT COUNT(*) FROM users WHERE tenant_id = $1 AND deleted_at IS NULL`, tenantID).Scan(&usage.UsersCount)
-			} else if scanErr != nil {
-				return scanErr
-			}
-
-			// Read-consistency: assets/sensors from live COUNT(*), api_calls
-			// from the per-event tenant_resource_usage source. Best-effort live
-			// reads — leave the metric at 0 on error (errcheck: deliberately ignored).
-			// Excludes platform-provided sensors (platform='platform' — see
-			// billing_repository.go's GetRealtimeCounts) and non-monitoring assets,
-			// matching the same definitions GetCurrentUsage uses.
-			_ = tx.QueryRowContext(c.Request.Context(), `SELECT COUNT(*) FROM sensors WHERE tenant_id = $1 AND deleted_at IS NULL AND platform != 'platform'`, tenantID).Scan(&usage.SensorsCount)
-			_ = tx.QueryRowContext(c.Request.Context(), `SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND deleted_at IS NULL AND asset_status = 'monitoring'`, tenantID).Scan(&usage.AssetsCount)
-			_ = tx.QueryRowContext(c.Request.Context(), `
-				SELECT COALESCE(SUM(api_calls), 0)
-				FROM tenant_resource_usage
-				WHERE tenant_id = $1 AND "timestamp" >= $2 AND "timestamp" <= $3
-			`, tenantID, periodStart, periodEnd).Scan(&usage.APIRequests)
-			return nil
-		})
+		usage, usageExists, err := store.GetTenantUsageRecord(c.Request.Context(), tenantID, periodStart, periodEnd)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch usage"})
 			return
 		}
+		liveSensors, liveAssets, liveUsers := store.GetRealtimeCounts(c.Request.Context(), tenantID)
+		usage.SensorsCount = liveSensors
+		usage.AssetsCount = liveAssets
+		if !usageExists {
+			usage.UsersCount = liveUsers
+		}
+		usage.APIRequests = store.GetCurrentMonthAPICalls(c.Request.Context(), tenantID, periodStart, periodEnd)
 		// storage_bytes is metered nowhere yet — leave 0 rather than
 		// fabricate from the unwritten column.
 
-		// Get tier limits.
-		// tenants + subscription_tiers are GLOBAL reference tables (no
-		// tenant_isolation policy); left unwrapped.
-		var tierLimitsJSON []byte
-		var maxSensors, maxAssets, maxUsers sql.NullInt64
-		err = db.QueryRow(`
-			SELECT st.limits, st.max_sensors, st.max_assets, st.max_users
-			FROM tenants t
-			JOIN subscription_tiers st ON t.subscription_tier_id = st.id
-			WHERE t.id = $1
-		`, tenantID).Scan(&tierLimitsJSON, &maxSensors, &maxAssets, &maxUsers)
+		tierLimitsJSON, maxSensors, maxAssets, maxUsers, err := store.GetTenantTierLimits(c.Request.Context(), tenantID)
 
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch tier limits"})
@@ -555,6 +562,10 @@ func CheckLimits(db *sql.DB) gin.HandlerFunc {
 		}
 
 		limits := resolveUsageLimits(tierLimitsJSON, maxSensors, maxAssets, maxUsers)
+		// Same overlay as GetCurrentUsage: this endpoint answers "am I near my
+		// limit?", so it has to be measuring against the limit that is actually
+		// enforced.
+		applyResolvedUsageLimits(c.Request.Context(), store, tenantID, &limits)
 
 		// Build checks map
 		checks := make(map[string]LimitCheck)

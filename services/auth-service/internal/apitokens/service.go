@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	// TokenPrefix namespaces VistaPlatform PATs so leaked-credential scanners
+	// TokenPrefix namespaces Vista Platform PATs so leaked-credential scanners
 	// and humans can recognize them on sight.
 	TokenPrefix = "qvpat_"
 

@@ -75,6 +75,10 @@ func (s *KMSDiscoveryService) DiscoverAWSKMSKeys(
 	if existingClient != nil {
 		client = existingClient
 	} else {
+		if _, err := authorizeCloudIntegration(ctx, s.bypassDB, tenantID, integrationID, "aws"); err != nil {
+			return nil, fmt.Errorf("AWS integration not authorized: %w", err)
+		}
+
 		client, err = awsclient.NewClient(ctx, s.bypassDB, integrationID, s.masterKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create AWS client: %w", err)

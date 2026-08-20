@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   configStrength, ipInCidr, ipv4ToInt, keyAlgorithmLabel, segmentForAsset,
   stripEmptyParens, stripInetMask,
-  assetIdentity, assetLocation, assetService, assetRisk, protocolBadges,
+  assetIdentity, assetLocation, assetService, serviceConfidence, assetRisk, protocolBadges,
   configCount, certCount, assetStatusBadge, relativeTime,
   type InfraRowAsset,
 } from './lens-helpers';
@@ -193,6 +193,45 @@ describe('assetService', () => {
 
   it('returns nulls for an unidentified service', () => {
     expect(assetService(BARE)).toEqual({ name: null, version: null });
+  });
+});
+
+// The backend has always sent confidence + method; the drawer showed neither,
+// so a name guessed from a port number looked exactly as solid as one read out
+// of a banner. These pin that the two now READ differently.
+describe('serviceConfidence', () => {
+  it('labels a port-heuristic name as a guess', () => {
+    const { qualifier, title } = serviceConfidence({
+      service_confidence: 'low', service_identification_method: 'port_heuristic',
+    });
+    expect(qualifier).toBe('Best guess · from port');
+    expect(title).toMatch(/port number alone/i);
+  });
+
+  it('labels a banner match more strongly than a port guess', () => {
+    expect(serviceConfidence({
+      service_confidence: 'high', service_identification_method: 'banner',
+    }).qualifier).toBe('Confirmed · from banner');
+    expect(serviceConfidence({
+      service_confidence: 'medium', service_identification_method: 'ja3s',
+    }).qualifier).toBe('Likely · from TLS fingerprint');
+  });
+
+  it('says a manual name was entered, not discovered', () => {
+    expect(serviceConfidence({
+      service_confidence: 'high', service_identification_method: 'manual',
+    }).qualifier).toBe('Set manually');
+  });
+
+  it('claims nothing when the backend sent no method', () => {
+    expect(serviceConfidence({})).toEqual({ qualifier: null, title: null });
+    expect(serviceConfidence({ service_confidence: 'low' })).toEqual({ qualifier: null, title: null });
+  });
+
+  it('is case-insensitive about what the backend sends', () => {
+    expect(serviceConfidence({
+      service_confidence: 'LOW', service_identification_method: 'Port_Heuristic',
+    }).qualifier).toBe('Best guess · from port');
   });
 });
 

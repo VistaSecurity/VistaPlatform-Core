@@ -107,12 +107,12 @@ func (s *OperationalService) GetEnvironmentAssets(tenantID, locationID uuid.UUID
 			a.location_id, a.network_segment_id, ns.name AS network_segment_name,
 			a.service_name, a.service_version,
 			a.service_confidence, a.service_identification_method,
-			a.risk_score, a.risk_level
+			a.risk_score, ` + models.RiskLevelCaseSQL("COALESCE(a.risk_score, 0)") + ` AS risk_level
 		FROM network_assets a
 		LEFT JOIN network_segments ns ON ns.id = a.network_segment_id
 		WHERE a.tenant_id = $1 AND a.location_id = $2 AND a.deleted_at IS NULL
 		  AND (a.environment::text = $3 OR ($3 = 'unknown' AND a.environment IS NULL))
-		ORDER BY a.risk_level DESC NULLS LAST, a.last_seen_at DESC
+		ORDER BY a.risk_score DESC NULLS LAST, a.last_seen_at DESC
 		LIMIT $4 OFFSET $5
 	`
 

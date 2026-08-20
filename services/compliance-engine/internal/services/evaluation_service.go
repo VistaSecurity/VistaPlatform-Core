@@ -116,7 +116,13 @@ type ControlDetailsControl struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
 	Status string `json:"status"`
-	Score  *int   `json:"score,omitempty"`
+	// Score is nil — rendering "—" — when Status is NOT_ASSESSED. A sentinel
+	// integer would be read as a posture claim about a check that never ran.
+	Score *int `json:"score,omitempty"`
+	// NotAssessedReason is machine-readable and empty unless Status is
+	// NOT_ASSESSED; one of no_measurements / nothing_in_scope / not_evaluated /
+	// check_error.
+	NotAssessedReason string `json:"not_assessed_reason,omitempty"`
 }
 
 // EvidenceSummary represents evidence summary
@@ -1437,8 +1443,11 @@ func (s *EvaluationService) GetControlDetails(tenantID, controlID uuid.UUID, sce
 		WHERE c.id = $1
 	`, controlID)
 
+	frameworkType := "platform"
+
 	// If not found in platform_framework_controls, try tenant_framework_controls
 	if err != nil {
+		frameworkType = "tenant"
 		err = s.db.Get(&control, `
 			SELECT c.id, c.framework_id, COALESCE(c.family_id, '00000000-0000-0000-0000-000000000000'::uuid) as family_id,
 			       c.control_id, c.title, c.description,
@@ -1458,8 +1467,27 @@ func (s *EvaluationService) GetControlDetails(tenantID, controlID uuid.UUID, sce
 		return nil, fmt.Errorf("failed to get findings: %w", err)
 	}
 
-	// Calculate baseline status
-	baselineStatus, baselineSeverity := s.calculateControlStatus(allFindings)
+	// Calculate baseline status.
+	//
+	// This endpoint was missed by the honesty pass and kept its own
+	// arithmetic, which disagreed with every other endpoint on the same control:
+	// status came from calculateControlStatus ALONE, which returns PASS for zero
+	// findings whether or not anything was ever checked. Route it through the same
+	// loadControlAssessments + controlStatusFromAssessment pair the summary,
+	// posture and rollup paths use, so a control with no measurements — or one no
+	// evaluation has reached — reports NOT_ASSESSED here too instead of a clean
+	// pass.
+	//
+	// One gap is deliberately left as it is, because it is shared with those other
+	// paths rather than specific to this endpoint: when a violated control's
+	// findings are all hidden by the licence filter in getVisibleFindingsForControl,
+	// controlStatusFromAssessment still reports PASS. Changing that is a change to
+	// every caller's status, not a fix to this one.
+	assessments, err := loadControlAssessments(context.Background(), s.db.DB, tenantID, []uuid.UUID{controlID}, frameworkType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load control assessment: %w", err)
+	}
+	baselineStatus, baselineSeverity, notAssessedReason := s.controlStatusFromAssessment(allFindings, assessments[controlID])
 
 	// Get overrides
 	overrides, err := s.getOverrides(tenantID, scenarioID)
@@ -1470,13 +1498,18 @@ func (s *EvaluationService) GetControlDetails(tenantID, controlID uuid.UUID, sce
 	// Apply overrides
 	effectiveStatus, _, hasOverride := s.applyOverrides(controlID, baselineStatus, baselineSeverity, overrides)
 
-	// Count failing findings and affected assets
-	failingFindingsCount := 0
+	// Count failing findings and affected assets.
+	//
+	// EVERY row in allFindings is an ACTIVE, non-SUPPRESSED violation of this
+	// control — getVisibleFindingsForControl filters on exactly that — so all of
+	// them are failing findings. The old count excluded severity "Low", which is
+	// the same severity-decides-the-result mistake removed everywhere else
+	// (framework_score.go: severity is the WEIGHT, never the pass/fail input). It
+	// produced the flat contradiction of `failing_findings_count: 0, score: 100`
+	// sitting next to `status: FAIL` and a full array of findings.
+	failingFindingsCount := len(allFindings)
 	affectedAssetSet := make(map[uuid.UUID]bool)
 	for _, finding := range allFindings {
-		if finding.Severity == "Critical" || finding.Severity == "High" || finding.Severity == "Med" {
-			failingFindingsCount++
-		}
 		affectedAssetSet[finding.AssetID] = true
 	}
 
@@ -1599,19 +1632,31 @@ func (s *EvaluationService) GetControlDetails(tenantID, controlID uuid.UUID, sce
 		}
 	}
 
-	// Calculate score (percentage of passing findings)
-	score := 100
-	if len(allFindings) > 0 {
-		passingCount := len(allFindings) - failingFindingsCount
-		score = (passingCount * 100) / len(allFindings)
+	// Score follows the status, because a control is not a percentage.
+	//
+	// XCCDF strict scoring (the model ADR-0014's amendment adopts): "a rule
+	// contributes to the positive score only if all instances of that rule have a
+	// test result of pass" — any violating instance fails the whole control, with
+	// no partial credit. So a control is 100 (pass) or 0 (fail), and NOT_ASSESSED
+	// has no score at all: nil, rendered "—", never 0 (reads as "everything
+	// failed") and never 100 (reads as "everything passed").
+	var score *int
+	switch effectiveStatus {
+	case statusPass:
+		full := 100
+		score = &full
+	case statusFail:
+		zero := 0
+		score = &zero
 	}
 
 	return &ControlDetailsResponse{
 		Control: ControlDetailsControl{
-			ID:     control.ID.String(),
-			Name:   control.Title,
-			Status: effectiveStatus,
-			Score:  &score,
+			ID:                control.ID.String(),
+			Name:              control.Title,
+			Status:            effectiveStatus,
+			Score:             score,
+			NotAssessedReason: notAssessedReason,
 		},
 		Rationale: rationale,
 		EvidenceSummary: EvidenceSummary{

@@ -374,7 +374,12 @@ services:
     route_prefix: /cbom-service
     gateway_timeout: 60s
     status: active
-    required_secrets: [INTERNAL_AUTH_SECRET, JWT_SECRET]
+    # ENCRYPTION_MASTER_KEY: cbom-service builds the shared/storage S3 service so
+    # generated CBOM artifacts can be written to an operator-configured bucket
+    # instead of inline JSONB. That path decrypts the AWS integration's stored
+    # credentials, so without the master key initCBOMArtifactStorage returns nil
+    # and every artifact silently falls back to inline Postgres storage.
+    required_secrets: [INTERNAL_AUTH_SECRET, ENCRYPTION_MASTER_KEY, JWT_SECRET]
     docker:
       type: go-service
       dependencies: [postgres, nats]

@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
+	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
 	"github.com/vistasecurity/vistaplatform/shared/storage"
 )
 
@@ -54,7 +56,16 @@ type storageStore interface {
 	ListAWSIntegrations(ctx context.Context) ([]IntegrationSummary, error)
 	IntegrationExists(ctx context.Context, integrationID uuid.UUID) (bool, error)
 	GetIntegrationStatus(ctx context.Context, integrationID uuid.UUID) (string, error)
+	// ResolveAWSCredentials decrypts the integration's stored AWS credentials.
+	// TestStorageConnection calls it so the button exercises the same credential
+	// path an upload would, rather than reporting success off a status column.
+	ResolveAWSCredentials(ctx context.Context, integrationID uuid.UUID) (*storage.AWSCredentials, error)
 }
+
+// probeBucket is the S3 reachability check TestStorageConnection performs after
+// resolving credentials. It is a package variable so the contract tests can
+// substitute a stub — the real implementation talks to AWS.
+var probeBucket = storage.ProbeBucket
 
 // storageRepository runs the platform storage-config queries. The
 // platform_settings reads/writes stay on db; the platform_integrations lookups
@@ -66,6 +77,22 @@ type storageRepository struct {
 
 func newStorageStore(db, bypassDB *sql.DB) storageStore {
 	return &storageRepository{db: db, bypassDB: bypassDB}
+}
+
+// ResolveAWSCredentials decrypts the AWS credentials stored on the integration.
+//
+// RLS: cross-tenant — same rationale as the other platform_integrations reads
+// on this repo; the shared provider is handed bypassDB.
+func (r *storageRepository) ResolveAWSCredentials(ctx context.Context, integrationID uuid.UUID) (*storage.AWSCredentials, error) {
+	masterKey := os.Getenv("ENCRYPTION_MASTER_KEY")
+	if masterKey == "" {
+		return nil, errors.New("ENCRYPTION_MASTER_KEY is not set; cannot decrypt integration credentials")
+	}
+	encSvc, err := encryption.NewService(masterKey)
+	if err != nil {
+		return nil, err
+	}
+	return storage.NewDatabaseIntegrationProvider(r.bypassDB, encSvc).GetAWSCredentials(ctx, integrationID)
 }
 
 func (r *storageRepository) GetArtifactStorageConfigRaw(ctx context.Context) ([]byte, error) {
@@ -368,9 +395,45 @@ func testStorageConnectionWithStore(store storageStore) gin.HandlerFunc {
 			return
 		}
 
+		// Resolve the integration's credentials and actually reach the bucket.
+		//
+		// Everything above this point only reads rows we wrote ourselves, so the
+		// endpoint could not fail for any of the reasons an operator presses the
+		// button: wrong keys, revoked keys, wrong region, missing bucket, no
+		// s3:ListBucket permission, no network path. It answered "Storage
+		// configuration appears valid" in every one of those cases.
+		creds, err := store.ResolveAWSCredentials(c.Request.Context(), *integrationID)
+		if err != nil {
+			storageConfigLogger.WithError(err).WithField("integration_id", integrationID.String()).
+				Warn("Storage test: failed to resolve AWS credentials")
+			c.JSON(http.StatusOK, gin.H{
+				"success":            false,
+				"message":            "Could not decrypt the AWS credentials stored on this integration",
+				"artifact_type":      req.ArtifactType,
+				"bucket":             bucket,
+				"integration_status": status,
+			})
+			return
+		}
+
+		if err := probeBucket(c.Request.Context(), creds, bucket); err != nil {
+			storageConfigLogger.WithError(err).WithFields(logrus.Fields{
+				"integration_id": integrationID.String(),
+				"bucket":         bucket,
+			}).Warn("Storage test: S3 bucket probe failed")
+			c.JSON(http.StatusOK, gin.H{
+				"success":            false,
+				"message":            "Could not reach S3 bucket " + bucket + " with the configured credentials",
+				"artifact_type":      req.ArtifactType,
+				"bucket":             bucket,
+				"integration_status": status,
+			})
+			return
+		}
+
 		c.JSON(http.StatusOK, gin.H{
 			"success":            true,
-			"message":            "Storage configuration appears valid",
+			"message":            "Connected to S3 bucket " + bucket,
 			"artifact_type":      req.ArtifactType,
 			"bucket":             bucket,
 			"integration_status": status,

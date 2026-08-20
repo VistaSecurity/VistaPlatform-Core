@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -73,6 +74,28 @@ func otProbeDefaultPort(canonical string) int {
 	return 0
 }
 
+// dispatchableOTProtocols keeps only the OT protocols that will actually be
+// turned into a discovery target — i.e. those with a known standard port. It is
+// the filter that keeps discovery_jobs.ot_probe_protocols ("these probes were
+// dispatched") from asserting something that never happened.
+func dispatchableOTProtocols(canonical []string) []string {
+	if len(canonical) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(canonical))
+	for _, proto := range canonical {
+		if otProbeDefaultPort(proto) == 0 {
+			log.Printf("CreateJob: OT protocol %q has no standard port — not dispatched, not recorded as probed", proto)
+			continue
+		}
+		out = append(out, proto)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func valueOrEmpty(s *string) string {
 	if s == nil {
 		return ""
@@ -116,8 +139,39 @@ func NewDiscoveryService(db, bypassDB *sqlx.DB) *DiscoveryService {
 	return &DiscoveryService{db: db, bypassDB: bypassDB}
 }
 
+// ErrSensorDispatchUnsupported is returned when a caller asks for a discovery
+// job to be executed by a tenant-deployed sensor.
+//
+// There is no dispatcher: nothing turns a discovery job into a sensor command,
+// the sensor's command switch has no discovery case, and requested_sensor_ids is
+// written and read back but consumed by nothing. Jobs asking for it used to fall
+// straight through to the in-cluster nmap path — so a tenant who chose "run this
+// from my sensor" and targeted an address only that sensor can reach got a scan
+// launched from the platform cluster that reached nothing, and a job that
+// finished `completed` with zero findings and no hint the sensor was never used.
+//
+// Failing the request is the honest answer until dispatch is actually built:
+// a job must never run somewhere other than where the caller asked.
+var ErrSensorDispatchUnsupported = errors.New(
+	"execution_mode \"sensors\" is not supported: discovery jobs cannot be dispatched to tenant-deployed sensors. " +
+		"Use \"cloud\" (platform sensor) or \"auto\"")
+
+// rejectSensorDispatch guards every discovery-job creation path against the
+// unimplemented tenant-sensor execution mode. preferred_sensor_ids is rejected
+// for the same reason — it only means anything under sensor dispatch, and
+// accepting it silently would be the same lie in a different field.
+func rejectSensorDispatch(executionMode string, preferredSensorIDs []string) error {
+	if strings.EqualFold(strings.TrimSpace(executionMode), "sensors") || len(preferredSensorIDs) > 0 {
+		return ErrSensorDispatchUnsupported
+	}
+	return nil
+}
+
 func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateDiscoveryJobRequest) (*models.DiscoveryJob, error) {
 	// Validate request
+	if err := rejectSensorDispatch(req.ExecutionMode, req.PreferredSensorIDs); err != nil {
+		return nil, err
+	}
 	if len(req.Targets) == 0 {
 		return nil, fmt.Errorf("at least one target is required")
 	}
@@ -146,6 +200,15 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 			otProtocols = nil
 		}
 	}
+	// ot_probe_protocols is an audit column whose documented meaning is "these
+	// probes were dispatched". Keep it honest: drop any protocol we would not
+	// actually create a target row for, so the column can never claim a probe
+	// that never left the cluster. (otProbeDefaultPort covers every allowlisted
+	// protocol today, so this normally filters nothing — it is here so that a
+	// future protocol added to the allowlist without a port cannot silently
+	// re-open the "recorded as probed, never probed" gap B-60 was.)
+	otProtocols = dispatchableOTProtocols(otProtocols)
+
 	itProbing := len(req.Protocols) > 0 && len(req.Ports) > 0
 	if !itProbing && len(otProtocols) == 0 {
 		return nil, fmt.Errorf("at least one protocol/port pair or OT probe is required")

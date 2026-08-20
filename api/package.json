@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "license": "SEE LICENSE IN LICENSE.md",
   "private": true,
-  "description": "Spec-first OpenAPI contract for VistaPlatform and the generated, typed TypeScript client. See docsv4/developer-docs/design/frontend-v2/adr/0001-spec-first-api-contract.md.",
+  "description": "Spec-first OpenAPI contract for Vista Platform and the generated, typed TypeScript client. See docsv4/developer-docs/design/frontend-v2/adr/0001-spec-first-api-contract.md.",
   "type": "module",
   "main": "./clients/typescript/index.ts",
   "types": "./clients/typescript/index.ts",

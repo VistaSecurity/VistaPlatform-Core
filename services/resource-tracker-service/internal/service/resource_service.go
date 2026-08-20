@@ -9,6 +9,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/services/resource-tracker-service/internal/aws"
 	"github.com/vistasecurity/vistaplatform/services/resource-tracker-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/services/resource-tracker-service/internal/repository"
+	"github.com/vistasecurity/vistaplatform/shared/costing"
 )
 
 type ResourceService struct {
@@ -203,29 +204,41 @@ func (s *ResourceService) GenerateCostAnalysis(tenantID uuid.UUID, period string
 	return analysis, nil
 }
 
-// Helper function to calculate cost based on usage
+// calculateCost prices a single sample's per-unit (counter) components.
+//
+// Only counters are priceable here. A sample's api_calls / database_queries /
+// network_bytes are already interval sums, so a per-unit rate applies directly
+// and no window is needed. Storage is a point-in-time gauge rated per
+// GB-month: it has no meaning for one sample and is priced only at read time,
+// over a known window. The superseded version priced the gauge per sample AND
+// applied the per-GB rates to megabyte counts.
+//
+// Read paths do not consume this value — they recompute from the raw columns
+// over the requested window, so a headline and its itemisation always come
+// from a single costing.Compute call and cannot diverge.
 func (s *ResourceService) calculateCost(usage *models.ResourceUsage) float64 {
-	// Simple cost calculation - in production, these would be configurable rates
-	apiCost := float64(usage.APICalls) * 0.0001                       // $0.0001 per API call
-	databaseCost := float64(usage.DatabaseQueries) * 0.00005          // $0.00005 per query
-	storageCost := float64(usage.StorageUsedMB) * 0.023               // $0.023 per GB per month
-	computeCost := usage.CPUUsagePercent * 0.1                        // $0.1 per CPU percent
-	networkCost := float64(usage.NetworkBytes) / (1024 * 1024) * 0.09 // $0.09 per GB
-
-	return apiCost + databaseCost + storageCost + computeCost + networkCost
+	return costing.Compute(costing.Usage{
+		APICalls:        usage.APICalls,
+		DatabaseQueries: usage.DatabaseQueries,
+		NetworkBytes:    usage.NetworkBytes,
+		// StorageBytes and Window are deliberately unset: see above.
+	}, costing.DefaultRates()).TotalUSD
 }
 
-// Helper function to check and create alerts
+// Helper function to check and create alerts.
+//
+// Every threshold reads through a nil check: an unmeasured metric must not
+// raise an alert, and must not be treated as a comfortable zero either.
 func (s *ResourceService) checkAndCreateAlerts(usage *models.ResourceUsage) {
 	// Check for high API usage
-	if usage.APICalls > 10000 {
+	if usage.APICalls != nil && *usage.APICalls > 10000 {
 		alert := &models.ResourceAlert{
 			ID:           uuid.New(),
 			TenantID:     usage.TenantID,
 			AlertType:    "usage",
 			Metric:       "api_calls",
 			Threshold:    10000,
-			CurrentValue: float64(usage.APICalls),
+			CurrentValue: float64(*usage.APICalls),
 			Message:      "High API usage detected",
 			Severity:     "warning",
 			IsActive:     true,
@@ -235,14 +248,14 @@ func (s *ResourceService) checkAndCreateAlerts(usage *models.ResourceUsage) {
 	}
 
 	// Check for high memory usage
-	if usage.MemoryUsageMB > 1000 {
+	if usage.MemoryUsageMB != nil && *usage.MemoryUsageMB > 1000 {
 		alert := &models.ResourceAlert{
 			ID:           uuid.New(),
 			TenantID:     usage.TenantID,
 			AlertType:    "usage",
 			Metric:       "memory_usage",
 			Threshold:    1000,
-			CurrentValue: float64(usage.MemoryUsageMB),
+			CurrentValue: float64(*usage.MemoryUsageMB),
 			Message:      "High memory usage detected",
 			Severity:     "warning",
 			IsActive:     true,
@@ -252,14 +265,14 @@ func (s *ResourceService) checkAndCreateAlerts(usage *models.ResourceUsage) {
 	}
 
 	// Check for high CPU usage
-	if usage.CPUUsagePercent > 80 {
+	if usage.CPUUsagePercent != nil && *usage.CPUUsagePercent > 80 {
 		alert := &models.ResourceAlert{
 			ID:           uuid.New(),
 			TenantID:     usage.TenantID,
 			AlertType:    "performance",
 			Metric:       "cpu_usage",
 			Threshold:    80,
-			CurrentValue: usage.CPUUsagePercent,
+			CurrentValue: *usage.CPUUsagePercent,
 			Message:      "High CPU usage detected",
 			Severity:     "critical",
 			IsActive:     true,

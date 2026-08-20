@@ -1399,10 +1399,173 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/users/{id}/data-export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The user whose data is exported. Must belong to the caller's tenant. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Export everything held about one user (subject access request)
+         * @description Answers a data subject access request for a member of the caller's tenant. Requires `users.manage` — exporting another person's data is an administrative act, not a roster read. The tenant comes from the session and is applied both through row-level security and as an explicit predicate. Generated on demand and never stored: a saved export would be a second copy of exactly the data the request is about. Secret material (password hashes, token values, session state) is never included, and the payload states what it omits.
+         */
+        get: operations["exportUserData"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/users/{id}/erase": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The user to erase. Must belong to the caller's tenant, and may not be the caller. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Erase a user's personal data (right to erasure)
+         * @description Anonymize-in-place, not delete: the user row is referenced by tickets, comments and audit events, so removing it would either cascade into unrelated operational history or leave dangling references. The profile is tombstoned, API tokens and invitations are deleted, and the audit trail keeps its events with the identity removed. Legal acceptance records are RETAINED — they are the evidence the person agreed to the terms. The whole operation runs in one transaction that re-reads its own work and rolls back rather than report an erasure that did not happen. Requires `users.manage`. A caller cannot erase themselves.
+         */
+        post: operations["eraseUserData"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/me/data-export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download everything held about yourself
+         * @description The self-service half. No permission beyond being signed in — anyone may ask what is held about them — and the subject is taken from the session, never from a parameter. Same document as the administrative export.
+         */
+        get: operations["exportMyData"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        DataSubjectExport: {
+            subject: {
+                /** Format: uuid */
+                user_id: string;
+                /** Format: uuid */
+                tenant_id: string;
+            };
+            /** Format: date-time */
+            generated_at: string;
+            profile: {
+                email: string;
+                first_name: string | null;
+                last_name: string | null;
+                is_active: boolean;
+                email_verified: boolean;
+                timezone: string | null;
+                avatar_url: string | null;
+                /** Format: date-time */
+                last_login_at: string | null;
+                login_count: number;
+                /** Format: date-time */
+                created_at: string;
+                /** Format: date-time */
+                updated_at: string;
+            } | null;
+            /** @description Which document version was accepted, when, and from where. Retained through an erasure — this is the evidence of agreement. */
+            legal_acceptances: {
+                doc_type: string;
+                version: number;
+                content_hash: string;
+                /** Format: date-time */
+                accepted_at: string;
+                accepted_ip: string | null;
+                user_agent: string | null;
+            }[];
+            invitations: {
+                email: string;
+                role: string;
+                status: string;
+                /** Format: date-time */
+                created_at: string | null;
+                /** Format: date-time */
+                accepted_at: string | null;
+            }[];
+            /** @description Metadata only. The token value and its hash are never included. */
+            api_tokens: {
+                name: string;
+                token_prefix: string;
+                /** Format: date-time */
+                created_at: string;
+                /** Format: date-time */
+                last_used_at: string | null;
+                /** Format: date-time */
+                expires_at: string | null;
+                /** Format: date-time */
+                revoked_at: string | null;
+            }[];
+            /** @description What this person did, bounded by audit_events_window — the audit trail is the only unbounded category. */
+            audit_events: {
+                /** Format: date-time */
+                occurred_at: string;
+                event_type: string;
+                action: string;
+                resource_type: string | null;
+                success: boolean;
+                ip_address: string | null;
+            }[];
+            audit_events_window: {
+                /** Format: date-time */
+                from: string;
+                /** Format: date-time */
+                to: string;
+            };
+            /** @description What this export deliberately omits, and why. Shipped inside the document — an access request is answered by what you hand over AND by being straight about what you did not. */
+            not_included: string[];
+            schema_version: number;
+            generated_by: string;
+        };
+        DataSubjectErasureResult: {
+            /** Format: uuid */
+            user_id: string;
+            /** @description The RFC 2606 .invalid address that replaced the person's email. Derived from the user id, so re-running an erasure is idempotent. */
+            tombstone_email: string;
+            /** Format: date-time */
+            erased_at: string;
+            profile_anonymized: boolean;
+            /** Format: int64 */
+            api_tokens_deleted: number;
+            /** Format: int64 */
+            invitations_deleted: number;
+            /** Format: int64 */
+            audit_events_pseudonymized: number;
+            /** @description What was kept after the erasure, each with the reason. Retaining data is defensible only if the reason travels with it. */
+            retained: string[];
+            /** @description What this erasure does NOT reach. Stated rather than discovered — an operator who believes erasure was total will tell a data subject something untrue. */
+            limitations: string[];
+        };
         AuthMethodsRequest: {
             /** Format: email */
             email: string;
@@ -2245,7 +2408,7 @@ export interface components {
             /** Format: uuid */
             provider_id: string;
         };
-        /** @description Public platform branding (api.PlatformConfig). Returned bare (not wrapped). `platform_name` is always present (defaults to "VistaPlatform"); the logo/favicon URLs are present only when configured (omitempty pointers). `signup_enabled` mirrors platform_settings.registration_enabled (default true) so the /signup page knows whether to render the form. */
+        /** @description Public platform branding (api.PlatformConfig). Returned bare (not wrapped). `platform_name` is always present (defaults to "Vista Platform"); the logo/favicon URLs are present only when configured (omitempty pointers). `signup_enabled` mirrors platform_settings.registration_enabled (default true) so the /signup page knows whether to render the form. */
         PlatformConfig: {
             platform_name: string;
             /** @description Optional branding logo URL; omitted when unset. */
@@ -4660,6 +4823,85 @@ export interface operations {
                     "application/json": components["schemas"]["LegacyError"];
                 };
             };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    exportUserData: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The user whose data is exported. Must belong to the caller's tenant. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The export document. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataSubjectExport"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    eraseUserData: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The user to erase. Must belong to the caller's tenant, and may not be the caller. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description What was erased, what was retained and why, and what this does not reach. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataSubjectErasureResult"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    exportMyData: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The export document. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataSubjectExport"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
         };
     };

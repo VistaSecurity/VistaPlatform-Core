@@ -49,6 +49,12 @@ func ReconcileWorkerEnabled() bool {
 type ReconcileEnqueuer struct {
 	client   *events.NATSClient
 	bypassDB *sqlx.DB
+	// sink diverts jobs away from the NATS rail. Unexported and set only by
+	// in-package tests, so the "which mutations enqueue a reconcile?" invariant
+	// can be asserted without standing up a broker — that invariant is exactly
+	// the one that was silently false for every control/measurement mutation
+	// until B-08, and a guard nobody can exercise is how it stayed false.
+	sink func(ReconcileJob)
 }
 
 // NewReconcileEnqueuer builds an enqueuer over the shared NATS client + bypass DB pool.
@@ -57,7 +63,7 @@ func NewReconcileEnqueuer(client *events.NATSClient, bypassDB *sqlx.DB) *Reconci
 }
 
 func (e *ReconcileEnqueuer) ready() bool {
-	return e != nil && e.client != nil && ReconcileWorkerEnabled()
+	return e != nil && (e.client != nil || e.sink != nil) && ReconcileWorkerEnabled()
 }
 
 // Ready reports whether enqueue calls can publish work. Tenant-facing callers use
@@ -70,6 +76,10 @@ func (e *ReconcileEnqueuer) Ready() bool {
 // publish emits one reconcile job (best-effort; a publish error is logged, not fatal).
 func (e *ReconcileEnqueuer) publish(job ReconcileJob) {
 	if !e.ready() {
+		return
+	}
+	if e.sink != nil {
+		e.sink(job)
 		return
 	}
 	if err := events.PublishJSON(e.client, events.SubjectComplianceReconcileTenant, job); err != nil {

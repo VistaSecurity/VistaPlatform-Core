@@ -467,7 +467,7 @@ Data sources:
 - [Compliance Frameworks](./compliance-frameworks.md) - Framework-based compliance assessment
 - [Discovery](./discovery.md) - Asset discovery and configuration collection
 - [Algorithm Analysis](./unified-crypto-inventory.md#algorithm-analysis-features) - Algorithm taxonomy and recommendations
-- [Remediation](./remediation.md) - Triage, the ticket Queue, and migration Plans
+- [Remediation](./remediation.md) - Alerts, the ticket Queue, and migration Plans
 
 ---
 

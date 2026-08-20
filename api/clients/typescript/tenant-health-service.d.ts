@@ -210,13 +210,17 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** @description Per-factor scoring, each 0-100 (models.HealthBreakdown). */
+        /** @description Per-factor scoring, each 0-100 (models.HealthBreakdown). A factor is `null` when it could NOT be measured because the peer service supplying its raw metrics was unreachable — null means "unknown", never zero. Null factors are excluded from `overall_score`, whose remaining weights are renormalised; `data_completeness` says how much of the total factor weight was actually measured and `unavailable_sources` says which peers were missing. */
         HealthBreakdown: {
-            resource_efficiency: number;
-            performance_metrics: number;
-            security_posture: number;
-            business_activity: number;
-            cost_optimization: number;
+            resource_efficiency: number | null;
+            performance_metrics: number | null;
+            security_posture: number | null;
+            business_activity: number | null;
+            cost_optimization: number | null;
+            /** @description Peer services that could not be reached during collection. */
+            unavailable_sources?: string[] | null;
+            /** @description Fraction of total factor weight actually measured (0-1). */
+            data_completeness: number;
         };
         /** @description An actionable health recommendation (models.Recommendation). */
         Recommendation: {
@@ -259,7 +263,7 @@ export interface components {
             /** Format: uuid */
             tenant_id: string;
             overall_score: number;
-            /** @description excellent / good / fair / poor / critical. */
+            /** @description excellent / good / fair / poor / critical / unknown (unknown = no factor could be measured; overall_score is 0 for want of data, not a score). */
             health_status: string;
             /** Format: date-time */
             last_calculated: string;
@@ -299,6 +303,8 @@ export interface components {
             resource_cost: number;
             cost_per_user: number;
             cost_efficiency: number;
+            /** @description Peer services that could not be reached while collecting these metrics. The fields those peers feed carry zero values that are NOT measurements — the scorer reports the corresponding factors as unknown rather than scoring them. */
+            unavailable_sources?: string[] | null;
         };
         /** @description A tenant health alert (models.HealthAlert). `resolved_at` is a nullable pointer. */
         HealthAlert: {
@@ -334,7 +340,7 @@ export interface components {
             /** Format: uuid */
             tenant_id: string;
             overall_score: number;
-            /** @description excellent / good / fair / poor / critical. */
+            /** @description excellent / good / fair / poor / critical / unknown (unknown = no factor could be measured; overall_score is 0 for want of data, not a score). */
             health_status: string;
             score_breakdown: components["schemas"]["HealthBreakdown"];
             recommendations: components["schemas"]["Recommendation"][] | null;
@@ -348,7 +354,7 @@ export interface components {
             tenant_id: string;
             tenant_name: string;
             overall_score: number;
-            /** @description excellent / good / fair / poor / critical. */
+            /** @description excellent / good / fair / poor / critical / unknown (unknown = no factor could be measured; overall_score is 0 for want of data, not a score). */
             health_status: string;
             /** Format: date-time */
             last_calculated: string;
@@ -538,7 +544,7 @@ export interface operations {
                 limit?: number;
                 /** @description Page offset (applied only when >= 0). */
                 offset?: number;
-                /** @description Filter by health_status (excellent / good / fair / poor / critical). */
+                /** @description Filter by health_status (excellent / good / fair / poor / critical / unknown). */
                 status?: string;
                 min_score?: number;
                 max_score?: number;

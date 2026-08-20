@@ -11,6 +11,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/api"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 	"github.com/vistasecurity/vistaplatform/shared/models"
+	"github.com/vistasecurity/vistaplatform/shared/security/authpolicy"
 	"github.com/vistasecurity/vistaplatform/shared/security/jwtkeys"
 	passwordsvc "github.com/vistasecurity/vistaplatform/shared/security/password"
 
@@ -102,18 +103,24 @@ func Login(db *sql.DB, jwtSecret string, refreshTokenService *auth.PlatformRefre
 		_, _ = db.Exec("UPDATE platform_users SET last_login_at = $1 WHERE id = $2", now, user.ID)
 		user.LastLoginAt = &now
 
+		// The operator-configured session length (admin-ui Security > Policy ->
+		// "Session timeout"), falling back to the historical 7 days. Resolved ONCE
+		// per issuance and used for both the refresh JWT's exp claim and the
+		// refresh_tokens row, so the two cannot drift apart.
+		sessionTTL := authpolicy.SessionLifetime(db, defaultPlatformSessionTTL)
+
 		// Generate tokens. When force_password_change is set the access token is
 		// a LIMITED change-password-only session — the middleware refuses
 		// everything else until the password is rotated, so the seeded default
 		// credentials can never grant a working admin session.
-		accessToken, refreshToken, err := generateTokens(user.ID.String(), user.Email, roleName, jwtSecret, user.ForcePasswordChange)
+		accessToken, refreshToken, err := generateTokens(user.ID.String(), user.Email, roleName, jwtSecret, user.ForcePasswordChange, sessionTTL)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate tokens"})
 			return
 		}
 
 		// Store refresh token
-		expiresAt := time.Now().Add(7 * 24 * time.Hour)
+		expiresAt := time.Now().Add(sessionTTL)
 		familyID, err := refreshTokenService.StoreRefreshToken(
 			user.ID, refreshToken, nil, expiresAt,
 			c.ClientIP(), c.Request.UserAgent(),
@@ -290,15 +297,21 @@ func RefreshToken(db *sql.DB, jwtSecret string, refreshTokenService *auth.Platfo
 			return
 		}
 
+		// The operator-configured session length (admin-ui Security > Policy ->
+		// "Session timeout"), falling back to the historical 7 days. Resolved ONCE
+		// per issuance and used for both the refresh JWT's exp claim and the
+		// refresh_tokens row, so the two cannot drift apart.
+		sessionTTL := authpolicy.SessionLifetime(db, defaultPlatformSessionTTL)
+
 		// The flag is re-read from the DB above, so a rotation performed before
 		// the password change still yields a limited access token.
-		accessToken, newRefreshToken, err := generateTokens(user.ID.String(), user.Email, roleName, jwtSecret, user.ForcePasswordChange)
+		accessToken, newRefreshToken, err := generateTokens(user.ID.String(), user.Email, roleName, jwtSecret, user.ForcePasswordChange, sessionTTL)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate tokens"})
 			return
 		}
 
-		expiresAt := time.Now().Add(7 * 24 * time.Hour)
+		expiresAt := time.Now().Add(sessionTTL)
 		_, err = refreshTokenService.ValidateAndRotateToken(
 			req.RefreshToken, userID, newRefreshToken, expiresAt,
 			c.ClientIP(), c.Request.UserAgent(),
@@ -392,7 +405,7 @@ func ChangePassword(db *sql.DB, jwtSecret string, refreshTokenService *auth.Plat
 		}
 
 		// Validate and hash new password
-		if err := passwordsvc.ValidatePasswordStrength(req.NewPassword); err != nil {
+		if err := passwordsvc.ValidatePasswordStrengthWithPolicy(db, req.NewPassword); err != nil {
 			api.BadRequest(c, err.Error())
 			return
 		}
@@ -421,9 +434,15 @@ func ChangePassword(db *sql.DB, jwtSecret string, refreshTokenService *auth.Plat
 		if userID, parseErr := uuid.Parse(userIDStr); parseErr == nil {
 			_ = refreshTokenService.RevokeAllUserTokens(userID)
 
-			accessToken, refreshToken, tokErr := generateTokens(userIDStr, email, roleName, jwtSecret, false)
+			// The operator-configured session length (admin-ui Security > Policy ->
+			// "Session timeout"), falling back to the historical 7 days. Resolved ONCE
+			// per issuance and used for both the refresh JWT's exp claim and the
+			// refresh_tokens row, so the two cannot drift apart.
+			sessionTTL := authpolicy.SessionLifetime(db, defaultPlatformSessionTTL)
+
+			accessToken, refreshToken, tokErr := generateTokens(userIDStr, email, roleName, jwtSecret, false, sessionTTL)
 			if tokErr == nil {
-				expiresAt := time.Now().Add(7 * 24 * time.Hour)
+				expiresAt := time.Now().Add(sessionTTL)
 				if _, storeErr := refreshTokenService.StoreRefreshToken(
 					userID, refreshToken, nil, expiresAt,
 					c.ClientIP(), c.Request.UserAgent(),
@@ -484,7 +503,7 @@ func ResetPassword(db *sql.DB) gin.HandlerFunc {
 		}
 
 		// Validate and hash new password
-		if err := passwordsvc.ValidatePasswordStrength(req.NewPassword); err != nil {
+		if err := passwordsvc.ValidatePasswordStrengthWithPolicy(db, req.NewPassword); err != nil {
 			api.BadRequest(c, err.Error())
 			return
 		}
@@ -681,7 +700,12 @@ func parsePlatformRefreshToken(tokenString, jwtSecret string) (jwt.MapClaims, er
 	return claims, nil
 }
 
-func generateTokens(userID, email, role, jwtSecret string, pwdChangeRequired bool) (string, string, error) {
+// defaultPlatformSessionTTL is the platform-admin session length used when the
+// operator has never saved a "Session timeout" on the Policy page. It is the
+// value that was hardcoded in four places before that setting was wired up.
+const defaultPlatformSessionTTL = 7 * 24 * time.Hour
+
+func generateTokens(userID, email, role, jwtSecret string, pwdChangeRequired bool, refreshTTL time.Duration) (string, string, error) {
 	// Access token (1 hour — matches the tenant auth-service default).
 	// iss/aud match what auth-service issues so all services (e.g. audit-service) accept the token.
 	accessClaims := jwt.MapClaims{
@@ -717,7 +741,7 @@ func generateTokens(userID, email, role, jwtSecret string, pwdChangeRequired boo
 		"type":    "refresh",
 		"iss":     "crypto-inventory-auth",
 		"aud":     jwt.ClaimStrings{"crypto-inventory"},
-		"exp":     time.Now().Add(7 * 24 * time.Hour).Unix(),
+		"exp":     time.Now().Add(refreshTTL).Unix(),
 		"iat":     time.Now().Unix(),
 	}
 	refreshTokenString, err := signPlatformToken(refreshClaims, jwtSecret)

@@ -733,8 +733,8 @@ func (h *Handler) generateCACertificate() (string, string, error) {
 	caTemplate := x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject: pkix.Name{
-			Organization:       []string{"VistaPlatform"},
-			OrganizationalUnit: []string{"VistaPlatform"},
+			Organization:       []string{"Vista Platform"},
+			OrganizationalUnit: []string{"Vista Platform"},
 			Country:            []string{"US"},
 			Province:           []string{"Florida"},
 			Locality:           []string{"Orlando"},
@@ -801,8 +801,8 @@ func (h *Handler) generateSensorCertificate(sensorID uuid.UUID, caCertPEM, caKey
 	sensorTemplate := x509.Certificate{
 		SerialNumber: big.NewInt(2),
 		Subject: pkix.Name{
-			Organization:       []string{"VistaPlatform"},
-			OrganizationalUnit: []string{"VistaPlatform"},
+			Organization:       []string{"Vista Platform"},
+			OrganizationalUnit: []string{"Vista Platform"},
 			Country:            []string{"US"},
 			Province:           []string{"Florida"},
 			Locality:           []string{"Orlando"},
@@ -851,8 +851,8 @@ func (h *Handler) generateSensorCSR(sensorID uuid.UUID) (string, string, error) 
 	sensorIDStr := sensorID.String()
 	csrTemplate := x509.CertificateRequest{
 		Subject: pkix.Name{
-			Organization:       []string{"VistaPlatform"},
-			OrganizationalUnit: []string{"VistaPlatform"},
+			Organization:       []string{"Vista Platform"},
+			OrganizationalUnit: []string{"Vista Platform"},
 			Country:            []string{"US"},
 			Province:           []string{"Florida"},
 			Locality:           []string{"Orlando"},

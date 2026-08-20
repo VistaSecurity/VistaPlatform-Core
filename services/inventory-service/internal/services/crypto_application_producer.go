@@ -87,9 +87,19 @@ type atRestPosture struct {
 // producer does not touch it.
 //
 // Keyed on the collector's resource_type rather than on device_type because
-// that is the field every provider's collector writes with the same meaning
-// (StorageEncryptionFinding.ResourceType), so a new region/service wiring does
-// not have to remember to update a device-type list.
+// that is the field every STORAGE/DATABASE collector writes with the same
+// meaning (StorageEncryptionFinding.ResourceType), so a new region/service
+// wiring does not have to remember to update a device-type list.
+//
+// B-22: "every provider's collector writes" was too strong. The three cloud
+// key-store collectors (aws_kms, azure_keyvault_key, gcp_kms_crypto_key) write
+// no resource_type at all, so they are not routed here — and used to be
+// materialized as phantom TLS endpoints instead. inventory-service now drops
+// them at the AT-REST sentinel (isAtRestProtocol in asset_service.go) rather
+// than fabricating a measurement. Adding them to this map is not merely a map
+// entry: this table's whole vocabulary answers "is this resource's DATA
+// encrypted, and whose key", and none of its rungs describes a resource that IS
+// the key. That needs a product decision, not a mapping.
 var atRestResourceTypes = map[string]string{
 	// object / blob storage
 	"s3_bucket":       "cloud_storage",

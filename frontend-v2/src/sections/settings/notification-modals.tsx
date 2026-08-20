@@ -4,9 +4,10 @@
 // recipients[], slack → webhook_url, webhook → url, pagerduty →
 // integration_key. Unknown config keys are carried through on edit.
 import { useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
+import { alertSourceOptions, fetchAlertCatalogSources } from './alert-sources';
 import type { notificationServiceComponents as NC } from '@vistasecurity/api-contract';
 
 type Channel = NC['schemas']['TenantNotificationChannel'];
@@ -127,7 +128,17 @@ export function ChannelDeleteModal({ channel, open, onClose }: { channel: Channe
   );
 }
 
-const ALERT_SOURCES = ['all', 'audit', 'billing', 'certificates', 'discovery', 'monitoring', 'platform', 'remediation_plans', 'ticketing'];
+// B-33: the "Alert source" dropdown below is generated from the alert
+// registry rather than hand-maintained — see alert-sources.ts.
+function useAlertSources(current: string): string[] {
+  const catalogQ = useQuery({
+    queryKey: ['settings', 'alert-catalog'],
+    queryFn: fetchAlertCatalogSources,
+    staleTime: 5 * 60 * 1000,
+  });
+  return alertSourceOptions(catalogQ.data ?? [], current);
+}
+
 const SEVERITIES = ['critical', 'high', 'medium', 'low'];
 
 // The backend's frequency vocabulary is immediate | digest_hourly |
@@ -144,6 +155,7 @@ export function RuleModal({ rule, channels, open, onClose }: { rule: Rule | null
   const isEdit = !!rule;
   const [name, setName] = useState(rule?.rule_name ?? '');
   const [source, setSource] = useState(rule?.alert_source ?? 'all');
+  const alertSources = useAlertSources(source);
   const [severities, setSeverities] = useState<string[]>(rule?.severity_filter ?? []);
   const [channelIds, setChannelIds] = useState<string[]>(rule?.channel_ids ?? []);
   const [frequency, setFrequency] = useState(rule?.frequency ?? 'immediate');
@@ -207,7 +219,7 @@ export function RuleModal({ rule, channels, open, onClose }: { rule: Rule | null
       </ModalField>
       <ModalField label="Alert source" hint={isEdit ? 'The source cannot be changed after creation.' : 'Which subsystem the events come from.'}>
         <ModalSelect value={source} disabled={isEdit} onChange={(e) => setSource(e.target.value)}>
-          {ALERT_SOURCES.map((s) => <option key={s} value={s}>{s}</option>)}
+          {alertSources.map((s) => <option key={s} value={s}>{s}</option>)}
         </ModalSelect>
       </ModalField>
       <ModalField label="Severity filter" hint="Match only these severities; none selected = all severities.">

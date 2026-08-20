@@ -161,9 +161,18 @@ func (j *RetentionJob) processPolicy(ctx context.Context, policy services.Retent
 				archiveS3Keys = append(archiveS3Keys, result.S3Key)
 				j.logger.Printf("Archived %d logs to S3: %s", result.LogsArchived, result.S3Key)
 
-				// Mark logs as archived in database
+				// Mark logs as archived in the database. This stamp is the ONLY
+				// evidence the later delete step consults (FilterArchivedLogs),
+				// so a failure here must fail the whole policy run rather than
+				// warn: unstamped rows are re-selected next cycle and
+				// re-uploaded under a fresh S3 key, and the cycle would
+				// otherwise still report logs_archived: N. Returning here also
+				// skips the delete step, which is the safe direction.
 				if err := j.retentionService.MarkLogsAsArchived(ctx, logIDs, result.S3Key); err != nil {
-					j.logger.Printf("WARNING: Failed to mark logs as archived: %v", err)
+					j.logger.Printf("ERROR: Failed to mark logs as archived: %v", err)
+					errorMsg := err.Error()
+					_ = j.jobExecutionService.LogJobCompletion(ctx, logID, "failed", &errorMsg, nil)
+					return
 				}
 			} else {
 				// S3 not enabled - just log the count

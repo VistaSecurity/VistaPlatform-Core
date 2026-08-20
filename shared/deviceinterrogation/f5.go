@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -170,15 +171,16 @@ func (c *f5Client) interrogate(ctx context.Context) (*InterrogateResult, error) 
 			continue
 		}
 
-		// Destination is "ip:port"; default to 443 when unparseable.
-		destParts := strings.Split(vs.Destination, ":")
-		if len(destParts) != 2 {
-			continue
-		}
-		ipAddress := destParts[0]
-		port := 443
-		if p, err := f5ParseInt(destParts[1]); err == nil {
-			port = p
+		// `destination` is partition-qualified ("/Common/198.51.100.10:443"),
+		// and IPv6 VIPs use "." as the port separator. f5ParseDestination
+		// returns an address the downstream inet-typed columns accept, or ""
+		// when the destination names something that is not an IP literal. The
+		// VIP is emitted either way — an empty IPAddress still classifies by
+		// hostname downstream, whereas a partition-prefixed one failed the
+		// ::inet cast and lost the finding entirely.
+		ipAddress, port := f5ParseDestination(vs.Destination)
+		if port <= 0 {
+			port = 443
 		}
 
 		for _, profileRef := range vs.Profiles {
@@ -273,10 +275,8 @@ func (c *f5Client) getVirtualServers(ctx context.Context) ([]f5VirtualServer, er
 			Enabled:     f5GetBool(item, "enabled"),
 			Metadata:    item,
 		}
-		if destParts := strings.Split(vs.Destination, ":"); len(destParts) == 2 {
-			if port, err := f5ParseInt(destParts[1]); err == nil {
-				vs.Port = port
-			}
+		if _, port := f5ParseDestination(vs.Destination); port > 0 {
+			vs.Port = port
 		}
 		if profiles, ok := item["profiles"].([]interface{}); ok {
 			for _, p := range profiles {
@@ -709,8 +709,73 @@ func f5GetBool(m map[string]interface{}, key string) bool {
 	return false
 }
 
-func f5ParseInt(s string) (int, error) {
-	var result int
-	_, err := fmt.Sscanf(s, "%d", &result)
-	return result, err
+// f5ParseDestination splits an iControl `destination` into an IP literal and a
+// port. iControl returns the destination partition-qualified, and separates the
+// port differently per address family:
+//
+//	/Common/198.51.100.10:443        → 198.51.100.10, 443
+//	/Common/Prod/198.51.100.10:8443  → 198.51.100.10, 8443
+//	/Common/2001:db8::1.443          → 2001:db8::1,   443   (IPv6 separates with ".")
+//	/Common/198.51.100.10%2:443      → 198.51.100.10, 443   (route domain)
+//
+// The IP is returned empty when the remainder is not an IP literal — a
+// destination may also name a virtual-address object. Callers must never place
+// a non-IP value in CryptoAsset.IPAddress: it flows into
+// discovery_findings.resolved_ip and the $6::inet bind in writeSensorDiscovery,
+// both inet-typed, and a failed cast discards the row. Leaving the partition
+// prefix on ("/Common/198.51.100.10") is exactly that failure, and is how an F5
+// interrogation of a hundred VIPs reported success while producing zero
+// findings and zero inventory assets.
+//
+// A zero port means "not stated" (or a wildcard "any" VIP); the caller applies
+// its own default.
+func f5ParseDestination(destination string) (string, int) {
+	s := strings.TrimSpace(destination)
+	if s == "" {
+		return "", 0
+	}
+
+	// Strip the partition (and any folder) prefix: "/Common/x" → "x".
+	if strings.HasPrefix(s, "/") {
+		s = s[strings.LastIndex(s, "/")+1:]
+	}
+
+	// Split the port off. F5 writes "address:port" for IPv4 and "address.port"
+	// for IPv6, where ":" is already part of the address.
+	addr, portStr := s, ""
+	if strings.Count(s, ":") > 1 {
+		if idx := strings.LastIndex(s, "."); idx >= 0 {
+			addr, portStr = s[:idx], s[idx+1:]
+		}
+	} else if idx := strings.LastIndex(s, ":"); idx >= 0 {
+		addr, portStr = s[:idx], s[idx+1:]
+	}
+
+	port := 0
+	if portStr != "" {
+		// A wildcard VIP reports port "any", which is simply not a number.
+		if p, err := strconv.Atoi(portStr); err == nil && p > 0 && p <= 65535 {
+			port = p
+		}
+	}
+
+	if ip := f5StripRouteDomain(addr); net.ParseIP(ip) != nil {
+		return ip, port
+	}
+	// The split mis-cut a portless address whose own text contains dots (an
+	// IPv4-mapped IPv6 literal). Retry against the whole remainder.
+	if ip := f5StripRouteDomain(s); net.ParseIP(ip) != nil {
+		return ip, 0
+	}
+	return "", port
+}
+
+// f5StripRouteDomain removes the "%<id>" route-domain suffix F5 appends to an
+// address. It is F5 bookkeeping, not part of the address, and Postgres rejects
+// it on an inet cast.
+func f5StripRouteDomain(addr string) string {
+	if idx := strings.IndexByte(addr, '%'); idx >= 0 {
+		return addr[:idx]
+	}
+	return addr
 }

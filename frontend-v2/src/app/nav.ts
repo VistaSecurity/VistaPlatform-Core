@@ -71,12 +71,11 @@ export const SECTIONS: NavSection[] = [
     id: 'rem',
     label: 'Remediation',
     icon: 'Wrench',
-    path: '/remediation/triage',
+    path: '/remediation/alerts',
     groups: [
       {
         items: [
           { path: '/remediation/alerts', label: 'Alerts' },
-          { path: '/remediation/triage', label: 'Triage' },
           { path: '/remediation/queue', label: 'Queue' },
           { path: '/remediation/plans', label: 'Plans' },
         ],

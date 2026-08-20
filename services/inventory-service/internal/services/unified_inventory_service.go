@@ -358,11 +358,7 @@ func (s *UnifiedInventoryService) buildAssetQuery(
 			SELECT 1 FROM crypto_implementations ci
 			WHERE ci.asset_id = a.id
 			AND ci.deleted_at IS NULL
-			AND (
-				ci.protocol_version IN ('TLSv1.0', 'TLSv1.1', 'SSLv2', 'SSLv3')
-				OR ci.hash_algorithm IN ('SHA1', 'MD5')
-				OR (ci.key_size IS NOT NULL AND ci.key_size < 2048)
-			)
+			AND `+deprecatedAlgorithmsSQL("ci.")+`
 		)`)
 	}
 
@@ -706,12 +702,7 @@ func (s *UnifiedInventoryService) calculateSummary(
 			WHERE a.tenant_id = $1
 			AND ci.deleted_at IS NULL
 			AND a.deleted_at IS NULL
-			AND (
-				ci.protocol_version IN ('TLSv1.0', 'TLSv1.1', 'SSLv2', 'SSLv3')
-				OR ci.hash_algorithm IN ('SHA1', 'MD5')
-				OR (ci.key_size IS NOT NULL AND ci.key_size < 2048)
-			)
-		`, tenantID).Scan(&deprecatedAlgs); e == nil {
+			AND `+deprecatedAlgorithmsSQL("ci."), tenantID).Scan(&deprecatedAlgs); e == nil {
 			summary.DeprecatedAlgorithms = deprecatedAlgs
 		}
 

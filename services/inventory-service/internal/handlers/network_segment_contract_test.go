@@ -39,6 +39,9 @@ type stubNetworkSegmentService struct {
 	updateResult *models.NetworkSegment
 	updateErr    error
 	deleteErr    error
+	// cloud classification (B-49)
+	cloudSegment    *models.NetworkSegment
+	cloudSegmentErr error
 }
 
 func (s *stubNetworkSegmentService) List(uuid.UUID, models.NetworkSegmentFilters) ([]models.NetworkSegment, int, error) {
@@ -67,6 +70,9 @@ func (s *stubNetworkSegmentService) GetSegmentForIP(uuid.UUID, *string, *string)
 }
 func (s *stubNetworkSegmentService) ClassifyAsset(uuid.UUID, *string, *string, []string) (string, error) {
 	return "", nil
+}
+func (s *stubNetworkSegmentService) FindOrCreateCloudSegment(uuid.UUID, string, string, string, string) (*models.NetworkSegment, error) {
+	return s.cloudSegment, s.cloudSegmentErr
 }
 func (s *stubNetworkSegmentService) ReclassifyAllAssets(uuid.UUID) (int, error)      { return 0, nil }
 func (s *stubNetworkSegmentService) MigrateFromNetworkSpaces(uuid.UUID) (int, error) { return 0, nil }

@@ -432,8 +432,16 @@ func (h *Handler) download(c *gin.Context) {
 // VerifyResponse the UI can render as "Hash OK, signature OK" etc.
 //
 // Bytes come from inline content or, for object-stored artifacts, by streaming
-// from storage. If neither is available (no inline content and no storage
-// wired), the hash/signature fields stay unset and the UI greys the result.
+// from storage. If they cannot be obtained, the hash/signature fields
+// stay unset and the UI greys the result.
+//
+// Three outcomes, not two, and the difference matters to whoever is holding the
+// evidence: hash_valid=true is "verified"; hash_valid=false WITH a non-empty
+// hash_recomputed is a genuine mismatch (the bytes changed); hash_valid=false
+// with hash_recomputed ABSENT means the bytes could not be read and nothing was
+// compared. Telling an operator with an untampered artifact that its integrity
+// check failed is the failure mode this shape exists to avoid, so do not
+// collapse the third case into the second.
 func (h *Handler) verify(c *gin.Context) {
 	tenantID, ok := middleware.GetTenantIDFromContext(c)
 	if !ok {
@@ -464,16 +472,29 @@ func (h *Handler) verify(c *gin.Context) {
 
 	// Hash check requires the bytes — from inline content or, for object-stored
 	// artifacts, by streaming from storage.
+	//
+	// A read failure here is "not checked", not "failed": the artifact may be
+	// perfectly intact and merely unreachable (credentials rotated, object
+	// expired, storage unwired). The response says so by leaving HashRecomputed
+	// empty, and the operator is told so by the drawer. But an unreachable
+	// artifact is an operational fault someone has to fix, and swallowing the
+	// error silently left no trace of it anywhere — so it is logged.
 	var bytes []byte
 	if a.HasInlineContent {
 		if b, berr := h.repo.GetInlineContent(c.Request.Context(), tenantID, artifactID); berr == nil {
 			bytes = b
+		} else {
+			log.Printf("verify %s: inline content unreadable, hash not checked: %v", artifactID, berr)
 		}
 	} else if h.storage != nil && a.StorageKey != "" {
 		tenant := tenantID
 		if b, berr := ReadStoredBytes(c.Request.Context(), h.storage, a.StorageKey, &tenant); berr == nil {
 			bytes = b
+		} else {
+			log.Printf("verify %s: stored bytes unreadable (key %s), hash not checked: %v", artifactID, a.StorageKey, berr)
 		}
+	} else {
+		log.Printf("verify %s: no inline content and no storage wired, hash not checked", artifactID)
 	}
 
 	if len(bytes) > 0 {

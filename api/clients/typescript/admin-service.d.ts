@@ -583,7 +583,7 @@ export interface paths {
         };
         /**
          * List security events
-         * @description Platform security monitoring (admin-ui Security page). Filterable by event_type/severity/status/risk_level/tenant_id/time-range; paginated. Uses a `{ data, meta }` envelope. Returns 503 if the security service is not initialized.
+         * @description The security-relevant slice of the platform activity trail (audit.activity_logs), for admin-ui Security ▸ Dashboard: authentication / user / tenant / config events, plus every failure and every producer-flagged row. Filterable by event_type/category/success/requires_attention/tenant_id/time-range; paginated. Uses a `{ data, meta }` envelope. Returns 503 if the security service is not initialized.
          */
         get: operations["getSecurityEvents"];
         put?: never;
@@ -606,43 +606,6 @@ export interface paths {
          * @description Aggregated security stats over a time range. `data` is a free-form metrics object. Returns 503 if the security service is not initialized.
          */
         get: operations["getSecurityDashboardStats"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/admin/security/compliance": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List compliance framework statuses
-         * @description All compliance frameworks with their assessment status. Uses a `{ data, meta: { count } }` envelope. Returns 503 if the security service is not initialized.
-         */
-        get: operations["getAllComplianceFrameworks"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/admin/security/compliance/{framework}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get a compliance framework's status */
-        get: operations["getComplianceFrameworkStatus"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2206,6 +2169,8 @@ export interface components {
             published_at: string;
             /** Format: uuid */
             published_by?: string | null;
+            /** @description Unedited-template markers found in this version's body, e.g. "[YOUR LEGAL ENTITY]". Always present; empty means the document has been filled in. Computed server-side so the console never re-derives what counts as a placeholder. Capped at 10 entries. */
+            placeholders: string[];
         };
         AdminLegalVersion: {
             /** @enum {string} */
@@ -2225,6 +2190,16 @@ export interface components {
             doc_type: "terms_of_service" | "privacy_policy";
             title: string;
             body: string;
+            /**
+             * @description Publish a body that still contains "[BRACKETED]" template markers. Without it such a body is rejected with 422. The console sets it only after an explicit confirmation naming what was found.
+             * @default false
+             */
+            acknowledge_placeholders: boolean;
+        };
+        LegalPlaceholderRejection: {
+            error: string;
+            /** @description The distinct markers found, capped at 10. */
+            placeholders: string[];
         };
         LegalAcceptanceRow: {
             /** Format: uuid */
@@ -2560,7 +2535,6 @@ export interface components {
             support_email: string;
             max_tenants: number | null;
             default_trial_days: number | null;
-            maintenance_mode: boolean | null;
             registration_enabled: boolean | null;
             /**
              * @description When true, signup rejects consumer email domains (gmail, outlook, …).
@@ -2783,7 +2757,7 @@ export interface components {
                 [key: string]: unknown;
             };
         };
-        /** @description Result of POST /admin/storage/test. `success` is false when the integration is not in a connected state (still 200). */
+        /** @description Result of POST /admin/storage/test. The check resolves the AWS integration's stored credentials and issues an S3 HeadBucket against the configured bucket, so `success` is false (still 200) when the integration is not in a connected state, when its credentials cannot be decrypted, or when the bucket cannot be reached with them. */
         StorageTestResponse: {
             success: boolean;
             message: string;
@@ -3169,88 +3143,37 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /** @description A security/threat event (security.SecurityEvent). The non-required fields are omitempty in Go — absent (not null) when unset. */
+        /** @description One security-relevant row of the platform activity trail (security.SecurityEvent, read from audit.activity_logs). Every field maps to a column: there is no severity, threat score, anomaly flag or triage status because activity_logs records none, and deriving them would present a guess as a measurement. `description` carries error_message and is set only on failures. The non-required fields are omitempty in Go — absent (not null) when unset. */
         SecurityEvent: {
             /** Format: uuid */
             id: string;
-            event_id: string;
-            correlation_id?: string;
-            trace_id?: string;
             event_type: string;
-            severity: string;
             category: string;
-            title: string;
+            action: string;
+            resource_type?: string;
+            /** Format: uuid */
+            resource_id?: string;
             description?: string;
-            message?: string;
-            service_name: string;
-            source_ip?: string;
-            user_agent?: string;
+            success: boolean;
+            requires_attention: boolean;
             /** Format: uuid */
             user_id?: string;
-            user_type?: string;
+            user_email?: string;
+            user_type: string;
             /** Format: uuid */
             tenant_id?: string;
+            source_ip?: string;
+            user_agent?: string;
             request_id?: string;
-            request_method?: string;
-            request_path?: string;
-            response_status?: number;
-            threat_score: number;
-            is_anomaly: boolean;
-            anomaly_type?: string;
-            risk_level: string;
-            status: string;
-            /** Format: uuid */
-            assigned_to?: string;
-            /** Format: date-time */
-            resolved_at?: string;
-            resolution_notes?: string;
-            related_events?: string[];
             metadata?: {
                 [key: string]: unknown;
             };
             tags?: string[];
             compliance_tags?: string[];
-            requires_attention: boolean;
             /** Format: date-time */
             timestamp: string;
             /** Format: date-time */
-            detected_at: string;
-            /** Format: date-time */
             created_at: string;
-            /** Format: date-time */
-            updated_at: string;
-        };
-        /** @description A compliance framework assessment status (security.ComplianceFrameworkStatus). Non-required fields are omitempty — absent (not null) when unset. */
-        ComplianceFrameworkStatus: {
-            /** Format: uuid */
-            id: string;
-            framework_name: string;
-            framework_version?: string;
-            overall_status: string;
-            compliance_score: number;
-            /** Format: date-time */
-            last_assessed_at?: string;
-            /** Format: date-time */
-            next_assessment_due?: string;
-            assessment_frequency_days?: number;
-            total_requirements: number;
-            compliant_requirements: number;
-            non_compliant_requirements: number;
-            pending_requirements: number;
-            status_details?: {
-                [key: string]: unknown;
-            };
-            findings?: string[];
-            recommendations?: string[];
-            evidence_urls?: string[];
-            audit_trail_urls?: string[];
-            /** Format: uuid */
-            assessed_by?: string;
-            notes?: string;
-            /** Format: date-time */
-            created_at: string;
-            /** Format: date-time */
-            updated_at: string;
         };
         /** @description Envelope for GET /admin/security/events. `data` is null when there are no events (nil slice). */
         SecurityEventListResponse: {
@@ -3263,7 +3186,7 @@ export interface components {
                 [key: string]: unknown;
             };
         };
-        /** @description Envelope for GET /admin/security/dashboard-stats. `data` is a free-form metrics object. */
+        /** @description Envelope for GET /admin/security/dashboard-stats. `data` is a free-form metrics object; the keys the service emits today are total_events, failed_events, requires_attention, failed_logins, events_by_category and events_by_outcome. */
         SecurityDashboardResponse: {
             data: {
                 [key: string]: unknown;
@@ -3272,18 +3195,6 @@ export interface components {
                 time_range: string;
                 /** Format: date-time */
                 timestamp: string;
-            } & {
-                [key: string]: unknown;
-            };
-        };
-        ComplianceFrameworkResponse: {
-            data: components["schemas"]["ComplianceFrameworkStatus"];
-        };
-        /** @description Envelope for GET /admin/security/compliance. `data` is null when there are none (nil slice). */
-        ComplianceFrameworkListResponse: {
-            data: components["schemas"]["ComplianceFrameworkStatus"][] | null;
-            meta: {
-                count: number;
             } & {
                 [key: string]: unknown;
             };
@@ -3324,7 +3235,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /** @description A tenant cost record for a period (services.TenantCost). The two maps are null when unset. */
+        /** @description A tenant cost record for a period (services.TenantCost). total_cost_usd is always the sum of cost_breakdown — both come from one costing computation. Components that could not be measured are absent from cost_breakdown and named in not_measured; render those as "not measured", never as $0.00. */
         TenantCost: {
             /** Format: uuid */
             tenant_id: string;
@@ -3333,15 +3244,20 @@ export interface components {
             period_start: string;
             /** Format: date-time */
             period_end: string;
+            /** @description Sum of the priced components in cost_breakdown. Not an estimate of the full cost: components listed in not_measured are excluded, not extrapolated. */
             total_cost_usd: number;
+            /** @description Priced components only, keyed by component name (api_calls, database, storage, network). */
             cost_breakdown: {
                 [key: string]: number;
             } | null;
+            /** @description Components with no measurement over the period, and therefore not priced. compute is always present: the platform runs shared service pods, so no per-tenant CPU or memory figure exists. */
+            not_measured: string[] | null;
+            /** @description Raw quantities behind the cost. A null value means the quantity was not measured, as distinct from measured zero. */
             resource_usage: {
                 [key: string]: unknown;
             } | null;
         };
-        /** @description A platform-wide cost summary (services.PlatformCostSummary). The slice/maps are null when unset. */
+        /** @description A platform-wide cost summary (services.PlatformCostSummary). total_cost_usd is the sum of cost_by_service — both come from one costing computation per tenant. cost_by_resource was removed: its compute entry was a flat 30% of the total with no measurement behind it, and nothing rendered it. */
         PlatformCostSummary: {
             /** Format: date-time */
             period_start: string;
@@ -3351,12 +3267,12 @@ export interface components {
             tenant_count: number;
             average_cost_usd: number;
             top_tenants: components["schemas"]["TenantCost"][] | null;
+            /** @description Priced components only, summed across tenants. */
             cost_by_service: {
                 [key: string]: number;
             } | null;
-            cost_by_resource: {
-                [key: string]: number;
-            } | null;
+            /** @description Components no tenant had a measurement for over the period, and therefore not priced. */
+            not_measured: string[] | null;
         };
         /** @description Envelope for GET /admin/costs/tenants/{id}/history. `history` is null when there are none (nil slice). */
         TenantCostHistoryResponse: {
@@ -5083,10 +4999,11 @@ export interface operations {
                 limit?: number;
                 offset?: number;
                 event_type?: string;
-                severity?: string;
-                status?: string;
-                risk_level?: string;
-                is_anomaly?: string;
+                /** @description activity_logs event_category (authentication, user, tenant, config, …). */
+                category?: string;
+                /** @description Filter by outcome. "false" isolates failures. */
+                success?: string;
+                requires_attention?: string;
                 tenant_id?: string;
             };
             header?: never;
@@ -5131,56 +5048,6 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
-            500: components["responses"]["LegacyServerError"];
-            503: components["responses"]["LegacyServerError"];
-        };
-    };
-    getAllComplianceFrameworks: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The compliance frameworks. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ComplianceFrameworkListResponse"];
-                };
-            };
-            401: components["responses"]["LegacyUnauthorized"];
-            500: components["responses"]["LegacyServerError"];
-            503: components["responses"]["LegacyServerError"];
-        };
-    };
-    getComplianceFrameworkStatus: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                framework: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The compliance framework status. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ComplianceFrameworkResponse"];
-                };
-            };
-            400: components["responses"]["LegacyBadRequest"];
-            401: components["responses"]["LegacyUnauthorized"];
-            404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
             503: components["responses"]["LegacyServerError"];
         };
@@ -7271,6 +7138,15 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            /** @description The body still contains template placeholders and the request did not acknowledge them. Nothing was published. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegalPlaceholderRejection"];
+                };
+            };
             500: components["responses"]["LegacyServerError"];
         };
     };

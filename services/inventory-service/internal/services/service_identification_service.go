@@ -115,16 +115,28 @@ func getBannerFromRaw(rawData map[string]interface{}) string {
 
 // GetPortHeuristic returns the service name for port+protocol from service_identification_rules (tenant then built-in).
 func (s *ServiceIdentificationService) GetPortHeuristic(tenantID uuid.UUID, port int, protocol string) string {
+	// THIS IS THE FALLBACK, NOT THE MECHANISM. The protocol reaching this
+	// function is canonicalized at INGEST by cryptoparse.NormalizeProtocol, on
+	// every path that writes sensor_discoveries.protocol,
+	// external_connections.protocol or discovery_findings.protocol — so a rule
+	// lookup normally matches on the stored value directly.
+	//
+	// Read-side normalization is kept because rows written BEFORE that landed
+	// are still un-normalized ("EtherNet/IP", "OPC UA"), and no data migration
+	// rewrites them. Note it cannot rescue those anyway: ToUpper("EtherNet/IP")
+	// is "ETHERNET/IP", which matches no rule. What it does cover is the
+	// case-only and HTTPS/SSL variants. Do not treat it as the fix — the fix is
+	// at the writers.
 	proto := protocolNorm[strings.ToUpper(protocol)]
 	if proto == "" {
 		proto = strings.ToUpper(protocol)
 	}
 	var name string
-	// RLS-scoped: service_identification_rules carries the tenant_isolation policy.
-	// The query intentionally also reads built-in rules (tenant_id IS NULL); today the
-	// owner role bypasses RLS so wrapping is behavior-neutral. When RLS later enforces,
-	// the policy must be extended to allow the tenant_id IS NULL built-in rows or this
-	// fallback returns nothing (flagged for Phase 4).
+	// RLS-scoped: service_identification_rules is one of the hybrid tables whose
+	// policy is USING (tenant_id IS NULL OR tenant_id = <caller>), so the built-in
+	// (tenant_id IS NULL) rules stay visible under the non-owner app role while a
+	// tenant can still only WRITE its own overrides. The built-ins are seeded by
+	// scripts/database/seed.sql.
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		// Prefer tenant-specific rule, then built-in
 		return tx.QueryRow(`

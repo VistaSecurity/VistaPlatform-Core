@@ -2024,6 +2024,8 @@ export interface components {
             is_active?: boolean | null;
             /** @description Omitted/null keeps the current value on update (create default false). */
             auto_approve_discoveries?: boolean | null;
+            /** @description Which discovery sources auto-approval covers for this segment. Omitted/null keeps the current value on update and defaults to ["sensor"] on create, so cloud coverage is always an explicit opt-in. */
+            auto_approve_sources?: ("sensor" | "cloud")[] | null;
             tags?: {
                 [key: string]: unknown;
             };
@@ -2078,6 +2080,8 @@ export interface components {
             description?: string;
             is_active: boolean;
             auto_approve_discoveries: boolean;
+            /** @description Which discovery sources this segment auto-approves ("sensor", "cloud"). A segment stored before the setting existed reads back as ["sensor"]. */
+            auto_approve_sources?: string[] | null;
             tags: {
                 [key: string]: unknown;
             } | null;
@@ -3502,14 +3506,12 @@ export interface components {
         CreateDiscoveryJobRequest: {
             /** @description IPs, CIDRs, or hostnames to scan (max 1000). */
             targets: string[];
-            /** @description How the scan is dispatched: `auto`, `cloud`, or `sensors`. */
+            /** @description How the scan is dispatched: `auto` (platform decides) or `cloud` (platform sensor). `sensors` is REJECTED with 400 — discovery jobs cannot be dispatched to tenant-deployed sensors; no dispatcher exists, and such jobs used to run from the platform cluster instead. */
             execution_mode?: string;
             /** @description Protocols to probe (e.g. `TLS`, `SSH`). Empty = service default. */
             protocols?: string[];
             /** @description Ports to probe (e.g. 443, 22, 8443). Empty = service default. */
             ports?: number[];
-            /** @description Sensor IDs to prefer when execution_mode routes via sensors. */
-            preferred_sensor_ids?: string[];
             /** @description Per-job capture retention cap in MB (service default 25). */
             retention_cap_mb?: number | null;
             /** @description Per-job capture retention TTL in hours (service default 24). */

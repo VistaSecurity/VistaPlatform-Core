@@ -34,6 +34,11 @@ type stubBillingUsageStore struct {
 	maxAssets  sql.NullInt64
 	maxUsers   sql.NullInt64
 	limitsErr  error
+	// resolvedLimits is what the entitlements resolver reports for
+	// max_sensors / max_assets / max_users. A present key with a nil value is
+	// "unlimited". nil map = resolver returned nothing.
+	resolvedLimits    map[string]*int
+	resolvedLimitsErr error
 }
 
 func (s *stubBillingUsageStore) GetTenantUsageRecord(_ context.Context, _ uuid.UUID, _, _ time.Time) (UsageMetrics, bool, error) {
@@ -52,6 +57,10 @@ func (s *stubBillingUsageStore) GetTenantTierLimits(_ context.Context, _ uuid.UU
 	return s.limitsJSON, s.maxSensors, s.maxAssets, s.maxUsers, s.limitsErr
 }
 
+func (s *stubBillingUsageStore) ResolveNumericLimits(_ context.Context, _ uuid.UUID) (map[string]*int, error) {
+	return s.resolvedLimits, s.resolvedLimitsErr
+}
+
 func newBillingEngine(store billingUsageStore, authenticated bool, tenantID string) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -66,6 +75,7 @@ func newBillingEngine(store billingUsageStore, authenticated bool, tenantID stri
 		c.Next()
 	})
 	grp.GET("/billing/usage/current", GetCurrentUsageWithStore(store))
+	grp.POST("/billing/check-limits", CheckLimitsWithStore(store))
 	return r
 }
 

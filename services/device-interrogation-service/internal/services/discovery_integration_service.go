@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
+	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
@@ -135,8 +136,11 @@ func (s *DiscoveryIntegrationService) CreateDiscoveryFinding(
 	// WithTenantTx, matching CreateDiscoveryTarget. The policy's WITH CHECK is
 	// what makes a wrong tenant fail loudly rather than land a cross-tenant row.
 	err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
+		// Protocol is canonicalized on the way in so every discovery path stores
+		// one spelling — see cryptoparse.NormalizeProtocol.
 		return tx.QueryRowContext(ctx, query,
-			findingID, jobID, targetID, tenantID, executedVia, protocol, port,
+			findingID, jobID, targetID, tenantID, executedVia,
+			cryptoparse.NormalizeProtocol(protocol), port,
 			ipAddress, hostname, string(detailsJSON), confidenceScore, time.Now(),
 		).Scan(&findingID)
 	})

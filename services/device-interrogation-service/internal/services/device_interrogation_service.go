@@ -24,7 +24,13 @@ type DeviceInterrogationService struct {
 	bypassDB             *sql.DB
 	masterKey            string
 	discoveryIntegration *DiscoveryIntegrationService
-	registry             *di.Registry
+	// resultProcessor is borrowed for its materialization half only — the
+	// platform-sensor lookup, the certificate quality-flag computation and the
+	// sensor_discoveries writer. The agent path reaches those through
+	// ProcessJobResults; this in-cluster path has no agent payload to process,
+	// so it calls them directly rather than growing a second copy that can drift.
+	resultProcessor *ResultProcessor
+	registry        *di.Registry
 }
 
 // NewDeviceInterrogationService creates a new device interrogation service. db is
@@ -37,21 +43,28 @@ func NewDeviceInterrogationService(db, bypassDB *sql.DB, masterKey string) *Devi
 		bypassDB:             bypassDB,
 		masterKey:            masterKey,
 		discoveryIntegration: NewDiscoveryIntegrationService(db, bypassDB),
+		resultProcessor:      NewResultProcessor(db, bypassDB),
 		registry:             di.NewRegistry(),
 	}
 }
 
-// InterrogateDevice interrogates a device and stores results as discovery findings.
+// InterrogateDevice interrogates a device and materializes the results into
+// BOTH discovery sinks: discovery_findings (the job's inspection record) and
+// sensor_discoveries (the ingestion queue that actually reaches Inventory).
+//
+// It returns the discovery job id and how many assets were materialized, so the
+// caller can report a count describing what landed rather than the empty asset
+// list it forwards to the result processor.
 func (s *DeviceInterrogationService) InterrogateDevice(
 	ctx context.Context,
 	tenantID, userID, deviceID uuid.UUID,
-) (uuid.UUID, error) {
+) (uuid.UUID, int, error) {
 	device, err := s.getDevice(ctx, tenantID, deviceID)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("failed to get device: %w", err)
+		return uuid.Nil, 0, fmt.Errorf("failed to get device: %w", err)
 	}
 	if device.TenantID != tenantID {
-		return uuid.Nil, fmt.Errorf("device not found")
+		return uuid.Nil, 0, fmt.Errorf("device not found")
 	}
 
 	jobMetadata := map[string]interface{}{
@@ -62,10 +75,10 @@ func (s *DeviceInterrogationService) InterrogateDevice(
 
 	jobID, err := s.discoveryIntegration.CreateDiscoveryJob(ctx, tenantID, userID, "device_interrogation", jobMetadata)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("failed to create discovery job: %w", err)
+		return uuid.Nil, 0, fmt.Errorf("failed to create discovery job: %w", err)
 	}
 	if err := s.discoveryIntegration.MarkJobStarted(ctx, jobID); err != nil {
-		return uuid.Nil, fmt.Errorf("failed to mark job started: %w", err)
+		return uuid.Nil, 0, fmt.Errorf("failed to mark job started: %w", err)
 	}
 
 	targetID, err := s.discoveryIntegration.CreateDiscoveryTarget(ctx, tenantID, jobID,
@@ -83,7 +96,7 @@ func (s *DeviceInterrogationService) InterrogateDevice(
 	)
 	if err != nil {
 		s.discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr("Failed to create discovery target"))
-		return uuid.Nil, fmt.Errorf("failed to create discovery target: %w", err)
+		return uuid.Nil, 0, fmt.Errorf("failed to create discovery target: %w", err)
 	}
 
 	// Resolve + decrypt credentials, build the shared core's request shape.
@@ -91,7 +104,7 @@ func (s *DeviceInterrogationService) InterrogateDevice(
 	if err != nil {
 		s.updateDeviceError(ctx, tenantID, deviceID, err.Error())
 		s.discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(err.Error()))
-		return uuid.Nil, fmt.Errorf("failed to get credentials: %w", err)
+		return uuid.Nil, 0, fmt.Errorf("failed to get credentials: %w", err)
 	}
 	coreDevice := buildCoreDeviceInfo(device, baseURL)
 	coreCreds := di.Credentials{Username: username, Password: password, InsecureSkipVerify: insecureSkipVerify}
@@ -105,52 +118,52 @@ func (s *DeviceInterrogationService) InterrogateDevice(
 	interrogator, err := s.registry.Get(device.DeviceType)
 	if err != nil {
 		s.discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(fmt.Sprintf("Unsupported device type: %s", device.DeviceType)))
-		return uuid.Nil, fmt.Errorf("unsupported device type: %s", device.DeviceType)
+		return uuid.Nil, 0, fmt.Errorf("unsupported device type: %s", device.DeviceType)
+	}
+
+	// Resolve the tenant's platform system sensor BEFORE touching the device.
+	// Everything this function discovers has to land in sensor_discoveries to
+	// reach inventory, and that write needs a sensor id; without one there is no
+	// point connecting to the device at all. Same invariant, same failure
+	// posture as ProcessJobResults — a missing row is a broken invariant
+	// (`create_system_sensors_on_tenant_create` provisions it for every tenant),
+	// never a reason to degrade to a findings-only run that reports success and
+	// produces nothing a user will ever see.
+	systemSensorID, err := s.resultProcessor.lookupSystemSensor(ctx, tenantID)
+	if err != nil {
+		reason := fmt.Sprintf(
+			"platform device-interrogation sensor is missing for this tenant (%s), so interrogation results cannot reach inventory. "+
+				"The platform sensor rows are created for every tenant automatically; if one was deleted, contact your platform administrator to restore it. (%v)",
+			tenantID, err,
+		)
+		// Best-effort: the caller receives the same reason via the returned
+		// error below, so a failure to stamp the job here loses annotation, not
+		// the signal. Matches the sibling failure paths in this function.
+		_ = s.discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(reason))
+		return uuid.Nil, 0, fmt.Errorf("%s: %w", reason, err)
 	}
 
 	result, err := interrogator.Interrogate(ctx, coreDevice, coreCreds)
 	if err != nil {
 		s.updateDeviceError(ctx, tenantID, deviceID, err.Error())
 		s.discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(err.Error()))
-		return uuid.Nil, fmt.Errorf("device interrogation failed: %w", err)
+		return uuid.Nil, 0, fmt.Errorf("device interrogation failed: %w", err)
 	}
 
+	// The sensor_discoveries batch is keyed by this run's discovery job, exactly
+	// as ProcessJobResults keys its own — so a job's rows are identifiable and
+	// one run can never merge into another's batch.
+	batchID := jobID.String()
+
+	// materialized counts assets that reached sensor_discoveries — the sink that
+	// reaches Inventory. It is deliberately not len(result.Assets): a count of
+	// what was discovered, reported as a count of what landed, is exactly the
+	// claim that made this bug invisible.
+	materialized := 0
+
 	for i := range result.Assets {
-		asset := &result.Assets[i]
-		details := map[string]interface{}{
-			"device_id":         deviceID.String(),
-			"asset_type":        asset.AssetType,
-			"protocol_version":  diDerefStr(asset.ProtocolVersion),
-			"cipher_suite":      diDerefStr(asset.CipherSuite),
-			"supported_ciphers": asset.SupportedCiphers,
-			"key_size":          diDerefInt(asset.KeySize),
-			"hash_algorithm":    diDerefStr(asset.HashAlgorithm),
-			"tls_versions":      asset.TLSVersions,
-			"certificate":       asset.Certificate,
-			"certificates":      asset.Certificates,
-			"ssh_info":          asset.SSHInfo,
-			"service_hints":     asset.ServiceHints,
-			"metadata":          asset.Metadata,
-			"device_info":       result.DeviceInfo,
-			"device_identity":   result.DeviceIdentity,
-		}
-
-		var hostname *string
-		if asset.Hostname != "" {
-			hostname = &asset.Hostname
-		}
-		var ipAddress *string
-		if asset.IPAddress != "" {
-			ipAddress = &asset.IPAddress
-		}
-
-		confidenceScore := 0.9 // High confidence for direct device interrogation
-		if _, err := s.discoveryIntegration.CreateDiscoveryFinding(
-			ctx, tenantID, jobID, targetID, "device_interrogation",
-			asset.Protocol, asset.Port, hostname, ipAddress,
-			details, confidenceScore,
-		); err != nil {
-			fmt.Printf("Warning: failed to create discovery finding: %v\n", err)
+		if s.materializeInterrogatedAsset(ctx, tenantID, deviceID, jobID, targetID, systemSensorID, batchID, &result.Assets[i], result) {
+			materialized++
 		}
 	}
 
@@ -165,9 +178,98 @@ func (s *DeviceInterrogationService) InterrogateDevice(
 
 	s.updateDeviceInterrogationTime(ctx, tenantID, deviceID)
 	if err := s.discoveryIntegration.MarkJobCompleted(ctx, jobID); err != nil {
-		return uuid.Nil, fmt.Errorf("failed to mark job completed: %w", err)
+		return uuid.Nil, 0, fmt.Errorf("failed to mark job completed: %w", err)
 	}
-	return jobID, nil
+	return jobID, materialized, nil
+}
+
+// materializeInterrogatedAsset writes ONE interrogated asset into both discovery
+// sinks and reports whether it reached the inventory sink.
+//
+//   - discovery_findings — the job's inspection record ("what did this run see?")
+//   - sensor_discoveries — the ingestion queue discovery-processor polls, from
+//     which it classifies the asset, evaluates the tenant's auto-approval rules
+//     and imports it into Inventory (or parks it in Approvals)
+//
+// The second sink was missing here entirely. An interrogation wrote findings,
+// flipped the device to 'connected' and reported a count, while Inventory gained
+// nothing and Approvals showed no pending discoveries — because nothing
+// downstream reads discovery_findings into inventory. The agent path has always
+// reached this sink through ResultProcessor.ProcessJobResults; the in-cluster
+// path never did, and which executor claims a given job is a race.
+//
+// No double-write risk: for jobs that came through here the platform worker
+// hands ProcessJobResults an EMPTY asset list, so its per-asset loop — the only
+// other writer of these rows — iterates zero times.
+//
+// Returns true only when the sensor_discoveries row actually landed. The two
+// sinks are written independently: a failed finding does not skip the inventory
+// write, because that is what turns one broken INSERT into a total pipeline
+// outage.
+func (s *DeviceInterrogationService) materializeInterrogatedAsset(
+	ctx context.Context,
+	tenantID, deviceID, jobID, targetID, systemSensorID uuid.UUID,
+	batchID string,
+	asset *di.CryptoAsset,
+	result *di.InterrogateResult,
+) bool {
+	details := map[string]interface{}{
+		"device_id":         deviceID.String(),
+		"asset_type":        asset.AssetType,
+		"protocol_version":  diDerefStr(asset.ProtocolVersion),
+		"cipher_suite":      diDerefStr(asset.CipherSuite),
+		"supported_ciphers": asset.SupportedCiphers,
+		"key_size":          diDerefInt(asset.KeySize),
+		"hash_algorithm":    diDerefStr(asset.HashAlgorithm),
+		"tls_versions":      asset.TLSVersions,
+		"certificate":       asset.Certificate,
+		"certificates":      asset.Certificates,
+		"ssh_info":          asset.SSHInfo,
+		"service_hints":     asset.ServiceHints,
+		"metadata":          asset.Metadata,
+		"device_info":       result.DeviceInfo,
+		"device_identity":   result.DeviceIdentity,
+	}
+
+	var hostname *string
+	if asset.Hostname != "" {
+		hostname = &asset.Hostname
+	}
+	var ipAddress *string
+	if asset.IPAddress != "" {
+		ipAddress = &asset.IPAddress
+	}
+
+	// Compute the certificate quality flags once and share them across both
+	// sinks, exactly as ProcessJobResults does — one OCSP round trip, one
+	// set of flags, identical in discovery_findings and sensor_discoveries.
+	discovered := toDiscoveredAsset(asset, result.DeviceIdentity)
+	certFlags, ocspStatus, ocspDetail, derivedStatus := s.resultProcessor.assetCertQualityFlags(discovered)
+	mergeCertFlags(details, certFlags, ocspStatus, ocspDetail)
+	if discovered.CertValidationStatus == "" && derivedStatus != "" {
+		details["cert_validation_status"] = derivedStatus
+	}
+
+	confidenceScore := 0.9 // High confidence for direct device interrogation
+	if _, err := s.discoveryIntegration.CreateDiscoveryFinding(
+		ctx, tenantID, jobID, targetID, "device_interrogation",
+		asset.Protocol, asset.Port, hostname, ipAddress,
+		details, confidenceScore,
+	); err != nil {
+		fmt.Printf("Warning: failed to create discovery finding: %v\n", err)
+		// Deliberately no early return: the sinks are independent, and skipping
+		// the inventory write because the inspection record failed is what turns
+		// one broken INSERT into a total pipeline outage.
+	}
+
+	if err := s.resultProcessor.writeSensorDiscovery(
+		ctx, systemSensorID, tenantID, &deviceID, batchID,
+		discovered, certFlags, ocspStatus, ocspDetail,
+	); err != nil {
+		fmt.Printf("Warning: failed to write sensor discovery for device %s: %v\n", deviceID, err)
+		return false
+	}
+	return true
 }
 
 // buildCoreDeviceInfo maps a platform device record onto the shared core's
@@ -193,6 +295,105 @@ func buildCoreDeviceInfo(device *models.Device, baseURL string) di.DeviceInfo {
 		}
 	}
 	return d
+}
+
+// toDiscoveredAsset maps the shared core's CryptoAsset onto the platform's
+// enriched models.DiscoveredAsset — the shape every downstream materializer
+// (certificate quality flags, sensor_discoveries metadata) consumes.
+//
+// It mirrors the standalone Interrogation Agent's convertInterrogateResult
+// field for field. The two runtimes wrap the SAME shared interrogators and must
+// deliver the same asset to the same sinks; the only reason this is not one
+// function is that each runtime carries its own copy of the DiscoveredAsset
+// struct. Change one mapping, change the other.
+func toDiscoveredAsset(ca *di.CryptoAsset, identity *di.DeviceIdentity) models.DiscoveredAsset {
+	asset := models.DiscoveredAsset{
+		Hostname:             ca.Hostname,
+		IPAddress:            ca.IPAddress,
+		Port:                 ca.Port,
+		Protocol:             ca.Protocol,
+		AssetType:            ca.AssetType,
+		SupportedCiphers:     ca.SupportedCiphers,
+		TLSVersions:          ca.TLSVersions,
+		CertValidationStatus: ca.CertValidationStatus,
+		CertValidationError:  ca.CertValidationError,
+		ProtocolVersion:      diDerefStr(ca.ProtocolVersion),
+		CipherSuite:          diDerefStr(ca.CipherSuite),
+		KeySize:              diDerefInt(ca.KeySize),
+		KeyExchangeAlgorithm: diDerefStr(ca.KeyExchangeAlg),
+		HashAlgorithm:        diDerefStr(ca.HashAlgorithm),
+		Metadata:             ca.Metadata,
+	}
+	if ca.SSHInfo != nil {
+		asset.SSHInfo = &models.SSHInfo{
+			Banner:               ca.SSHInfo.Banner,
+			KeyTypes:             ca.SSHInfo.KeyTypes,
+			HostKeyType:          ca.SSHInfo.HostKeyType,
+			HostKeyFingerprint:   ca.SSHInfo.HostKeyFingerprint,
+			KexAlgorithm:         ca.SSHInfo.KexAlgorithm,
+			EncryptionAlgC2S:     ca.SSHInfo.EncryptionAlgC2S,
+			EncryptionAlgS2C:     ca.SSHInfo.EncryptionAlgS2C,
+			MACAlgC2S:            ca.SSHInfo.MACAlgC2S,
+			MACAlgS2C:            ca.SSHInfo.MACAlgS2C,
+			CompressionAlgorithm: ca.SSHInfo.CompressionAlgorithm,
+		}
+	}
+	if ca.ServiceHints != nil {
+		asset.ServiceHints = &models.ServiceHints{
+			ServiceName:          ca.ServiceHints.ServiceName,
+			ServiceVersion:       ca.ServiceHints.ServiceVersion,
+			Confidence:           ca.ServiceHints.Confidence,
+			IdentificationMethod: ca.ServiceHints.IdentificationMethod,
+		}
+	}
+	if ca.Certificate != nil {
+		asset.Certificate = toModelCertificate(ca.Certificate)
+	}
+	if len(ca.Certificates) > 0 {
+		certs := make([]models.CertificateInfo, 0, len(ca.Certificates))
+		for i := range ca.Certificates {
+			certs = append(certs, *toModelCertificate(&ca.Certificates[i]))
+		}
+		asset.Certificates = certs
+	}
+	if identity != nil {
+		asset.DeviceInfo = &models.DeviceIdentity{
+			Vendor:          identity.Vendor,
+			Model:           identity.Model,
+			FirmwareVersion: identity.FirmwareVersion,
+			SerialNumber:    identity.SerialNumber,
+			OSVersion:       identity.OSVersion,
+		}
+	}
+	return asset
+}
+
+// toModelCertificate maps the shared/certificates canonical cert shape onto the
+// platform's models.CertificateInfo.
+func toModelCertificate(c *di.CertificateInfo) *models.CertificateInfo {
+	serial := c.SerialNumber
+	if serial == "" {
+		serial = c.Serial
+	}
+	return &models.CertificateInfo{
+		SubjectDN:               c.SubjectDN,
+		IssuerDN:                c.IssuerDN,
+		SerialNumber:            serial,
+		NotBefore:               c.NotBefore,
+		NotAfter:                c.NotAfter,
+		Fingerprint:             c.FingerprintSHA256,
+		FingerprintSHA256:       c.FingerprintSHA256,
+		FingerprintSHA1:         c.FingerprintSHA1,
+		KeyAlgorithm:            c.KeyAlgorithm,
+		KeySize:                 c.KeySize,
+		SignatureAlgorithm:      c.SignatureAlg,
+		IsCA:                    c.IsCA,
+		CertificatePEM:          c.CertificatePEM,
+		SubjectAlternativeNames: c.SubjectAlternativeNames,
+		KeyUsage:                c.KeyUsage,
+		ExtendedKeyUsage:        c.ExtendedKeyUsage,
+		ChainOrder:              c.ChainOrder,
+	}
 }
 
 func diDerefStr(s *string) string {
@@ -424,12 +625,12 @@ func (s *DeviceInterrogationService) interrogateDatabase(
 	device *models.Device,
 	coreDevice di.DeviceInfo,
 	coreCreds di.Credentials,
-) (uuid.UUID, error) {
+) (uuid.UUID, int, error) {
 	finding, err := di.InterrogateDatabase(ctx, coreDevice, coreCreds)
 	if err != nil {
 		s.updateDeviceError(ctx, tenantID, device.ID, err.Error())
 		s.discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(err.Error()))
-		return uuid.Nil, fmt.Errorf("database interrogation failed: %w", err)
+		return uuid.Nil, 0, fmt.Errorf("database interrogation failed: %w", err)
 	}
 
 	if device.Hostname != nil {
@@ -442,7 +643,7 @@ func (s *DeviceInterrogationService) interrogateDatabase(
 	dbService := NewDatabaseInterrogationService(s.db)
 	if err := dbService.StoreDatabaseEncryptionFinding(ctx, tenantID, &device.ID, finding); err != nil {
 		s.discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(err.Error()))
-		return uuid.Nil, fmt.Errorf("failed to store database encryption finding: %w", err)
+		return uuid.Nil, 0, fmt.Errorf("failed to store database encryption finding: %w", err)
 	}
 
 	details := map[string]interface{}{
@@ -479,5 +680,6 @@ func (s *DeviceInterrogationService) interrogateDatabase(
 
 	s.updateDeviceInterrogationTime(ctx, tenantID, device.ID)
 	s.discoveryIntegration.MarkJobCompleted(ctx, jobID)
-	return jobID, nil
+	// One database finding per interrogation.
+	return jobID, 1, nil
 }

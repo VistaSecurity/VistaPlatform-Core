@@ -3,7 +3,7 @@
 // these; nothing here fetches. Mirrors the discovery section's kit pattern so
 // the two read alike (components/ui is stream-1-owned and stays read-only).
 import { Icon } from '../../components/ui';
-import type { DiffChange } from './queries';
+import type { DiffChange, VerifyResponse } from './queries';
 
 // ---- formatters -----------------------------------------------------------
 export function fmtBytes(n?: number | null): string {
@@ -34,6 +34,56 @@ export function relTime(iso?: string | null): string {
 
 export function shortHash(h?: string | null, n = 12): string {
   return h ? h.slice(0, n) : '—';
+}
+
+// ---- verify verdicts ------------------------------------------------------
+
+export type HashState = 'verified' | 'mismatch' | 'not-checked';
+
+export interface HashVerdict {
+  state: HashState;
+  label: string;
+  icon: string;
+  tone: string;
+  detail?: string;
+}
+
+/**
+ * The hash half of a verify result has THREE outcomes, not two.
+ *
+ * `hash_valid` is a plain boolean, so "we compared and they differ" and "we
+ * could not read the bytes, so we compared nothing" both arrive as `false`.
+ * The server distinguishes them by omitting `hash_recomputed` in the second
+ * case — a shape the OpenAPI spec documents deliberately.
+ *
+ * Branching on `hash_valid` alone painted an object-stored artifact whose bytes
+ * merely could not be fetched (credentials rotated, object expired, storage
+ * unwired) as a red "Hash mismatch", and suppressed the explanatory line
+ * because `hash_recomputed` was empty. An operator holding untampered evidence
+ * was told its integrity check had failed, which reads as tampering. The
+ * signature half already had the three-state treatment; this gives the hash the
+ * same honesty.
+ */
+export function hashVerdict(v: Pick<VerifyResponse, 'hash_valid' | 'hash_recomputed' | 'hash_stored'>): HashVerdict {
+  if (v.hash_valid) {
+    return { state: 'verified', label: 'Hash verified', icon: 'badge-check', tone: 'var(--ok)' };
+  }
+  if (v.hash_recomputed) {
+    return {
+      state: 'mismatch',
+      label: 'Hash mismatch',
+      icon: 'shield-x',
+      tone: 'var(--danger)',
+      detail: `expected ${shortHash(v.hash_stored, 24)}… · got ${shortHash(v.hash_recomputed, 24)}…`,
+    };
+  }
+  return {
+    state: 'not-checked',
+    label: 'Hash not checked — artifact bytes unavailable',
+    icon: 'shield-off',
+    tone: 'var(--app-t3)',
+    detail: 'Nothing was compared, so this is not a tamper signal. The stored bytes could not be read — check object storage configuration.',
+  };
 }
 
 // ---- diff-category palette ------------------------------------------------

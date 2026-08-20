@@ -326,10 +326,14 @@ function DiscoveryCertModal({ certs, data, onClose }: {
 type DiscoveryFinding = inventoryComponents['schemas']['DiscoveryFinding'];
 
 const PROTOCOLS = ['TLS', 'SSH'];
-const EXEC_MODES: { value: string; label: string }[] = [
+// "Sensors — tenant-deployed" was removed: nothing dispatches a discovery job to
+// a tenant-deployed sensor. Picking it produced a scan that ran from the platform
+// cluster instead, could not reach a target only the sensor can see, and reported
+// `completed` with zero findings. The API now rejects execution_mode "sensors"
+// outright; the option comes back when dispatch is actually built.
+export const EXEC_MODES: { value: string; label: string }[] = [
   { value: 'auto', label: 'Auto — platform decides' },
   { value: 'cloud', label: 'Cloud — platform sensor' },
-  { value: 'sensors', label: 'Sensors — tenant-deployed' },
 ];
 
 // Reports where a job's findings went. The wording is built by

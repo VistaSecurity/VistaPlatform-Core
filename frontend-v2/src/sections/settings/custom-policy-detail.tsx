@@ -7,6 +7,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { clients } from '../../lib/clients';
 import { Icon, Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
 import { STag } from './kit';
+import { notAssessedReasonText } from '../findings/control-status';
 import type { complianceEngineComponents } from '@vistasecurity/api-contract';
 
 type Control = complianceEngineComponents['schemas']['TenantFrameworkControl'];
@@ -220,7 +221,7 @@ function RulesModal({ control, onClose }: { control: Control; onClose: () => voi
     <Modal
       open onClose={onClose} size="lg" icon="sliders-horizontal" eyebrow={`Rules — ${control.control_id}`}
       title={form ? (form.editingId ? 'Edit rule' : 'New rule') : control.title}
-      description={form ? 'A rule fails when the measured value violates the predicate.' : 'A control passes when all its rules pass. With no rules it passes by default.'}
+      description={form ? 'A rule fails when the measured value violates the predicate.' : `A control passes when all its rules pass and fails if any fail. ${notAssessedReasonText('no_measurements')} It's scored Not assessed, not a pass.`}
       footerNote={saveMut.isError ? errMsg(saveMut.error) : undefined}
       primary={form ? <button className="ui-btn sm accent" disabled={formInvalid || saveMut.isPending} onClick={() => form && saveMut.mutate(form)}>{saveMut.isPending ? 'Saving…' : 'Save rule'}</button> : undefined}
       secondary={<button className="ui-btn sm" onClick={onClose}>Close</button>}

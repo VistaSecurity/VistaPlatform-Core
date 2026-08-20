@@ -422,10 +422,18 @@ func newRouter(
 		api.POST("/audit-service/retention-policies", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.retention.CreateRetentionPolicy)
 		api.PUT("/audit-service/retention-policies/:id", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.retention.UpdateRetentionPolicy)
 
-		// Alert endpoints (legacy)
+		// Built-in audit alert rules (read-only view of the in-memory engine).
+		//
+		// GET /alerts and POST /alerts/:id/acknowledge used to sit here. They
+		// were the sole data source for Remediation → Triage and neither did
+		// anything: GetAlerts returned a hardcoded empty list and
+		// AcknowledgeAlert only wrote a log line, so the page showed "Inbox
+		// zero" forever and an acknowledgement was confirmed but never stored.
+		// Both, and the page, were removed. Audit-rule alerts that map onto a
+		// registry alert type reach the tenant through the stateful alert rail
+		// (alerts.raise → compliance-engine → Remediation → Alerts), which
+		// persists them with a real lifecycle.
 		api.GET("/audit-service/alerts/rules", h.alert.GetAlertRules)
-		api.GET("/audit-service/alerts", h.alert.GetAlerts)
-		api.POST("/audit-service/alerts/:id/acknowledge", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.alert.AcknowledgeAlert)
 
 		// Custom Alert Rule endpoints (NEW)
 		api.POST("/audit-service/alert-rules", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.alertRule.CreateAlertRule)

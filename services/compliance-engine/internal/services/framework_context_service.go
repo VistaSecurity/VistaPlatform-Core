@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	sharedservices "github.com/vistasecurity/vistaplatform/shared/services"
 )
 
 // FrameworkContextService provides a consolidated view of framework data for a tenant
@@ -287,37 +289,64 @@ func (s *FrameworkContextService) calculateFrameworkStats(tenantID, frameworkID 
 	return frameworkScore(outcomes)
 }
 
-// getSubscriptionInfo retrieves subscription information for a tenant
-func (s *FrameworkContextService) getSubscriptionInfo(tenantID uuid.UUID, currentCount int) *FrameworkSubscriptionInfo {
-	// Get subscription tier from tenants table (subscription_tier_id FK)
-	var tier string
-	var frameworkLimit int
+// unlimitedFrameworkLimit is how an unlimited cap is reported on the wire.
+// FrameworkSubscriptionInfo.FrameworkLimit is a non-pointer int in a pinned
+// contract, and -1 is the platform's existing "unlimited" encoding for numeric
+// caps (see UsageLimits in auth-service).
+const unlimitedFrameworkLimit = -1
 
-	err := s.db.QueryRow(`
-		SELECT st.tier, st.compliance_framework_limit
+// getSubscriptionInfo retrieves subscription information for a tenant.
+//
+// It reads through shared/services.LimitEnforcementService — the same path that
+// ENFORCES the framework cap.
+//
+// The previous implementation selected `st.tier` and
+// `st.compliance_framework_limit`, and NEITHER COLUMN EXISTS on
+// subscription_tiers. Postgres therefore errored on every call, the error was
+// swallowed by the "default to free tier" branch, and every tenant on every
+// plan was reported as tier "free" with a framework limit of 1 — including
+// Enterprise tenants with an unlimited cap. currentCount was also adjusted by a
+// hardcoded -1 for Best Practices, duplicating a free-framework carve-out that
+// countActiveFrameworkSubscriptions already applies properly.
+func (s *FrameworkContextService) getSubscriptionInfo(tenantID uuid.UUID, currentCount int) *FrameworkSubscriptionInfo {
+	info := &FrameworkSubscriptionInfo{}
+
+	// Tier NAME (the real column) for display.
+	var tierName sql.NullString
+	if err := s.db.QueryRow(`
+		SELECT st.name
 		FROM tenants t
 		JOIN subscription_tiers st ON t.subscription_tier_id = st.id
 		WHERE t.id = $1
-	`, tenantID).Scan(&tier, &frameworkLimit)
+	`, tenantID).Scan(&tierName); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		log.Printf("WARN: framework subscription tier lookup failed for tenant %s: %v", tenantID, err)
+	}
+	if tierName.Valid {
+		info.Tier = tierName.String
+	}
 
+	// Cap + usage from the enforcement path. Asking whether ONE more framework
+	// fits is exactly the question CanAddMore answers, so this can no longer
+	// disagree with the 402 the tenant would actually get.
+	enforcement := sharedservices.NewLimitEnforcementService(s.db.DB)
+	check, err := enforcement.CheckComplianceFrameworkCountLimit(tenantID, 1)
 	if err != nil {
-		// Default to free tier if subscription not found
-		tier = "free"
-		frameworkLimit = 1
+		log.Printf("WARN: framework cap resolve failed for tenant %s: %v", tenantID, err)
+		// Report what we know rather than a fabricated cap: usage as counted by
+		// the caller, and "cannot add more" — the conservative answer, matching
+		// how the resolver itself defaults.
+		info.FrameworksUsed = currentCount
+		return info
 	}
 
-	// Best Practices doesn't count toward limit, so adjust current count
-	adjustedCount := currentCount - 1
-	if adjustedCount < 0 {
-		adjustedCount = 0
+	info.FrameworksUsed = check.CurrentUsage
+	info.CanAddMore = check.Allowed
+	if check.Limit == nil {
+		info.FrameworkLimit = unlimitedFrameworkLimit
+	} else {
+		info.FrameworkLimit = *check.Limit
 	}
-
-	return &FrameworkSubscriptionInfo{
-		Tier:           tier,
-		FrameworkLimit: frameworkLimit,
-		FrameworksUsed: adjustedCount,
-		CanAddMore:     adjustedCount < frameworkLimit,
-	}
+	return info
 }
 
 // BatchEvaluateRequest represents a request to evaluate multiple frameworks

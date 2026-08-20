@@ -6,10 +6,10 @@
      influxdb} fields decide which backends are granted outbound to each
      datastore. Backend-to-backend HTTP on :8080 is allowed for all
      backends (the gateway-free chart routes inter-service traffic
-     directly). The five services in .Values.networkPolicy.externalEgressBackends
-     get a broader Internet egress allow (everything EXCEPT RFC1918 +
-     link-local + the service CIDR) so they can reach customer networks
-     / vendor APIs / SMTP / webhooks.
+     directly). The services in .Values.networkPolicy.externalEgressBackends
+     get a broader outbound allow (everything EXCEPT the cluster's own pod
+     and Service CIDRs, plus link-local) so they can reach customer device
+     networks / vendor APIs / SMTP / webhooks.
      ─────────────────────────────────────────────────────────────────── */}}
 
 {{/* DNS egress for every pod in the namespace. Without this the default-deny
@@ -203,20 +203,41 @@ spec:
 {{- end }}
 ---
 
-{{/* Internet egress for backends that legitimately need to call out:
-     sensor-manager / cluster-sensor-service (TLS probing arbitrary
-     endpoints), device-interrogation-service (vendor mgmt APIs on
-     customer networks), notification-service (webhook + SMTP),
-     integration-sync (third-party integrations).
+{{/* Outbound egress for backends that legitimately need to leave the
+     cluster: sensor-manager / cluster-sensor-service (TLS + SSH probing of
+     arbitrary endpoints), device-interrogation-service (vendor mgmt APIs and
+     SNMP/OT probes on customer networks), notification-service (webhooks +
+     SMTP), and auth-service / admin-service / monitoring-service /
+     cluster-sensor-service, which each open their own SMTP connection via
+     shared/email rather than routing mail through a central relay pod.
 
-     Allows TCP to 0.0.0.0/0 except the standard private CIDRs and
-     link-local — this opens the public Internet without permitting
-     lateral movement to other namespaces or in-cluster Services. */}}
+     Scope is 0.0.0.0/0 MINUS .Values.networkPolicy.clusterInternalCIDRs
+     (the cluster's own pod and Service ranges) MINUS link-local. It is
+     deliberately NOT "0.0.0.0/0 minus all of RFC1918": the customer device
+     networks these services exist to reach are themselves RFC1918, so
+     excluding 10/8 + 172.16/12 + 192.168/16 blocked interrogation and
+     internal active scanning outright while the API still reported success.
+
+     What this does NOT permit: reaching other namespaces' pods or in-cluster
+     ClusterIP Services by address, and the instance-metadata endpoint. What
+     it DOES permit that a blanket RFC1918 block did not: any address on the
+     customer's own networks, including node IPs unless the operator adds the
+     node subnet to clusterInternalCIDRs. Ports come from
+     .Values.networkPolicy.externalEgressPorts so an operator can tighten
+     them. */}}
 {{- if .Values.networkPolicy.externalEgressBackends }}
+{{- $clusterCIDRs := .Values.networkPolicy.clusterInternalCIDRs | default (list) }}
+{{- if not $clusterCIDRs }}
+  {{- fail "networkPolicy.egressEnabled requires networkPolicy.clusterInternalCIDRs to list this cluster's pod and Service CIDRs. Leaving it empty would render allow-egress-outbound as an unrestricted outbound allow. Find yours with: kubectl cluster-info dump | grep -E 'cluster-cidr|service-cluster-ip-range'" }}
+{{- end }}
+{{- $egressPorts := .Values.networkPolicy.externalEgressPorts | default (list) }}
+{{- if not $egressPorts }}
+  {{- fail "networkPolicy.externalEgressPorts must list at least one port; an empty list would deny all outbound traffic for externalEgressBackends." }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-egress-internet
+  name: allow-egress-outbound
   labels:
     {{- include "vistaplatform.labels" . | nindent 4 }}
 spec:
@@ -229,18 +250,22 @@ spec:
         - ipBlock:
             cidr: 0.0.0.0/0
             except:
-              - 10.0.0.0/8
-              - 172.16.0.0/12
-              - 192.168.0.0/16
-              - 169.254.0.0/16
-      # Common outbound ports — HTTPS (443) for vendor APIs, HTTP (80) for
-      # health-check redirects, SMTP submission (587) + SMTPS (465) for
-      # notification-service, plus arbitrary high ports for TLS probing.
+              {{- range $cidr := $clusterCIDRs }}
+              - {{ $cidr | quote }}
+              {{- end }}
+              {{- /* Link-local (RFC 3927) incl. the cloud instance-metadata
+                     endpoint 169.254.169.254. Not operator-configurable:
+                     no supported outbound path needs it. */}}
+              {{- if not (has "169.254.0.0/16" $clusterCIDRs) }}
+              - "169.254.0.0/16"
+              {{- end }}
       ports:
-        - { protocol: TCP, port: 80 }
-        - { protocol: TCP, port: 443 }
-        - { protocol: TCP, port: 465 }
-        - { protocol: TCP, port: 587 }
-        - { protocol: TCP, port: 8443 }
+        {{- range $port := $egressPorts }}
+        - protocol: {{ $port.protocol | default "TCP" }}
+          port: {{ $port.port }}
+          {{- if $port.endPort }}
+          endPort: {{ $port.endPort }}
+          {{- end }}
+        {{- end }}
 {{- end }}
 {{- end }}

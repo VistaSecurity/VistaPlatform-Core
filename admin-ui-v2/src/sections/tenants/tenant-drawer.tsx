@@ -222,10 +222,27 @@ function PlanChangePanel({ t }: { t: Tenant }) {
   );
 }
 
+// COMPONENT_LABELS names the costing components (shared/costing) for display.
+// An unknown key falls back to the raw name rather than being hidden.
+const COMPONENT_LABELS: Record<string, string> = {
+  api_calls: 'API calls',
+  database: 'Database',
+  storage: 'Storage',
+  network: 'Network',
+  compute: 'Compute',
+};
+
+const componentLabel = (key: string) => COMPONENT_LABELS[key] ?? key;
+
 function BillingTab({ t }: { t: Tenant }) {
   const cost = useTenantCost(t.id);
   const coupons = useTenantCoupons(t.id);
   const breakdown = cost.data?.cost_breakdown ? Object.entries(cost.data.cost_breakdown) : [];
+  // Components the backend could not measure over the period. They are absent
+  // from cost_breakdown rather than present as $0.00, so they must be shown as
+  // "not measured" — otherwise the headline silently understates the true cost
+  // with nothing on screen to say so.
+  const notMeasured = cost.data?.not_measured ?? [];
 
   return (
     <>
@@ -239,9 +256,18 @@ function BillingTab({ t }: { t: Tenant }) {
             <div style={{ fontSize: 11.5, color: 'var(--op-t3)', marginTop: 2 }}>
               {new Date(cost.data.period_start).toLocaleDateString()} – {new Date(cost.data.period_end).toLocaleDateString()}
             </div>
-            {breakdown.length > 0 && (
+            {(breakdown.length > 0 || notMeasured.length > 0) && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 7, marginTop: 12 }}>
-                {breakdown.map(([k, v]) => <Row key={k} label={k} value={money(v)} />)}
+                {breakdown.map(([k, v]) => <Row key={k} label={componentLabel(k)} value={money(v)} />)}
+                {notMeasured.map((k) => (
+                  <Row key={k} label={componentLabel(k)} value={<span style={{ color: 'var(--op-t3)' }}>Not measured</span>} />
+                ))}
+              </div>
+            )}
+            {notMeasured.length > 0 && (
+              <div style={{ fontSize: 11, color: 'var(--op-t3)', marginTop: 10, lineHeight: 1.45 }}>
+                The total covers measured components only. Compute is not attributable per tenant — the
+                platform runs shared service pods, so there is no per-tenant CPU or memory figure to price.
               </div>
             )}
           </div>

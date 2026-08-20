@@ -113,7 +113,7 @@ The platform uses a **5-section primary navigation** organized around the lifecy
 | **Discovery** | Find assets — sensors, scanning, device interrogation, and cloud/PCAP sources | Command Center; Sensors & Agents, Discovery Jobs, Devices, Scheduled Scans; Approvals; Job Logs; Cloud, PCAP Upload |
 | **Inventory** | One unified inventory, viewed through switchable **lenses** | Lenses (Infrastructure, Certificates, Keys, and more) plus By-Protocol lenses — see [Inventory & Lenses](../features/inventory-and-lenses.md) |
 | **Risk & Compliance** | Where you stand and what's failing | Posture, Findings, CBOM |
-| **Remediation** | Fixing what was found, end to end | Triage, Queue, Plans |
+| **Remediation** | Fixing what was found, end to end | Alerts, Queue, Plans |
 
 **Settings** and **My Profile** are *not* in the primary rail — they live in the **profile dropdown** at the bottom of the rail (see below).
 
@@ -160,7 +160,7 @@ On smaller screens (tablets and phones), the top navigation bar is replaced by a
   - *Findings*: Active compliance findings, filterable by lens
   - *CBOM*: Generate and compare audit-grade CBOM artifacts
 - **Remediation**:
-  - *Triage*: Prioritize what to fix next
+  - *Alerts*: The alert inbox — acknowledge, snooze, resolve, or turn one into a ticket
   - *Queue*: The unified ticket queue — every remediation ticket lives here
   - *Plans*: Track multi-step remediation and migration plans (e.g. PQC migration)
 - **My Profile** (via the profile dropdown): your personal settings — Personal, Preferences, Security, Notifications, Sessions & Devices, Connected Accounts, API Tokens, Accessibility, and Account & Privacy.

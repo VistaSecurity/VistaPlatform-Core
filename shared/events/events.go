@@ -312,32 +312,13 @@ type CertificateExpiringPayload struct {
 	DaysRemaining int       `json:"days_remaining"`
 }
 
-// AuditJobExecutionEvent represents a job execution log entry published to NATS.
-// It replaces the HTTP calls from services to audit-service for job lifecycle logging.
-type AuditJobExecutionEvent struct {
-	EventID        uuid.UUID              `json:"event_id"`
-	JobID          uuid.UUID              `json:"job_id"`
-	LogID          uuid.UUID              `json:"log_id"` // Client-generated log ID for correlating start/progress/complete
-	JobType        string                 `json:"job_type"`
-	JobName        string                 `json:"job_name"`
-	Phase          string                 `json:"phase"` // "start", "progress", "complete"
-	Status         string                 `json:"status,omitempty"`
-	TenantID       *uuid.UUID             `json:"tenant_id,omitempty"`
-	InitiatedBy    *uuid.UUID             `json:"initiated_by,omitempty"`
-	ItemsProcessed int                    `json:"items_processed,omitempty"`
-	ItemsSucceeded int                    `json:"items_succeeded,omitempty"`
-	ItemsFailed    int                    `json:"items_failed,omitempty"`
-	ErrorMessage   *string                `json:"error_message,omitempty"`
-	Timestamp      time.Time              `json:"timestamp"`
-	Metadata       map[string]interface{} `json:"metadata,omitempty"`
-}
-
 // --- NATS Subjects ---
 
 const (
-	// Audit subjects
+	// Audit subjects. Job-execution logging is HTTP-only (audit-service's
+	// /job-execution-logs API) — there is deliberately no subject for it: the
+	// audit.job-execution rail was published to for years with no subscriber.
 	SubjectAuditActivityLogs = "audit.activity-logs"
-	SubjectAuditJobExecution = "audit.job-execution"
 
 	// Notification subjects
 	SubjectNotificationsSend = "notifications.send"

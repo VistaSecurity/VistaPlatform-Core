@@ -13,6 +13,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/database"
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
@@ -479,7 +480,9 @@ func (s *SensorService) StoreDiscoveries(batch *models.DiscoveryBatch) error {
 			batch.SensorID,
 			tenantID,
 			batch.BatchID,
-			discovery.Protocol,
+			// Canonical protocol_type spelling, not whatever the sensor's
+			// assembler happened to emit — see cryptoparse.NormalizeProtocol.
+			cryptoparse.NormalizeProtocol(discovery.Protocol),
 			discovery.DestIP,
 			discovery.Port,
 			discovery.Confidence,

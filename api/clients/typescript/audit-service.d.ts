@@ -251,43 +251,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/alerts": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List triggered alerts
-         * @description Filter by `status` (default "open"). `alerts` is null when none match.
-         */
-        get: operations["getAlerts"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/alerts/{id}/acknowledge": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Acknowledge a triggered alert */
-        post: operations["acknowledgeAlert"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/analytics/user-activity": {
         parameters: {
             query?: never;
@@ -763,37 +726,6 @@ export interface components {
             is_active?: boolean;
         } & {
             [key: string]: unknown;
-        };
-        /**
-         * @description A triggered alert (services.Alert). `sample_events`, `acknowledged_at`,
-         *     `acknowledged_by`, `resolved_at` are omitempty.
-         */
-        Alert: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            rule_id: string;
-            rule_name: string;
-            severity: string;
-            message: string;
-            event_count: number;
-            sample_events?: {
-                [key: string]: unknown;
-            }[];
-            /** Format: date-time */
-            triggered_at: string;
-            /** Format: date-time */
-            acknowledged_at?: string;
-            /** Format: uuid */
-            acknowledged_by?: string;
-            /** Format: date-time */
-            resolved_at?: string;
-            /** @description open / acknowledged / resolved. */
-            status: string;
-        };
-        /** @description Envelope `{ "alerts": [...] }`. `alerts` is null when none match. */
-        AlertListResponse: {
-            alerts: components["schemas"]["Alert"][] | null;
         };
         /** @description Envelope `{ "summary": {...} }` for /analytics/user-activity. `summary` is a loosely-typed analytics blob. */
         AnalyticsSummaryResponse: {
@@ -1444,54 +1376,6 @@ export interface operations {
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    getAlerts: {
-        parameters: {
-            query?: {
-                status?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The matching alerts. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AlertListResponse"];
-                };
-            };
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    acknowledgeAlert: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Acknowledgement confirmation. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AuditMessageResponse"];
-                };
-            };
-            400: components["responses"]["LegacyBadRequest"];
-            401: components["responses"]["LegacyUnauthorized"];
             500: components["responses"]["LegacyServerError"];
         };
     };

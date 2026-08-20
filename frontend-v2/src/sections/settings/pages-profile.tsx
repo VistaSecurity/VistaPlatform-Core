@@ -10,6 +10,7 @@ import { useAuth } from '@vistasecurity/primitives/auth';
 import { clients } from '../../lib/clients';
 import { Icon } from '../../components/ui';
 import { SPage, SSection, SCard, SRow, SInput, SAvatar, SDot, SToggle, SSelect, StateNote, STag, relTime, GREEN, AMBER } from './kit';
+import { ExportMyDataButton } from './data-subject';
 import type { SettingsNavItem } from './nav';
 
 export function ProfilePersonalPage({ meta }: { meta: SettingsNavItem }) {
@@ -132,6 +133,16 @@ export function ProfilePersonalPage({ meta }: { meta: SettingsNavItem }) {
           <SInput key={`tz-${user?.id}`} value={timezone} width={220} placeholder="e.g. America/New_York" onChange={setTimezone} />
         </SRow>
       </SCard>
+
+      {/* Data subject access, self-service (#1461). Sits on your own profile
+          because the most common version of this request is your own. */}
+      <SSection title="Your data">
+        <SCard>
+          <SRow label="Export" hint="Everything this platform holds about you, as a file you can keep." last>
+            <ExportMyDataButton />
+          </SRow>
+        </SCard>
+      </SSection>
     </SPage>
   );
 }

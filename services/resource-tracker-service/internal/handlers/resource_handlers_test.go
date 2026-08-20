@@ -15,6 +15,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/services/resource-tracker-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/services/resource-tracker-service/internal/repository"
 	"github.com/vistasecurity/vistaplatform/services/resource-tracker-service/internal/service"
+	"github.com/vistasecurity/vistaplatform/shared/costing"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 )
 
@@ -91,7 +92,7 @@ func TestRecordResourceMetrics_MissingTenantHeader(t *testing.T) {
 	defer cleanup()
 	r := newTestRouter(h)
 
-	body := models.ResourceMetricsRequest{APICalls: 5}
+	body := models.ResourceMetricsRequest{APICalls: costing.Int64(5)}
 	// signedRequest with empty header to skip the X-Tenant-ID header
 	// but still produce a valid HMAC for the no-tenant message variant.
 	req := signedRequest(t, body, "")
@@ -116,7 +117,7 @@ func TestRecordResourceMetrics_MalformedTenantHeader(t *testing.T) {
 	defer cleanup()
 	r := newTestRouter(h)
 
-	body := models.ResourceMetricsRequest{APICalls: 5}
+	body := models.ResourceMetricsRequest{APICalls: costing.Int64(5)}
 	req := signedRequest(t, body, "not-a-uuid")
 
 	w := httptest.NewRecorder()
@@ -144,7 +145,7 @@ func TestRecordResourceMetrics_BodyTenantContradictsHeader(t *testing.T) {
 
 	body := models.ResourceMetricsRequest{
 		TenantID: bodyTenant,
-		APICalls: 5,
+		APICalls: costing.Int64(5),
 	}
 	req := signedRequest(t, body, headerTenant.String())
 
@@ -168,7 +169,7 @@ func TestRecordResourceMetrics_InvalidHMACRejectedByMiddleware(t *testing.T) {
 	defer cleanup()
 	r := newTestRouter(h)
 
-	body := models.ResourceMetricsRequest{APICalls: 5}
+	body := models.ResourceMetricsRequest{APICalls: costing.Int64(5)}
 	bodyBytes, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/resource-tracker/metrics", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
@@ -208,7 +209,7 @@ func TestRecordResourceMetrics_ValidSignedCallBindsHeaderTenant(t *testing.T) {
 		WithArgs(headerTenant).
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 
-	body := models.ResourceMetricsRequest{APICalls: 42}
+	body := models.ResourceMetricsRequest{APICalls: costing.Int64(42)}
 	req := signedRequest(t, body, headerTenant.String())
 
 	w := httptest.NewRecorder()
@@ -249,14 +250,17 @@ func newAllTenantsRouter(h *ResourceHandlers) *gin.Engine {
 // unmocked — the handler ignores their errors (costTrend, _ := ...), so they
 // resolve to empty trends without affecting the pagination math under test.
 func expectAllTenantsQuery(mock sqlmock.Sqlmock, n int) {
+	// No total_cost_usd column: cost is derived at read time from these
+	// aggregates through shared/costing rather than read back from the stored
+	// per-sample column.
 	cols := []string{
 		"tenant_id", "tenant_name", "total_api_calls", "total_db_queries",
-		"avg_memory_mb", "avg_cpu_percent", "total_storage_mb",
-		"total_network_bytes", "total_cost_usd",
+		"avg_memory_mb", "avg_cpu_percent", "mean_storage_mb",
+		"total_network_bytes",
 	}
 	rows := sqlmock.NewRows(cols)
 	for i := 0; i < n; i++ {
-		rows.AddRow(uuid.New(), "tenant", 1, 1, 1.0, 1.0, 1, int64(1), 1.0)
+		rows.AddRow(uuid.New(), "tenant", int64(1), int64(1), 1.0, 1.0, 1.0, int64(1))
 	}
 	mock.ExpectQuery("FROM tenants t").WillReturnRows(rows)
 }
@@ -316,7 +320,7 @@ func TestRecordResourceMetrics_MatchingBodyTenantAccepted(t *testing.T) {
 
 	body := models.ResourceMetricsRequest{
 		TenantID: tenant, // same as header — should be accepted
-		APICalls: 7,
+		APICalls: costing.Int64(7),
 	}
 	req := signedRequest(t, body, tenant.String())
 

@@ -16,7 +16,7 @@ import (
 // Modbus/TCP (TCP port 502, MBAP-wrapped Modbus PDU) is the dominant OT
 // protocol in the field — PLCs, drives, sensors, flow meters, RTUs all speak
 // it. It has no native authentication or encryption: every Modbus/TCP session
-// is a plaintext conversation. For VistaPlatform, *detecting* Modbus on the wire
+// is a plaintext conversation. For Vista Platform, *detecting* Modbus on the wire
 // IS the finding — the absence of crypto is the cryptographic-discovery
 // signal.
 //

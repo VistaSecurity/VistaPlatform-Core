@@ -6,7 +6,7 @@
 #
 # RKE2 docs: https://docs.rke2.io/install/configuration
 
-# CIS hardening profile. Required for VistaPlatform deployments.
+# CIS hardening profile. Required for Vista Platform deployments.
 # Before enabling, create the required system users:
 #   sudo useradd -r -c "kube-apiserver user" -s /sbin/nologin -M kube-apiserver
 #   sudo useradd -r -c "etcd user" -s /sbin/nologin -M etcd
@@ -25,7 +25,7 @@ tls-san:
 cni:
   - canal
 
-# Audit logging — required by CIS benchmark and VistaPlatform deployment guide.
+# Audit logging — required by CIS benchmark and Vista Platform deployment guide.
 # Create /etc/rancher/rke2/audit-policy.yaml before starting rke2-server.
 kube-apiserver-arg:
   - audit-log-path=/var/lib/rancher/rke2/server/logs/audit.log
@@ -41,7 +41,7 @@ kube-apiserver-arg:
 # Disable bundled components.
 #
 # IMPORTANT: RKE2 v1.30+ ships rke2-ingress-nginx (NOT Traefik) as the bundled
-# ingress controller. The VistaPlatform chart emits Traefik-only IngressRoute and
+# ingress controller. The Vista Platform chart emits Traefik-only IngressRoute and
 # Middleware CRDs, so nginx cannot serve them. We disable nginx here and
 # install Traefik explicitly per deployment-guide §3.5.
 disable:

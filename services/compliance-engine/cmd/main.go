@@ -63,7 +63,6 @@ func main() {
 	defer func() { _ = bypassDB.Close() }()
 
 	// Initialize services
-	complianceService := services.NewComplianceService(db)
 	scenarioService := services.NewScenarioService(db)
 	overrideService := services.NewOverrideService(db)
 	platformFrameworkService := services.NewPlatformFrameworkService(db)
@@ -84,7 +83,7 @@ func main() {
 	ruleEvaluator.SetMetrics(metricsService)
 
 	// Initialize handlers
-	complianceHandlers := handlers.NewComplianceHandlers(complianceService, mappingsService)
+	complianceHandlers := handlers.NewComplianceHandlers(mappingsService)
 	findingsService := services.NewFindingsService(db, bypassDB, ruleEvaluator, frameworkLicenseService, evaluationService, metricsService)
 	workspaceHandlers := handlers.NewWorkspaceHandlers(evaluationService, scenarioService, overrideService, findingsService)
 	metricsHandlers := handlers.NewMetricsHandlers(metricsService)
@@ -146,6 +145,13 @@ func main() {
 	// Alert catalog (§8.2): registry types + tenant settings + rung ladders.
 	alertCatalog := services.NewAlertCatalogService(db)
 	alertCatalogHandlers := handlers.NewAlertCatalogHandlers(alertCatalog)
+
+	// The engine enforces the tenant's enable/disable toggle for EVERY producer,
+	// so a producer that forgets to check (the cert-expiry lifecycle bridge, and
+	// audit-service's failed_login_burst over NATS, both did) cannot bypass it.
+	// Framework-contributed policy rungs go through RaisePolicyRung and are
+	// deliberately exempt (§8.3).
+	alertEngine.SetAlertCatalog(alertCatalog)
 
 	// Initialize remediation plan service
 	planService := services.NewRemediationPlanService(db, bypassDB, natsClient)
@@ -242,15 +248,12 @@ func main() {
 		compliance.GET("/measurement-types", measurementHandlers.ListMeasurementTypes)
 		compliance.GET("/measurement-types/:code", measurementHandlers.GetMeasurementType)
 
-		// Compliance rules management
-		compliance.GET("/rules", complianceHandlers.GetComplianceRules)
-		compliance.GET("/rules/:id", complianceHandlers.GetComplianceRule)
-		compliance.POST("/rules", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionComplianceUpdate), complianceHandlers.CreateComplianceRule)
-
-		// Compliance checks and reports. Running a check writes findings,
-		// so it counts as a compliance.update (not a read).
-		compliance.POST("/checks", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionComplianceUpdate), complianceHandlers.RunComplianceCheck)
-		compliance.GET("/reports", complianceHandlers.GetComplianceReports)
+		// NOTE: the pre-ADR-0014 rule/check/report path (GET+POST /rules,
+		// POST /checks, GET /reports, GET /legacy/summary) was removed. It was
+		// dead in every direction: compliance_rules was never seeded so the
+		// evaluation loop never ran, no UI or Go client ever called the routes,
+		// and compliance_checks had no readers. Compliance evaluation is the
+		// materialized-findings model below (/findings, /evaluate, /summary).
 
 		// Tenant-triggered re-evaluation (Risk & Compliance → Posture). The tenant
 		// comes from the caller's context, never from a parameter. GET is read-only
@@ -258,7 +261,6 @@ func main() {
 		// gated on compliance.manage and consumes the persisted 1h cooldown.
 		compliance.GET("/reevaluation", reevaluationHandler.GetState)
 		compliance.POST("/reevaluate", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionComplianceManage), reevaluationHandler.Reevaluate)
-		compliance.GET("/legacy/summary", complianceHandlers.GetComplianceSummary)
 
 		// Workspace endpoints (v1 MVP)
 		compliance.GET("/summary", workspaceHandlers.GetSummary)

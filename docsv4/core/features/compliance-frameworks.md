@@ -149,7 +149,7 @@ Each measurement type includes validation metadata:
 
 1. **Browse Frameworks**: View published frameworks and their preview scores (Settings → Policies → Compliance Frameworks)
 2. **Activate** the frameworks relevant to you (Best Practices is always active)
-3. *(Enterprise)* **Author Custom Policies** for internal standards (Settings → Policies → Custom Policies)
+3. *(Enterprise, currently unavailable — see above)* Author Custom Policies for internal standards (Settings → Policies → Custom Policies)
 4. **Review Results**: Posture, control results, and findings appear in Risk & Compliance → Posture
 
 ## Framework Status
@@ -304,17 +304,19 @@ Compliance overrides allow users to:
 
 ## Compliance Checking
 
-Once frameworks are set up, compliance checks can be run:
+Once a framework is activated, evaluation is continuous — you do not run it by
+hand. The engine reconciles findings when an asset or certificate changes, when
+a framework is published, and when you activate one, then writes a score rollup
+per framework:
 
-**API:** `POST /api/v1/compliance-engine/checks`
+1. Every control of every activated framework is evaluated against your inventory
+2. Overrides are applied (global and assessment-scoped)
+3. Compliance is measured using the framework's defined measurements
+4. Gaps surface as findings under **Risk & Compliance → Findings**, with the
+   score on **Posture**
 
-**Check Process:**
-1. Select framework and version (or load a saved assessment)
-2. System evaluates all controls
-3. Applies overrides (global and assessment-scoped)
-4. Measures compliance using defined measurements
-5. Generates compliance report
-6. Identifies gaps and recommendations
+**Risk & Compliance → Posture** also offers a manual re-evaluation for when you
+want the numbers refreshed immediately (rate-limited to once an hour).
 
 ## Best Practices
 

@@ -45,6 +45,9 @@ func (s *NetworkSegmentService) GetSegmentForIP(tenantID uuid.UUID, ipAddress *s
 	if len(segments) == 0 {
 		return nil, nil
 	}
+	for i := range segments {
+		segments[i].HydrateAutoApproveSources()
+	}
 
 	// Sort so CIDR (by prefix length desc), then ip_range, then domain. Same type keep order.
 	sort.Slice(segments, func(i, j int) bool {
@@ -205,6 +208,9 @@ func (s *NetworkSegmentService) List(tenantID uuid.UUID, filters models.NetworkS
 	if err != nil {
 		return nil, 0, err
 	}
+	for i := range list {
+		list[i].HydrateAutoApproveSources()
+	}
 	return list, total, nil
 }
 
@@ -223,6 +229,7 @@ func (s *NetworkSegmentService) GetByID(tenantID, id uuid.UUID) (*models.Network
 		}
 		return nil, err
 	}
+	seg.HydrateAutoApproveSources()
 	return &seg, nil
 }
 
@@ -243,7 +250,8 @@ func (s *NetworkSegmentService) Create(tenantID uuid.UUID, input models.NetworkS
 		}
 	}
 	tags := toJSONB(input.Tags)
-	meta := toJSONB(input.Metadata)
+	// New segments default to sensor-only unless the caller names sources.
+	meta := withAutoApproveSources(input.Metadata, models.NormalizeAutoApproveSources(input.AutoApproveSources))
 	isActive := input.IsActive
 	if isActive == nil {
 		defaultActive := true
@@ -370,7 +378,18 @@ func (s *NetworkSegmentService) Update(tenantID, id uuid.UUID, input models.Netw
 	}
 
 	tags := toJSONB(input.Tags)
-	meta := toJSONB(input.Metadata)
+	// Sources survive an update that says nothing about them, even one whose
+	// `metadata` replaces the whole blob: a client that predates the field must
+	// not be able to widen or narrow the tenant's approval policy by omission.
+	sources := seg.AutoApproveSources
+	if input.AutoApproveSources != nil {
+		sources = models.NormalizeAutoApproveSources(input.AutoApproveSources)
+	}
+	baseMeta := input.Metadata
+	if baseMeta == nil {
+		baseMeta = map[string]interface{}(seg.Metadata)
+	}
+	meta := withAutoApproveSources(baseMeta, sources)
 	isActive := input.IsActive
 	if isActive == nil {
 		// Keep the persisted value when omitted so updates never write NULL to is_active.
@@ -513,6 +532,45 @@ func (s *NetworkSegmentService) ReclassifyAllAssets(tenantID uuid.UUID) (int, er
 	return updated, nil
 }
 
+// withAutoApproveSources returns the metadata blob to persist for a segment:
+// base with the per-source auto-approval setting stamped into it.
+//
+// The setting lives inside metadata rather than in its own column so that
+// adding it needs no schema change; it is still a first-class API field
+// (NetworkSegmentInput.AutoApproveSources) rather than something a caller pokes
+// into the blob by hand, because a policy control buried in a free-form map is
+// one an unrelated `metadata` write can silently erase.
+func withAutoApproveSources(base map[string]interface{}, sources []string) interface{} {
+	meta := make(map[string]interface{}, len(base)+1)
+	for k, v := range base {
+		meta[k] = v
+	}
+	meta[models.AutoApproveSourcesKey] = models.NormalizeAutoApproveSources(sources)
+	return models.JSONB(meta)
+}
+
+// approvalRuleSourceCondition maps a segment's sources onto the
+// discovery_auto_approval_rules `source` condition that shared/approval's
+// evaluator understands.
+//
+// The evaluator has always had "cloud_discovery" and "all" branches; until this
+// mapping existed, both writers hard-coded "sensor_discoveries" and no API
+// could author a rule by hand, so those branches were unreachable and every
+// cloud discovery was rejected before ownership or segment were even
+// considered.
+func approvalRuleSourceCondition(sources []string) string {
+	sensor := models.AutoApproveSourcesInclude(sources, models.AutoApproveSourceSensor)
+	cloud := models.AutoApproveSourcesInclude(sources, models.AutoApproveSourceCloud)
+	switch {
+	case sensor && cloud:
+		return "all"
+	case cloud:
+		return "cloud_discovery"
+	default:
+		return "sensor_discoveries"
+	}
+}
+
 // nullableUserID maps uuid.Nil to SQL NULL for created_by-style columns. The zero UUID
 // is what HMAC service-auth requests carry (no real user row exists for it, so inserting
 // it verbatim would fail the users FK).
@@ -562,7 +620,7 @@ func (s *NetworkSegmentService) ManageAutoApprovalRules(tenantID, userID uuid.UU
 
 		// All segments for tenant (to know auto_approve and to disable rules when off)
 		var segments []models.NetworkSegment
-		err = tx.Select(&segments, `SELECT id, name, value, network_type, auto_approve_discoveries, is_active FROM network_segments WHERE tenant_id = $1`, tenantID)
+		err = tx.Select(&segments, `SELECT id, name, value, network_type, auto_approve_discoveries, is_active, metadata FROM network_segments WHERE tenant_id = $1`, tenantID)
 		if err != nil {
 			return fmt.Errorf("failed to list segments: %w", err)
 		}
@@ -572,8 +630,9 @@ func (s *NetworkSegmentService) ManageAutoApprovalRules(tenantID, userID uuid.UU
 			ruleID, exists := existingRules[segIDStr]
 
 			if seg.AutoApproveDiscoveries {
+				sources := models.AutoApproveSourcesFromMetadata(seg.Metadata)
 				conditions := map[string]interface{}{
-					"source":                        "sensor_discoveries",
+					"source":                        approvalRuleSourceCondition(sources),
 					"network_ownership":             "internal",
 					"network_type":                  seg.NetworkType,
 					"require_network_segment_match": true,
@@ -583,8 +642,9 @@ func (s *NetworkSegmentService) ManageAutoApprovalRules(tenantID, userID uuid.UU
 				if err != nil {
 					continue
 				}
-				ruleName := fmt.Sprintf("Auto-approve sensor discoveries: %s", seg.Value)
-				ruleDescription := fmt.Sprintf("Auto-approve sensor discoveries matching network segment: %s", seg.Name)
+				sourceLabel := strings.Join(sources, "+")
+				ruleName := fmt.Sprintf("Auto-approve %s discoveries: %s", sourceLabel, seg.Value)
+				ruleDescription := fmt.Sprintf("Auto-approve %s discoveries matching network segment: %s", sourceLabel, seg.Name)
 
 				if exists {
 					_, err = tx.Exec(`UPDATE discovery_auto_approval_rules
@@ -851,6 +911,13 @@ func (s *NetworkSegmentService) FindOrCreateCloudSegment(tenantID uuid.UUID, clo
 		Environment: environment,
 		LocationID:  &loc.ID,
 		IsActive:    &isActive,
+		// A cloud VPC segment can only ever be matched by cloud discoveries —
+		// no address falls inside "cloud://aws/us-east-1" — so sensor-only
+		// sources here would make its auto-approve toggle cover nothing. This
+		// is a default for a segment being created now, not a change to any
+		// existing one, and auto_approve_discoveries is still false: the tenant
+		// still has to switch auto-approval on before anything is approved.
+		AutoApproveSources: []string{models.AutoApproveSourceCloud},
 	}
 	return s.Create(tenantID, input)
 }
@@ -870,5 +937,6 @@ func (s *NetworkSegmentService) GetByValue(tenantID uuid.UUID, value string) (*m
 		}
 		return nil, err
 	}
+	seg.HydrateAutoApproveSources()
 	return &seg, nil
 }

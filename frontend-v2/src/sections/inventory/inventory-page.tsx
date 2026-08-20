@@ -576,7 +576,7 @@ export function InventoryPage() {
             style={{ width: '100%', height: 33, padding: '0 12px 0 33px', borderRadius: 9, border: '1px solid var(--app-border2)', background: 'var(--app-panel2)', color: 'var(--app-t1)', fontSize: 13, outline: 'none' }} />
         </div>
         {isCert && (
-          <FilterSelect label="Ownership" value={fCertOwner} onChange={setFCertOwner} options={['All', '3rd-party', 'Internal', 'Unknown']} />
+          <FilterSelect label="Ownership" value={fCertOwner} onChange={(v) => { setFCertOwner(v); setPage(1); }} options={['All', '3rd-party', 'Internal', 'Unknown']} />
         )}
         {isData && (
           <>

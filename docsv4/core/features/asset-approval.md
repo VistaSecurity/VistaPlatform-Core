@@ -26,6 +26,35 @@ Approvals** unless the address is on an auto-approving segment — in which case
 all of them go straight to `monitoring`. The rule does not depend on how the
 asset was found.
 
+### Which discoveries a segment auto-approves
+
+Turning auto-approve on opens a second choice: **which discovery sources** it
+covers.
+
+| Source | Covers |
+|---|---|
+| **Sensor discoveries** | Anything observed on the network — passive sensor capture, active scans, device interrogation, manual creation, spreadsheet and CMDB import |
+| **Cloud discoveries** | Resources read from your cloud accounts through the provider APIs you connected (AWS, Azure, GCP) |
+
+Both are unchecked-by-default in the sense that matters: **an existing segment
+covers sensor discoveries only**, exactly as it did before this setting existed.
+Cloud coverage is something you tick on purpose, per segment. A new cloud VPC
+segment is the one exception — it can only ever be matched by cloud
+discoveries, so its sources start as cloud (with auto-approve itself still off).
+
+Understand what you are opting into. A cloud discovery comes from your own
+account, read with credentials you supplied, which is a higher-trust source than
+a sensor watching whatever traffic crosses a wire — that is why it can be
+auto-approved at all. But it is still inventory admitted without a human
+looking: enable it for a segment when you want everything the platform finds in
+that cloud account monitored automatically, not as a way to shorten a backlog.
+
+Cloud resources are matched to a segment by the **account and region** they live
+in, not by an IP address — most of them (KMS keys, buckets, managed databases)
+have no address of their own. Each provider/region (or VPC, where the resource
+reports one) gets its own segment, created the first time a resource is found
+there, and its auto-approve toggle is per-segment like any other.
+
 The one deliberate exception is **elevating an external connection** (Inventory
 → Connections → Elevate): that is an explicit, confirmed click on a specific
 endpoint, so the click is the approval and the asset is created as `monitoring`.
@@ -192,10 +221,13 @@ Discovery Jobs:
 ```
 
 **Auto-Approval:**
-- Sensor and cloud discoveries can be auto-approved based on network space rules
+- Sensor and cloud discoveries can both be auto-approved, per network segment
 - Configured per network segment: **Settings → Infrastructure** → edit a
-  segment → "Auto-approve discoveries" (applies to both sensor and cloud
-  discoveries; **off by default**, so a fresh tenant reviews everything)
+  segment → "Auto-approve discoveries", then pick which sources it covers —
+  sensor discoveries, cloud discoveries, or both. The toggle is **off by
+  default**, so a fresh tenant reviews everything, and a segment that was
+  already auto-approving covers **sensor discoveries only** until you tick
+  cloud.
 - Auto-approved assets skip the pending approval step (their certificates and
   crypto configurations materialize immediately)
 - Auto-approved assets show "Auto" badge in the approvals page

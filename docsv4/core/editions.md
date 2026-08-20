@@ -6,13 +6,13 @@
 
 # Editions
 
-Vista Platform ships as a free, open-source **Core** plus two paid editions. An edition is a licensing boundary that decides whether a capability exists in a build at all. It is not the same thing as a *tier* — tiers are commercial packaging that an operator authors, and only the MSP edition can author them.
+Vista Platform ships as a free, source-available **Vista Platform Core** plus two paid editions — **Vista Platform Enterprise** and **Vista Platform MSP**. An edition is a licensing boundary that decides whether a capability exists in a build at all. It is not the same thing as a *tier* — tiers are commercial packaging that an operator authors, and only the MSP edition can author them.
 
 Anything not listed on this page is Core.
 
 ## Core
 
-*Free and open source. One team securing its own estate.*
+*Free and source-available. One team securing its own estate.*
 
 Everything not listed as Enterprise or MSP below. Full discovery, the complete crypto inventory and CMDB, compliance evaluation against the six free frameworks, CBOM generation and CycloneDX export, RBAC, local users and invitations, audit logging, RLS tenant isolation, the mTLS service mesh, and the sensor and agent source.
 

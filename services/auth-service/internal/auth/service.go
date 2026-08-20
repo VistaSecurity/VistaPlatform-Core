@@ -30,6 +30,7 @@ import (
 	"github.com/sirupsen/logrus"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/email"
+	"github.com/vistasecurity/vistaplatform/shared/security/authpolicy"
 	passwordsvc "github.com/vistasecurity/vistaplatform/shared/security/password"
 )
 
@@ -446,7 +447,7 @@ func (a *AuthService) DB() *sql.DB {
 // - Triggers email verification workflow
 func (a *AuthService) Register(req *models.RegisterRequest) (*models.User, error) {
 	// Validate password strength according to security policy
-	if err := passwordsvc.ValidatePasswordStrength(req.Password); err != nil {
+	if err := passwordsvc.ValidatePasswordStrengthWithPolicy(a.db, req.Password); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrWeakPassword, err)
 	}
 
@@ -698,7 +699,7 @@ func (a *AuthService) Login(req *models.LoginRequest, clientIP, userAgent string
 			)
 
 			// Store refresh token
-			expiresAt := time.Now().Add(a.jwt.GetRefreshExpiry())
+			expiresAt := time.Now().Add(authpolicy.SessionLifetime(a.db, a.jwt.GetRefreshExpiry()))
 			_, err = a.refreshTokenService.StoreRefreshToken(
 				platformUser.ID,
 				refreshToken,
@@ -777,7 +778,7 @@ func (a *AuthService) Login(req *models.LoginRequest, clientIP, userAgent string
 	}
 
 	// Store refresh token in database with device fingerprint
-	expiresAt := time.Now().Add(a.jwt.GetRefreshExpiry())
+	expiresAt := time.Now().Add(authpolicy.SessionLifetime(a.db, a.jwt.GetRefreshExpiry()))
 	familyID, err := a.refreshTokenService.StoreRefreshToken(
 		user.ID,
 		refreshToken,
@@ -831,7 +832,7 @@ func (a *AuthService) RefreshToken(refreshToken string, clientIP, userAgent stri
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate tokens: %w", err)
 		}
-		expiresAt := time.Now().Add(a.jwt.GetRefreshExpiry())
+		expiresAt := time.Now().Add(authpolicy.SessionLifetime(a.db, a.jwt.GetRefreshExpiry()))
 		_, err = a.refreshTokenService.ValidateAndRotateToken(
 			refreshToken,
 			platformUser.ID,
@@ -873,7 +874,7 @@ func (a *AuthService) RefreshToken(refreshToken string, clientIP, userAgent stri
 	}
 
 	// Validate old token, rotate it, and store new token (with reuse detection)
-	expiresAt := time.Now().Add(a.jwt.GetRefreshExpiry())
+	expiresAt := time.Now().Add(authpolicy.SessionLifetime(a.db, a.jwt.GetRefreshExpiry()))
 	_, err = a.refreshTokenService.ValidateAndRotateToken(
 		refreshToken,
 		user.ID,
@@ -1488,10 +1489,13 @@ func (a *AuthService) checkAccountLocked(userID uuid.UUID) (bool, error) {
 }
 
 // recordFailedLogin increments the failed login counter and locks the account
-// after 5 consecutive failures (locked for 15 minutes).
+// once it reaches the operator-configured maximum — admin-ui Security ▸ Policy,
+// "Maximum login attempts" and "Lockout duration (minutes)". Falls back to the
+// historical 5 attempts / 15 minutes when those settings have never been saved.
 func (a *AuthService) recordFailedLogin(userID uuid.UUID) {
-	const maxAttempts = 5
-	const lockoutDuration = 15 * time.Minute
+	policy := authpolicy.Lockout(a.db)
+	maxAttempts := policy.MaxAttempts
+	lockoutDuration := policy.Duration
 
 	// RLS: cross-tenant — runs on the bypass role (Phase 4). Login-flow write
 	// keyed only by user id; the tenant is not yet established. Wrapping would
@@ -1530,7 +1534,7 @@ func (a *AuthService) resetFailedLoginAttempts(userID uuid.UUID) {
 //
 // These mirror the tenant-user helpers above against the platform_users table,
 // so the highest-privilege accounts (super_admin / platform_admin) get the same
-// 5-attempt / 15-minute lockout the tenant path has always had. Previously the
+// lockout the tenant path has always had. Previously the
 // platform-login branch had NO lockout — only the rate limiter stood between an
 // attacker and unlimited password guesses against a platform admin.
 
@@ -1549,10 +1553,13 @@ func (a *AuthService) checkPlatformAccountLocked(userID uuid.UUID) (bool, error)
 }
 
 // recordPlatformFailedLogin increments the platform user's failed login counter
-// and locks the account after 5 consecutive failures (locked for 15 minutes).
+// and locks the account once it reaches the operator-configured maximum. It
+// reads the SAME policy as the tenant path: a lockout rule the highest-privilege
+// accounts are exempt from is not a lockout rule.
 func (a *AuthService) recordPlatformFailedLogin(userID uuid.UUID) {
-	const maxAttempts = 5
-	const lockoutDuration = 15 * time.Minute
+	policy := authpolicy.Lockout(a.db)
+	maxAttempts := policy.MaxAttempts
+	lockoutDuration := policy.Duration
 
 	_, err := a.db.Exec(
 		`UPDATE platform_users
@@ -1753,7 +1760,7 @@ func (a *AuthService) ChangePassword(userID uuid.UUID, req *models.ChangePasswor
 	}
 
 	// Validate new password strength
-	if err := passwordsvc.ValidatePasswordStrength(req.NewPassword); err != nil {
+	if err := passwordsvc.ValidatePasswordStrengthWithPolicy(a.db, req.NewPassword); err != nil {
 		return err
 	}
 
@@ -1864,7 +1871,7 @@ func (a *AuthService) ResetPassword(req *models.ResetPasswordRequest) error {
 	}
 
 	// Validate new password strength
-	if err := passwordsvc.ValidatePasswordStrength(req.NewPassword); err != nil {
+	if err := passwordsvc.ValidatePasswordStrengthWithPolicy(a.db, req.NewPassword); err != nil {
 		return err
 	}
 

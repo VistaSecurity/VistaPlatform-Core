@@ -359,7 +359,7 @@ command and a minimal `values.yaml`.
 they are not legally binding. Every user is asked to accept them at sign-up, so
 until you replace them your users are accepting placeholder text.
 
-This is not an oversight on our part that you can wait for us to fix. VistaPlatform
+This is not an oversight on our part that you can wait for us to fix. Vista Platform
 is self-hosted: **you** are the service provider and the data controller. Those
 are *your* terms with *your* users, and only you can write them — the software
 authors neither operate your instance nor receive any data from it.

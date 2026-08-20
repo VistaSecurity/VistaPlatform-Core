@@ -593,8 +593,20 @@ func (s *AgentService) GetNextJob(ctx context.Context, agentID uuid.UUID) (*mode
 // the agent could connect to.
 var ErrJobHasNoTarget = errors.New("device has no hostname, IP address, or management URL")
 
-// enrichJobTarget copies the device's addressing from the device row into the
-// job parameters, and reports ErrJobHasNoTarget when there is nothing to copy.
+// enrichJobTarget copies the device's addressing AND its device_type from the
+// device row into the job parameters, and reports ErrJobHasNoTarget when there
+// is no address to copy.
+//
+// device_type is here for the same reason the addresses are, one field over:
+// the in-cluster worker re-reads the device row and never needs it in the
+// payload, so a creation path that omits it (the scheduler, which forwards an
+// operator-stored parameter map verbatim — and the schedule-create UI never
+// sends one) looks fine until an agent wins the `agent_id IS NULL` claim race.
+// The agent has no database; DeviceJob.ToJob sources device_type exclusively
+// from Parameters, and the agent's executor refuses the job with
+// "device_type not specified in job" when it is absent. Resolving it here —
+// the last point that can still see the device row — makes the payload
+// sufficient for the executor that cannot look anything up.
 //
 // Parameters already on the job win: a scheduled job may deliberately target a
 // specific address, and the job's own payload is the more specific intent.
@@ -615,13 +627,13 @@ func (s *AgentService) enrichJobTarget(ctx context.Context, tenantID uuid.UUID, 
 		return ErrJobHasNoTarget
 	}
 
-	var hostname, ipAddress, managementURL sql.NullString
+	var hostname, ipAddress, managementURL, deviceType sql.NullString
 	err := s.bypassDB.QueryRowContext(ctx,
-		`SELECT hostname, ip_address, management_url
+		`SELECT hostname, ip_address, management_url, device_type
 		   FROM devices
 		  WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
 		*job.DeviceID, tenantID,
-	).Scan(&hostname, &ipAddress, &managementURL)
+	).Scan(&hostname, &ipAddress, &managementURL, &deviceType)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("device %s not found", *job.DeviceID)
 	}
@@ -632,6 +644,17 @@ func (s *AgentService) enrichJobTarget(ctx context.Context, tenantID uuid.UUID, 
 	setIfAbsent(job.Parameters, "hostname", hostname)
 	setIfAbsent(job.Parameters, "ip_address", ipAddress)
 	setIfAbsent(job.Parameters, "management_url", managementURL)
+	setIfAbsent(job.Parameters, "device_type", deviceType)
+
+	// ToJob already ran, so a device_type resolved just now is not yet on the
+	// job's own field — mirror it across. The agent reads Job.DeviceType first
+	// and falls back to Parameters["device_type"]; populate both so neither an
+	// older nor a newer agent binary is left without it.
+	if job.DeviceType == "" {
+		if dt, ok := job.Parameters["device_type"].(string); ok {
+			job.DeviceType = dt
+		}
+	}
 
 	if !hasAnyTarget(job.Parameters) {
 		return ErrJobHasNoTarget

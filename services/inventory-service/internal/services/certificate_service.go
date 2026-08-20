@@ -47,7 +47,8 @@ const certificateColumns = `
 	signature_algorithm_oid, public_key_algorithm_oid,
 	data_completeness, data_source, last_data_update,
 	created_at, updated_at,
-	known_bad_ca, cert_ownership`
+	known_bad_ca, cert_ownership,
+	has_sct, is_ev, ocsp_status, ocsp_detail`
 
 // effectiveOwnershipExpr resolves the SAME "which ownership bucket does this
 // certificate belong to" answer for both the `?ownership=` filter and the
@@ -101,6 +102,8 @@ func scanCertificateRowFull(scanner interface {
 	var serialNumber, commonName, sigAlg, pubKeyAlg, certPEM, fpSHA1, dataSource sql.NullString
 	var certStateReason, sigAlgOID, pubKeyAlgOID sql.NullString
 	var knownBadCA, certOwnership sql.NullString
+	var ocspStatus, ocspDetail sql.NullString
+	var hasSCT, isEV sql.NullBool
 	var pubKeySize sql.NullInt64
 	var notBefore, notAfter, revokedAt, revocationDiscoveredAt, lastDataUpdate sql.NullTime
 	var activationDate, deactivationDate, destructionDate sql.NullTime
@@ -121,6 +124,7 @@ func scanCertificateRowFull(scanner interface {
 		&cert.DataCompleteness, &dataSource, &lastDataUpdate,
 		&cert.CreatedAt, &cert.UpdatedAt,
 		&knownBadCA, &certOwnership,
+		&hasSCT, &isEV, &ocspStatus, &ocspDetail,
 	}
 	if withDeploymentCount {
 		dest = append(dest, &deploymentCount)
@@ -153,6 +157,30 @@ func scanCertificateRowFull(scanner interface {
 	if certOwnership.Valid && certOwnership.String != "" {
 		v := certOwnership.String
 		cert.CertOwnership = &v
+	}
+
+	// Quality flags. These were persisted by updateCertQualityFlags but absent
+	// from certificateColumns, so every read returned them nil and the drawer's
+	// Trust & revocation block was blank on every certificate — including ones
+	// whose OCSP status is `revoked`.
+	//
+	// A false is a measurement, not an absence: has_sct=false means "we looked
+	// and there were no SCTs". Only SQL NULL (never measured) stays nil.
+	if hasSCT.Valid {
+		v := hasSCT.Bool
+		cert.HasSCT = &v
+	}
+	if isEV.Valid {
+		v := isEV.Bool
+		cert.IsEV = &v
+	}
+	if ocspStatus.Valid && ocspStatus.String != "" {
+		v := ocspStatus.String
+		cert.OCSPStatus = &v
+	}
+	if ocspDetail.Valid && ocspDetail.String != "" {
+		v := ocspDetail.String
+		cert.OCSPDetail = &v
 	}
 
 	if serialNumber.Valid {
@@ -1106,6 +1134,12 @@ func (s *CertificateService) UpdateCertificate(
 		return nil, fmt.Errorf("failed to update certificate: %w", err)
 	}
 
+	// Persist certificate quality flags on re-discovery too. They were written
+	// only on the create path, so a certificate first seen without an OCSP
+	// check (or before SCT/EV were measured) could never acquire the flags:
+	// every later observation goes through FindOrCreateCertificate → here.
+	s.updateCertQualityFlags(tenantID, certID, certData)
+
 	// Record update history (args carries the trailing certID + tenantID)
 	_ = s.RecordCertificateHistory(tenantID, certID, "data_enriched", map[string]interface{}{
 		"fields_updated": len(args) - 2,
@@ -1432,9 +1466,13 @@ func (s *CertificateService) RebuildCertificateChain(tenantID uuid.UUID, certID 
 
 		// Skip if we already have an issuer link
 		if currentCert.IssuerCertificateID != nil {
-			// Follow the existing link
+			// Follow the existing link. A lookup FAILURE is reported, not
+			// treated as "chain ends here" — see the issuer lookup below.
 			nextCert, err := s.GetCertificateByID(tenantID, *currentCert.IssuerCertificateID)
-			if err != nil || nextCert == nil {
+			if err != nil {
+				return nil, fmt.Errorf("failed to follow issuer link from certificate %s: %w", currentCert.ID, err)
+			}
+			if nextCert == nil {
 				break
 			}
 			currentCert = nextCert
@@ -1442,9 +1480,17 @@ func (s *CertificateService) RebuildCertificateChain(tenantID uuid.UUID, certID 
 			continue
 		}
 
-		// Try to find the issuer certificate by matching subject DN
+		// Try to find the issuer certificate by matching subject DN.
+		//
+		// `err != nil` is NOT "no issuer found": collapsing the two is what let
+		// a broken query report a clean 200 with links_created: 0 on every call
+		// for as long as the query was broken. A genuine miss returns
+		// (nil, nil).
 		issuerCert, err := s.findCertificateBySubjectDN(tenantID, currentCert.IssuerDN)
-		if err != nil || issuerCert == nil {
+		if err != nil {
+			return nil, fmt.Errorf("failed to look up issuer %q: %w", currentCert.IssuerDN, err)
+		}
+		if issuerCert == nil {
 			// No issuer found, chain is incomplete
 			break
 		}
@@ -1498,7 +1544,7 @@ func (s *CertificateService) findCertificateBySubjectDN(tenantID uuid.UUID, subj
 			revoked_at, revocation_discovered_at, data_completeness, data_source,
 			last_data_update, created_at, updated_at
 		FROM certificates
-		WHERE tenant_id = $1 AND subject_dn = $2 AND deleted_at IS NULL
+		WHERE tenant_id = $1 AND subject_dn = $2
 		ORDER BY not_after DESC
 		LIMIT 1
 	`
@@ -1637,10 +1683,14 @@ func (s *CertificateService) RebuildAllCertificateChains(ctx context.Context, te
 	}
 
 	// Get all certificates that don't have an issuer link and are not self-signed
+	// NB: `certificates` has no deleted_at column — it is not soft-deleted. The
+	// sibling joins elsewhere in this file filter ci./na.deleted_at, which do
+	// exist; copying that predicate onto `certificates` made this query error
+	// on every call, so the bulk rebuild 500'd for every tenant and the
+	// single-certificate rebuild silently found no issuer, forever.
 	query := `
 		SELECT id FROM certificates
 		WHERE tenant_id = $1
-		AND deleted_at IS NULL
 		AND is_self_signed = false
 		AND issuer_certificate_id IS NULL
 		ORDER BY created_at

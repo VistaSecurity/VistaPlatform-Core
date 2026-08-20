@@ -183,7 +183,7 @@ func createPlatformUserWithStore(store platformUserStore, hasher passwordHasher)
 			return
 		}
 
-		if err := passwordsvc.ValidatePasswordStrength(req.Password); err != nil {
+		if err := passwordsvc.ValidatePasswordStrengthWithMinLength(req.Password, store.PasswordMinLength(ctx)); err != nil {
 			api.BadRequest(c, err.Error())
 			return
 		}
@@ -462,7 +462,7 @@ func adminSetPasswordWithStore(store platformUserStore, hasher passwordHasher) g
 			return
 		}
 
-		if err := passwordsvc.ValidatePasswordStrength(req.NewPassword); err != nil {
+		if err := passwordsvc.ValidatePasswordStrengthWithMinLength(req.NewPassword, store.PasswordMinLength(c.Request.Context())); err != nil {
 			api.BadRequest(c, err.Error())
 			return
 		}

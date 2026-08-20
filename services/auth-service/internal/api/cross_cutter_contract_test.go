@@ -1067,12 +1067,12 @@ func TestContract_GetTrialStatus_200_fullPhase(t *testing.T) {
 	// A tenant on a trial tier, day 3 of a 14-day full window -> PhaseFull with
 	// the nullable trial_* fields populated.
 	eng := newConfigEngine(nil, &stubTrialStatusStore{row: trialStatusRow{
-		isTrial:       sql.NullBool{Bool: true, Valid: true},
-		trialDaysFull: sql.NullInt64{Int64: 14, Valid: true},
-		trialDaysSoft: sql.NullInt64{Int64: 14, Valid: true},
-		trialStart:    sql.NullTime{Time: start, Valid: true},
-		trialEnd:      sql.NullTime{Time: end, Valid: true},
-		converted:     sql.NullBool{Bool: false, Valid: true},
+		IsTrial:         sql.NullBool{Bool: true, Valid: true},
+		TrialDaysFull:   sql.NullInt64{Int64: 14, Valid: true},
+		TrialDaysSoft:   sql.NullInt64{Int64: 14, Valid: true},
+		TrialStart:      sql.NullTime{Time: start, Valid: true},
+		TrialEnd:        sql.NullTime{Time: end, Valid: true},
+		ConvertedToPaid: sql.NullBool{Bool: false, Valid: true},
 	}}, true, aTenantID)
 	w := do(eng, http.MethodGet, "/api/v1/auth-service/tenant/trial-status", nil)
 	if w.Code != http.StatusOK {

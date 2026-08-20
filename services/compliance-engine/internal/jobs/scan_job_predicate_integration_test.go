@@ -273,14 +273,31 @@ func TestIntegration_ComplianceScoreDropScan_FiresOnDrop(t *testing.T) {
 
 // --- asset_limit_approaching -------------------------------------------------
 
+// newTierWithAssetCap creates a tier whose ENFORCED asset cap is `cap`, set the
+// way the platform actually sets it: a tier_entitlements row against the
+// max_assets billable item. `staleColumnValue` is written to the legacy
+// subscription_tiers.max_assets column, which nothing enforces — pass a
+// deliberately different number so a reader that still trusts it is caught.
+func (h *jobHarness) newTierWithAssetCap(t *testing.T, tenant uuid.UUID, cap, staleColumnValue int) {
+	t.Helper()
+	tierID := uuid.New()
+	h.exec(t, `INSERT INTO subscription_tiers (id, name, display_name, max_assets)
+	           VALUES ($1,$2,'Predicate Audit Tier', $3)`, tierID, "pat-"+uuid.NewString()[:8], staleColumnValue)
+	h.exec(t, `INSERT INTO tier_entitlements (tier_id, item_id, included_value)
+	           SELECT $1, id, jsonb_build_object('quantity', $2::int) FROM billable_items WHERE key = 'max_assets'`,
+		tierID, cap)
+	h.exec(t, `UPDATE tenants SET subscription_tier_id = $1 WHERE id = $2`, tierID, tenant)
+}
+
 func TestIntegration_AssetLimitScan_FiresNearPlanLimit(t *testing.T) {
 	h := newJobHarness(t)
 	tenant := testdb.NewTenant(t, h.owner)
 
-	tierID := uuid.New()
-	h.exec(t, `INSERT INTO subscription_tiers (id, name, display_name, max_assets)
-	           VALUES ($1,$2,'Predicate Audit Tier', 10)`, tierID, "pat-"+uuid.NewString()[:8])
-	h.exec(t, `UPDATE tenants SET subscription_tier_id = $1 WHERE id = $2`, tierID, tenant)
+	// B-15: enforced cap 10, stale tier column 50. The alert must measure
+	// against 10. Before the fix it read the column, so a tenant was warned at
+	// the wrong usage — or, with a NULL column, classified unlimited and never
+	// warned at all before the hard 402.
+	h.newTierWithAssetCap(t, tenant, 10, 50)
 
 	job := NewAssetLimitScanJob(h.app, h.bypass, h.catlg, h.engine, time.Hour)
 
@@ -294,12 +311,58 @@ func TestIntegration_AssetLimitScan_FiresNearPlanLimit(t *testing.T) {
 	}
 
 	// 9/10 = 90% — over the warn rung, under the high rung.
+	// Against the stale column (50) this is 18% and would NOT alert.
 	for i := 0; i < 6; i++ {
 		h.exec(t, `INSERT INTO network_assets_partitioned (tenant_id, asset_type) VALUES ($1,'server')`, tenant)
 	}
 	job.ScanAll()
 	if got := h.alertCount(t, tenant, "asset_limit_approaching"); got != 1 {
 		t.Fatalf("asset usage at 90%% did not raise an alert: got %d, want 1", got)
+	}
+}
+
+// TestIntegration_AssetLimitScan_IgnoresTheStaleTierColumn is the same
+// disagreement pointed the other way: the legacy column says the tenant is at
+// 90% of 10, the enforced cap is 1000. Reading the column would raise a
+// false alarm telling a tenant to upgrade a plan they are nowhere near
+// exhausting.
+func TestIntegration_AssetLimitScan_IgnoresTheStaleTierColumn(t *testing.T) {
+	h := newJobHarness(t)
+	tenant := testdb.NewTenant(t, h.owner)
+	h.newTierWithAssetCap(t, tenant, 1000, 10)
+
+	for i := 0; i < 9; i++ {
+		h.exec(t, `INSERT INTO network_assets_partitioned (tenant_id, asset_type) VALUES ($1,'server')`, tenant)
+	}
+	NewAssetLimitScanJob(h.app, h.bypass, h.catlg, h.engine, time.Hour).ScanAll()
+
+	if got := h.alertCount(t, tenant, "asset_limit_approaching"); got != 0 {
+		t.Fatalf("9 assets against an ENFORCED cap of 1000 alerted (it read the stale "+
+			"max_assets column of 10): got %d, want 0", got)
+	}
+}
+
+// TestIntegration_AssetLimitScan_HonoursAPerTenantOverride pins the negotiated
+// case: a tenant-specific entitlement raises the cap above the tier's, and the
+// warning has to follow it. Per-tenant overrides were invisible to this job.
+func TestIntegration_AssetLimitScan_HonoursAPerTenantOverride(t *testing.T) {
+	h := newJobHarness(t)
+	tenant := testdb.NewTenant(t, h.owner)
+	h.newTierWithAssetCap(t, tenant, 10, 10)
+
+	// 9/10 = 90% on the tier — would alert.
+	for i := 0; i < 9; i++ {
+		h.exec(t, `INSERT INTO network_assets_partitioned (tenant_id, asset_type) VALUES ($1,'server')`, tenant)
+	}
+	// ...but this tenant negotiated 1000.
+	h.exec(t, `INSERT INTO tenant_entitlements (tenant_id, item_id, override_value, effective_from)
+	           SELECT $1, id, '{"quantity": 1000}'::jsonb, now() - interval '1 day'
+	           FROM billable_items WHERE key = 'max_assets'`, tenant)
+
+	NewAssetLimitScanJob(h.app, h.bypass, h.catlg, h.engine, time.Hour).ScanAll()
+
+	if got := h.alertCount(t, tenant, "asset_limit_approaching"); got != 0 {
+		t.Fatalf("a negotiated per-tenant cap of 1000 was ignored: got %d alerts, want 0", got)
 	}
 }
 
@@ -341,13 +404,18 @@ func TestIntegration_TenantHealthDegradedScan_FiresBelowThreshold(t *testing.T) 
 	sentinel := services.PlatformAlertTenantID
 	healthy := testdb.NewTenant(t, h.owner)
 	degraded := testdb.NewTenant(t, h.owner)
+	// B-12: a tenant whose peers were all unreachable stores overall_score 0
+	// with health_status 'unknown'. That is "no data", not "score 0" — it must
+	// NOT alert, or a mesh hiccup reports every tenant as critically degraded.
+	unknown := testdb.NewTenant(t, h.owner)
 	t.Cleanup(func() {
 		_, _ = h.owner.Exec(`DELETE FROM alerts WHERE tenant_id = $1 AND subject_id = ANY($2)`,
-			sentinel, "{"+healthy.String()+","+degraded.String()+"}")
+			sentinel, "{"+healthy.String()+","+degraded.String()+","+unknown.String()+"}")
 	})
 
 	h.exec(t, `INSERT INTO tenant_health (tenant_id, overall_score, health_status) VALUES ($1, 92.0, 'healthy')`, healthy)
 	h.exec(t, `INSERT INTO tenant_health (tenant_id, overall_score, health_status) VALUES ($1, 35.0, 'critical')`, degraded)
+	h.exec(t, `INSERT INTO tenant_health (tenant_id, overall_score, health_status) VALUES ($1, 0.0, 'unknown')`, unknown)
 
 	job := NewTenantHealthDegradedScanJob(h.app, h.bypass, h.catlg, h.engine, time.Hour)
 	job.Scan()
@@ -357,6 +425,9 @@ func TestIntegration_TenantHealthDegradedScan_FiresBelowThreshold(t *testing.T) 
 	}
 	if n := h.subjectAlertCount(t, sentinel, "tenant_health_degraded", healthy); n != 0 {
 		t.Fatalf("healthy tenant raised an alert: got %d, want 0", n)
+	}
+	if n := h.subjectAlertCount(t, sentinel, "tenant_health_degraded", unknown); n != 0 {
+		t.Fatalf("unmeasured (health_status='unknown') tenant raised an alert: got %d, want 0", n)
 	}
 }
 

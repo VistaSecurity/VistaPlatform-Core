@@ -24,6 +24,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
@@ -34,6 +35,7 @@ import (
 	shareddb "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	sharedevents "github.com/vistasecurity/vistaplatform/shared/events"
+	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 
@@ -144,17 +146,26 @@ func buildSuppressionKey(hostname *string, ipAddress *string, port *int) string 
 	return hex.EncodeToString(sum[:])
 }
 
-// isSuppressed checks if a pending discovery matches a denied/suppressed fingerprint
+// isSuppressed checks if a pending discovery matches a denied/suppressed fingerprint.
+//
+// B-42: this used to return (false, nil) for EVERY error, which is how the
+// missing asset_suppressions table stayed invisible — `relation does not exist`
+// read identically to "no matching fingerprint". Only sql.ErrNoRows means "not
+// suppressed"; anything else is returned so a caller can tell a genuine miss
+// from a broken query.
 func (s *AssetService) isSuppressed(tenantID uuid.UUID, hostname *string, ipAddress *string, port *int) (bool, error) {
 	key := buildSuppressionKey(hostname, ipAddress, port)
 	var exists bool
-	// asset_suppressions has no RLS policy (not in the tenant_isolation set), so
-	// this read stays on the plain handle — the WHERE tenant_id is the isolation.
+	// RLS-scoped read over asset_suppressions (tenant_isolation policy).
 	query := `SELECT TRUE FROM asset_suppressions WHERE tenant_id = $1 AND suppression_key = $2 LIMIT 1`
-	err := s.db.QueryRow(query, tenantID, key).Scan(&exists)
-	if err != nil {
-		// if no rows, not suppressed
+	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+		return tx.QueryRow(query, tenantID, key).Scan(&exists)
+	})
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
+	}
+	if err != nil {
+		return false, err
 	}
 	return exists, nil
 }
@@ -182,9 +193,11 @@ func (s *AssetService) addSuppression(tenantID uuid.UUID, hostname *string, ipAd
 	if userID != nil {
 		createdBy = *userID
 	}
-	// asset_suppressions has no RLS policy — plain handle, WHERE/INSERT tenant_id
-	// is the isolation.
-	_, err := s.db.Exec(query, tenantID, h, ip, p, reason, createdBy, key)
+	// RLS-scoped write over asset_suppressions (tenant_isolation policy).
+	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+		_, e := tx.Exec(query, tenantID, h, ip, p, reason, createdBy, key)
+		return e
+	})
 	return err
 }
 
@@ -261,67 +274,154 @@ func (s *AssetService) applyCertQualityFlags(certData *models.CertificateData, r
 	}
 }
 
-// normalizeProtocol returns a value valid for the protocol_type enum.
-// Keep this set in sync with ALTER TYPE protocol_type ADD VALUE
-// statements in scripts/database/schema.sql.
+// atRestProtocolSentinel is the marker device-interrogation-service stamps on a
+// finding whose cryptography is at rest rather than negotiated on the wire
+// (atRestProtocolPort in cloud_discovery_service.go). It is deliberately NOT a
+// protocol_type enum value: nothing may persist it as a protocol.
+const atRestProtocolSentinel = "AT-REST"
+
+// isAtRestProtocol reports whether a finding is an at-rest resource rather than
+// a network endpoint. Such a finding must never be materialized as a crypto
+// configuration — see the call site in processDiscoveryCryptoData (B-22).
+// resolveProtocol now backstops this generically (AT-REST is unrecognised, and
+// unrecognised no longer means TLS), but this stays because it says WHY at-rest
+// findings leave early: their posture belongs in crypto_applications.
+func isAtRestProtocol(protocol string) bool {
+	return strings.EqualFold(strings.TrimSpace(protocol), atRestProtocolSentinel)
+}
+
+// protocolVerdict is what resolveProtocol answers with. Only protocolEnum
+// carries a value a row may store in crypto_implementations.protocol; the other
+// three each say "there is no protocol observation here", for a different
+// reason, and each reason is worth logging differently.
+type protocolVerdict int
+
+const (
+	// protocolEnum: the observed string names a protocol the enum models.
+	protocolEnum protocolVerdict = iota
+	// protocolTransport: the observed string names a TRANSPORT (tcp/udp), not
+	// an application protocol. "The port answered a TCP handshake" is not a
+	// cryptographic observation — nothing was negotiated.
+	protocolTransport
+	// protocolPlaintext: the observed string explicitly says no encryption was
+	// in use (the database collectors' "NONE" when SSL is off). Recording that
+	// as a crypto configuration inverts the finding.
+	protocolPlaintext
+	// protocolUnrecognized: we do not know what this protocol is. A crypto
+	// configuration IS a protocol observation, so there is nothing to record.
+	protocolUnrecognized
+)
+
+func (v protocolVerdict) String() string {
+	switch v {
+	case protocolEnum:
+		return "modelled"
+	case protocolTransport:
+		return "a transport, not an application protocol"
+	case protocolPlaintext:
+		return "explicitly unencrypted"
+	default:
+		return "unrecognised"
+	}
+}
+
+// resolveProtocol maps an observed protocol name onto the protocol_type enum.
+// Keep the mapped set in sync with the CREATE TYPE protocol_type statement in
+// scripts/database/schema.sql.
 //
-// The sensor emits protocol identifiers as it parses them from the wire
-// (often with hyphenation or vendor casing). This function maps those
-// aliases to the canonical enum literal. Unknown protocols fall through
-// to "TLS" with a warning log — that log is intentional as a tripwire
-// for the next time the sensor adds a protocol we forgot to wire here.
-func normalizeProtocol(protocol string) string {
-	protocolUpper := strings.ToUpper(protocol)
-	switch protocolUpper {
+// The sensor emits protocol identifiers as it parses them from the wire (often
+// with hyphenation or vendor casing); this function maps those aliases to the
+// canonical enum literal.
+//
+// It does NOT invent an answer when it has none. It used to: the default arm
+// returned "TLS" for every string it did not recognise, with only a warning
+// log. crypto_implementations.protocol is NOT NULL and enum-typed, so the row
+// that landed asserted a negotiated-TLS observation that never happened — empty
+// protocol_version, empty cipher_suite — and fed the risk and PQC denominators.
+// Three kinds of string went through that arm: transports (cluster-sensor
+// stamps "tcp" on every scanned port whose probe does not reply, so a quiet
+// Modbus segment became a wall of phantom TLS endpoints), the database
+// collectors' explicit "NONE" (SSL is OFF — the exact inverse of what got
+// stored), and genuinely unknown names. None of the three is a TLS measurement,
+// and the enum has no honest value for any of them, so the caller is told there
+// is nothing to record instead. See the short-circuit in
+// processDiscoveryCryptoData, and the same correction for the AT-REST sentinel
+// above.
+//
+// This is NOT the same job as cryptoparse.NormalizeProtocol, which runs at
+// ingest on the three free-text protocol columns. That one only fixes SPELLING
+// and passes an unknown protocol through untouched. This one is the semantic
+// map onto the enum — it is allowed to decide that HTTPS is TLS and that
+// WireGuard is a VPN. Its alias arms for the OT spellings are now
+// belt-and-braces for freshly written rows and still load-bearing for rows
+// written before that.
+func resolveProtocol(protocol string) (string, protocolVerdict) {
+	switch strings.ToUpper(strings.TrimSpace(protocol)) {
 	case "HTTPS", "HTTP/2", "HTTP2":
-		return "TLS" // HTTPS is TLS over HTTP
+		return "TLS", protocolEnum // HTTPS is TLS over HTTP
 	case "TLS", "SSL":
-		return "TLS"
+		return "TLS", protocolEnum
 	case "SSH":
-		return "SSH"
-	case "IPSEC", "IP-SEC", "IKE":
-		return "IPSec"
+		return "SSH", protocolEnum
+	// IKE and IKEv2 are the key-exchange half of an IPSec association, which is
+	// what the Cisco collector reports them as (parseIKEv2SA stamps "IKEv2").
+	// IKEV2 had no arm, so every Cisco IKEv2 SA — a real, correctly identified
+	// VPN association — was filed as TLS.
+	case "IPSEC", "IP-SEC", "IKE", "IKEV2", "IKE-V2", "IKE_V2":
+		return "IPSec", protocolEnum
 	case "VPN", "WIREGUARD", "OPENVPN":
-		return "VPN"
+		return "VPN", protocolEnum
 	case "SMB":
-		return "SMB"
+		return "SMB", protocolEnum
 	case "KERBEROS":
-		return "Kerberos"
+		return "Kerberos", protocolEnum
 	case "DATABASE", "DB":
-		return "Database"
+		return "Database", protocolEnum
 	case "API", "REST", "GRAPHQL":
-		return "API"
+		return "API", protocolEnum
 	// OT/ICS protocols. The sensor emits the protocol name directly
 	// from its assemblers; we accept common vendor / standard aliases.
 	case "MODBUS", "MODBUS/TCP", "MODBUS_TCP", "MODBUS-TCP":
-		return "Modbus"
+		return "Modbus", protocolEnum
 	case "DNP3", "DNP3.0", "DNP3-SAV5", "DNP3-SAV6", "DNP3_SAV5", "DNP3_SAV6":
-		return "DNP3"
+		return "DNP3", protocolEnum
 	case "OPC_UA", "OPC-UA", "OPCUA", "OPC UA":
-		return "OPC_UA"
+		return "OPC_UA", protocolEnum
 	case "ETHERNET_IP", "ETHERNET-IP", "ETHERNET/IP", "ENIP", "CIP":
-		return "EtherNet_IP"
+		return "EtherNet_IP", protocolEnum
 	case "BACNET":
-		return "BACnet"
+		return "BACnet", protocolEnum
 	case "BACNET_SC", "BACNET-SC", "BACNET/SC":
-		return "BACnet_SC"
+		return "BACnet_SC", protocolEnum
 	case "HART_IP", "HART-IP", "HARTIP":
-		return "HART_IP"
+		return "HART_IP", protocolEnum
 	case "S7", "S7COMM", "S7-COMM", "S7_COMM", "S7-PLUS", "S7PLUS", "S7_PLUS":
-		return "S7"
+		return "S7", protocolEnum
 	case "MMS", "IEC-61850-MMS", "IEC61850-MMS", "IEC61850_MMS":
-		return "MMS"
+		return "MMS", protocolEnum
 	case "ICCP", "TASE.2", "TASE-2", "TASE_2":
-		return "ICCP"
+		return "ICCP", protocolEnum
 	case "IEC62351", "IEC-62351", "IEC_62351":
-		return "IEC62351"
+		return "IEC62351", protocolEnum
+
+	// Transports. cluster-sensor's mapProtocol preserve-list covers only
+	// TLS/SSH-shaped requests, so every other scanned port — including every OT
+	// target whose protocol probe got no reply — comes back stamped with the
+	// transport nmap reported.
+	case "TCP", "UDP":
+		return "", protocolTransport
+
+	// Explicitly unencrypted. shared/deviceinterrogation/database.go stamps
+	// "NONE" when the engine reports SSL is off; the CloudFront collector
+	// stamps "HTTP" when the origin protocol policy is http-only, under a
+	// comment reading "Do not report a TLS version it does not use" — which is
+	// precisely what the old default then did. Both are measurements, and the
+	// thing they measured is the absence of transport encryption.
+	case "NONE", "HTTP":
+		return "", protocolPlaintext
+
 	default:
-		// Default to TLS for unknown protocols (most common case)
-		// Log a warning for unexpected protocols
-		if protocolUpper != "TLS" {
-			log.Printf("Warning: Unknown protocol '%s', defaulting to TLS", protocol)
-		}
-		return "TLS"
+		return "", protocolUnrecognized
 	}
 }
 
@@ -636,8 +736,16 @@ func (s *AssetService) IngestFindings(tenantID uuid.UUID, findings []IngestFindi
 				return inserted, fmt.Errorf("failed to find existing asset: %w", err)
 			}
 
-			// If suppressed/denied, skip creation
-			suppressed, _ := s.isSuppressed(tenantID, f.Hostname, effectiveIP, f.Port)
+			// If suppressed/denied, skip creation. A suppression-lookup failure
+			// is not a reason to abort the whole ingest batch, but it must not
+			// be discarded silently either (B-42) — log it and fall through to
+			// creating the asset, which is the safe direction: a re-created
+			// asset lands in Approvals for a human, whereas wrongly suppressing
+			// one hides a real discovery.
+			suppressed, suppErr := s.isSuppressed(tenantID, f.Hostname, effectiveIP, f.Port)
+			if suppErr != nil {
+				log.Printf("[AssetService] Warning: suppression lookup failed for tenant %s: %v", tenantID, suppErr)
+			}
 			if suppressed {
 				continue
 			}
@@ -695,7 +803,7 @@ func (s *AssetService) IngestFindings(tenantID uuid.UUID, findings []IngestFindi
 			// segment auto-approval rules against the classified discovery.
 			// Re-deriving it here would evaluate the rules twice and could
 			// disagree with what the pipeline recorded on the discovery row.
-			asset, createErr := s.createAssetWithStatus(tenantID, input, status)
+			asset, createErr := s.createAssetWithStatus(tenantID, input, status, findingDiscoveryMethod(f))
 			if createErr != nil {
 				return inserted, fmt.Errorf("failed to upsert asset: %w", createErr)
 			}
@@ -1036,7 +1144,28 @@ func (s *AssetService) routeToExternalConnection(tenantID uuid.UUID, f IngestFin
 	if f.Port != nil {
 		destPort = *f.Port
 	}
-	protocol := normalizeProtocol(f.Protocol)
+	// external_connections.protocol is varchar, not the enum, so an
+	// unrecognised protocol has somewhere honest to go: itself. Coercing it to
+	// "TLS" here was the same fabrication as on the crypto_implementations path
+	// — and it silently defeated the pass-through this table is documented to
+	// provide (TestIntegration_ExternalConnectionUpsert_StoresCanonicalProtocol
+	// asserts an unmodelled protocol is stored un-rewritten, but reached Upsert
+	// directly, so it never saw this coercion upstream of it).
+	//
+	// Enum-modelled protocols still get the canonical literal, so the row's
+	// UNIQUE key (tenant, source_ip, dest_ip, dest_port, protocol) keeps
+	// collapsing spellings of the same protocol onto one row. Everything else
+	// is passed through; Upsert canonicalizes its SPELLING via
+	// cryptoparse.NormalizeProtocol without changing which protocol it is.
+	protocol, verdict := resolveProtocol(f.Protocol)
+	if verdict != protocolEnum {
+		protocol = strings.TrimSpace(f.Protocol)
+		if protocol == "" {
+			// Upsert rejects an empty protocol, and "" would be a claim of its
+			// own in a NOT NULL column. Say what is actually true.
+			protocol = "unknown"
+		}
+	}
 
 	// For manual discoveries, there is no source IP (it originates from the platform).
 	// Use "0.0.0.0" as a sentinel indicating a platform-initiated discovery.
@@ -1156,7 +1285,8 @@ func (s *AssetService) ElevateExternalConnection(tenantID, connID uuid.UUID) (*m
 	// click IS the approval. Queuing it would ask the user to approve their own
 	// deliberate action. It is not a caller-supplied status: nothing in the
 	// request body reaches this value.
-	asset, err := s.createAssetWithStatus(tenantID, input, "monitoring")
+	f := buildElevationFinding(conn)
+	asset, err := s.createAssetWithStatus(tenantID, input, "monitoring", findingDiscoveryMethod(f))
 	if err != nil {
 		return nil, fmt.Errorf("create managed asset from connection %s: %w", conn.ID, err)
 	}
@@ -1164,7 +1294,6 @@ func (s *AssetService) ElevateExternalConnection(tenantID, connID uuid.UUID) (*m
 	// Materialize the leaf certificate (if captured) via the canonical
 	// approved-discovery path so the vendor cert is created, linked to the asset,
 	// and assessed exactly like an internal one.
-	f := buildElevationFinding(conn)
 	if conn.CertSubject != nil && *conn.CertSubject != "" && conn.CertIssuer != nil && *conn.CertIssuer != "" {
 		var lifecycleRiskChanged []*events.AssetRiskChangedPayload
 		var lifecycleCryptoAdded []*events.CryptoConfigurationAddedPayload
@@ -1252,6 +1381,13 @@ func buildElevationFinding(conn *models.ExternalConnection) IngestFinding {
 // that every component column is bound to a parameter: signature_algorithm and
 // symmetric_encryption were literal NULLs here, which made four seeded
 // compliance controls evaluate against permanently empty fields.
+//
+// discovery_method was a literal 'integration' for the same reason and with the
+// same effect: every crypto configuration on the platform claimed to have come
+// from a third-party integration, the documented
+// `?discovery_method=passive|active|manual` filter returned nothing for any
+// other value, and the wrong provenance was baked into exported CBOM evidence.
+// It is now bound to $15 — see findingDiscoveryMethod.
 const insertCryptoImplementationSQL = `
 		INSERT INTO crypto_implementations (
 			id, tenant_id, asset_id, protocol, protocol_version, cipher_suite,
@@ -1263,36 +1399,177 @@ const insertCryptoImplementationSQL = `
 		) VALUES (
 			$1,$2,$3,$4,$5,$6,
 			$12,$13,$14,
-			$7,$8,$9,'integration',
+			$7,$8,$9,$15::public.discovery_method,
 			NULL,$10,$11,NULL,
 			'{}'::jsonb, NOW(), NOW(),
 			NOW(), NOW()
 		)`
 
+// defaultDiscoveryMethod is what a finding that states no provenance is stored
+// as. It is the value every row carried before provenance was threaded through,
+// so an unattributable finding is no worse off than it already was — but it is
+// deliberately NOT a guess: nothing maps an unknown producer string onto
+// 'passive' or 'active'.
+const defaultDiscoveryMethod = "integration"
+
+// discoveryMethodByProducerString maps the provenance strings producers
+// actually emit onto the `discovery_method` ENUM in schema.sql
+// (passive | active | manual | integration | device_interrogation | cloud_api |
+// source_code_scan | host_scan).
+//
+// A raw pass-through would violate the enum and abort the INSERT:
+// "active_enrichment" and "pcap_upload" are both real producer values and
+// neither is an enum member.
+var discoveryMethodByProducerString = map[string]string{
+	// Enum members producers already speak verbatim.
+	"passive":              "passive",
+	"active":               "active",
+	"manual":               "manual",
+	"integration":          "integration",
+	"device_interrogation": "device_interrogation",
+	"cloud_api":            "cloud_api",
+	"source_code_scan":     "source_code_scan",
+	"host_scan":            "host_scan",
+
+	// Producer spellings with no enum member of their own.
+	"active_enrichment": "active",  // sensor TLS enricher: an active probe
+	"pcap_upload":       "passive", // a PCAP is captured traffic, never solicited
+}
+
+// discoveryMethodBySourceString maps the RawData "source" key for the cases
+// where it unambiguously names the provenance. It is consulted only when the
+// finding carries no explicit discovery_method. Ambiguous sources (e.g.
+// "connection_elevation", which may stand behind either a passive observation
+// or an active probe) are deliberately absent — they fall through to
+// defaultDiscoveryMethod rather than being guessed at.
+var discoveryMethodBySourceString = map[string]string{
+	"cloud_discovery":      "cloud_api",
+	"cloud_api":            "cloud_api",
+	"device_interrogation": "device_interrogation",
+	"ui":                   "manual",
+}
+
+// findingDiscoveryMethod resolves a finding's provenance to a `discovery_method`
+// enum value. The sensor's own discovery_method wins; the source key is a
+// second chance; anything unrecognised falls back to defaultDiscoveryMethod.
+func findingDiscoveryMethod(f IngestFinding) string {
+	if f.RawData == nil {
+		return defaultDiscoveryMethod
+	}
+	if dm, _ := f.RawData["discovery_method"].(string); dm != "" {
+		if mapped, ok := discoveryMethodByProducerString[strings.ToLower(strings.TrimSpace(dm))]; ok {
+			return mapped
+		}
+	}
+	if src, _ := f.RawData["source"].(string); src != "" {
+		if mapped, ok := discoveryMethodBySourceString[strings.ToLower(strings.TrimSpace(src))]; ok {
+			return mapped
+		}
+	}
+	return defaultDiscoveryMethod
+}
+
+// maxDeferredFindings caps network_assets.metadata->'deferred_findings'.
+//
+// With dedup in place an asset reaches this only by producing that many
+// genuinely distinct observations while pending, which is pathological — the
+// cap is a backstop against unbounded JSONB growth, not a routine trim. Oldest
+// entries are dropped first: the newest observations are the ones that describe
+// the asset's current posture.
+const maxDeferredFindings = 50
+
 // storeDeferredFinding saves the raw finding data in the asset's metadata under
 // the "deferred_findings" key. When the asset is later approved, ApproveAssets
 // processes these deferred findings to create certificates and crypto configurations.
+//
+// Deduplicated and capped. This used to be a blind `||` append that rewrote the
+// whole JSONB document on every ingest, so an asset left in Discovery →
+// Approvals accumulated one complete copy of every re-observation — full
+// certificate PEM chains included — for as long as nobody clicked Approve, and
+// then fired all of them in a single burst on approval. Findings that
+// materialize to the same thing now REPLACE their predecessor in place rather
+// than stacking, so the newest observation wins and the array stays the size of
+// the asset's distinct posture.
+//
+// Note the fingerprint deliberately does not compare whole findings: several
+// producers stamp per-observation timestamps into RawData, so a blob comparison
+// never matches and would dedup nothing. See deferredFindingFingerprint.
 func (s *AssetService) storeDeferredFinding(tenantID, assetID uuid.UUID, f IngestFinding) {
 	findingJSON, err := json.Marshal(f)
 	if err != nil {
 		log.Printf("Warning: failed to marshal deferred finding for asset %s: %v", assetID, err)
 		return
 	}
+	fingerprint := s.deferredFindingFingerprint(f)
 
-	// Append to existing deferred_findings array in metadata, or create a new one.
+	// Read-modify-write, so it must be serialized: two concurrent ingests of the
+	// same asset would otherwise each read the array, each append, and the second
+	// write would drop the first. The same per-asset advisory lock the crypto
+	// upsert uses does that, cluster-wide.
 	// RLS-scoped write over network_assets.
 	err = database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		_, e := tx.Exec(`
+		if _, e := tx.Exec(lockAssetMaterializationSQL, assetMaterializationLockKey(tenantID, assetID)); e != nil {
+			return fmt.Errorf("lock asset materialization: %w", e)
+		}
+
+		var existingJSON []byte
+		if e := tx.QueryRow(
+			`SELECT COALESCE(metadata->'deferred_findings', '[]'::jsonb) FROM network_assets WHERE id = $1 AND tenant_id = $2`,
+			assetID, tenantID,
+		).Scan(&existingJSON); e != nil {
+			return fmt.Errorf("read deferred findings: %w", e)
+		}
+
+		var existing []json.RawMessage
+		if len(existingJSON) > 0 {
+			if e := json.Unmarshal(existingJSON, &existing); e != nil {
+				// A malformed array is not a reason to lose the new observation,
+				// but it IS a reason to say so rather than silently reset.
+				log.Printf("Warning: deferred findings for asset %s are unreadable (%v); starting a fresh array", assetID, e)
+				existing = nil
+			}
+		}
+
+		replaced := false
+		for i, entry := range existing {
+			var prev IngestFinding
+			if e := json.Unmarshal(entry, &prev); e != nil {
+				continue
+			}
+			if s.deferredFindingFingerprint(prev) != fingerprint {
+				continue
+			}
+			// Same finding, seen again: keep its position (so ordering stays
+			// first-seen) and take the newer body.
+			existing[i] = json.RawMessage(findingJSON)
+			replaced = true
+			break
+		}
+		if !replaced {
+			existing = append(existing, json.RawMessage(findingJSON))
+		}
+		if len(existing) > maxDeferredFindings {
+			dropped := len(existing) - maxDeferredFindings
+			log.Printf("Warning: asset %s holds more than %d distinct deferred findings; dropping the %d oldest",
+				assetID, maxDeferredFindings, dropped)
+			existing = existing[dropped:]
+		}
+
+		merged, e := json.Marshal(existing)
+		if e != nil {
+			return fmt.Errorf("marshal deferred findings: %w", e)
+		}
+		_, e = tx.Exec(`
 			UPDATE network_assets
 			SET metadata = jsonb_set(
 				COALESCE(metadata, '{}'::jsonb),
 				'{deferred_findings}',
-				COALESCE(metadata->'deferred_findings', '[]'::jsonb) || $1::jsonb,
+				$1::jsonb,
 				true
 			),
 			updated_at = NOW()
 			WHERE id = $2`,
-			string(findingJSON), assetID)
+			string(merged), assetID)
 		return e
 	})
 	if err != nil {
@@ -1317,12 +1594,54 @@ func (s *AssetService) processDiscoveryCryptoData(
 	//
 	// An S3 bucket or an RDS instance is not a network endpoint: it negotiates
 	// no protocol, no cipher suite and no version. Falling through would
-	// manufacture a crypto_implementations row whose protocol is whatever
-	// normalizeProtocol defaults to (TLS) with every crypto column NULL —
+	// manufacture a crypto_implementations row with every crypto column NULL —
 	// which is precisely the phantom TLS endpoint this replaces. Its
 	// encryption posture is at-rest, so it belongs in crypto_applications.
 	if posture, ok := atRestPostureFromFinding(f); ok {
 		s.produceAtRestApplication(tenantID, assetID, posture)
+		return nil
+	}
+
+	// B-22: the same reasoning, for the at-rest resources that atRestResourceTypes
+	// does NOT yet map — today the three cloud key stores (AWS KMS, Azure Key
+	// Vault keys, GCP Cloud KMS keys). device-interrogation-service stamps their
+	// findings with protocol "AT-REST" (atRestProtocolPort), and its comment
+	// asserted that inventory-service routes them to crypto_applications by
+	// resource_type. It does not: those three collectors write no resource_type
+	// at all, so atRestPostureFromFinding returns false above and execution used
+	// to fall through — protocol normalization had no AT-REST case, so it logged
+	// "Unknown protocol, defaulting to TLS" and every discovered customer-managed
+	// key became an asset carrying a TLS crypto configuration with NULL
+	// protocol_version and NULL cipher_suite. A negotiated-protocol measurement
+	// that never happened, feeding the risk and PQC denominators.
+	//
+	// Not measuring something is the honest answer here; inventing a TLS endpoint
+	// is not. Surfacing key stores as first-class at-rest posture is separate
+	// work: crypto_applications models "is this resource's DATA encrypted, and
+	// whose key" — every rung of that ladder (Unencrypted / Provider key /
+	// Customer key) is a category error for a resource that IS the key.
+	if isAtRestProtocol(f.Protocol) {
+		return nil
+	}
+
+	// And the general case, of which AT-REST was one instance.
+	//
+	// A crypto configuration IS a protocol observation: the row names a
+	// protocol_type, and everything downstream — the weak-protocol check, the
+	// OT-encryption measurement, the risk and PQC denominators — reads it as a
+	// measurement of what the endpoint negotiated. If we cannot name the
+	// protocol, there is nothing to measure, and the enum offers no value that
+	// says so. Recording the finding anyway is what produced phantom TLS
+	// endpoints: a "tcp"-stamped port that never answered a protocol probe, or a
+	// database that reported SSL OFF, arriving in inventory as a TLS endpoint
+	// with no version and no cipher suite.
+	//
+	// The asset itself is unaffected — "something answered on this port" is a
+	// true fact and was already recorded by the caller. Only the crypto
+	// configuration, which would be a fabricated one, is skipped.
+	if _, verdict := resolveProtocol(f.Protocol); verdict != protocolEnum {
+		log.Printf("[AssetService] asset %s: no crypto configuration materialized — protocol %q is %s",
+			assetID, f.Protocol, verdict)
 		return nil
 	}
 
@@ -1378,9 +1697,23 @@ func (s *AssetService) processDiscoveryCryptoData(
 	// silent pass on every asset. The cipher suite already tells us what was
 	// negotiated, and ParseCipherSuite is already called a few lines below to
 	// build the junction links; the same components now fill the columns.
-	cryptoID := uuid.New()
-	derived := s.deriveCipherComponents(f)
-	insertCrypto := insertCryptoImplementationSQL
+	//
+	// UPSERT, not INSERT. This used to mint a fresh uuid on every call, so an
+	// endpoint re-observed hourly grew ~168 identical Crypto Configuration rows a
+	// week — inflating the drawer, the tenant's configuration count, and the PQC
+	// and risk denominators that divide by the number of implementations. The
+	// natural key, and why each column is or is not in it, lives on
+	// cryptoImplementationKey in crypto_dedup.go.
+	// Guaranteed recordable: the short-circuit at the top of this function
+	// returned for every other verdict. Checked again rather than assumed —
+	// the enum column would reject an empty protocol, but only after the
+	// certificate work above had already been committed.
+	key, recordable := s.cryptoKeyForFinding(assetID, f)
+	if !recordable {
+		return errors.Join(append(materializationErrs,
+			fmt.Errorf("protocol %q names no modelled protocol; refusing to materialize a crypto configuration for it", f.Protocol))...)
+	}
+	protocol := key.Protocol
 
 	raw := models.JSONB{}
 	if f.RawData != nil {
@@ -1395,20 +1728,29 @@ func (s *AssetService) processDiscoveryCryptoData(
 		}
 	}
 
-	protocol := normalizeProtocol(f.Protocol)
-
-	// RLS-scoped write over crypto_implementations.
+	var cryptoID uuid.UUID
+	var cryptoCreated bool
+	// RLS-scoped write over crypto_implementations. The advisory lock is what
+	// stands in for the unique constraint this table deliberately does not have:
+	// it serializes the find-then-write for this asset across every replica, so
+	// two workers ingesting the same endpoint cannot both miss and both insert.
 	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		_, e := tx.Exec(
-			insertCrypto,
-			cryptoID, tenantID, assetID, protocol, derived.ProtocolVersion, f.CipherSuite,
-			derived.Hash, f.KeySize, primaryCertID, sensor, rawJSON,
-			derived.KeyExchange, derived.Signature, derived.Symmetric,
-		)
-		return e
+		if _, e := tx.Exec(lockAssetMaterializationSQL, assetMaterializationLockKey(tenantID, assetID)); e != nil {
+			return fmt.Errorf("lock asset materialization: %w", e)
+		}
+		id, created, e := upsertCryptoImplementation(tx, tenantID, key, primaryCertID, sensor, rawJSON)
+		if e != nil {
+			return e
+		}
+		cryptoID, cryptoCreated = id, created
+		return nil
 	}); err != nil {
-		log.Printf("[AssetService] Warning: failed to insert crypto implementation for asset %s: %v", assetID, err)
-		materializationErrs = append(materializationErrs, fmt.Errorf("insert crypto implementation: %w", err))
+		// Everything below writes against cryptoID — junction links, algorithm
+		// classification, the risk update. Without a row they would either fail
+		// on the foreign key or attach to uuid.Nil. Stop here and report.
+		log.Printf("[AssetService] Warning: failed to materialize crypto implementation for asset %s: %v", assetID, err)
+		materializationErrs = append(materializationErrs, fmt.Errorf("materialize crypto implementation: %w", err))
+		return errors.Join(materializationErrs...)
 	}
 
 	// Link certificates to crypto configuration
@@ -1554,7 +1896,11 @@ func (s *AssetService) processDiscoveryCryptoData(
 		}
 	}
 
-	if s.eventPublisher != nil && lifecycleCryptoAdded != nil {
+	// Only on creation. "crypto.configuration_added" for a configuration that
+	// already existed is a false event, and before the upsert every hourly
+	// re-observation raised one — the same burst the duplicate rows came from,
+	// delivered to notification consumers.
+	if s.eventPublisher != nil && lifecycleCryptoAdded != nil && cryptoCreated {
 		*lifecycleCryptoAdded = append(*lifecycleCryptoAdded, &events.CryptoConfigurationAddedPayload{
 			AssetID:                assetID,
 			CryptoImplementationID: cryptoID,
@@ -1644,6 +1990,15 @@ func (s *AssetService) processDeferredFindings(tenantID uuid.UUID, assetID uuid.
 		}
 	}
 
+	// Collapse duplicates before replaying. storeDeferredFinding now dedups on
+	// the way in, but an asset that has been sitting in Approvals since before
+	// that landed still carries one copy per re-observation — and approving it
+	// replayed every one of them, each doing the same certificate lookups and
+	// the same risk pass. The crypto upsert would converge them onto one row
+	// anyway; this stops the redundant work (and the redundant events) rather
+	// than undoing it afterwards.
+	findings = s.dedupDeferredFindings(findings)
+
 	var lifecycleRiskChanged []*events.AssetRiskChangedPayload
 	var lifecycleCryptoAdded []*events.CryptoConfigurationAddedPayload
 	var lifecycleCertExpiring []*events.CertificateExpiringPayload
@@ -1693,6 +2048,27 @@ func (s *AssetService) processDeferredFindings(tenantID uuid.UUID, assetID uuid.
 	return nil
 }
 
+// dedupDeferredFindings collapses deferred findings that materialize to the
+// same thing, keeping the LAST occurrence of each (the most recent observation)
+// at the position of the first (so replay order stays first-seen).
+func (s *AssetService) dedupDeferredFindings(findings []IngestFinding) []IngestFinding {
+	if len(findings) < 2 {
+		return findings
+	}
+	pos := make(map[string]int, len(findings))
+	out := make([]IngestFinding, 0, len(findings))
+	for _, f := range findings {
+		fp := s.deferredFindingFingerprint(f)
+		if i, seen := pos[fp]; seen {
+			out[i] = f
+			continue
+		}
+		pos[fp] = len(out)
+		out = append(out, f)
+	}
+	return out
+}
+
 func (s *AssetService) DenyAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, userID uuid.UUID) error {
 	if len(assetIDs) == 0 {
 		return nil
@@ -1708,10 +2084,15 @@ func (s *AssetService) DenyAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, user
 		return fmt.Errorf("failed to load assets for suppression: %w", err)
 	}
 
-	// Suppress fingerprints
+	// Suppress fingerprints.
+	//
+	// B-42: a failure here used to go to a bare stdout Printf while DenyAssets
+	// still returned nil, so the deny reported success with no suppression
+	// recorded — invisible to the user and to any caller. Suppression is half
+	// of what "deny" means, so its failure is the operation's failure.
 	for _, a := range assets {
 		if err := s.addSuppression(tenantID, a.Hostname, a.IPAddress, a.Port, &userID, "denied by user"); err != nil {
-			fmt.Printf("Warning: failed to add suppression for asset %s: %v\n", a.ID, err)
+			return fmt.Errorf("failed to record deny suppression for asset %s: %w", a.ID, err)
 		}
 	}
 
@@ -1780,7 +2161,10 @@ func (s *AssetService) evaluateAssetApproval(tenantID uuid.UUID, ipAddress, host
 // pull (both via BulkCreateAssets). Callers that hold a status the server already
 // evaluated — the discovery ingestion pipeline — use createAssetWithStatus.
 func (s *AssetService) CreateAsset(tenantID uuid.UUID, input models.AssetInput) (*models.Asset, error) {
-	return s.createAssetWithStatus(tenantID, input, s.evaluateAssetApproval(tenantID, input.IPAddress, input.Hostname))
+	// A handler-created asset IS manual provenance — there is no request field
+	// for it, deliberately: a client cannot claim its hand-entered asset was
+	// sensor-observed.
+	return s.createAssetWithStatus(tenantID, input, s.evaluateAssetApproval(tenantID, input.IPAddress, input.Hostname), "manual")
 }
 
 // createAssetWithStatus is CreateAsset with the approval decision already made.
@@ -1789,7 +2173,10 @@ func (s *AssetService) CreateAsset(tenantID uuid.UUID, input models.AssetInput) 
 // which receives a status that discovery-processor-service produced by running
 // the same segment auto-approval rules over the classified discovery. It is
 // unexported so no handler can reach it.
-func (s *AssetService) createAssetWithStatus(tenantID uuid.UUID, input models.AssetInput, assetStatus string) (*models.Asset, error) {
+// discoveryMethod is the resolved `discovery_method` enum value for the asset
+// row; it was omitted from the INSERT entirely, so the asset drawer's Discovery
+// line was blank for every asset on the platform.
+func (s *AssetService) createAssetWithStatus(tenantID uuid.UUID, input models.AssetInput, assetStatus, discoveryMethod string) (*models.Asset, error) {
 	// Validate minimal requirements
 	if input.AssetType == "" {
 		return nil, fmt.Errorf("asset_type is required")
@@ -1827,12 +2214,17 @@ func (s *AssetService) createAssetWithStatus(tenantID uuid.UUID, input models.As
 		assetStatus = "pending_approval"
 	}
 
+	if discoveryMethod == "" {
+		discoveryMethod = defaultDiscoveryMethod
+	}
+
 	insert := `
         INSERT INTO network_assets (
             tenant_id, hostname, ip_address, port, asset_type,
             operating_system, environment, business_unit, owner_email,
-            description, tags, metadata, asset_ownership, asset_status
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+            description, tags, metadata, asset_ownership, asset_status,
+            discovery_method
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
         RETURNING id
     `
 
@@ -1854,6 +2246,7 @@ func (s *AssetService) createAssetWithStatus(tenantID uuid.UUID, input models.As
 			metadataJSON,
 			assetOwnership,
 			assetStatus,
+			discoveryMethod,
 		).Scan(&assetID)
 	})
 	if err != nil {
@@ -2170,10 +2563,14 @@ func (s *AssetService) HardDeleteAsset(tenantID, assetID uuid.UUID) error {
 type TenantActivitySummary struct {
 	TenantID       uuid.UUID      `json:"tenant_id"`
 	ActiveUsers    int            `json:"active_users"`    // Users who have interacted (estimate from asset updates)
-	APICalls       int            `json:"api_calls"`       // API calls (could query resource-tracker)
+	APICalls       int            `json:"api_calls"`       // API calls, measured by resource-tracker-service; 0 with the source listed in UnavailableSources when it could not be reached
 	FeatureUsage   map[string]int `json:"feature_usage"`   // Feature usage counts
 	UserEngagement float64        `json:"user_engagement"` // Engagement score (0-100)
 	LastUpdated    time.Time      `json:"last_updated"`
+	// UnavailableSources names peer services this summary could not reach.
+	// Its consumer (tenant-health-service) relays these so an unreachable peer
+	// reads as UNKNOWN rather than as a measured value.
+	UnavailableSources []string `json:"unavailable_sources,omitempty"`
 }
 
 // GetTenantActivitySummary returns activity metrics for a specific tenant
@@ -2242,11 +2639,19 @@ func (s *AssetService) GetTenantActivitySummary(tenantID uuid.UUID) (*TenantActi
 		summary.ActiveUsers = 0
 	}
 
-	// Query API calls from resource-tracker-service
+	// Query API calls from resource-tracker-service.
+	//
+	// There is deliberately NO estimation fallback. The previous one derived a
+	// number from inventory size — a formula that has nothing to do with API
+	// traffic — and it was indistinguishable from a measurement downstream, so
+	// an unreachable peer silently became a plausible metric on every tenant's
+	// health score. When the peer cannot be reached the count is 0 and the
+	// source is named, which the consumer reads as UNKNOWN.
 	apiCalls, err := s.getAPICallsFromResourceTracker(tenantID)
 	if err != nil {
-		// Fallback to estimation if resource-tracker is unavailable
-		summary.APICalls = assetCount*2 + cryptoCount + keyCount + libraryCount + integrationCount*5
+		log.Printf("[AssetService] resource-tracker-service unreachable for tenant %s: %v — reporting api_calls as UNKNOWN", tenantID, err)
+		summary.APICalls = 0
+		summary.UnavailableSources = append(summary.UnavailableSources, "resource-tracker-service")
 	} else {
 		summary.APICalls = apiCalls
 	}
@@ -2291,6 +2696,48 @@ func (s *AssetService) GetTenantActivitySummary(tenantID uuid.UUID) (*TenantActi
 	return summary, nil
 }
 
+// peerHTTPClientOnce guards the lazily-built S2S client below.
+var (
+	peerHTTPClientOnce sync.Once
+	peerHTTPClientVal  *http.Client
+)
+
+// peerHTTPClient returns the HTTP client used for service-to-service polls.
+//
+// Under serviceMtls the peer URL resolves to https://<svc>:8443, which is
+// RequireAndVerifyClientCert: a bare &http.Client{} fails the handshake on
+// every call. Built once, from the same CLIENT_CERT_PATH / CLIENT_KEY_PATH /
+// PLATFORM_CA_CERT_PATH the chart already mounts for this service.
+func peerHTTPClient() *http.Client {
+	peerHTTPClientOnce.Do(func() {
+		peerHTTPClientVal = newPeerHTTPClient(
+			sharedconfig.GetEnvAsBool("USE_MTLS", true),
+			sharedconfig.GetEnv("CLIENT_CERT_PATH", "/app/certs/client-cert.pem"),
+			sharedconfig.GetEnv("CLIENT_KEY_PATH", "/app/certs/client-key.pem"),
+			sharedconfig.GetEnv("PLATFORM_CA_CERT_PATH", "/app/certs/platform-ca-cert.pem"),
+		)
+	})
+	return peerHTTPClientVal
+}
+
+// newPeerHTTPClient is peerHTTPClient's construction step, split out so it can
+// be exercised without the package-level sync.Once.
+func newPeerHTTPClient(useMTLS bool, certPath, keyPath, caPath string) *http.Client {
+	plain := &http.Client{Timeout: 5 * time.Second}
+	if !useMTLS {
+		return plain
+	}
+	c, err := sharedhttp.NewMTLSClient(certPath, keyPath, caPath)
+	if err != nil {
+		// Not fatal — the caller reports the peer as unavailable rather than
+		// inventing a value, so this degrades visibly.
+		log.Printf("[AssetService] USE_MTLS is set but the mTLS client could not be built: %v — peer polls will fail and report UNKNOWN", err)
+		return plain
+	}
+	c.Timeout = 5 * time.Second
+	return c
+}
+
 // getAPICallsFromResourceTracker queries the resource-tracker-service for API call count
 func (s *AssetService) getAPICallsFromResourceTracker(tenantID uuid.UUID) (int, error) {
 	trackerURL := os.Getenv("RESOURCE_TRACKER_URL")
@@ -2311,8 +2758,7 @@ func (s *AssetService) getAPICallsFromResourceTracker(tenantID uuid.UUID) (int, 
 
 	serviceauth.SignRequestFromEnv(req)
 
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req) //nolint:gosec // intentional — internal service-to-service call, URL from trusted config not user input
+	resp, err := peerHTTPClient().Do(req) //nolint:gosec // intentional — internal service-to-service call, URL from trusted config not user input
 	if err != nil {
 		return 0, fmt.Errorf("failed to query resource-tracker: %w", err)
 	}

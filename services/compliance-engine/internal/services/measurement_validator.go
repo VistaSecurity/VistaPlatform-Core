@@ -1,7 +1,6 @@
 package services
 
 import (
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -280,91 +279,4 @@ func (v *MeasurementValidator) ValidateOperator(predicate map[string]interface{}
 	}
 
 	return fmt.Errorf("operator '%s' is not valid. Valid operators: %v", operatorStr, validOperators)
-}
-
-// ParseAllowedRuleTypes parses allowed_rule_types from JSONB
-func (v *MeasurementValidator) ParseAllowedRuleTypes(allowedRuleTypesJSON interface{}) []string {
-	if allowedRuleTypesJSON == nil {
-		return nil
-	}
-
-	// Handle JSONB array
-	switch val := allowedRuleTypesJSON.(type) {
-	case []interface{}:
-		result := make([]string, 0, len(val))
-		for _, v := range val {
-			if str, ok := v.(string); ok {
-				result = append(result, str)
-			}
-		}
-		return result
-	case []byte:
-		var result []string
-		if err := json.Unmarshal(val, &result); err == nil {
-			return result
-		}
-	case string:
-		var result []string
-		if err := json.Unmarshal([]byte(val), &result); err == nil {
-			return result
-		}
-	}
-
-	return nil
-}
-
-// ParseValidOperators parses valid_operators from JSONB
-func (v *MeasurementValidator) ParseValidOperators(validOperatorsJSON interface{}) []string {
-	if validOperatorsJSON == nil {
-		return nil
-	}
-
-	// Handle JSONB array
-	switch val := validOperatorsJSON.(type) {
-	case []interface{}:
-		result := make([]string, 0, len(val))
-		for _, v := range val {
-			if str, ok := v.(string); ok {
-				result = append(result, str)
-			}
-		}
-		return result
-	case []byte:
-		var result []string
-		if err := json.Unmarshal(val, &result); err == nil {
-			return result
-		}
-	case string:
-		var result []string
-		if err := json.Unmarshal([]byte(val), &result); err == nil {
-			return result
-		}
-	}
-
-	return nil
-}
-
-// ParseEnumValues parses enum_values from JSONB
-func (v *MeasurementValidator) ParseEnumValues(enumValuesJSON interface{}) []interface{} {
-	if enumValuesJSON == nil {
-		return nil
-	}
-
-	// Handle JSONB array
-	switch val := enumValuesJSON.(type) {
-	case []interface{}:
-		return val
-	case []byte:
-		var result []interface{}
-		if err := json.Unmarshal(val, &result); err == nil {
-			return result
-		}
-	case string:
-		var result []interface{}
-		if err := json.Unmarshal([]byte(val), &result); err == nil {
-			return result
-		}
-	}
-
-	return nil
 }

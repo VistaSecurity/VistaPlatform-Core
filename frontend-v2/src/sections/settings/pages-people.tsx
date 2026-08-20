@@ -11,6 +11,7 @@ import { clients } from '../../lib/clients';
 import { Icon } from '../../components/ui';
 import { SPage, SSection, SCard, SRow, SSelect, STable, STableRow, STag, SDot, SAvatar, StateNote, relTime, GREEN, AMBER } from './kit';
 import { InviteMemberModal, ChangeRoleModal } from './people-modals';
+import { ExportMemberDataButton, EraseMemberModal } from './data-subject';
 import { SsoProviderModal, SsoProviderDeleteModal } from './sso-modals';
 import { RolePermissionDrawer, CreateRoleModal, DeleteRoleModal } from './role-modals';
 import type { TenantRole } from './role-logic';
@@ -38,6 +39,7 @@ export function MembersPage({ meta }: { meta: SettingsNavItem }) {
   const tenantId = tenant?.id;
   const [inviteOpen, setInviteOpen] = useState(false);
   const [roleTarget, setRoleTarget] = useState<AuthC['schemas']['TenantUser'] | null>(null);
+  const [eraseTarget, setEraseTarget] = useState<{ id: string; name: string; email: string } | null>(null);
   const { data, isLoading, isError } = useQuery({
     queryKey: ['settings', 'members', tenantId],
     enabled: !!tenantId,
@@ -67,6 +69,14 @@ export function MembersPage({ meta }: { meta: SettingsNavItem }) {
     >
       {inviteOpen && <InviteMemberModal open onClose={() => setInviteOpen(false)} />}
       {roleTarget && <ChangeRoleModal key={roleTarget.id} member={roleTarget} open onClose={() => setRoleTarget(null)} />}
+      {eraseTarget && (
+        <EraseMemberModal
+          key={eraseTarget.id}
+          target={eraseTarget}
+          tenantId={tenantId}
+          onClose={() => setEraseTarget(null)}
+        />
+      )}
       {isError ? (
         <SCard><StateNote icon="alert-triangle" tone="var(--danger-text)" title="Couldn't load members" message="The member roster failed to load." /></SCard>
       ) : isLoading || !tenantId ? (
@@ -101,9 +111,24 @@ export function MembersPage({ meta }: { meta: SettingsNavItem }) {
                   <span style={{ fontSize: 12, color: 'var(--app-t3)' }}>{relTime(m.last_login_at)}</span>,
                   <span className="mono" style={{ fontSize: 11, color: 'var(--app-t3)' }}>{(m.auth_methods ?? []).join(', ') || '—'}</span>,
                   <PermissionGate permission={TENANT_PERMISSIONS.users.manage}>
-                    {m.id !== user?.id && (
-                      <button className="ui-btn sm ghost" title="Change role" onClick={() => setRoleTarget(m)}><Icon name="shield-half" size={14} /></button>
-                    )}
+                    <span style={{ display: 'inline-flex', gap: 6 }}>
+                      {m.id !== user?.id && (
+                        <button className="ui-btn sm ghost" title="Change role" onClick={() => setRoleTarget(m)}><Icon name="shield-half" size={14} /></button>
+                      )}
+                      {/* Subject access request: hand this member everything held
+                          about them. Available for yourself too — the same
+                          document either way. */}
+                      <ExportMemberDataButton userId={m.id} name={name} />
+                      {m.id !== user?.id && (
+                        <button
+                          className="ui-btn sm ghost"
+                          title={`Erase ${name}'s personal data`}
+                          onClick={() => setEraseTarget({ id: m.id, name, email: m.email ?? '' })}
+                        >
+                          <Icon name="user-x" size={14} />
+                        </button>
+                      )}
+                    </span>
                   </PermissionGate>,
                 ]}
               />

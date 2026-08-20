@@ -9,15 +9,23 @@ import { LegalLinks } from '../components/legal-links';
 
 const PENDING_KEY = ['legal', 'pending'];
 
+// B-29: a server-side failure (e.g. a schema regression on legal_documents)
+// must NOT resolve as "nothing pending" — this gate is the only place pending
+// re-acceptance is enforced. Throwing routes it into isError, which `blocked`
+// already treats as fail-closed below. Extracted so the throw is directly
+// unit-testable without mounting the component.
+export async function fetchLegalPending() {
+  const { data, error } = await clients.auth.GET('/auth/legal/pending', {});
+  if (error || !data) throw new Error('Failed to check legal acceptance status');
+  return data.documents ?? [];
+}
+
 export function LegalGate({ children }: { children: React.ReactNode }) {
   const qc = useQueryClient();
 
   const pendingQ = useQuery({
     queryKey: PENDING_KEY,
-    queryFn: async () => {
-      const { data } = await clients.auth.GET('/auth/legal/pending', {});
-      return data?.documents ?? [];
-    },
+    queryFn: fetchLegalPending,
     // Session-scoped: no need to refetch aggressively.
     staleTime: 5 * 60 * 1000,
   });

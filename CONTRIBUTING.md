@@ -5,7 +5,7 @@ time before you start.
 
 ## How this repository works
 
-VistaPlatform is **open core**. This repository holds the Core edition, which
+Vista Platform is **open core**. This repository holds the Core edition, which
 is the whole product for a single organization. Enterprise and MSP features
 live in a separate private repository and are not published here.
 
@@ -23,11 +23,11 @@ repository. Practically, that means:
 **Please don't open a pull request right now — it will be closed unread, and
 that is a waste of your time rather than a judgement on your patch.**
 
-The reason is boring and temporary. The project is presently authored by one
-person, and copyright sits with that person because no company holds it yet.
-While that is true, accepting outside code makes the eventual tidy-up (moving
-copyright into a proper entity) require tracking down every contributor. It is
-far easier to sort the entity out first and open the doors after.
+The reason is resourcing, not principle. Taking outside code responsibly means
+a contributor licence agreement, a review process with the capacity to actually
+turn patches around, and someone to maintain both. We do not have that in place
+yet, and opening the door before we do would mean patches sitting unread — which
+is worse for you than a clear "not yet".
 
 That will change. When it does, this file will say so.
 

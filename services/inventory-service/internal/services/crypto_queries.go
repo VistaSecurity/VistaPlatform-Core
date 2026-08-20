@@ -50,6 +50,40 @@ func (s *AssetService) GetCryptoImplementations(tenantID, assetID uuid.UUID) ([]
 	return cryptoImpls, nil
 }
 
+// legacyTLSVersionsFromRawData pulls the enumerated accepted-version list out
+// of a crypto configuration's raw_data and returns just the legacy entries, in
+// the spelling they were observed in.
+//
+// The value arrives as a JSON array, so after a JSONB scan it is
+// []interface{} of strings; a []string is accepted too for callers that build
+// the map in Go. Anything else yields no versions rather than an error — a
+// missing or malformed enumeration means "not measured", never "clean".
+func legacyTLSVersionsFromRawData(raw models.JSONB) []string {
+	if raw == nil {
+		return nil
+	}
+	var observed []string
+	switch v := raw["tls_versions"].(type) {
+	case []string:
+		observed = v
+	case []interface{}:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				observed = append(observed, s)
+			}
+		}
+	default:
+		return nil
+	}
+	var legacy []string
+	for _, ver := range observed {
+		if isLegacyProtocolVersion(ver) {
+			legacy = append(legacy, ver)
+		}
+	}
+	return legacy
+}
+
 // AnalyzeCryptoRisk analyzes crypto configuration and returns risk factors.
 func (s *AssetService) AnalyzeCryptoRisk(crypto *models.CryptoImplementation) []string {
 	var riskFactors []string
@@ -63,7 +97,11 @@ func (s *AssetService) AnalyzeCryptoRisk(crypto *models.CryptoImplementation) []
 		version := *crypto.ProtocolVersion
 		switch crypto.Protocol {
 		case "TLS":
-			if version < "1.2" {
+			// Folded comparison, not `version < "1.2"`: producers write the
+			// spaced "TLS 1.0", and "TLS 1.0" < "1.2" is false in Go's byte
+			// ordering, so the lexicographic test never fired for any value
+			// actually stored.
+			if isLegacyProtocolVersion(version) {
 				riskFactors = append(riskFactors, "Outdated TLS version")
 			}
 		case "SSH":
@@ -71,6 +109,14 @@ func (s *AssetService) AnalyzeCryptoRisk(crypto *models.CryptoImplementation) []
 				riskFactors = append(riskFactors, "Outdated SSH version")
 			}
 		}
+	}
+	// The enumerated accepted-version set is what catches a server that
+	// negotiates TLS 1.3 but still ACCEPTS TLS 1.0/1.1. Both probing runtimes
+	// write it into raw_data as "tls_versions"; the external-connection path
+	// already scores it (hasWeakTLSVersion), the managed-asset path read it
+	// nowhere.
+	if legacy := legacyTLSVersionsFromRawData(crypto.RawData); len(legacy) > 0 {
+		riskFactors = append(riskFactors, "Server accepts legacy TLS: "+strings.Join(legacy, ", "))
 	}
 	if crypto.KeySize != nil && *crypto.KeySize < 2048 {
 		riskFactors = append(riskFactors, "Weak key size")

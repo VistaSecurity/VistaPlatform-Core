@@ -1,6 +1,6 @@
 # Disclaimer
 
-**VistaPlatform is provided "AS IS" and is used entirely at your own risk.**
+**Vista Platform is provided "AS IS" and is used entirely at your own risk.**
 
 Please read this before deploying it, and before relying on anything it tells
 you. It is not a substitute for the licence — see [LICENSE.md](LICENSE.md) for
@@ -9,7 +9,7 @@ limitation of liability.
 
 ## Beta software
 
-**VistaPlatform is beta software.** It is pre-1.0 and the version numbers say so.
+**Vista Platform is beta software.** It is pre-1.0 and the version numbers say so.
 
 - **Interfaces will change without notice** across 0.x releases — APIs, chart
   values, database schema, configuration, and the shape of the data model.
@@ -46,7 +46,7 @@ permits.
 
 ## Authorized use only
 
-VistaPlatform includes tooling that actively touches other people's
+Vista Platform includes tooling that actively touches other people's
 infrastructure. The sensor performs active TLS, SSH, SMB and OT/ICS probing when
 you direct it to. The interrogation agent authenticates to network devices and
 cloud accounts and reads their configuration.
@@ -72,7 +72,7 @@ You are responsible for how you use this software. The licensor is not.
 
 ## Not compliance certification, and not legal advice
 
-VistaPlatform's compliance evaluation, risk scores, post-quantum assessments and
+Vista Platform's compliance evaluation, risk scores, post-quantum assessments and
 CBOM artifacts are **informational output about your own systems**. They are not
 an audit, an attestation, a certification, or legal advice.
 
@@ -108,7 +108,7 @@ them is claimed or implied**, including by the PCI Security Standards Council,
 the AICPA, ISO, NIST, IEC, the IETF, the OWASP Foundation, or any device or
 cloud vendor whose equipment this software can interrogate.
 
-VistaPlatform's own marks are covered in [NOTICE](NOTICE).
+Vista Platform's own marks are covered in [NOTICE](NOTICE).
 
 ## Cryptography and export control
 

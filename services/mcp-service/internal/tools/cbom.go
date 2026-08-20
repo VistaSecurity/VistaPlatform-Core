@@ -63,7 +63,7 @@ func registerCBOMTools(s *mcp.Server, d *Deps) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "vistaplatform_get_cbom_artifact",
 		Description: "Fetch one CBOM artifact's metadata by UUID: scope snapshot, content hash, size, component count, data freshness and signature info. " +
-			"(Metadata only — download the CycloneDX document itself from the VistaPlatform UI.)",
+			"(Metadata only — download the CycloneDX document itself from the Vista Platform UI.)",
 		Annotations: readOnly("Get CBOM artifact"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in getArtifactInput) (*mcp.CallToolResult, any, error) {
 		return d.run(ctx, req, "reports.read", in, func() (any, error) {

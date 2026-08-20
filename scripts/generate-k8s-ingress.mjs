@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Generate Kubernetes Traefik CRDs (Middleware + IngressRoute) for the
-// VistaPlatform Helm chart from standards/service-registry.yaml.
+// Vista Platform Helm chart from standards/service-registry.yaml.
 //
 // Replaces the bundled api-gateway Traefik (charts/vistaplatform/files/gateway/)
 // and the hand-written charts/vistaplatform/templates/gateway/ingressroute.yaml.

@@ -1,5 +1,5 @@
 -- =================================================================
--- VistaPlatform - Consolidated Database Schema
+-- Vista Platform - Consolidated Database Schema
 -- =================================================================
 -- Single source of truth for database initialization. On fresh deploy,
 -- PostgreSQL runs this file as 01-schema.sql from docker-entrypoint-initdb.d.
@@ -3838,7 +3838,29 @@ CREATE OR REPLACE VIEW public.network_assets AS
 
 
 -- MATERIALIZED VIEW: mv_location_finding_summary
-CREATE MATERIALIZED VIEW IF NOT EXISTS public.mv_location_finding_summary AS
+-- B-40: DROP ... CASCADE + CREATE, not CREATE ... IF NOT EXISTS.
+-- `CREATE MATERIALIZED VIEW` has no OR REPLACE, and `IF NOT EXISTS` matches by
+-- NAME only — so on any database that already has this matview, an edit to the
+-- body below is a silent no-op: schema-migration exits 0 while the cluster
+-- keeps the stale definition. (A previous POST-MIGRATIONS block carried a
+-- drop+recreate for exactly this reason; it was removed in the POST-MIGRATIONS
+-- collapse, and the duplication it required is why it rotted. Keeping the
+-- drop AT the definition site means there is only ever one copy of the body.)
+--
+-- The CASCADE also un-wedges upgrades of installs created before the partition
+-- conversion, where this matview still joins network_assets_legacy: dropping
+-- it here, before POST-MIGRATIONS' `DROP TABLE ... network_assets_legacy
+-- CASCADE`, means that drop no longer takes the matview with it and the
+-- wrapper-view CREATEs that follow it no longer fail under ON_ERROR_STOP=1.
+--
+-- Everything the CASCADE removes is recreated later in this same file:
+-- idx_mv_location_finding_summary_key (CREATE INDEX IF NOT EXISTS, further
+-- down the body) and mv_location_finding_summary_tenant (CREATE OR REPLACE
+-- VIEW, in POST-MIGRATIONS). WITH DATA, because an unpopulated matview raises
+-- "has not been populated" on every read until the next
+-- refresh_operational_views().
+DROP MATERIALIZED VIEW IF EXISTS public.mv_location_finding_summary CASCADE;
+CREATE MATERIALIZED VIEW public.mv_location_finding_summary AS
  SELECT l.id AS location_id,
     l.tenant_id,
     l.name AS location_name,
@@ -3848,10 +3870,21 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS public.mv_location_finding_summary AS
     count(DISTINCT a.id) AS asset_count,
     count(DISTINCT ci.id) AS crypto_config_count,
     count(DISTINCT c.id) AS certificate_count,
-    count(DISTINCT a.id) FILTER (WHERE ((a.risk_level)::text = 'Critical'::text)) AS critical_findings,
-    count(DISTINCT a.id) FILTER (WHERE ((a.risk_level)::text = 'High'::text)) AS high_findings,
-    count(DISTINCT a.id) FILTER (WHERE ((a.risk_level)::text = 'Medium'::text)) AS medium_findings,
-    count(DISTINCT a.id) FILTER (WHERE ((a.risk_level)::text = 'Low'::text)) AS low_findings,
+    -- B-18: band network_assets_partitioned.risk_score, do NOT read the stored
+    -- risk_level column. Nothing anywhere writes risk_level — no INSERT,
+    -- UPDATE, trigger or seed — so it sits at its DEFAULT 'Informational'
+    -- forever and these four counters were structurally always 0, however
+    -- Critical the location's assets actually were.
+    --
+    -- Bands are the canonical ladder from
+    -- services/inventory-service/internal/models/risk_bands.go (RiskBandSQL's
+    -- half-open intervals: Critical >= 90, High 70–89, Medium 40–69, Low 1–39,
+    -- Informational 0). They must stay mutually exclusive, because each asset
+    -- previously contributed to exactly one of these counters.
+    count(DISTINCT a.id) FILTER (WHERE (COALESCE(a.risk_score, 0) >= 90)) AS critical_findings,
+    count(DISTINCT a.id) FILTER (WHERE (COALESCE(a.risk_score, 0) >= 70 AND COALESCE(a.risk_score, 0) < 90)) AS high_findings,
+    count(DISTINCT a.id) FILTER (WHERE (COALESCE(a.risk_score, 0) >= 40 AND COALESCE(a.risk_score, 0) < 70)) AS medium_findings,
+    count(DISTINCT a.id) FILTER (WHERE (COALESCE(a.risk_score, 0) >= 1 AND COALESCE(a.risk_score, 0) < 40)) AS low_findings,
     count(DISTINCT c.id) FILTER (WHERE ((c.not_after IS NOT NULL) AND (c.not_after > now()) AND (c.not_after <= (now() + '30 days'::interval)))) AS expiring_certs_30d,
     count(DISTINCT c.id) FILTER (WHERE ((c.not_after IS NOT NULL) AND (c.not_after < now()))) AS expired_certs
    FROM (((public.locations l
@@ -3863,7 +3896,13 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS public.mv_location_finding_summary AS
 
 
 -- MATERIALIZED VIEW: mv_remediation_queue
-CREATE MATERIALIZED VIEW IF NOT EXISTS public.mv_remediation_queue AS
+-- B-40: DROP ... CASCADE + CREATE — see the note on
+-- mv_location_finding_summary above for why `CREATE ... IF NOT EXISTS` cannot
+-- carry an edit onto an existing database. Dependents recreated later in this
+-- file: idx_mv_remediation_queue_tenant_severity (body) and
+-- mv_remediation_queue_tenant (POST-MIGRATIONS).
+DROP MATERIALIZED VIEW IF EXISTS public.mv_remediation_queue CASCADE;
+CREATE MATERIALIZED VIEW public.mv_remediation_queue AS
  SELECT a.tenant_id,
     'expiring_cert'::character varying(50) AS finding_type,
         CASE
@@ -5927,7 +5966,11 @@ CREATE TABLE IF NOT EXISTS public.tenant_cost_analysis (
 
 
 -- MATERIALIZED VIEW: tenant_cost_summary
-CREATE MATERIALIZED VIEW IF NOT EXISTS public.tenant_cost_summary AS
+-- B-40: DROP ... CASCADE + CREATE — see the note on
+-- mv_location_finding_summary above. Dependent recreated later in this file:
+-- idx_tenant_cost_summary_unique (body). No wrapper view consumes it.
+DROP MATERIALIZED VIEW IF EXISTS public.tenant_cost_summary CASCADE;
+CREATE MATERIALIZED VIEW public.tenant_cost_summary AS
  SELECT tenant_resource_usage.tenant_id,
     date_trunc('day'::text, tenant_resource_usage."timestamp") AS cost_date,
     sum(tenant_resource_usage.cost_usd) AS daily_cost,
@@ -6413,7 +6456,34 @@ CREATE OR REPLACE VIEW public.v_ci_inventory AS
     COALESCE(network_assets_partitioned.hostname, ((network_assets_partitioned.ip_address)::text)::character varying) AS display_name,
     network_assets_partitioned.description,
     network_assets_partitioned.risk_score,
-    network_assets_partitioned.risk_level,
+        -- B-18: band risk_score; do NOT select the stored risk_level column.
+        -- Nothing writes network_assets_partitioned.risk_level — ingest updates
+        -- risk_score and no INSERT, UPDATE, trigger or seed ever touches its
+        -- sibling — so it stays at its DEFAULT 'Informational' forever. An
+        -- Enterprise CMDB sync profile that maps risk_level therefore pushed
+        -- `risk_level: "Informational"` next to `risk_score: 90` into the
+        -- customer's system of record. Same canonical ladder as the
+        -- crypto_configuration branch below and as
+        -- services/inventory-service/internal/models/risk_bands.go
+        -- (RiskLevelCaseSQL): Critical >= 90, High >= 70, Medium >= 40,
+        -- Low >= 1, Informational 0. Score 0 means NOT ASSESSED, so only 0
+        -- bands as Informational.
+        --
+        -- The ::character varying casts are load-bearing, not decoration.
+        -- Postgres resolves a UNION column to the FIRST branch's type when the
+        -- conversions are implicit in both directions, so this branch decides
+        -- the view's risk_level type; the column has always been `character
+        -- varying` (from the stored column this replaces). Emitting ::text here
+        -- flips it, and CREATE OR REPLACE VIEW cannot change a column's type —
+        -- it fails with "cannot change data type of view column", aborting the
+        -- migration on every EXISTING install while passing on a fresh one.
+        CASE
+            WHEN (network_assets_partitioned.risk_score >= 90) THEN 'Critical'::character varying
+            WHEN (network_assets_partitioned.risk_score >= 70) THEN 'High'::character varying
+            WHEN (network_assets_partitioned.risk_score >= 40) THEN 'Medium'::character varying
+            WHEN (network_assets_partitioned.risk_score >= 1) THEN 'Low'::character varying
+            ELSE 'Informational'::character varying
+        END AS risk_level,
     network_assets_partitioned.first_discovered_at,
     network_assets_partitioned.last_seen_at AS last_verified_at,
     network_assets_partitioned.created_at,
@@ -11271,8 +11341,54 @@ CREATE INDEX IF NOT EXISTS idx_aws_cost_data_tenant_date ON public.aws_cost_data
 CREATE INDEX IF NOT EXISTS idx_aws_cost_data_tenant_id ON public.aws_cost_data USING btree (tenant_id);
 
 
--- INDEX: idx_aws_cost_data_unique
-CREATE UNIQUE INDEX IF NOT EXISTS idx_aws_cost_data_unique ON public.aws_cost_data USING btree (tenant_id, cost_date, service_name, COALESCE(usage_type, ''::character varying)) WHERE (deleted_at IS NULL);
+-- INDEX: idx_aws_cost_data_unique_v2
+-- v2 (B-57): the original idx_aws_cost_data_unique indexed tenant_id directly.
+-- Postgres unique indexes treat NULL as distinct from every other value
+-- (including another NULL), so the platform-wide sync's tenant_id=NULL rows
+-- never collided with the index and StoreCostData's ON CONFLICT arbiter could
+-- never match them — every sync attempt re-inserted instead of updating.
+-- COALESCE(tenant_id, <sentinel>) collapses NULL onto one concrete value like
+-- every other tenant_id, restoring the intended one-row-per-day-per-service
+-- upsert. Superseded index dropped in POST-MIGRATIONS below. Kept as a
+-- separate name (not a same-name redefinition) because `CREATE ... IF NOT
+-- EXISTS` is a no-op by name on an already-migrated database regardless of
+-- whether the definition changed.
+--
+-- MUST be preceded by the de-duplication block below. Collapsing NULL onto a
+-- sentinel makes rows that were previously DISTINCT under the old index
+-- collide, and duplicate NULL-tenant rows are exactly what the bug produced —
+-- so on any database that ran the buggy sync, creating this index without
+-- repairing the data first aborts the whole migration under ON_ERROR_STOP=1.
+DO $$
+BEGIN
+    -- Idempotent no-op on a fresh install (the table is empty) and on any
+    -- database already carrying the v2 index (it cannot hold duplicates). Only
+    -- a database that accumulated duplicates under the old index has anything
+    -- to delete. Runs BEFORE the CREATE UNIQUE INDEX below rather than in
+    -- POST-MIGRATIONS because the index creation lives here in the pg_dump
+    -- body, thousands of lines earlier in the file — a repair appended at the
+    -- bottom would run only after the statement it exists to unblock had
+    -- already failed and aborted the run.
+    IF to_regclass('public.aws_cost_data') IS NOT NULL THEN
+        DELETE FROM public.aws_cost_data a
+         USING public.aws_cost_data b
+         WHERE a.deleted_at IS NULL
+           AND b.deleted_at IS NULL
+           AND COALESCE(a.tenant_id, '00000000-0000-0000-0000-000000000000'::uuid)
+             = COALESCE(b.tenant_id, '00000000-0000-0000-0000-000000000000'::uuid)
+           AND a.cost_date = b.cost_date
+           AND a.service_name = b.service_name
+           AND COALESCE(a.usage_type, ''::character varying) = COALESCE(b.usage_type, ''::character varying)
+           -- Total order over the group, so exactly one row survives: keep the
+           -- most recently synced, breaking ties on id (the PK, never NULL).
+           -- synced_at is NOT NULL in the current definition but is COALESCEd
+           -- anyway so the comparison stays total on any older shape.
+           AND (COALESCE(a.synced_at, 'epoch'::timestamptz), a.id)
+             < (COALESCE(b.synced_at, 'epoch'::timestamptz), b.id);
+    END IF;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_aws_cost_data_unique_v2 ON public.aws_cost_data USING btree (COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid), cost_date, service_name, COALESCE(usage_type, ''::character varying)) WHERE (deleted_at IS NULL);
 
 
 -- INDEX: idx_aws_cost_sync_jobs_created
@@ -20149,6 +20265,87 @@ CREATE POLICY tenant_reevaluation_requests_tenant_isolation ON public.tenant_ree
 CREATE UNIQUE INDEX IF NOT EXISTS uq_crypto_applications_tenant_resource_context
     ON public.crypto_applications (tenant_id, resource_identifier, encryption_context)
     WHERE deleted_at IS NULL;
+
+
+-- ============================================================================
+-- ASSET SUPPRESSION — denied-discovery fingerprints (B-42)
+-- ============================================================================
+-- inventory-service has read and written `asset_suppressions` since the deny
+-- flow shipped, and the table has never existed in any commit — no DDL, no
+-- seed, no chart file. Both call sites hid it: the read collapsed every error
+-- (including relation-does-not-exist) into "not suppressed", and the write's
+-- error went to a bare stdout Printf while DenyAssets still returned nil. So
+-- deny appeared to work, and the customer-facing promise in
+-- docsv4/core/features/asset-approval.md ("suppressed from rediscovery") was
+-- unbacked.
+--
+-- What it is for: the primary deny guard is `asset_status = 'denied'` on the
+-- network_assets row itself, which holds as long as that row survives. The
+-- fingerprint here is the fallback for when it does not — a denied host that is
+-- subsequently deleted from Inventory would otherwise come back on the next
+-- discovery as a fresh pending_approval asset.
+--
+-- suppression_key is md5(hostname|ip|port) computed in Go
+-- (buildSuppressionKey), stored hex — 32 chars, hence char(32)-width varchar.
+-- It is a deterministic dedup fingerprint, not a security primitive.
+--
+-- (tenant_id, suppression_key) is UNIQUE because addSuppression's
+-- `ON CONFLICT (tenant_id, suppression_key) DO NOTHING` needs an arbiter; a
+-- plain table without it would raise 42P10 on every deny.
+CREATE TABLE IF NOT EXISTS public.asset_suppressions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL,
+    hostname character varying(255),
+    ip_address character varying(45),
+    port integer,
+    reason text,
+    created_by uuid,
+    suppression_key character varying(32) NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT asset_suppressions_pkey PRIMARY KEY (id),
+    CONSTRAINT asset_suppressions_tenant_key_unique UNIQUE (tenant_id, suppression_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_suppressions_tenant_id ON public.asset_suppressions USING btree (tenant_id);
+
+DO $$ BEGIN
+  IF to_regclass('public.asset_suppressions') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'asset_suppressions_tenant_id_fkey' AND conrelid = to_regclass('public.asset_suppressions')
+     ) THEN
+    ALTER TABLE ONLY public.asset_suppressions
+        ADD CONSTRAINT asset_suppressions_tenant_id_fkey FOREIGN KEY (tenant_id)
+        REFERENCES public.tenants(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+-- RLS, like every other tenant-scoped table. The Go call sites go through
+-- database.WithTenantTx accordingly — a plain-pool query here would silently
+-- return zero rows under the default serviceRls=on, which is the same
+-- fail-open shape this finding is about.
+ALTER TABLE public.asset_suppressions ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS asset_suppressions_tenant_isolation ON public.asset_suppressions;
+CREATE POLICY asset_suppressions_tenant_isolation ON public.asset_suppressions
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+
+-- ============================================================================
+-- B-57: aws_cost_data unique index superseded by idx_aws_cost_data_unique_v2
+-- ============================================================================
+-- idx_aws_cost_data_unique_v2 (created earlier in this file, alongside the
+-- aws_cost_data table) replaces idx_aws_cost_data_unique. `CREATE UNIQUE INDEX
+-- IF NOT EXISTS` matches by name only, so redefining the original name in
+-- place would silently keep the old (buggy) index on every database that had
+-- already applied a prior version of this file — hence the new name plus this
+-- drop, rather than an in-place edit.
+--
+-- The drop belongs HERE and the de-duplication that unblocks the v2 index
+-- belongs UP THERE, next to the CREATE: dropping the old index early would
+-- leave the table unprotected if a later statement in the same run failed,
+-- while the dedup must precede the CREATE it exists to make succeed.
+DROP INDEX IF EXISTS public.idx_aws_cost_data_unique;
 
 
 -- ============================================================================

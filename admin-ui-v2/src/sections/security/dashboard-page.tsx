@@ -1,14 +1,24 @@
-// VISTA Operations — Security ▸ Dashboard (index sub-page). Platform security posture:
-// event stat cards, by-severity / by-status breakdowns, compliance framework status,
-// recent security events, and impersonation activity. Wired to admin-service
-// (/admin/security/*) + auth-service (/admin/impersonations/audit) via typed clients.
-// Ported from _legacy/admin-ui security-dashboard-page.tsx into the v2 op-* design.
+// VISTA Operations — Security ▸ Dashboard (index sub-page). The platform's
+// security posture, read from the ACTIVITY TRAIL (audit.activity_logs via
+// admin-service /admin/security/*), plus impersonation activity from auth-service.
+//
+// This page used to read public.security_events and public.compliance_framework_status.
+// Neither table has a writer anywhere in the product, so half the page rendered
+// "Total events 0 / Anomalies detected 0 / High-risk events 0" and an empty
+// framework table on every deployment forever — behind an HTTP 200, which reads
+// as "nothing happened" rather than "nothing is recorded". Both are repointed or
+// gone:
+//
+//   - Events + stats now come from audit.activity_logs, which every service
+//     writes to. The panels show what that table actually holds: counts, outcome
+//     (succeeded / failed), category, and the producer's requires_attention flag.
+//     There is no severity or anomaly breakdown, because nothing measures either.
+//   - The compliance-framework panel is removed outright (no source). Tenant
+//     framework scores are a different question and live in compliance-engine.
 import { useState } from 'react';
-import { ChartBar, AlertTriangle, ShieldAlert, Clock, ShieldCheck, UserCog, RefreshCw } from 'lucide-react';
+import { ChartBar, AlertTriangle, ShieldAlert, KeyRound, UserCog, RefreshCw, Layers } from 'lucide-react';
 import { StatTile, StatusTag, MiniBar, relTime } from '../../components/ui/primitives';
-import {
-  useSecurityStats, useSecurityEvents, useComplianceFrameworks, useImpersonationAudit,
-} from './queries';
+import { useSecurityStats, useSecurityEvents, useImpersonationAudit } from './queries';
 
 const TIME_RANGES = [
   { id: '1h', label: 'Last hour' },
@@ -17,7 +27,16 @@ const TIME_RANGES = [
   { id: '30d', label: 'Last 30 days' },
 ];
 
-const SEV_COLOR: Record<string, string> = { critical: 'var(--danger)', high: 'var(--warn-strong)', medium: 'var(--warn)', low: 'var(--info)' };
+// Category colours are presentation only — the platform assigns no risk ranking
+// to an event category, and this palette must not be read as one.
+const CATEGORY_COLOR: Record<string, string> = {
+  authentication: 'var(--info)',
+  user: 'var(--ok-lime)',
+  tenant: 'var(--warn)',
+  config: 'var(--warn-strong)',
+};
+
+const OUTCOME_COLOR: Record<string, string> = { succeeded: 'var(--ok)', failed: 'var(--danger)' };
 
 function Panel({ title, icon: Icon, right, children }: { title: string; icon?: typeof ChartBar; right?: React.ReactNode; children: React.ReactNode }) {
   return (
@@ -31,25 +50,18 @@ function Panel({ title, icon: Icon, right, children }: { title: string; icon?: t
   );
 }
 
-function complianceColor(score: number): string {
-  if (score >= 90) return 'var(--ok)';
-  if (score >= 70) return 'var(--ok-lime)';
-  if (score >= 50) return 'var(--warn)';
-  return 'var(--danger)';
-}
+const actorOf = (email?: string | null, userType?: string) => email || userType || 'system';
 
 export function SecurityDashboardPage() {
   const [range, setRange] = useState('24h');
   const statsQ = useSecurityStats(range);
   const eventsQ = useSecurityEvents(25);
-  const complianceQ = useComplianceFrameworks();
   const impQ = useImpersonationAudit();
 
   const stats = statsQ.data ?? {};
-  const bySeverity = stats.events_by_severity ?? {};
-  const byStatus = stats.events_by_status ?? {};
+  const byCategory = stats.events_by_category ?? {};
+  const byOutcome = stats.events_by_outcome ?? {};
   const events = eventsQ.data ?? [];
-  const frameworks = complianceQ.data ?? [];
   const imps = impQ.data ?? [];
 
   return (
@@ -66,75 +78,59 @@ export function SecurityDashboardPage() {
 
       {/* stat cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12 }}>
-        <StatTile label="Total events" value={statsQ.isLoading ? '…' : (stats.total_events ?? 0)} sub="in range" icon={ChartBar} />
-        <StatTile label="Anomalies detected" value={statsQ.isLoading ? '…' : (stats.anomalies_detected ?? 0)} sub="flagged" icon={AlertTriangle} accent={(stats.anomalies_detected ?? 0) > 0 ? 'var(--warn)' : undefined} />
-        <StatTile label="High-risk events" value={statsQ.isLoading ? '…' : (stats.high_risk_events ?? 0)} sub="elevated risk" icon={ShieldAlert} accent={(stats.high_risk_events ?? 0) > 0 ? 'var(--danger)' : undefined} />
-        <StatTile label="Open events" value={statsQ.isLoading ? '…' : (byStatus.open ?? 0)} sub="unresolved" icon={Clock} accent={(byStatus.open ?? 0) > 0 ? 'var(--warn)' : undefined} />
+        <StatTile label="Security events" value={statsQ.isLoading ? '…' : (stats.total_events ?? 0)} sub="in range" icon={ChartBar} />
+        <StatTile label="Failed events" value={statsQ.isLoading ? '…' : (stats.failed_events ?? 0)} sub="did not succeed" icon={AlertTriangle} accent={(stats.failed_events ?? 0) > 0 ? 'var(--warn)' : undefined} />
+        <StatTile label="Failed sign-ins" value={statsQ.isLoading ? '…' : (stats.failed_logins ?? 0)} sub="authentication" icon={KeyRound} accent={(stats.failed_logins ?? 0) > 0 ? 'var(--warn)' : undefined} />
+        <StatTile label="Needs attention" value={statsQ.isLoading ? '…' : (stats.requires_attention ?? 0)} sub="flagged by producer" icon={ShieldAlert} accent={(stats.requires_attention ?? 0) > 0 ? 'var(--danger)' : undefined} />
       </div>
 
       {/* breakdowns */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-        <Panel title="Events by severity" icon={ShieldAlert}>
+        <Panel title="Events by category" icon={Layers}>
           <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
             {statsQ.isLoading && <div style={{ color: 'var(--op-t3)', fontSize: 12.5 }}>Loading…</div>}
-            {!statsQ.isLoading && Object.keys(bySeverity).length === 0 && <div style={{ color: 'var(--op-t3)', fontSize: 12.5 }}>No events in this time range.</div>}
-            {Object.entries(bySeverity).map(([sev, n]) => (
-              <div key={sev} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <span style={{ width: 70, fontSize: 11.5, fontWeight: 600, color: SEV_COLOR[sev.toLowerCase()] ?? 'var(--op-t2)', textTransform: 'uppercase' }}>{sev}</span>
-                <div style={{ flex: 1 }}><MiniBar pct={stats.total_events ? (Number(n) / Number(stats.total_events)) * 100 : 0} color={SEV_COLOR[sev.toLowerCase()] ?? 'var(--neutral)'} /></div>
+            {!statsQ.isLoading && Object.keys(byCategory).length === 0 && <div style={{ color: 'var(--op-t3)', fontSize: 12.5 }}>No events in this time range.</div>}
+            {Object.entries(byCategory).map(([cat, n]) => (
+              <div key={cat} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ width: 100, fontSize: 11.5, fontWeight: 600, color: CATEGORY_COLOR[cat] ?? 'var(--op-t2)', textTransform: 'uppercase' }}>{cat}</span>
+                <div style={{ flex: 1 }}><MiniBar pct={stats.total_events ? (Number(n) / Number(stats.total_events)) * 100 : 0} color={CATEGORY_COLOR[cat] ?? 'var(--neutral)'} /></div>
                 <span className="op-num" style={{ fontSize: 14, fontWeight: 700, color: 'var(--op-t1)', minWidth: 30, textAlign: 'right' }}>{Number(n)}</span>
               </div>
             ))}
           </div>
         </Panel>
-        <Panel title="Events by status" icon={Clock}>
+        <Panel title="Events by outcome" icon={ShieldAlert}>
           <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
             {statsQ.isLoading && <div style={{ color: 'var(--op-t3)', fontSize: 12.5 }}>Loading…</div>}
-            {!statsQ.isLoading && Object.keys(byStatus).length === 0 && <div style={{ color: 'var(--op-t3)', fontSize: 12.5 }}>No events in this time range.</div>}
-            {Object.entries(byStatus).map(([st, n]) => (
-              <div key={st} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-                <StatusTag status={st === 'open' ? 'open' : st === 'resolved' ? 'success' : st === 'investigating' ? 'investigating' : 'unknown'} />
-                <span className="op-num" style={{ fontSize: 14, fontWeight: 700, color: 'var(--op-t1)' }}>{Number(n)}</span>
+            {!statsQ.isLoading && Object.keys(byOutcome).length === 0 && <div style={{ color: 'var(--op-t3)', fontSize: 12.5 }}>No events in this time range.</div>}
+            {Object.entries(byOutcome).map(([outcome, n]) => (
+              <div key={outcome} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ width: 100, fontSize: 11.5, fontWeight: 600, color: OUTCOME_COLOR[outcome] ?? 'var(--op-t2)', textTransform: 'uppercase' }}>{outcome}</span>
+                <div style={{ flex: 1 }}><MiniBar pct={stats.total_events ? (Number(n) / Number(stats.total_events)) * 100 : 0} color={OUTCOME_COLOR[outcome] ?? 'var(--neutral)'} /></div>
+                <span className="op-num" style={{ fontSize: 14, fontWeight: 700, color: 'var(--op-t1)', minWidth: 30, textAlign: 'right' }}>{Number(n)}</span>
               </div>
             ))}
           </div>
         </Panel>
       </div>
 
-      {/* compliance frameworks */}
-      <Panel title="Compliance frameworks" icon={ShieldCheck}>
-        <table className="op-table">
-          <thead><tr><th>Framework</th><th>Status</th><th className="num">Score</th><th className="num">Compliant</th><th>Last assessed</th></tr></thead>
-          <tbody>
-            {frameworks.map((f) => (
-              <tr key={f.id}>
-                <td style={{ fontWeight: 500, color: 'var(--op-t1)' }}>{f.framework_name}{f.framework_version ? <span className="t-muted" style={{ fontWeight: 400 }}> {f.framework_version}</span> : null}</td>
-                <td><StatusTag status={f.overall_status === 'compliant' ? 'success' : f.overall_status === 'non_compliant' ? 'failed' : 'pending'} /></td>
-                <td className="num" style={{ color: complianceColor(f.compliance_score), fontWeight: 700 }}>{Math.round(f.compliance_score)}%</td>
-                <td className="num t-muted">{f.compliant_requirements}/{f.total_requirements}</td>
-                <td className="t-muted mono" style={{ fontSize: 11 }}>{relTime(f.last_assessed_at)}</td>
-              </tr>
-            ))}
-            {(complianceQ.isLoading || complianceQ.isError || frameworks.length === 0) && (
-              <tr><td colSpan={5} style={{ textAlign: 'center', padding: 36, color: 'var(--op-t3)' }}>{complianceQ.isLoading ? 'Loading…' : complianceQ.isError ? <>Couldn't load. <button className="op-btn sm" style={{ marginLeft: 8 }} onClick={() => complianceQ.refetch()}>Retry</button></> : 'No compliance frameworks assessed.'}</td></tr>
-            )}
-          </tbody>
-        </table>
-      </Panel>
-
       {/* recent security events */}
       <Panel title="Recent security events" icon={ShieldAlert}>
         <table className="op-table">
-          <thead><tr><th>Event</th><th>Type</th><th>Severity</th><th>Service</th><th>Status</th><th>When</th></tr></thead>
+          <thead><tr><th>Action</th><th>Category</th><th>Actor</th><th>Outcome</th><th>Source IP</th><th>When</th></tr></thead>
           <tbody>
             {events.map((e) => (
               <tr key={e.id}>
-                <td style={{ fontWeight: 500, color: 'var(--op-t1)', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.title}</td>
-                <td className="t-muted mono" style={{ fontSize: 11 }}>{e.event_type}</td>
-                <td><StatusTag status={(e.severity || 'unknown').toLowerCase()} /></td>
-                <td className="t-muted">{e.service_name}</td>
-                <td><StatusTag status={e.status === 'open' ? 'open' : e.status === 'resolved' ? 'success' : e.status} /></td>
-                <td className="t-muted mono" style={{ fontSize: 11 }}>{relTime(e.timestamp || e.detected_at)}</td>
+                <td style={{ fontWeight: 500, color: 'var(--op-t1)', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {e.action}
+                  {e.requires_attention && <span title="Flagged as needing attention" style={{ marginLeft: 7, fontSize: 10.5, fontWeight: 700, color: 'var(--danger)' }}>ATTN</span>}
+                  {e.description && <div className="t-muted" style={{ fontSize: 11, fontWeight: 400 }}>{e.description}</div>}
+                </td>
+                <td className="t-muted mono" style={{ fontSize: 11 }}>{e.category}</td>
+                <td className="t-muted" style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{actorOf(e.user_email, e.user_type)}</td>
+                <td><StatusTag status={e.success ? 'success' : 'failed'} /></td>
+                <td className="t-muted mono" style={{ fontSize: 11 }}>{e.source_ip || '—'}</td>
+                <td className="t-muted mono" style={{ fontSize: 11 }}>{relTime(e.timestamp)}</td>
               </tr>
             ))}
             {(eventsQ.isLoading || eventsQ.isError || events.length === 0) && (
@@ -164,6 +160,10 @@ export function SecurityDashboardPage() {
           </tbody>
         </table>
       </Panel>
+
+      <div style={{ fontSize: 11.5, color: 'var(--op-t3)' }}>
+        Security events are the authentication, user, tenant and configuration slice of the platform activity trail, plus every failed action and anything a service flagged for attention. The full unfiltered trail — with search, filters and export — is under <strong>Activity Log</strong>.
+      </div>
     </div>
   );
 }

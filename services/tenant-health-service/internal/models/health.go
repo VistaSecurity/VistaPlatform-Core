@@ -11,7 +11,7 @@ type TenantHealth struct {
 	ID              uuid.UUID        `json:"id" db:"id"`
 	TenantID        uuid.UUID        `json:"tenant_id" db:"tenant_id"`
 	OverallScore    float64          `json:"overall_score" db:"overall_score"`
-	HealthStatus    string           `json:"health_status" db:"health_status"` // "excellent", "good", "fair", "poor", "critical"
+	HealthStatus    string           `json:"health_status" db:"health_status"` // "excellent", "good", "fair", "poor", "critical", "unknown"
 	LastCalculated  time.Time        `json:"last_calculated" db:"last_calculated"`
 	ScoreBreakdown  HealthBreakdown  `json:"score_breakdown" db:"score_breakdown"`
 	Recommendations []Recommendation `json:"recommendations" db:"recommendations"`
@@ -20,13 +20,66 @@ type TenantHealth struct {
 	UpdatedAt       time.Time        `json:"updated_at" db:"updated_at"`
 }
 
-// HealthBreakdown provides detailed scoring for each health factor
+// Metric source names. A health factor is only scored when the peer service
+// that supplies its raw metrics answered; when a peer is unreachable its name
+// is recorded on HealthMetrics.UnavailableSources and the factors it feeds
+// score as UNKNOWN (nil) rather than being filled with a plausible constant.
+//
+// Reporting an invented 99.9% uptime for an unreachable monitoring-service is
+// strictly worse than reporting a gap: the number is indistinguishable from a
+// measurement, identical for every tenant, and it feeds an alert.
+const (
+	SourceMonitoring      = "monitoring-service"
+	SourceAuth            = "auth-service"
+	SourceInventory       = "inventory-service"
+	SourceResourceTracker = "resource-tracker-service"
+)
+
+// HealthStatusUnknown is the health status stored when NO factor could be
+// measured. Consumers (the admin-ui board and compliance-engine's
+// tenant_health_degraded scan) must treat it as "no data", never as a low
+// score.
+const HealthStatusUnknown = "unknown"
+
+// SourceFactors maps a metric source to the health factors it feeds. Used by
+// the scorer to decide which factors are unknown when a peer is unreachable.
+var SourceFactors = map[string][]string{
+	SourceMonitoring:      {FactorPerformanceMetrics},
+	SourceAuth:            {FactorSecurityPosture},
+	SourceInventory:       {FactorBusinessActivity},
+	SourceResourceTracker: {FactorResourceEfficiency, FactorCostOptimization},
+}
+
+// Health factor names, matching the HealthBreakdown JSON keys.
+const (
+	FactorResourceEfficiency = "resource_efficiency"
+	FactorPerformanceMetrics = "performance_metrics"
+	FactorSecurityPosture    = "security_posture"
+	FactorBusinessActivity   = "business_activity"
+	FactorCostOptimization   = "cost_optimization"
+)
+
+// HealthBreakdown provides detailed scoring for each health factor.
+//
+// Each factor is a POINTER: nil (JSON null) means "not measured" — the peer
+// service that supplies it was unreachable. It does NOT mean zero. A nil factor
+// is excluded from the weighted overall score (the remaining weights are
+// renormalised) and rendered as "Unavailable" in the UI.
 type HealthBreakdown struct {
-	ResourceEfficiency float64 `json:"resource_efficiency"` // 0-100
-	PerformanceMetrics float64 `json:"performance_metrics"` // 0-100
-	SecurityPosture    float64 `json:"security_posture"`    // 0-100
-	BusinessActivity   float64 `json:"business_activity"`   // 0-100
-	CostOptimization   float64 `json:"cost_optimization"`   // 0-100
+	ResourceEfficiency *float64 `json:"resource_efficiency"` // 0-100, null = not measured
+	PerformanceMetrics *float64 `json:"performance_metrics"` // 0-100, null = not measured
+	SecurityPosture    *float64 `json:"security_posture"`    // 0-100, null = not measured
+	BusinessActivity   *float64 `json:"business_activity"`   // 0-100, null = not measured
+	CostOptimization   *float64 `json:"cost_optimization"`   // 0-100, null = not measured
+
+	// UnavailableSources names the peer services that could not be reached,
+	// so an operator sees WHY a factor is missing rather than just that it is.
+	UnavailableSources []string `json:"unavailable_sources,omitempty"`
+
+	// DataCompleteness is the fraction of total factor weight that was
+	// actually measured (1 = everything, 0 = nothing). The overall score is
+	// only meaningful in proportion to this.
+	DataCompleteness float64 `json:"data_completeness"`
 }
 
 // Recommendation provides actionable advice for improving tenant health
@@ -89,6 +142,22 @@ type HealthMetrics struct {
 	ResourceCost   float64 `json:"resource_cost"`
 	CostPerUser    float64 `json:"cost_per_user"`
 	CostEfficiency float64 `json:"cost_efficiency"`
+
+	// UnavailableSources names the peer services that could not be reached
+	// while collecting these metrics (see the Source* constants). The zero
+	// values of the fields those peers feed are NOT measurements — the scorer
+	// must exclude the corresponding factors rather than score them.
+	UnavailableSources []string `json:"unavailable_sources,omitempty"`
+}
+
+// IsSourceUnavailable reports whether the named peer failed during collection.
+func (m HealthMetrics) IsSourceUnavailable(source string) bool {
+	for _, s := range m.UnavailableSources {
+		if s == source {
+			return true
+		}
+	}
+	return false
 }
 
 // HealthAlert represents alerts for health issues

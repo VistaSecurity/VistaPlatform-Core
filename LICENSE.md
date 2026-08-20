@@ -6,7 +6,7 @@ FSL-1.1-ALv2
 
 ## Notice
 
-Copyright 2026 Robert Ray Woodward
+Copyright 2026 LakeShore Labs LLC (d/b/a Vista Security)
 
 ## Terms and Conditions
 

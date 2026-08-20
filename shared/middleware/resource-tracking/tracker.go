@@ -111,16 +111,21 @@ func (t *Tracker) Middleware() gin.HandlerFunc {
 			return
 		}
 
-		// Create resource metrics
+		// Create resource metrics.
+		//
+		// Only two things here are actually measured per tenant: the request
+		// itself, and the bytes of its payload. CPU, memory and storage are
+		// left nil — not zero — because this process is a SHARED pod serving
+		// every tenant and none of its resource use is attributable to the one
+		// that happened to send this request. The fields previously carried
+		// 0 for CPU and storage (read downstream as a measurement of zero) and
+		// a memory figure synthesised from the length of the URL path.
 		metric := ResourceMetrics{
 			TenantID:        tenantID,
 			ServiceName:     t.config.ServiceName,
 			Timestamp:       start,
-			APICalls:        1,                           // Each request is one API call
-			DatabaseQueries: t.extractDatabaseQueries(c), // This would need to be implemented per service
-			MemoryUsageMB:   t.estimateMemoryUsage(c),    // Rough estimate
-			CPUUsagePercent: 0,                           // Would need system metrics
-			StorageUsedMB:   0,                           // Would need storage metrics
+			APICalls:        1, // Each request is one API call
+			DatabaseQueries: t.extractDatabaseQueries(c),
 			NetworkBytes:    totalNetworkBytes,
 			ResponseTimeMs:  duration.Milliseconds(),
 			StatusCode:      c.Writer.Status(),
@@ -196,70 +201,34 @@ func (t *Tracker) extractTenantID(c *gin.Context) uuid.UUID {
 	return uuid.Nil
 }
 
-// extractDatabaseQueries attempts to extract database query count from context
-// This would need to be implemented per service based on their database usage patterns
-func (t *Tracker) extractDatabaseQueries(c *gin.Context) int {
-	// Try to get from context (services can set this)
-	if queryCount, exists := c.Get("db_queries"); exists {
-		if count, ok := queryCount.(int); ok {
-			return count
+// extractDatabaseQueries returns the number of database queries a request made,
+// or nil if nothing counted them.
+//
+// A service opts in by setting "db_queries" on the gin context. No service does
+// today, so this returns nil for every request and database cost is reported as
+// not measured — which is the truth.
+//
+// It used to guess instead, from the HTTP method and the LENGTH OF THE URL
+// PATH: any GET to a path longer than ten characters "was" one query, any write
+// "was" two. Every database_queries value the platform has ever stored came
+// from that guess, and it was priced per query as though counted.
+func (t *Tracker) extractDatabaseQueries(c *gin.Context) *int64 {
+	queryCount, exists := c.Get("db_queries")
+	if !exists {
+		return nil
+	}
+	switch v := queryCount.(type) {
+	case int:
+		n := int64(v)
+		return &n
+	case int64:
+		return &v
+	case string:
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return &n
 		}
-		if countStr, ok := queryCount.(string); ok {
-			if count, err := strconv.Atoi(countStr); err == nil {
-				return count
-			}
-		}
 	}
-
-	// Default estimate based on endpoint patterns
-	endpoint := c.Request.URL.Path
-	method := c.Request.Method
-
-	// Rough estimates based on typical patterns
-	switch {
-	case method == "GET" && len(endpoint) > 10:
-		return 1 // Most GET requests do 1 query
-	case method == "POST" || method == "PUT" || method == "PATCH":
-		return 2 // Write operations typically do 2+ queries
-	case method == "DELETE":
-		return 1 // Delete operations typically do 1 query
-	default:
-		return 1
-	}
-}
-
-// estimateMemoryUsage provides a rough estimate of memory usage
-func (t *Tracker) estimateMemoryUsage(c *gin.Context) int {
-	// This is a very rough estimate
-	// In a real implementation, you'd want to use actual memory metrics
-
-	// Base memory usage
-	baseMemory := 10 // MB
-
-	// Add based on request size
-	requestSize := c.Request.ContentLength
-	if requestSize > 0 {
-		baseMemory += int(requestSize / (1024 * 1024)) // Convert to MB
-	}
-
-	// Add based on response size
-	responseSize := c.Writer.Size()
-	if responseSize > 0 {
-		baseMemory += responseSize / (1024 * 1024) // Convert to MB
-	}
-
-	// Add based on endpoint complexity
-	endpoint := c.Request.URL.Path
-	switch {
-	case len(endpoint) > 50: // Complex endpoints
-		baseMemory += 5
-	case len(endpoint) > 20: // Medium complexity
-		baseMemory += 2
-	default: // Simple endpoints
-		baseMemory += 1
-	}
-
-	return baseMemory
+	return nil
 }
 
 // Stop stops the tracker and flushes any remaining metrics

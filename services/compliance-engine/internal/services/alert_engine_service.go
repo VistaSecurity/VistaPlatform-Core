@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/alertcatalog"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
@@ -37,7 +38,15 @@ type AlertEngineService struct {
 	// https://notification-service:8443, which demands one), hence the
 	// cert-aware constructor below.
 	httpClient *http.Client
+	// catalog answers "has this tenant switched this alert type off?" for the
+	// backstop in Raise. Optional: nil means no gate (tests, and any wiring that
+	// predates SetAlertCatalog), which is the pre-existing behaviour.
+	catalog *AlertCatalogService
 }
+
+// SetAlertCatalog wires the tenant alert catalog so Raise can honour a tenant's
+// enable/disable toggle for every producer at once (optional; nil is a no-op).
+func (s *AlertEngineService) SetAlertCatalog(c *AlertCatalogService) { s.catalog = c }
 
 var (
 	// ErrAlertNotFound is returned when the alert doesn't exist for the tenant.
@@ -142,12 +151,70 @@ const (
 	RaiseOpened    RaiseOutcome = "opened"
 	RaiseEscalated RaiseOutcome = "escalated"
 	RaiseTouched   RaiseOutcome = "touched"
+	// RaiseSuppressed means the tenant has this alert type switched off in the
+	// catalog, so nothing was written and nothing was notified.
+	RaiseSuppressed RaiseOutcome = "suppressed"
 )
 
-// Raise opens or escalates the open alert for (tenant, type, subject).
+// Raise opens or escalates the open alert for (tenant, type, subject), honouring
+// the tenant's alert-catalog enable/disable toggle.
+//
+// # Why the toggle is enforced HERE and not only in the producers
+//
+// Eight of the ten live tenant-track types gated on AlertCatalogService.
+// IsTypeEnabled inside their own scan job, and Raise had no backstop — so the two
+// producers that are not scan jobs silently ignored the toggle:
+//
+//   - handleCertificateExpiring, which turns inventory-service's fixed
+//     30/14/7/0-day lifecycle events into raises. A tenant who switched
+//     "Certificate expiring" off still got roughly three escalation
+//     notifications per certificate (high at 14 days, critical at 7 and at 0)
+//     that the honoured ladder path would never have produced.
+//   - audit-service's failed_login_burst detector, which publishes onto
+//     alerts.raise over NATS. audit-service has no reference to
+//     tenant_alert_settings at all, so turning that type off did nothing
+//     whatsoever.
+//
+// A gate every producer has to remember is a gate the next producer forgets, and
+// both misses were exactly that. Enforcing it on the one path every producer
+// funnels through is what makes the toggle true by construction.
+//
+// The gate applies to TENANT-track registry types only. Platform-track alerts are
+// not in the tenant catalog (GetCatalog filters to Track == "tenant"), and they
+// raise against a sentinel tenant, so a per-tenant setting is meaningless for
+// them. Types with no registry entry are left alone.
 func (s *AlertEngineService) Raise(ctx context.Context, ev events.AlertRaiseEvent) (RaiseOutcome, error) {
+	return s.raise(ctx, ev, false)
+}
+
+// RaisePolicyRung is Raise for a rung contributed by an ACTIVATED compliance
+// framework, which bypasses the catalog toggle by design.
+//
+// §8.3 disable semantics: "a tenant may disable a catalog type entirely, and may
+// silence any notification via routing — but rungs contributed by an *activated*
+// framework still open/escalate the alert (visible on the Alerts page) even when
+// routed nowhere. You can control noise; you can't fake posture."
+//
+// BuildLadder already implements the tenant half of that rule — with the type
+// disabled it drops the baseline and preference rungs and keeps only the policy
+// rungs — so every raise CertLadderScanJob makes against a disabled type is by
+// construction a policy rung, and must not be gated again here.
+//
+// Deliberately a separate in-process method rather than a flag on the wire event:
+// an alerts.raise message arriving over NATS from another service can then never
+// claim policy-rung status for itself.
+func (s *AlertEngineService) RaisePolicyRung(ctx context.Context, ev events.AlertRaiseEvent) (RaiseOutcome, error) {
+	return s.raise(ctx, ev, true)
+}
+
+func (s *AlertEngineService) raise(ctx context.Context, ev events.AlertRaiseEvent, policyRung bool) (RaiseOutcome, error) {
 	if ev.TenantID == uuid.Nil {
 		return "", fmt.Errorf("alert raise requires tenant_id")
+	}
+	if !policyRung && !s.typeEnabledForTenant(ctx, ev.TenantID, ev.AlertType) {
+		log.Printf("[AlertEngine] Raise suppressed: tenant=%s type=%s disabled in alert catalog",
+			ev.TenantID, ev.AlertType)
+		return RaiseSuppressed, nil
 	}
 	severity := ev.Severity
 	if severityRank(severity) == 0 && severity != "info" {
@@ -156,21 +223,28 @@ func (s *AlertEngineService) Raise(ctx context.Context, ev events.AlertRaiseEven
 
 	outcome := RaiseTouched
 	var alertID uuid.UUID
+	// snoozeActive is set when the alert being escalated is snoozed and the snooze
+	// window has not expired. Escalation still happens (severity, event chain, the
+	// row on the Alerts page); only the notification fan-out is withheld. See the
+	// comment on publishAlertNotification's guard below.
+	var snoozeActive bool
 
 	err := shareddatabase.WithTenantTx(ctx, s.db.DB, ev.TenantID, func(tx *sql.Tx) error {
 		var (
 			existingID       uuid.UUID
 			existingSeverity string
+			existingStatus   string
+			snoozedUntil     sql.NullTime
 		)
 		// Lock the open alert row (if any) so concurrent raises serialize.
 		row := tx.QueryRowContext(ctx, `
-			SELECT id, severity FROM alerts
+			SELECT id, severity, status, snoozed_until FROM alerts
 			WHERE tenant_id = $1 AND alert_type = $2
 			  AND COALESCE(subject_id, '00000000-0000-0000-0000-000000000000'::uuid) = COALESCE($3, '00000000-0000-0000-0000-000000000000'::uuid)
 			  AND status <> 'resolved'
 			FOR UPDATE
 		`, ev.TenantID, ev.AlertType, ev.SubjectID)
-		scanErr := row.Scan(&existingID, &existingSeverity)
+		scanErr := row.Scan(&existingID, &existingSeverity, &existingStatus, &snoozedUntil)
 
 		switch {
 		case scanErr == sql.ErrNoRows:
@@ -197,6 +271,7 @@ func (s *AlertEngineService) Raise(ctx context.Context, ev events.AlertRaiseEven
 
 		default:
 			alertID = existingID
+			snoozeActive = alertSnoozeActive(existingStatus, snoozedUntil, time.Now())
 			if severityRank(severity) > severityRank(existingSeverity) {
 				if _, err := tx.ExecContext(ctx, `
 					UPDATE alerts SET severity = $1, title = $2, message = $3,
@@ -226,11 +301,56 @@ func (s *AlertEngineService) Raise(ctx context.Context, ev events.AlertRaiseEven
 		return "", err
 	}
 
-	if outcome == RaiseOpened || outcome == RaiseEscalated {
+	if outcome == RaiseOpened || (outcome == RaiseEscalated && !snoozeActive) {
 		s.publishAlertNotification(ev.TenantID, ev.Source, ev.AlertType, severity, ev.Title, ev.Message,
 			alertID, string(outcome), ev.Metadata)
 	}
+	if outcome == RaiseEscalated && snoozeActive {
+		log.Printf("[AlertEngine] Escalation notification withheld: alert=%s tenant=%s type=%s severity=%s (snoozed)",
+			alertID, ev.TenantID, ev.AlertType, severity)
+	}
 	return outcome, nil
+}
+
+// typeEnabledForTenant reports whether the tenant has this alert type switched on.
+//
+// Fails OPEN in every "we cannot tell" case — no catalog wired, or the type is
+// absent from the registry, or it is a platform-track type — because a missing
+// answer must never silence a real alert. The only thing that suppresses is an
+// explicit tenant setting (or an EnabledByDefault:false registry entry), which is
+// what IsTypeEnabled resolves.
+func (s *AlertEngineService) typeEnabledForTenant(ctx context.Context, tenantID uuid.UUID, alertType string) bool {
+	if s.catalog == nil {
+		return true
+	}
+	entry, ok := alertcatalog.Get(alertType)
+	if !ok || entry.Track != "tenant" {
+		return true
+	}
+	return s.catalog.IsTypeEnabled(ctx, tenantID, alertType)
+}
+
+// alertSnoozeActive reports whether an alert is currently snoozed, which is the
+// only status that withholds an escalation notification.
+//
+// Snooze's own contract is "pauses escalation/re-notification until `until`"
+// (§9 of NOTIFICATION_ALERTING_ARCHITECTURE.md, and the doc comment on Snooze),
+// but Raise never read the status: any non-resolved alert escalated AND paged.
+// A user who snoozed a cert-expiry alert for a week still got email/Slack/
+// PagerDuty every time a tighter rung was crossed inside the window, while the
+// row on the Alerts page still read 'snoozed'.
+//
+// Keyed on 'snoozed' specifically, NOT on "any non-active status": escalating an
+// ACKNOWLEDGED alert is intended — acknowledging says "I have seen this", not
+// "stop telling me when it gets worse".
+//
+// An expired snooze does not suppress. The row can sit at status='snoozed' past
+// its snoozed_until (nothing sweeps it back to active), so trusting the status
+// column alone would make a one-hour snooze permanent. A NULL snoozed_until on a
+// snoozed row is treated as expired for the same fail-open reason: silence has to
+// be bounded by something the user actually chose.
+func alertSnoozeActive(status string, snoozedUntil sql.NullTime, now time.Time) bool {
+	return status == "snoozed" && snoozedUntil.Valid && snoozedUntil.Time.After(now)
 }
 
 // ResolveAuto resolves the open alert for (tenant, type, subject) with the

@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/discovery"
 )
@@ -118,25 +119,38 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 		}
 	}()
 
-	// Look up the tenant's platform system sensor once. Device interrogation
-	// findings are additionally published into sensor_discoveries under it so
+	// Look up the tenant's platform system sensor once. Assets handed to this
+	// processor are additionally published into sensor_discoveries under it so
 	// they flow through the unified discovery pipeline (network classification +
-	// auto-approval + auto-import), the same path the cloud discovery flow uses.
-	// Cloud jobs (IntegrationID set) already write sensor_discoveries in the
-	// router and must not be double-written here.
+	// auto-approval + auto-import). discovery_findings alone reaches nothing.
 	//
-	// A missing row used to fall back to discovery_findings only. That fallback
-	// is gone: nothing downstream reads discovery_findings into inventory, so it
-	// converted a broken invariant into "the job succeeded and produced nothing
-	// a user will ever see" — on a timer, because scheduled scans run this same
-	// path. The job now FAILS, with the reason on the job itself.
-	var systemSensorID uuid.UUID
+	// This lookup is UNCONDITIONAL, and the gate it replaced (`IntegrationID ==
+	// nil`) was wrong in both directions. It read as "cloud jobs already wrote
+	// sensor_discoveries upstream, don't double-write" — but the only cloud path
+	// that writes them upstream is the interactive handler
+	// (api/router.go -> CloudDiscoveryService.WriteSensorDiscoveries), and that
+	// path never calls this processor at all: it marks its own device_job
+	// in_progress at creation so the platform worker cannot claim it, and
+	// finalises the job itself. Every executor that DOES reach here — the
+	// platform worker (scheduled cloud discovery and device interrogation) and an
+	// agent submitting results — has written no sensor_discoveries row.
+	//
+	// The gate was also inert, because GetJobByID omitted integration_id and so
+	// reported nil for every job. Fixing that SELECT without also fixing this
+	// gate would have switched scheduled cloud discovery onto the skip branch and
+	// silently stopped its assets reaching inventory — the accidental nil was the
+	// only reason they arrived.
+	//
+	// A missing sensor row used to fall back to discovery_findings only. That
+	// fallback is gone: nothing downstream reads discovery_findings into
+	// inventory, so it converted a broken invariant into "the job succeeded and
+	// produced nothing a user will ever see" — on a timer, because scheduled
+	// scans run this same path. The job now FAILS, with the reason on the job
+	// itself.
 	batchID := discoveryJobID.String()
-	if deviceJob.IntegrationID == nil {
-		systemSensorID, err = s.lookupSystemSensor(ctx, deviceJob.TenantID)
-		if err != nil {
-			return s.failMissingPlatformSensor(ctx, jobQueue, jobID, deviceJob, result, steps, err)
-		}
+	systemSensorID, err := s.lookupSystemSensor(ctx, deviceJob.TenantID)
+	if err != nil {
+		return s.failMissingPlatformSensor(ctx, jobQueue, jobID, deviceJob, result, steps, err)
 	}
 
 	// Process each discovered asset
@@ -237,18 +251,14 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 		// discovery-processor applies network classification + tenant
 		// auto-approval rules and auto-imports the asset. discovery-processor's
 		// DB poller picks up the batch; no explicit trigger is required.
-		if systemSensorID != uuid.Nil {
-			if err := s.writeSensorDiscovery(ctx, systemSensorID, deviceJob, batchID, asset, certFlags, ocspStatus, ocspDetail); err != nil {
-				fmt.Printf("Warning: failed to write sensor discovery for %s: %v\n", targetInput, err)
-				steps.fail(targetInput, StageSensorDiscovery, err)
-			} else {
-				steps.ok(targetInput, StageSensorDiscovery)
-			}
+		//
+		// systemSensorID cannot be uuid.Nil here — a missing platform sensor
+		// fails the job before this loop runs.
+		if err := s.writeSensorDiscovery(ctx, systemSensorID, deviceJob.TenantID, deviceJob.DeviceID, batchID, asset, certFlags, ocspStatus, ocspDetail); err != nil {
+			fmt.Printf("Warning: failed to write sensor discovery for %s: %v\n", targetInput, err)
+			steps.fail(targetInput, StageSensorDiscovery, err)
 		} else {
-			// Only reachable for cloud jobs now — the router already wrote their
-			// sensor_discoveries row, and a missing platform sensor on the
-			// interrogation path fails the job before this loop runs.
-			steps.skip(targetInput, StageSensorDiscovery, "cloud discovery writes sensor_discoveries upstream")
+			steps.ok(targetInput, StageSensorDiscovery)
 		}
 	}
 
@@ -550,10 +560,16 @@ func (s *ResultProcessor) lookupSystemSensor(ctx context.Context, tenantID uuid.
 // import), mirroring the cloud discovery path. Failures do not abort result
 // processing, but they ARE returned so the caller can record them in the job's
 // processing log — a silently swallowed error here is invisible to the user.
+//
+// It takes tenantID/deviceID rather than a *models.DeviceJob because the
+// in-cluster interrogation path (DeviceInterrogationService) publishes through
+// this same function and holds no device job — the two runtimes must write
+// byte-identical rows, so they share this writer rather than each growing one.
 func (s *ResultProcessor) writeSensorDiscovery(
 	ctx context.Context,
 	sensorID uuid.UUID,
-	deviceJob *models.DeviceJob,
+	tenantID uuid.UUID,
+	deviceID *uuid.UUID,
 	batchID string,
 	asset models.DiscoveredAsset,
 	certFlags map[string]interface{},
@@ -579,7 +595,7 @@ func (s *ResultProcessor) writeSensorDiscovery(
 		port = asset.Port
 	}
 
-	metadata := buildSensorDiscoveryMetadata(deviceJob, asset)
+	metadata := buildSensorDiscoveryMetadata(deviceID, asset)
 	mergeCertFlags(metadata, certFlags, ocspStatus, ocspDetail)
 
 	metadataJSON, err := json.Marshal(metadata)
@@ -588,15 +604,16 @@ func (s *ResultProcessor) writeSensorDiscovery(
 	}
 
 	now := time.Now()
-	// RLS-scoped write on `sensor_discoveries` under the resolved deviceJob.TenantID.
-	err = shareddatabase.WithTenantTx(ctx, s.db, deviceJob.TenantID, func(tx *sql.Tx) error {
+	// RLS-scoped write on `sensor_discoveries` under the resolved tenantID.
+	err = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
 		_, e := tx.ExecContext(ctx, `
 			INSERT INTO sensor_discoveries (
 				id, sensor_id, tenant_id, batch_id, protocol, dest_ip, port,
 				confidence, metadata, hostname, timestamp, created_at
 			) VALUES ($1, $2, $3, $4, $5, $6::inet, $7, $8, $9, $10, $11, $12)`,
-			uuid.New(), sensorID, deviceJob.TenantID, batchID,
-			protocol, destIP, port,
+			uuid.New(), sensorID, tenantID, batchID,
+			// Canonical protocol_type spelling — see cryptoparse.NormalizeProtocol.
+			cryptoparse.NormalizeProtocol(protocol), destIP, port,
 			0.95, metadataJSON, stringPtr(asset.Hostname),
 			now, now,
 		)
@@ -611,15 +628,15 @@ func (s *ResultProcessor) writeSensorDiscovery(
 // buildSensorDiscoveryMetadata builds the sensor_discoveries metadata blob for an
 // interrogated asset using the key names discovery-processor's extractCryptoDetails
 // expects (note: "version" for the protocol version, not "protocol_version").
-func buildSensorDiscoveryMetadata(deviceJob *models.DeviceJob, asset models.DiscoveredAsset) map[string]interface{} {
+func buildSensorDiscoveryMetadata(deviceID *uuid.UUID, asset models.DiscoveredAsset) map[string]interface{} {
 	meta := map[string]interface{}{
 		"discovery_method": "device_interrogation",
 		"version":          asset.ProtocolVersion,
 		"cipher_suite":     asset.CipherSuite,
 	}
-	if deviceJob.DeviceID != nil {
-		meta["device_id"] = deviceJob.DeviceID.String()
-		meta["source_device_id"] = deviceJob.DeviceID.String()
+	if deviceID != nil {
+		meta["device_id"] = deviceID.String()
+		meta["source_device_id"] = deviceID.String()
 	}
 	if asset.HashAlgorithm != "" {
 		meta["hash_algorithm"] = asset.HashAlgorithm

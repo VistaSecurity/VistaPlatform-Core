@@ -148,7 +148,10 @@ Import findings as infrastructure assets:
 Imported assets are:
 - Linked to parent device via `device_id`
 - Created with `discovery_method = 'cloud_api'`
-- Set to `pending_approval` status (unless auto-approved)
+- Set to `pending_approval` status — unless their cloud segment (per
+  subscription/region) has auto-approve enabled **with cloud discoveries among
+  its sources**, which is off on every pre-existing segment. See
+  [Asset Approval](asset-approval.md#which-discoveries-a-segment-auto-approves).
 
 ---
 

@@ -27,6 +27,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/auth"
+	"github.com/vistasecurity/vistaplatform/shared/security/authpolicy"
 	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
 )
 
@@ -201,12 +202,13 @@ func StaffSsoCallback(db *sql.DB, jwtSecret string, refreshTokenService *auth.Pl
 		// the limited change-password-only session when force_password_change is
 		// set: the break-glass password still needs rotating even though
 		// this sign-in came through the IdP.
-		accessToken, refreshToken, err := generateTokens(userID.String(), email, roleName, jwtSecret, forcePasswordChange)
+		sessionTTL := authpolicy.SessionLifetime(db, defaultPlatformSessionTTL)
+		accessToken, refreshToken, err := generateTokens(userID.String(), email, roleName, jwtSecret, forcePasswordChange, sessionTTL)
 		if err != nil {
 			c.Redirect(http.StatusFound, "/login?error=sso_session")
 			return
 		}
-		expiresAt := time.Now().Add(7 * 24 * time.Hour)
+		expiresAt := time.Now().Add(sessionTTL)
 		_, _ = refreshTokenService.StoreRefreshToken(userID, refreshToken, nil, expiresAt, c.ClientIP(), c.Request.UserAgent())
 		_, _ = db.Exec(`UPDATE platform_users SET last_login_at = now() WHERE id = $1`, userID)
 		setPlatformAuthCookies(c, accessToken, 3600, refreshToken, jwtSecret)

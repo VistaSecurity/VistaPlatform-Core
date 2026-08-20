@@ -58,6 +58,22 @@ func (h *DiscoveryHandler) CreateJob(c *gin.Context) {
 		return
 	}
 
+	// Tenant-sensor dispatch does not exist. Rejecting here (rather than only at
+	// cluster-sensor-service, which also rejects it) keeps the message specific:
+	// this proxy collapses every downstream error into "failed to create
+	// discovery job", and "we ran your scan from somewhere else" is exactly the
+	// outcome this guard exists to prevent.
+	if strings.EqualFold(strings.TrimSpace(input.ExecutionMode), "sensors") || len(input.PreferredSensorIDs) > 0 {
+		log.Printf("[DiscoveryHandler] Rejected unsupported sensor dispatch: execution_mode=%q preferred_sensor_ids=%d",
+			input.ExecutionMode, len(input.PreferredSensorIDs))
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "validation_error",
+			"details": "execution_mode \"sensors\" is not supported: discovery jobs cannot be dispatched to " +
+				"tenant-deployed sensors. Use \"cloud\" (platform sensor) or \"auto\"",
+		})
+		return
+	}
+
 	// Convert tenantID and userID from UUID to string
 	tenantIDStr := ""
 	if tenantID, ok := tenantIDVal.(uuid.UUID); ok {

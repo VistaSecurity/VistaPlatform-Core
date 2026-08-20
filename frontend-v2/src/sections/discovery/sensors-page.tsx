@@ -142,10 +142,11 @@ export function SensorsPage() {
         />
       )}
 
-      {/* Quiet when the tenant has no agents — an empty second table is noise,
-          not information, and the sensors table above already carries the
-          page-level "nothing registered yet" state. */}
-      {agents.length > 0 && (
+      {/* B-28: a failed agents fetch must say so, not silently render as "no
+          agents" — agents.length is 0 on error too since agentsQ.data ?? []. */}
+      {agentsQ.isError ? (
+        <div style={{ marginTop: 26 }}>{queryNote(agentsQ, false, { thing: 'discovery agents' })}</div>
+      ) : agents.length > 0 && (
         <div style={{ marginTop: 26 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
             <h3 style={{ margin: 0, fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 14, color: 'var(--app-t1)' }}>Discovery agents</h3>

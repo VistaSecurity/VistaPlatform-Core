@@ -27,6 +27,61 @@ func (s *PlatformFrameworkService) SetReconcileEnqueuer(e *ReconcileEnqueuer) {
 	s.reconcile = e
 }
 
+// reconcileFrameworkChanged fans an ADR-0014 reconcile out to every tenant, scoped
+// to this framework's controls, after an edit that changed what the framework
+// EVALUATES.
+//
+// ADR-0014 §5 lists "platform framework publish / control or threshold change" as
+// one trigger, but only PublishFramework was wired: CreateControl, UpdateControl,
+// DeleteControl and all three measurement mutations changed an already-published
+// framework's evaluable content and enqueued nothing. A platform admin tightening
+// a threshold on live Best Practices therefore produced no new findings for any
+// inventory that did not independently change, and the stored per-tenant rollup
+// went stale and disagreed with the live path — with no re-publish action on the
+// catalog page and no warning that the edit had done nothing.
+//
+// Scoped to published frameworks only: EvaluateTenantFrameworksScoped short-
+// circuits on an unpublished framework, so a fan-out per draft edit would be one
+// wasted JetStream message per tenant per keystroke-sized edit. Draft content
+// becomes evaluable at PublishFramework, which does its own fan-out.
+//
+// Best-effort by construction — a nil enqueuer, a disabled worker or a NATS
+// outage all degrade to the pre-existing on-asset-change behaviour rather than
+// failing the admin's edit.
+func (s *PlatformFrameworkService) reconcileFrameworkChanged(frameworkID uuid.UUID, reason string) {
+	if frameworkID == uuid.Nil {
+		return
+	}
+	var status string
+	if err := s.db.Get(&status, `SELECT status FROM platform_frameworks WHERE id = $1`, frameworkID); err != nil {
+		fmt.Printf("Warning: reconcile skipped, framework %s status lookup failed: %v\n", frameworkID, err)
+		return
+	}
+	if status != "published" {
+		return
+	}
+	s.reconcile.EnqueueAllTenantsScoped(frameworkID, reason)
+}
+
+// frameworkIDForControl resolves a control's owning platform framework.
+func (s *PlatformFrameworkService) frameworkIDForControl(controlID uuid.UUID) (uuid.UUID, error) {
+	var frameworkID uuid.UUID
+	err := s.db.Get(&frameworkID, `SELECT framework_id FROM platform_framework_controls WHERE id = $1`, controlID)
+	return frameworkID, err
+}
+
+// frameworkIDForMeasurement resolves a platform measurement's owning framework.
+func (s *PlatformFrameworkService) frameworkIDForMeasurement(measurementID uuid.UUID) (uuid.UUID, error) {
+	var frameworkID uuid.UUID
+	err := s.db.Get(&frameworkID, `
+		SELECT pfc.framework_id
+		FROM control_measurements cm
+		JOIN platform_framework_controls pfc ON pfc.id = cm.control_id
+		WHERE cm.id = $1 AND cm.framework_type = 'platform'
+	`, measurementID)
+	return frameworkID, err
+}
+
 // CreateFramework creates a new platform framework (draft status)
 func (s *PlatformFrameworkService) CreateFramework(input *models.PlatformFrameworkInput, createdBy uuid.UUID) (*models.PlatformFramework, error) {
 	// If trying to create a platform default, check if one already exists
@@ -378,6 +433,7 @@ func (s *PlatformFrameworkService) CreateControl(frameworkID uuid.UUID, input *m
 		return nil, fmt.Errorf("failed to create platform framework control: %w", err)
 	}
 
+	s.reconcileFrameworkChanged(frameworkID, "framework_changed")
 	return control, nil
 }
 
@@ -408,17 +464,39 @@ func (s *PlatformFrameworkService) UpdateControl(controlID uuid.UUID, input *mod
 		return nil, fmt.Errorf("failed to update platform framework control: %w", err)
 	}
 
+	s.reconcileFrameworkChanged(control.FrameworkID, "framework_changed")
 	return control, nil
 }
 
 // DeleteControl deletes a platform framework control
 func (s *PlatformFrameworkService) DeleteControl(controlID uuid.UUID) error {
+	// Resolved BEFORE the delete — afterwards the row (and its framework link) is gone.
+	frameworkID, lookupErr := s.frameworkIDForControl(controlID)
+
 	_, err := s.db.Exec("DELETE FROM platform_framework_controls WHERE id = $1", controlID)
 	if err != nil {
 		return fmt.Errorf("failed to delete platform framework control: %w", err)
 	}
 
+	if lookupErr == nil {
+		s.reconcileFrameworkChanged(frameworkID, "framework_changed")
+	}
 	return nil
+}
+
+// NullableSeverity maps an absent per-measurement severity override to SQL NULL.
+//
+// control_measurements.severity_override is nullable under a CHECK that admits
+// only the four severity labels: NULL satisfies it, an empty string does not. The binding tag
+// on ControlMeasurementInput makes the field optional, so a rule authored without
+// an explicit override arrives as "" — which the database rejects. The admin-ui
+// rule builder leaves it blank by default, so that is the common case, not the
+// edge one. The matching reads COALESCE it back to "".
+func NullableSeverity(severity string) interface{} {
+	if severity == "" {
+		return nil
+	}
+	return severity
 }
 
 // AddControlMeasurement adds a measurement mapping to a control
@@ -426,9 +504,7 @@ func (s *PlatformFrameworkService) AddControlMeasurement(controlID uuid.UUID, in
 	// Get measurement type for validation
 	var measurementType models.MeasurementType
 	err := s.db.Get(&measurementType, `
-		SELECT id, code, name, description, data_type, extraction_query, units, valid_range,
-		       allowed_rule_types, enum_values, valid_operators, predicate_schema, category,
-		       created_at, updated_at
+		SELECT `+models.MeasurementTypeColumns+`
 		FROM measurement_types
 		WHERE id = $1
 	`, input.MeasurementTypeID)
@@ -439,13 +515,7 @@ func (s *PlatformFrameworkService) AddControlMeasurement(controlID uuid.UUID, in
 		return nil, fmt.Errorf("failed to get measurement type: %w", err)
 	}
 
-	// Parse JSONB fields
 	validator := NewMeasurementValidator()
-	measurementType.AllowedRuleTypes = validator.ParseAllowedRuleTypes(measurementType.AllowedRuleTypes)
-	measurementType.ValidOperators = validator.ParseValidOperators(measurementType.ValidOperators)
-	measurementType.EnumValues = validator.ParseEnumValues(measurementType.EnumValues)
-
-	// Validate measurement input
 	if err := validator.ValidateMeasurementInput(input, &measurementType); err != nil {
 		return nil, fmt.Errorf("validation failed: %w", err)
 	}
@@ -476,7 +546,8 @@ func (s *PlatformFrameworkService) AddControlMeasurement(controlID uuid.UUID, in
 	query := `
 		INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		RETURNING id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at
+		RETURNING id, control_id, framework_type, measurement_type_id, rule_type, predicate,
+		          COALESCE(severity_override, '') AS severity_override, weight, created_at, updated_at
 	`
 
 	var predicateJSONB []byte
@@ -484,7 +555,7 @@ func (s *PlatformFrameworkService) AddControlMeasurement(controlID uuid.UUID, in
 		query,
 		measurement.ID, measurement.ControlID, measurement.FrameworkType,
 		measurement.MeasurementTypeID, measurement.RuleType, predicateJSON,
-		measurement.SeverityOverride, measurement.Weight, measurement.CreatedAt, measurement.UpdatedAt,
+		NullableSeverity(measurement.SeverityOverride), measurement.Weight, measurement.CreatedAt, measurement.UpdatedAt,
 	).Scan(
 		&measurement.ID, &measurement.ControlID, &measurement.FrameworkType,
 		&measurement.MeasurementTypeID, &measurement.RuleType, &predicateJSONB,
@@ -501,6 +572,9 @@ func (s *PlatformFrameworkService) AddControlMeasurement(controlID uuid.UUID, in
 		return nil, fmt.Errorf("failed to unmarshal predicate: %w", err)
 	}
 
+	if frameworkID, lookupErr := s.frameworkIDForControl(controlID); lookupErr == nil {
+		s.reconcileFrameworkChanged(frameworkID, "framework_changed")
+	}
 	return measurement, nil
 }
 
@@ -509,9 +583,7 @@ func (s *PlatformFrameworkService) UpdateControlMeasurement(measurementID uuid.U
 	// Get measurement type for validation
 	var measurementType models.MeasurementType
 	err := s.db.Get(&measurementType, `
-		SELECT id, code, name, description, data_type, extraction_query, units, valid_range,
-		       allowed_rule_types, enum_values, valid_operators, predicate_schema, category,
-		       created_at, updated_at
+		SELECT `+models.MeasurementTypeColumns+`
 		FROM measurement_types
 		WHERE id = $1
 	`, input.MeasurementTypeID)
@@ -522,13 +594,7 @@ func (s *PlatformFrameworkService) UpdateControlMeasurement(measurementID uuid.U
 		return nil, fmt.Errorf("failed to get measurement type: %w", err)
 	}
 
-	// Parse JSONB fields
 	validator := NewMeasurementValidator()
-	measurementType.AllowedRuleTypes = validator.ParseAllowedRuleTypes(measurementType.AllowedRuleTypes)
-	measurementType.ValidOperators = validator.ParseValidOperators(measurementType.ValidOperators)
-	measurementType.EnumValues = validator.ParseEnumValues(measurementType.EnumValues)
-
-	// Validate measurement input
 	if err := validator.ValidateMeasurementInput(input, &measurementType); err != nil {
 		return nil, fmt.Errorf("validation failed: %w", err)
 	}
@@ -548,7 +614,8 @@ func (s *PlatformFrameworkService) UpdateControlMeasurement(measurementID uuid.U
 		UPDATE control_measurements
 		SET measurement_type_id = $1, rule_type = $2, predicate = $3, severity_override = $4, weight = $5, updated_at = NOW()
 		WHERE id = $6 AND framework_type = 'platform'
-		RETURNING id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at
+		RETURNING id, control_id, framework_type, measurement_type_id, rule_type, predicate,
+		          COALESCE(severity_override, '') AS severity_override, weight, created_at, updated_at
 	`
 
 	measurement := &models.ControlMeasurement{}
@@ -556,7 +623,7 @@ func (s *PlatformFrameworkService) UpdateControlMeasurement(measurementID uuid.U
 	err = s.db.QueryRow(
 		query,
 		input.MeasurementTypeID, input.RuleType, predicateJSON,
-		input.SeverityOverride, weight, measurementID,
+		NullableSeverity(input.SeverityOverride), weight, measurementID,
 	).Scan(
 		&measurement.ID, &measurement.ControlID, &measurement.FrameworkType,
 		&measurement.MeasurementTypeID, &measurement.RuleType, &predicateJSONB,
@@ -576,16 +643,25 @@ func (s *PlatformFrameworkService) UpdateControlMeasurement(measurementID uuid.U
 		return nil, fmt.Errorf("failed to unmarshal predicate: %w", err)
 	}
 
+	if frameworkID, lookupErr := s.frameworkIDForControl(measurement.ControlID); lookupErr == nil {
+		s.reconcileFrameworkChanged(frameworkID, "framework_changed")
+	}
 	return measurement, nil
 }
 
 // DeleteControlMeasurement deletes a control measurement mapping
 func (s *PlatformFrameworkService) DeleteControlMeasurement(measurementID uuid.UUID) error {
+	// Resolved BEFORE the delete — afterwards there is no row to join back to a framework.
+	frameworkID, lookupErr := s.frameworkIDForMeasurement(measurementID)
+
 	_, err := s.db.Exec("DELETE FROM control_measurements WHERE id = $1 AND framework_type = 'platform'", measurementID)
 	if err != nil {
 		return fmt.Errorf("failed to delete control measurement: %w", err)
 	}
 
+	if lookupErr == nil {
+		s.reconcileFrameworkChanged(frameworkID, "framework_changed")
+	}
 	return nil
 }
 

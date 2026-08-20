@@ -95,9 +95,19 @@ func TestAssignUserRole_RejectsRoleWhosePermissionsActorDoesNotHold(t *testing.T
 	mock.ExpectQuery(`SELECT id FROM tenant_roles`).
 		WithArgs(tenantID, "tenant_admin").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(roleID))
+	// The ceiling resolves the role's owning tenant before reading its grants,
+	// so a role id from another tenant can never reach the comparison.
+	mock.ExpectQuery(`SELECT tenant_id FROM tenant_roles`).
+		WithArgs(roleID).
+		WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow(tenantID))
 	mock.ExpectQuery(`SELECT p\.id, p\.name`).
 		WithArgs(roleID).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(unheldPermissionID, "users.delete"))
+	// Delegation lookup: tenant_admin is a grantOR in the delegation table, not
+	// a grantEE, so no pairing matches and the exemption set is empty.
+	mock.ExpectQuery(`SELECT name, is_system_role FROM tenant_roles`).
+		WithArgs(roleID, tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"name", "is_system_role"}).AddRow("tenant_admin", true))
 	mock.ExpectQuery(`SELECT DISTINCT p\.id`).
 		WithArgs(actorID, tenantID).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
@@ -133,9 +143,17 @@ func TestEnsureRoleGrantableByName_RejectsBeforeInvitationOrUserCreate(t *testin
 	mock.ExpectQuery(`SELECT id FROM tenant_roles`).
 		WithArgs(tenantID, "security_admin").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(roleID))
+	// The ceiling resolves the role's owning tenant before reading its grants,
+	// so a role id from another tenant can never reach the comparison.
+	mock.ExpectQuery(`SELECT tenant_id FROM tenant_roles`).
+		WithArgs(roleID).
+		WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow(tenantID))
 	mock.ExpectQuery(`SELECT p\.id, p\.name`).
 		WithArgs(roleID).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(unheldPermissionID, "security.view"))
+	mock.ExpectQuery(`SELECT name, is_system_role FROM tenant_roles`).
+		WithArgs(roleID, tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"name", "is_system_role"}).AddRow("security_admin", true))
 	mock.ExpectQuery(`SELECT DISTINCT p\.id`).
 		WithArgs(actorID, tenantID).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))

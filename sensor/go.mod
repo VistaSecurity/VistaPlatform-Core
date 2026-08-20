@@ -3,9 +3,9 @@ module github.com/vistasecurity/vistaplatform/sensor
 go 1.26.6
 
 require (
-	github.com/vistasecurity/vistaplatform/shared v0.0.0
 	github.com/google/uuid v1.6.0
-	github.com/gopacket/gopacket v1.2.0
+	github.com/gopacket/gopacket v1.6.1
+	github.com/vistasecurity/vistaplatform/shared v0.0.0
 	golang.org/x/crypto v0.53.0
 	golang.org/x/term v0.44.0
 	gopkg.in/yaml.v3 v3.0.1

@@ -31,6 +31,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/config"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/email"
+	"github.com/vistasecurity/vistaplatform/shared/security/authpolicy"
 	passwordsvc "github.com/vistasecurity/vistaplatform/shared/security/password"
 )
 
@@ -226,7 +227,7 @@ func AcceptInvitation(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, jwtServi
 			c.JSON(http.StatusForbidden, gin.H{"error": "This organization requires single sign-on. Use one of the SSO options instead."})
 			return
 		}
-		if err := passwordsvc.ValidatePasswordStrength(req.Password); err != nil {
+		if err := passwordsvc.ValidatePasswordStrengthWithPolicy(db, req.Password); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
@@ -253,7 +254,7 @@ func AcceptInvitation(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, jwtServi
 			return
 		}
 		rts := auth.NewRefreshTokenService(db)
-		_, _ = rts.StoreRefreshToken(userID, refreshToken, nil, time.Now().Add(jwtService.GetRefreshExpiry()), c.ClientIP(), c.Request.UserAgent())
+		_, _ = rts.StoreRefreshToken(userID, refreshToken, nil, time.Now().Add(authpolicy.SessionLifetime(db, jwtService.GetRefreshExpiry())), c.ClientIP(), c.Request.UserAgent())
 		setAuthCookiesResponseWriter(c.Writer, cfg, int(jwtService.GetAccessExpiry().Seconds()), accessToken, refreshToken)
 
 		c.JSON(http.StatusOK, gin.H{"message": "Invitation accepted", "redirect": "/dashboard"})

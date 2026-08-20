@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: VistaPlatform — compliance-engine API
+  title: Vista Platform — compliance-engine API
   version: "0.1.0"
   description: |
     Spec-first contract for compliance-engine (ADR-0001). Sixth vertical slice
@@ -71,7 +71,7 @@ info:
     first consumes them (ADR-0001 step 5), at which point this file and the
     contract test move together.
   contact:
-    name: VistaPlatform Platform
+    name: Vista Security
 servers:
   - url: /api/v1/compliance-engine
     description: compliance-engine, mounted behind the API gateway.

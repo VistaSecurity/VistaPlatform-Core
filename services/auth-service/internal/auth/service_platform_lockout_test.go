@@ -3,9 +3,16 @@ package auth
 //: platform-admin login must enforce the same failed-attempt lockout the
 // tenant path has, against the platform_users table. These tests drive the real
 // Login() platform branch over sqlmock.
+//
+// The threshold is no longer a constant: recordPlatformFailedLogin reads
+// platform_settings via authpolicy.Lockout, so the value bound to $1 of the
+// UPDATE is the operator-configured "Maximum login attempts". These tests pin
+// BOTH ends of that -- the configured value when one is saved, and the
+// historical 5 when none is.
 
 import (
 	"database/sql"
+	"strconv"
 	"testing"
 	"time"
 
@@ -47,8 +54,28 @@ func expectFallThroughToPlatform(mock sqlmock.Sqlmock, email string, id uuid.UUI
 		}).AddRow(id, email, hash, "Plat", "Admin", true, true, now, now, "platform_admin"))
 }
 
-// A wrong password on the platform path records a failed attempt (the UPDATE
-// that locks at the 5th failure) and returns ErrInvalidCredentials.
+// expectLockoutPolicyLookup mocks the two platform_settings reads that
+// authpolicy.Lockout performs. Pass -1 for either to simulate "never saved",
+// which must yield the historical default.
+func expectLockoutPolicyLookup(mock sqlmock.Sqlmock, maxAttempts, lockoutMinutes int) {
+	q := `SELECT setting_value FROM platform_settings WHERE setting_key = \$1`
+	if maxAttempts < 0 {
+		mock.ExpectQuery(q).WithArgs("max_login_attempts").WillReturnError(sql.ErrNoRows)
+	} else {
+		mock.ExpectQuery(q).WithArgs("max_login_attempts").
+			WillReturnRows(sqlmock.NewRows([]string{"setting_value"}).AddRow([]byte(strconv.Itoa(maxAttempts))))
+	}
+	if lockoutMinutes < 0 {
+		mock.ExpectQuery(q).WithArgs("lockout_duration_minutes").WillReturnError(sql.ErrNoRows)
+	} else {
+		mock.ExpectQuery(q).WithArgs("lockout_duration_minutes").
+			WillReturnRows(sqlmock.NewRows([]string{"setting_value"}).AddRow([]byte(strconv.Itoa(lockoutMinutes))))
+	}
+}
+
+// A wrong password on the platform path records a failed attempt and returns
+// ErrInvalidCredentials. With no saved policy, the threshold bound to $1 is the
+// historical 5.
 func TestPlatformLoginRecordsFailedAttempt(t *testing.T) {
 	svc, mock, cleanup := platformLoginService(t)
 	defer cleanup()
@@ -65,8 +92,8 @@ func TestPlatformLoginRecordsFailedAttempt(t *testing.T) {
 	mock.ExpectQuery(`SELECT locked_until FROM platform_users WHERE id = \$1`).
 		WithArgs(id).
 		WillReturnRows(sqlmock.NewRows([]string{"locked_until"}).AddRow(nil))
-	// Failed password → record the attempt. The maxAttempts arg ($1 = 5) proves
-	// the lock-at-5-failures threshold is wired.
+	// No policy saved -> the historical default is what reaches the UPDATE.
+	expectLockoutPolicyLookup(mock, -1, -1)
 	mock.ExpectExec(`UPDATE platform_users\s+SET failed_login_attempts = failed_login_attempts \+ 1`).
 		WithArgs(5, sqlmock.AnyArg(), sqlmock.AnyArg(), id).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -94,5 +121,37 @@ func TestPlatformLoginLockedReturnsErrAccountLocked(t *testing.T) {
 	_, loginErr := svc.Login(&models.LoginRequest{Email: email, Password: "whatever"}, "ip", "ua")
 	if loginErr != ErrAccountLocked {
 		t.Fatalf("got %v, want ErrAccountLocked", loginErr)
+	}
+}
+
+// The enforcement assertion for this fix: a platform admin who saves "3" gets 3.
+// Before it, the value persisted, redisplayed on reload, and the code locked at
+// 5 regardless.
+func TestPlatformLoginUsesConfiguredLockoutThreshold(t *testing.T) {
+	svc, mock, cleanup := platformLoginService(t)
+	defer cleanup()
+
+	email := "admin@vista.example"
+	id := uuid.New()
+	hash, err := svc.password.HashPassword("CorrectHorse9!")
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+
+	expectFallThroughToPlatform(mock, email, id, hash)
+	mock.ExpectQuery(`SELECT locked_until FROM platform_users WHERE id = \$1`).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"locked_until"}).AddRow(nil))
+
+	expectLockoutPolicyLookup(mock, 3, 60)
+	// $1 is the threshold the UPDATE CASE compares against. Binding 3 here --
+	// not 5 -- is the proof that the saved setting is what locks the account.
+	mock.ExpectExec(`UPDATE platform_users\s+SET failed_login_attempts = failed_login_attempts \+ 1`).
+		WithArgs(3, sqlmock.AnyArg(), sqlmock.AnyArg(), id).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	_, loginErr := svc.Login(&models.LoginRequest{Email: email, Password: "WrongPass!"}, "ip", "ua")
+	if loginErr != ErrInvalidCredentials {
+		t.Fatalf("got %v, want ErrInvalidCredentials", loginErr)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -37,7 +38,7 @@ type InterrogationSchedule struct {
 	TargetID       uuid.UUID              `json:"target_id"`
 	IsEnabled      bool                   `json:"is_enabled"`
 	LastRunAt      *time.Time             `json:"last_run_at,omitempty"`
-	LastRunStatus  string                 `json:"last_run_status,omitempty"` // "success", "failure", "pending"
+	LastRunStatus  string                 `json:"last_run_status,omitempty"` // scheduleRunPending / scheduleRunSuccess / scheduleRunFailed
 	LastRunJobID   *uuid.UUID             `json:"last_run_job_id,omitempty"`
 	NextRunAt      *time.Time             `json:"next_run_at,omitempty"`
 	SuccessCount   int                    `json:"success_count"`
@@ -417,12 +418,24 @@ func (s *SchedulerService) TriggerSchedule(ctx context.Context, tenantID, schedu
 
 	updateQuery := `
 		UPDATE interrogation_schedules
-		SET last_run_at = $1, last_run_job_id = $2, last_run_status = 'pending',
-			next_run_at = $3, updated_at = $1
-		WHERE id = $4 AND tenant_id = $5
+		SET last_run_at = $1, last_run_job_id = $2, last_run_status = $3,
+			next_run_at = $4, updated_at = $1
+		WHERE id = $5 AND tenant_id = $6
 	`
 	err = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		_, e := tx.ExecContext(ctx, updateQuery, now, job.ID, nextRun, scheduleID, tenantID)
+		if _, e := tx.ExecContext(ctx, updateQuery, now, job.ID, scheduleRunPending, nextRun, scheduleID, tenantID); e != nil {
+			return e
+		}
+		// Open the run's history row now, while it is still 'pending'. The
+		// outcome is stamped onto this same row by recordScheduleOutcome when
+		// the job reaches a terminal status — keyed by job id, so a run appears
+		// in the history exactly once whether or not it ever finishes. A run
+		// that is dropped on the floor stays visibly 'pending' instead of
+		// vanishing, which is the honest record of what happened.
+		_, e := tx.ExecContext(ctx, `
+			INSERT INTO schedule_history (schedule_id, job_id, status, started_at)
+			VALUES ($1, $2, $3, $4)`,
+			scheduleID, job.ID, scheduleRunPending, now)
 		return e
 	})
 	if err != nil {
@@ -475,6 +488,123 @@ func (s *SchedulerService) GetScheduleHistory(ctx context.Context, tenantID, sch
 	}
 
 	return history, nil
+}
+
+// Schedule run-outcome vocabulary. These are the values written to
+// interrogation_schedules.last_run_status and schedule_history.status, and they
+// are the values the Scheduled Scans page reads — it colours a run red on
+// exactly "failed". The Go side previously documented "failure", which nothing
+// wrote and the UI would not have recognised if it had.
+const (
+	scheduleRunPending = "pending"
+	scheduleRunSuccess = "success"
+	scheduleRunFailed  = "failed"
+)
+
+// recordScheduleOutcome attributes a finished device job back to the
+// interrogation schedule that dispatched it: it writes/updates the job's
+// schedule_history row and refreshes the schedule's last_run_status and
+// success/failure counters.
+//
+// Before this existed, TriggerSchedule wrote last_run_status='pending' and
+// nothing ever moved it, success_count/failure_count were inserted as 0 and
+// never incremented, and schedule_history had a reader (GET
+// /schedules/:id/history) with no producer at all. A nightly interrogation that
+// had failed for a month looked identical to one succeeding.
+//
+// Idempotent on purpose, because a terminal status can legitimately be written
+// twice for one job (the platform worker marks a job completed, then
+// ProcessJobResults can mark it failed on a broken platform-sensor invariant):
+//   - the history row is keyed by job id — updated in place, never appended to
+//   - the counters are RECOMPUTED from schedule_history rather than incremented,
+//     so no sequence of repeated or reordered calls can drift them
+//
+// A stale completion can arrive after the schedule has fired again. Resolve the
+// schedule through schedule_history, so that old run still updates its own
+// history row and counters; only the current job may rewrite last_run_status.
+//
+// RLS: keyed by job id with no tenant input (the owning tenant is the OUTPUT),
+// called from JobQueueService.UpdateJobStatus → bypass role, same as its caller.
+func recordScheduleOutcome(
+	ctx context.Context,
+	db *sql.DB,
+	jobID uuid.UUID,
+	status models.DeviceJobStatus,
+	errorMessage *string,
+	result *models.JobResult,
+) error {
+	var outcome string
+	switch status {
+	case models.JobStatusCompleted:
+		outcome = scheduleRunSuccess
+	case models.JobStatusFailed:
+		outcome = scheduleRunFailed
+	default:
+		return nil // Not a terminal status — nothing to attribute yet.
+	}
+
+	// Which schedule dispatched this job? Most jobs are ad-hoc and match nothing.
+	var scheduleID uuid.UUID
+	var startedAt time.Time
+	err := db.QueryRowContext(ctx, `
+		SELECT h.schedule_id, h.started_at
+		FROM schedule_history h
+		JOIN interrogation_schedules s ON s.id = h.schedule_id
+		WHERE h.job_id = $1 AND s.deleted_at IS NULL
+		UNION ALL
+		SELECT s.id, COALESCE(s.last_run_at, NOW())
+		FROM interrogation_schedules s
+		WHERE s.last_run_job_id = $1
+		  AND s.deleted_at IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM schedule_history h WHERE h.job_id = $1)
+		LIMIT 1`, jobID).Scan(&scheduleID, &startedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to resolve schedule for job %s: %w", jobID, err)
+	}
+
+	assetsFound := jobResultAssetCount(result)
+
+	res, err := db.ExecContext(ctx, `
+		UPDATE schedule_history
+		SET status = $1, completed_at = NOW(), error_message = $2, assets_found = $3
+		WHERE schedule_id = $4 AND job_id = $5`,
+		outcome, errorMessage, assetsFound, scheduleID, jobID)
+	if err != nil {
+		return fmt.Errorf("failed to update schedule history for job %s: %w", jobID, err)
+	}
+	updated, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to inspect schedule history update for job %s: %w", jobID, err)
+	}
+	if updated == 0 {
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO schedule_history (
+				schedule_id, job_id, status, started_at, completed_at, error_message, assets_found
+			) VALUES ($1, $2, $3, $4, NOW(), $5, $6)`,
+			scheduleID, jobID, outcome, startedAt, errorMessage, assetsFound,
+		); err != nil {
+			return fmt.Errorf("failed to insert schedule history for job %s: %w", jobID, err)
+		}
+	}
+
+	if _, err := db.ExecContext(ctx, `
+		UPDATE interrogation_schedules s
+		SET last_run_status = CASE WHEN s.last_run_job_id = $5 THEN $1 ELSE s.last_run_status END,
+		    success_count = (SELECT count(*) FROM schedule_history h
+		                      WHERE h.schedule_id = s.id AND h.status = $2),
+		    failure_count = (SELECT count(*) FROM schedule_history h
+		                      WHERE h.schedule_id = s.id AND h.status = $3),
+		    updated_at = NOW()
+		WHERE s.id = $4`,
+		outcome, scheduleRunSuccess, scheduleRunFailed, scheduleID, jobID,
+	); err != nil {
+		return fmt.Errorf("failed to update schedule %s from job %s: %w", scheduleID, jobID, err)
+	}
+
+	return nil
 }
 
 // dueScheduleBatch bounds how many schedules one sweep claims, so a backlog

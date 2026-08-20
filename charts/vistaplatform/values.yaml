@@ -1,4 +1,4 @@
-# VistaPlatform default values. Override in your customer values.yaml.
+# Vista Platform default values. Override in your customer values.yaml.
 # See charts/vistaplatform/examples/values-customer.yaml.example for a starter.
 
 # -- Create the release Namespace from the chart (with PSA labels). When false,
@@ -209,7 +209,7 @@ containerSecurityContext:
 # Datastores running in-cluster.
 #
 # storageClassName default is "longhorn" — the recommended production
-# storage backend for VistaPlatform on RKE2. Longhorn is a native CSI driver
+# storage backend for Vista Platform on RKE2. Longhorn is a native CSI driver
 # (no privileged helper-pods), provides replicated block storage across
 # nodes, scales from single-node lab to multi-rack production by
 # changing replica count, and aligns with the Rancher/SUSE RKE2
@@ -387,7 +387,7 @@ backends:
 
   cbom-service:
     needs: {postgres: true, redis: false, nats: true}
-    secrets: {jwtSecret: true, internalAuthSecret: true}
+    secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: true}
     resources:
       requests: {cpu: 150m, memory: 192Mi}
       limits: {cpu: 400m, memory: 384Mi}
@@ -929,26 +929,103 @@ networkPolicy:
   # amplification, attacker C2). Set to true to default-deny egress and rely
   # on the generated allow-rules-egress.yaml for legitimate traffic: kube-dns
   # in kube-system, the four datastores via the registry's needs.* fields,
-  # backend-to-backend HTTP on 8080, and Internet egress for the services
+  # backend-to-backend HTTP on 8080, and outbound egress for the services
   # listed in externalEgressBackends below.
+  #
+  # BEFORE ENABLING: set clusterInternalCIDRs to YOUR cluster's pod and Service
+  # CIDRs (see below). The chart refuses to render with an empty list rather
+  # than silently emitting an allow-all outbound rule.
   #
   # Recommended rollout: enable on a staging cluster first,
   # observe for a release cycle, then flip the chart default. Customers on
   # EKS with VPC CNI or GKE with NetworkPolicy v2 may need vendor tweaks.
   egressEnabled: false
 
-  # Backends that legitimately need to reach the public Internet:
-  #   * sensor-manager / cluster-sensor-service — TLS probing of arbitrary endpoints
+  # Backends that legitimately need to reach networks outside the cluster —
+  # both the public Internet and the customer's own device networks:
+  #   * sensor-manager / cluster-sensor-service — TLS/SSH probing of arbitrary
+  #     endpoints, and cluster-sensor-service also sends alert email
   #   * device-interrogation-service — vendor mgmt APIs on customer networks
   #   * notification-service — webhook + SMTP delivery
-  #   * integration-sync — third-party integrations (cloud providers, ticket systems)
+  #   * auth-service — password reset, user invites, email verification (SMTP)
+  #   * admin-service — platform-admin invites and the SMTP test endpoint
+  #   * monitoring-service — alert email (SMTP)
   # Every other backend stays cluster-internal.
+  #
+  # All seven dial out from their own pod (shared/email opens the SMTP
+  # connection in-process; there is no central mail relay pod), so a service
+  # missing from this list fails silently — the API still returns success and
+  # the only trace is a warning in the pod log.
   externalEgressBackends:
     - sensor-manager
     - cluster-sensor-service
     - device-interrogation-service
     - notification-service
-    - integration-sync
+    - auth-service
+    - admin-service
+    - monitoring-service
+
+  # ── Outbound egress carve-out ────────────────────────────────────────────
+  # The Internet/outbound rule permits 0.0.0.0/0 MINUS these CIDRs, so a
+  # compromised backend cannot reach other namespaces' pods or in-cluster
+  # ClusterIP Services by address while still being able to reach the
+  # customer's device networks. Those device networks are almost always
+  # RFC1918, which is why this list must be your cluster's OWN ranges and not
+  # a blanket 10/8 + 172.16/12 + 192.168/16 exclusion.
+  #
+  # 169.254.0.0/16 (link-local, including the cloud instance-metadata endpoint
+  # at 169.254.169.254) is always excluded by the template and does not need
+  # to be listed here.
+  #
+  # The default below is the k3s / RKE2 distribution default. VERIFY IT
+  # AGAINST YOUR CLUSTER — the values differ per distribution and a wrong
+  # entry either blocks device interrogation (too broad) or leaves in-cluster
+  # addresses reachable (too narrow). Discover yours with:
+  #
+  #   kubectl cluster-info dump | grep -E 'cluster-cidr|service-cluster-ip-range'
+  #
+  # Common defaults:
+  #   k3s / RKE2      pods 10.42.0.0/16   services 10.43.0.0/16
+  #   kubeadm+Flannel pods 10.244.0.0/16  services 10.96.0.0/12
+  #   kubeadm+Calico  pods 192.168.0.0/16 services 10.96.0.0/12
+  #   EKS (VPC CNI)   pods = the VPC CIDR services 172.20.0.0/16
+  #   GKE             pods and services are per-cluster — read them from the
+  #                   cluster description, do not assume
+  #
+  # Optionally add your NODE subnet to block pod->kubelet (:10250) and
+  # pod->kube-apiserver (:6443) by address. Only do so if your device networks
+  # do NOT live on that same subnet — on a single-subnet on-prem install they
+  # usually do, and excluding it would block interrogation of those devices.
+  clusterInternalCIDRs:
+    - 10.42.0.0/16
+    - 10.43.0.0/16
+
+  # Ports the externalEgressBackends may reach on those outside networks.
+  # Entries are NetworkPolicy port objects: { protocol, port } or a range
+  # { protocol, port, endPort }.
+  #
+  # The TCP default is the full range because active discovery probes
+  # operator-chosen ports: the curated set in shared/discovery/sweep.go alone
+  # spans 22/139/445/443/465/502/636/993/995/2222/4840/5671/6379/8443/8883/
+  # 9443/10443/44818/47808, and Active Scan lets a tenant enter any port. A
+  # narrower allowlist reintroduces exactly the silent-failure this rule had:
+  # the scan reports "no crypto found" instead of "blocked".
+  #
+  # UDP is curated, because the platform only ever sends three UDP probes:
+  # SNMP interrogation (161, shared/deviceinterrogation/probers.go) and the
+  # two OT/ICS discovery probes EtherNet/IP CIP List-Identity (44818) and
+  # BACnet Who-Is (47808) in shared/discovery/probe_ot.go. DNS (UDP 53) is
+  # granted separately by the allow-egress-dns rule.
+  #
+  # Tighten this to your environment if you can enumerate the ports your
+  # devices actually listen on — for example, drop the TCP range entry and
+  # list only { protocol: TCP, port: 443 } / 22 / 8443 if you never scan
+  # anything else.
+  externalEgressPorts:
+    - { protocol: TCP, port: 1, endPort: 65535 }
+    - { protocol: UDP, port: 161 }
+    - { protocol: UDP, port: 44818 }
+    - { protocol: UDP, port: 47808 }
 
   # kube-dns / CoreDNS Service location. Used for the DNS egress allow rule.
   # Override if your cluster runs CoreDNS in a non-standard namespace.
@@ -1038,7 +1115,7 @@ serviceRls:
 # wires up Traefik api-gateway → backends with mTLS via ServersTransport.
 #
 # ON by default: encrypted internal transport is the shipped posture.
-# Every organization that self-hosts VistaPlatform receives a guided install
+# Every organization that self-hosts Vista Platform receives a guided install
 # instruction set, so the cluster prerequisites below are a documented,
 # mandatory part of that install — not an obstacle for a bare self-service
 # cluster (there are no self-service installs of the whole platform).

@@ -480,6 +480,102 @@ func anyWeakKeySizeSQL(keySizeCol, kexCol string) string {
 	return "(" + criticallyWeakKeySizeSQL(keySizeCol, kexCol) + " OR " + highRiskKeySizeSQL(keySizeCol, kexCol) + ")"
 }
 
+// foldProtocolVersion folds an observed protocol-version string onto a
+// separator-free upper-case form, so the several spellings producers actually
+// emit compare equal: "TLS 1.0", "TLSv1.0", "TLS1.0" and "tls-1.0" all fold to
+// "TLS1.0".
+//
+// It is deliberately the SQL-expressible subset of
+// cryptoparse.NormalizeComponentCode (upper-case + drop spaces and hyphens) and
+// NOT that function itself: NormalizeComponentCode additionally strips cipher
+// mode suffixes ("-GCM", "-128", …), which has no SQL twin. Keeping the fold
+// small is what lets foldProtocolVersionSQL below stay provably identical.
+func foldProtocolVersion(v string) string {
+	v = strings.ToUpper(strings.TrimSpace(v))
+	v = strings.ReplaceAll(v, " ", "")
+	return strings.ReplaceAll(v, "-", "")
+}
+
+// foldProtocolVersionSQL is the SQL twin of foldProtocolVersion.
+func foldProtocolVersionSQL(col string) string {
+	return fmt.Sprintf("REPLACE(REPLACE(UPPER(TRIM(COALESCE(%s, ''))), ' ', ''), '-', '')", col)
+}
+
+// legacyProtocolVersionCodes are the folded protocol-version spellings that name
+// a version RFC 8996 deprecates outright (TLS 1.0 / TLS 1.1). AWS renders TLS
+// 1.0 as the bare "TLSv1", and the passive path sometimes carries only the
+// version half ("1.0"), so both shapes are listed.
+//
+// Any SSL version is weak regardless of spelling and is matched by prefix
+// instead, so SSLv2/SSLv3/"SSL 3.0" need no entries here.
+var legacyProtocolVersionCodes = []string{
+	"TLS1.0", "TLSV1.0", "TLS1", "TLSV1", "1.0", "1",
+	"TLS1.1", "TLSV1.1", "1.1",
+}
+
+// isLegacyProtocolVersion reports whether an observed protocol-version string
+// names SSL (any version) or TLS 1.0/1.1.
+//
+// Every producer in the tree writes the SPACED form ("TLS 1.0") — the sensor's
+// packet capture and TLS enricher, the shared active probers, the F5 and Cisco
+// interrogators. Comparisons against a bare "1.0" or against 'TLSv1.0' were
+// therefore dead code: they matched nothing that is ever stored.
+func isLegacyProtocolVersion(version string) bool {
+	folded := foldProtocolVersion(version)
+	if folded == "" {
+		return false
+	}
+	if strings.HasPrefix(folded, "SSL") {
+		return true
+	}
+	for _, code := range legacyProtocolVersionCodes {
+		if folded == code {
+			return true
+		}
+	}
+	return false
+}
+
+// legacyProtocolVersionSQL is the SQL twin of isLegacyProtocolVersion.
+// TestLegacyProtocolVersionSQL_MatchesGo pins the two against each other over
+// every spelling either side claims to handle.
+func legacyProtocolVersionSQL(col string) string {
+	folded := foldProtocolVersionSQL(col)
+	quoted := make([]string, 0, len(legacyProtocolVersionCodes))
+	for _, code := range legacyProtocolVersionCodes {
+		quoted = append(quoted, "'"+code+"'")
+	}
+	return fmt.Sprintf("(%s LIKE 'SSL%%' OR %s IN (%s))",
+		folded, folded, strings.Join(quoted, ", "))
+}
+
+// legacyTLSVersionsArraySQL is the SQL twin of hasWeakTLSVersion: it matches a
+// text[] column of enumerated accepted versions containing any legacy one. The
+// filter and the facet counter used a literal `&& ARRAY['TLS 1.0','TLS 1.1']`,
+// which silently missed every other spelling the enumerators can produce
+// (SSLv3, 'TLSv1.1' from a cloud SSL policy).
+func legacyTLSVersionsArraySQL(arrayCol string) string {
+	return fmt.Sprintf(
+		"EXISTS (SELECT 1 FROM unnest(COALESCE(%s, ARRAY[]::text[])) AS legacy_tls_v WHERE %s)",
+		arrayCol, legacyProtocolVersionSQL("legacy_tls_v"))
+}
+
+// deprecatedAlgorithmsSQL is the shared `?uses_deprecated_algorithms=true`
+// predicate. It lived inline at three call sites with two independent defects:
+// it compared protocol_version against 'TLSv1.0'/'TLSv1.1' (a spelling no
+// producer writes, so the real TLS 1.0/1.1 rows were skipped), and it used a
+// family-blind `key_size < 2048`, which labels every healthy 256-bit EC key
+// deprecated — the exact bug anyWeakKeySizeSQL already fixed elsewhere.
+//
+// prefix qualifies the columns (e.g. "ci.").
+func deprecatedAlgorithmsSQL(prefix string) string {
+	return "(" +
+		legacyProtocolVersionSQL(prefix+"protocol_version") +
+		" OR UPPER(COALESCE(" + prefix + "hash_algorithm, '')) IN ('SHA1', 'SHA-1', 'MD5')" +
+		" OR " + anyWeakKeySizeSQL(prefix+"key_size", prefix+"key_exchange_algorithm") +
+		")"
+}
+
 // CalculateRiskScore calculates an overall risk score based on detected issues
 func (d *WeakCryptoDetector) CalculateRiskScore(issues []WeakCryptoIssue) int {
 	if len(issues) == 0 {

@@ -316,7 +316,7 @@ function render() {
   L.push('# Editions');
   L.push('');
   L.push(
-    'Vista Platform ships as a free, open-source **Core** plus two paid editions. ' +
+    'Vista Platform ships as a free, source-available **Vista Platform Core** plus two paid editions — **Vista Platform Enterprise** and **Vista Platform MSP**. ' +
       'An edition is a licensing boundary that decides whether a capability exists ' +
       'in a build at all. It is not the same thing as a *tier* — tiers are ' +
       'commercial packaging that an operator authors, and only the MSP edition can ' +

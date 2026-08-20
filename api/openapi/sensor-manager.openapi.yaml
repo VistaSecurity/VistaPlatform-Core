@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: VistaPlatform — sensor-manager API
+  title: Vista Platform — sensor-manager API
   version: 0.1.0
   description: |
     Spec-first contract for sensor-manager (ADR-0001). The Operations-area
@@ -59,7 +59,7 @@ info:
     consumes them (ADR-0001 step 5), at which point this file and the contract
     test move together.
   contact:
-    name: VistaPlatform Platform
+    name: Vista Security
 servers:
 - url: /api/v1/sensor-manager
   description: sensor-manager v1, mounted behind the API gateway.

@@ -120,12 +120,12 @@ func (m *CAManager) CreateCA(tenantID uuid.UUID, encryptionKey string) (*CACerti
 	caTemplate := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			Organization:       []string{"VistaPlatform"},
-			OrganizationalUnit: []string{"VistaPlatform"},
+			Organization:       []string{"Vista Platform"},
+			OrganizationalUnit: []string{"Vista Platform"},
 			Country:            []string{"US"},
 			Province:           []string{"Florida"},
 			Locality:           []string{"Orlando"},
-			CommonName:         fmt.Sprintf("VistaPlatform CA - Tenant %s", tenantID.String()[:8]),
+			CommonName:         fmt.Sprintf("Vista Platform CA - Tenant %s", tenantID.String()[:8]),
 		},
 		NotBefore:             notBefore,
 		NotAfter:              notAfter,

@@ -58,9 +58,21 @@ func (a *AuthService) RecordImpersonationStart(ctx context.Context, p Impersonat
 	// start event targets a known tenant (p.TenantID, the impersonated tenant),
 	// so the INSERT runs inside WithTenantTx to satisfy the policy WITH CHECK.
 	return shareddatabase.WithTenantTx(ctx, a.DB(), p.TenantID, func(tx *sql.Tx) error {
+		// Every placeholder is explicitly cast. Two distinct parse-time failures
+		// used to make this INSERT fail on EVERY call (the audit trail was always
+		// empty):
+		//   1. $2 was bound both to the uuid user_id column and to `$2::text`
+		//      inside jsonb_build_object -> "inconsistent types deduced for
+		//      parameter $2". The jsonb use is now ($2::uuid)::text, so both uses
+		//      deduce uuid.
+		//   2. jsonb_build_object is VARIADIC "any", so a bare placeholder passed
+		//      only to it has no inferable type -> "could not determine data type
+		//      of parameter $N". Every jsonb argument therefore carries its own
+		//      cast.
+		// Do not remove these casts.
 		_, err := tx.ExecContext(ctx, `
         INSERT INTO auth_audit_log (tenant_id, user_id, event_type, event_status, ip_address, user_agent, event_data)
-        VALUES ($1, $2, 'impersonation_start', 'success', $3::inet, $4, jsonb_build_object('actor_id', $5, 'actor_email', $6, 'target_user_id', $2::text, 'target_email', $7, 'reason', $8, 'jti', $9, 'ttl_seconds', $10))
+        VALUES ($1::uuid, $2::uuid, 'impersonation_start', 'success', $3::inet, $4::text, jsonb_build_object('actor_id', $5::text, 'actor_email', $6::text, 'target_user_id', ($2::uuid)::text, 'target_email', $7::text, 'reason', $8::text, 'jti', $9::text, 'ttl_seconds', $10::int))
     `, p.TenantID, p.TargetUserID, p.IP, p.UA, p.ActorID, p.ActorEmail, p.TargetEmail, p.Reason, p.JTI, p.TTLSeconds)
 		return err
 	})
@@ -113,9 +125,12 @@ func (a *AuthService) RecordImpersonationStop(ctx context.Context, actorID, jti,
 	// platform-wide record written with tenant_id = NULL; there is no tenant to
 	// scope to (set_tenant_context rejects the nil tenant). Wrapping is impossible
 	// and wrong here.
+	// $3/$4 reach the planner only through jsonb_build_object (VARIADIC "any"),
+	// which cannot infer a type — this INSERT used to fail at parse time on every
+	// call with "could not determine data type of parameter $3". Keep the casts.
 	_, err := a.BypassDB().ExecContext(ctx, `
         INSERT INTO auth_audit_log (tenant_id, user_id, event_type, event_status, ip_address, user_agent, event_data)
-        VALUES (NULL, NULL, 'impersonation_stop', 'success', $1::inet, $2, jsonb_build_object('actor_id', $3, 'jti', $4))
+        VALUES (NULL, NULL, 'impersonation_stop', 'success', $1::inet, $2::text, jsonb_build_object('actor_id', $3::text, 'jti', $4::text))
     `, ip, ua, actorID, jti)
 	return err
 }

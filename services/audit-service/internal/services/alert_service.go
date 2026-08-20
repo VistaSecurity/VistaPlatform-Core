@@ -50,21 +50,25 @@ type AlertAction struct {
 	Config map[string]interface{} `json:"config"`
 }
 
-// Alert represents a triggered alert
+// Alert represents a triggered alert.
+//
+// It is transient: this service raises it, hands it to the stateful alert rail
+// (alerts.raise) or to a direct notification, and forgets it. The lifecycle
+// fields it used to carry (acknowledged_at / acknowledged_by / resolved_at)
+// were only ever served by a read endpoint that returned a hardcoded empty
+// list; ownership of alert state lives with the rail (compliance-engine's
+// `alerts` table, behind Remediation → Alerts).
 type Alert struct {
-	ID             uuid.UUID                `json:"id"`
-	RuleID         uuid.UUID                `json:"rule_id"`
-	TenantID       *uuid.UUID               `json:"tenant_id,omitempty"`
-	RuleName       string                   `json:"rule_name"`
-	Severity       string                   `json:"severity"`
-	Message        string                   `json:"message"`
-	EventCount     int                      `json:"event_count"`
-	SampleEvents   []map[string]interface{} `json:"sample_events,omitempty"`
-	TriggeredAt    time.Time                `json:"triggered_at"`
-	AcknowledgedAt *time.Time               `json:"acknowledged_at,omitempty"`
-	AcknowledgedBy *uuid.UUID               `json:"acknowledged_by,omitempty"`
-	ResolvedAt     *time.Time               `json:"resolved_at,omitempty"`
-	Status         string                   `json:"status"` // 'open', 'acknowledged', 'resolved'
+	ID           uuid.UUID                `json:"id"`
+	RuleID       uuid.UUID                `json:"rule_id"`
+	TenantID     *uuid.UUID               `json:"tenant_id,omitempty"`
+	RuleName     string                   `json:"rule_name"`
+	Severity     string                   `json:"severity"`
+	Message      string                   `json:"message"`
+	EventCount   int                      `json:"event_count"`
+	SampleEvents []map[string]interface{} `json:"sample_events,omitempty"`
+	TriggeredAt  time.Time                `json:"triggered_at"`
+	Status       string                   `json:"status"` // 'open' at raise time
 }
 
 // AlertService handles alert rules and triggering
@@ -551,20 +555,6 @@ func (s *AlertService) GetRules(ctx context.Context) []AlertRule {
 	s.rulesMu.RLock()
 	defer s.rulesMu.RUnlock()
 	return s.rules
-}
-
-// GetAlerts retrieves recent alerts
-func (s *AlertService) GetAlerts(ctx context.Context, status string, limit int) ([]Alert, error) {
-	// In production, this would query from database
-	// For now, return empty - alerts are logged but not persisted yet
-	return []Alert{}, nil
-}
-
-// AcknowledgeAlert marks an alert as acknowledged
-func (s *AlertService) AcknowledgeAlert(ctx context.Context, alertID uuid.UUID, userID uuid.UUID) error {
-	// Would update database in production
-	s.logger.Printf("Alert %s acknowledged by user %s", alertID, userID)
-	return nil
 }
 
 // raiseRailAlert publishes the alert onto the stateful alert rail

@@ -16,7 +16,6 @@ import { InventoryPage } from './sections/inventory/inventory-page';
 import { SensorsPage } from './sections/discovery/sensors-page';
 import { PlansPage } from './sections/remediation/plans-page';
 import { QueuePage } from './sections/remediation/queue-page';
-import { TriagePage } from './sections/remediation/triage-page';
 import { AlertsPage } from './sections/remediation/alerts-page';
 import { JobsPage } from './sections/discovery/jobs-page';
 import { CommandCenterPage } from './sections/discovery/command-center';
@@ -97,7 +96,13 @@ export default function App() {
 
           {/* Remediation */}
           <Route path="/remediation/alerts" element={<AlertsPage />} />
-          <Route path="/remediation/triage" element={<TriagePage />} />
+          {/* Triage was an audit-rule alert inbox with no producer: its only
+              data source returned a hardcoded empty list, so it read "Inbox
+              zero" forever and its Acknowledge stored nothing. The capability
+              it promised (work an alert, or turn it into a ticket) is the
+              Alerts page, which has real state and an evidence trail — so the
+              documented deep link lands there. */}
+          <Route path="/remediation/triage" element={<Navigate to="/remediation/alerts" replace />} />
           <Route path="/remediation/queue" element={<QueuePage />} />
           <Route path="/remediation/plans" element={<PlansPage />} />
 

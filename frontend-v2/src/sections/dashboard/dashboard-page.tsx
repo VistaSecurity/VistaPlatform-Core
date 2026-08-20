@@ -4,6 +4,7 @@ import { clients } from '../../lib/clients';
 import { Icon, LevelBar, LevelDot, MiniBar, RiskGauge, levelFromScore, riskColor, LEVEL_MIN } from '../../components/ui';
 import { PostureTrendChart } from '../../components/posture-trend-chart';
 import { DASHBOARD_COMPLIANCE_FINDINGS_ROUTE, getDashboardPqcMetric, getDiscoveryFleetMetric } from './dashboard-metrics';
+import { fetchDashboardSensors, fetchDashboardDeviceAgents, fetchDashboardTicketStats } from './dashboard-queries';
 
 // Dashboard — the command center, ported to the mock's four layers (Dashboard.jsx):
 // cinematic hero, "needs attention" triage strip, lifecycle pipeline, supporting
@@ -22,23 +23,11 @@ function useRollups() {
       return data.risk_summary;
     },
   });
-  const sensors = useQuery({
-    queryKey: ['dashboard', 'sensors'],
-    queryFn: async () => {
-      const { data } = await clients.sensors.GET('/sensors', {});
-      return data?.sensors ?? [];
-    },
-  });
+  const sensors = useQuery({ queryKey: ['dashboard', 'sensors'], queryFn: fetchDashboardSensors });
   // Discovery agents are a SECOND fleet, in device-interrogation-service's own
   // table — the Discovery card counted only /sensors and so under-reported the
   // fleet by every registered agent. Same source Command Center uses.
-  const deviceAgents = useQuery({
-    queryKey: ['dashboard', 'device-agents'],
-    queryFn: async () => {
-      const { data } = await clients.devices.GET('/agents', {});
-      return data?.agents ?? [];
-    },
-  });
+  const deviceAgents = useQuery({ queryKey: ['dashboard', 'device-agents'], queryFn: fetchDashboardDeviceAgents });
   // /pqc/progress rather than /pqc/summary (M-2): progress exposes the
   // classifier's full partition (pqc_ready, symmetric_safe, non_pqc,
   // unclassified) so "not yet assessed" configs can be shown separately
@@ -72,13 +61,7 @@ function useRollups() {
       return data.certificates ?? [];
     },
   });
-  const tickets = useQuery({
-    queryKey: ['dashboard', 'ticket-stats'],
-    queryFn: async () => {
-      const { data } = await clients.compliance.GET('/tickets/stats', {});
-      return data?.stats;
-    },
-  });
+  const tickets = useQuery({ queryKey: ['dashboard', 'ticket-stats'], queryFn: fetchDashboardTicketStats });
   // 30-day posture trend (ADR-0007). New tenants get a flat seeded baseline at
   // their current posture rather than a blank chart.
   const trend = useQuery({
@@ -136,6 +119,10 @@ export function DashboardPage() {
   // /sensors is a sensor" was wrong even before agents were missing entirely.
   const fleet = getDiscoveryFleetMetric(sensors.data, deviceAgents.data);
   const fleetDots = [...(sensors.data ?? []), ...(deviceAgents.data ?? [])];
+  // B-28: a 5xx from either fleet's query (or a discovery.read permission gate
+  // on /agents) must read as "couldn't load", never as "0 sensors, 0 agents" —
+  // the Discovery stage below branches on this instead of trusting `fleet`.
+  const fleetError = sensors.isError || deviceAgents.isError;
 
   const certs = expiring.data ?? [];
   const expSoon = certs.filter((c) => typeof c.days_until_expiry === 'number' && c.days_until_expiry >= 0 && c.days_until_expiry <= 30).length;
@@ -167,14 +154,16 @@ export function DashboardPage() {
     return <Center icon="alert-triangle" tone="var(--danger-text)" title="Couldn't load dashboard" message={risk.error instanceof Error ? risk.error.message : 'Request failed'} />;
   }
 
+  // B-28: `error` lets the tile itself say "couldn't load" instead of a count
+  // that is really an unthrown fetch failure wearing a zero.
   const attention = [
-    { id: 'crit', count: crit, label: 'Critical findings', sub: 'across all assets', icon: 'circle-alert', tone: RED, route: DASHBOARD_COMPLIANCE_FINDINGS_ROUTE },
-    { id: 'high', count: high, label: 'High-risk assets', sub: `risk score ≥ ${LEVEL_MIN.High}`, icon: 'server', tone: 'var(--danger-soft)', route: '/inventory?lens=infrastructure' },
-    { id: 'exp', count: expSoon, label: 'Certs expiring', sub: 'within 30 days', icon: 'file-badge', tone: ORANGE, route: '/inventory?lens=certificate' },
-    { id: 'unk', count: unknown, label: 'Unscored assets', sub: 'no risk signal yet', icon: 'search', tone: 'var(--warn)', route: '/inventory?lens=infrastructure' },
-    { id: 'pqc', count: pqcNeedsMigration, label: 'Not PQC-ready', sub: 'configs on classical crypto', icon: 'key-round', tone: BLUE, route: '/inventory?lens=configuration' },
-    { id: 'pqc-unclassified', count: pqcUnclassified, label: 'Not yet assessed', sub: 'no algorithm data', icon: 'help-circle', tone: 'var(--app-t3)', route: '/inventory?lens=configuration' },
-    { id: 'tick', count: tkOverdue, label: 'Overdue tickets', sub: 'past SLA', icon: 'wrench', tone: ORANGE, route: '/remediation/plans' },
+    { id: 'crit', count: crit, label: 'Critical findings', sub: 'across all assets', icon: 'circle-alert', tone: RED, route: DASHBOARD_COMPLIANCE_FINDINGS_ROUTE, error: findingsSeverity.isError },
+    { id: 'high', count: high, label: 'High-risk assets', sub: `risk score ≥ ${LEVEL_MIN.High}`, icon: 'server', tone: 'var(--danger-soft)', route: '/inventory?lens=infrastructure', error: false },
+    { id: 'exp', count: expSoon, label: 'Certs expiring', sub: 'within 30 days', icon: 'file-badge', tone: ORANGE, route: '/inventory?lens=certificate', error: expiring.isError },
+    { id: 'unk', count: unknown, label: 'Unscored assets', sub: 'no risk signal yet', icon: 'search', tone: 'var(--warn)', route: '/inventory?lens=infrastructure', error: false },
+    { id: 'pqc', count: pqcNeedsMigration, label: 'Not PQC-ready', sub: 'configs on classical crypto', icon: 'key-round', tone: BLUE, route: '/inventory?lens=configuration', error: pqc.isError },
+    { id: 'pqc-unclassified', count: pqcUnclassified, label: 'Not yet assessed', sub: 'no algorithm data', icon: 'help-circle', tone: 'var(--app-t3)', route: '/inventory?lens=configuration', error: pqc.isError },
+    { id: 'tick', count: tkOverdue, label: 'Overdue tickets', sub: 'past SLA', icon: 'wrench', tone: ORANGE, route: '/remediation/plans', error: tickets.isError },
   ];
 
   return (
@@ -289,9 +278,9 @@ export function DashboardPage() {
                 <Icon name={a.icon} size={16} style={{ color: a.tone }} />
                 <Icon name="arrow-up-right" size={13} style={{ color: 'var(--app-t3)' }} />
               </div>
-              <div className="mono" style={{ fontSize: 27, fontWeight: 800, color: 'var(--app-t1)', margin: '10px 0 3px', letterSpacing: '-.02em' }}>{a.count.toLocaleString()}</div>
+              <div className="mono" style={{ fontSize: 27, fontWeight: 800, color: a.error ? 'var(--danger-text)' : 'var(--app-t1)', margin: '10px 0 3px', letterSpacing: '-.02em' }}>{a.error ? '—' : a.count.toLocaleString()}</div>
               <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--app-t1)', lineHeight: 1.25 }}>{a.label}</div>
-              <div style={{ fontSize: 10.5, color: 'var(--app-t3)', marginTop: 1 }}>{a.sub}</div>
+              <div style={{ fontSize: 10.5, color: a.error ? 'var(--danger-text)' : 'var(--app-t3)', marginTop: 1 }}>{a.error ? "Couldn't load" : a.sub}</div>
             </button>
           ))}
         </div>
@@ -304,23 +293,32 @@ export function DashboardPage() {
           <span style={{ fontSize: 12, color: 'var(--app-t3)' }}>— discovery flows through to remediation</span>
         </div>
         <div style={{ display: 'flex', alignItems: 'stretch', flexWrap: 'wrap', gap: '0 0' }}>
-          <Stage icon="radar" accent={BLUE} title="Discovery" hero={String(fleet.all.online)} heroUnit={`/ ${fleet.all.total} online`} caption="sensors and agents reporting in" onClick={() => nav('/discovery')}
+          <Stage icon="radar" accent={BLUE} title="Discovery"
+            hero={fleetError ? '—' : String(fleet.all.online)}
+            heroColor={fleetError ? 'var(--danger-text)' : undefined}
+            heroUnit={fleetError ? undefined : `/ ${fleet.all.total} online`}
+            caption={fleetError ? "couldn't load sensor/agent status" : 'sensors and agents reporting in'}
+            onClick={() => nav('/discovery')}
             viz={
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%' }}>
-                <div style={{ display: 'flex', gap: 5 }}>
-                  {fleetDots.slice(0, 10).map((x, i) => {
-                    const on = (x.status || '').toLowerCase() === 'active';
-                    return <span key={i} style={{ width: 9, height: 9, borderRadius: 50, background: on ? GREEN : RED, boxShadow: on ? 'none' : `0 0 6px ${RED}` }} />;
-                  })}
+              fleetError ? (
+                <span style={{ fontSize: 11, color: 'var(--danger-text)' }}>Couldn't load the sensor/agent fleet.</span>
+              ) : (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%' }}>
+                  <div style={{ display: 'flex', gap: 5 }}>
+                    {fleetDots.slice(0, 10).map((x, i) => {
+                      const on = (x.status || '').toLowerCase() === 'active';
+                      return <span key={i} style={{ width: 9, height: 9, borderRadius: 50, background: on ? GREEN : RED, boxShadow: on ? 'none' : `0 0 6px ${RED}` }} />;
+                    })}
+                  </div>
+                  <span style={{ fontSize: 11, color: 'var(--app-t3)' }}>{fleet.all.online}/{fleet.all.total} active</span>
                 </div>
-                <span style={{ fontSize: 11, color: 'var(--app-t3)' }}>{fleet.all.online}/{fleet.all.total} active</span>
-              </div>
+              )
             }
             // Broken out because "sensor" is loosely used for both: a passive
             // network sensor and a command-driven discovery agent are different
             // things with different failure modes, and one combined number hides
             // which half is down.
-            stats={[
+            stats={fleetError ? [] : [
               ['Sensors', `${fleet.sensors.online}/${fleet.sensors.total}`, null],
               ['Agents', `${fleet.agents.online}/${fleet.agents.total}`, null],
             ]} />
@@ -346,9 +344,15 @@ export function DashboardPage() {
             }
             stats={[['High-risk', String(high), null], ['PQC configs', pqcPct + '%', null]]} />
           <Connector />
-          <Stage icon="wrench" accent={ORANGE} title="Remediation" hero={String(tkOverdue)} heroColor={tkOverdue ? RED : undefined} caption="overdue · past SLA" onClick={() => nav('/remediation/plans')}
+          <Stage icon="wrench" accent={ORANGE} title="Remediation"
+            hero={tickets.isError ? '—' : String(tkOverdue)}
+            heroColor={tickets.isError ? 'var(--danger-text)' : tkOverdue ? RED : undefined}
+            caption={tickets.isError ? "couldn't load ticket status" : 'overdue · past SLA'}
+            onClick={() => nav('/remediation/plans')}
             viz={
-              onTrackPct == null ? (
+              tickets.isError ? (
+                <span style={{ fontSize: 11, color: 'var(--danger-text)' }}>Couldn't load ticket status.</span>
+              ) : onTrackPct == null ? (
                 <span style={{ fontSize: 11, color: 'var(--app-t3)' }}>No open tickets yet.</span>
               ) : (
                 <div style={{ width: '100%' }}>
@@ -359,7 +363,7 @@ export function DashboardPage() {
                 </div>
               )
             }
-            stats={[['Open tickets', String(tkTotal), null]]} />
+            stats={tickets.isError ? [] : [['Open tickets', String(tkTotal), null]]} />
         </div>
       </div>
 

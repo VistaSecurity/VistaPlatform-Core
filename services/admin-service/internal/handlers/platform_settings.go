@@ -4,11 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/shared/security/authpolicy"
+	passwordsvc "github.com/vistasecurity/vistaplatform/shared/security/password"
 )
 
 // platformSettingKV is one persisted setting row (setting_key, setting_value JSON).
@@ -110,7 +114,14 @@ type PlatformSettings struct {
 	DefaultTrialDays *int `json:"default_trial_days"`
 
 	// Access control
-	MaintenanceMode     *bool `json:"maintenance_mode"`
+	//
+	// There is deliberately no MaintenanceMode here. The Policy page carried a
+	// "Maintenance mode" toggle for which the PUT had no branch and the GET no
+	// case, so it round-tripped as the hardcoded default false — and nothing in
+	// any service read it even in principle. Persisting the value on its own
+	// would only have made the false belief durable; a real maintenance mode is a
+	// request gate across every service with an operator bypass, which is a
+	// feature, not a wiring fix. The toggle was removed instead.
 	RegistrationEnabled *bool `json:"registration_enabled"`
 	// BlockPersonalEmailDomains opts into rejecting consumer domains (gmail,
 	// outlook, …) at signup. Default false — required for self-hosted Core,
@@ -163,7 +174,6 @@ func getPlatformSettingsWithStore(store platformSettingsStore) gin.HandlerFunc {
 			SupportEmail:                   "support@example.com",
 			MaxTenants:                     nil,
 			DefaultTrialDays:               nil,
-			MaintenanceMode:                boolPtr(false),
 			RegistrationEnabled:            boolPtr(true),
 			BlockPersonalEmailDomains:      boolPtr(false),
 			EmailVerificationRequired:      boolPtr(true),
@@ -321,14 +331,44 @@ func updatePlatformSettingsWithStore(store platformSettingsStore) gin.HandlerFun
 			return
 		}
 
-		// Validate settings (basic validation)
-		if settings.PasswordMinLength != nil && *settings.PasswordMinLength < 4 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Password minimum length must be at least 4"})
+		// Validate settings.
+		//
+		// These bounds mirror what the enforcement layers actually accept
+		// (shared/security/password and shared/security/authpolicy both clamp).
+		// Rejecting an out-of-range value here rather than clamping it silently is
+		// the point: the operator learns the number they typed is not the number
+		// in force, instead of seeing it saved and disbelieved.
+		if settings.PasswordMinLength != nil &&
+			(*settings.PasswordMinLength < passwordsvc.MinPasswordLength || *settings.PasswordMinLength > passwordsvc.MaxPasswordLength) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf(
+				"Password minimum length must be between %d and %d",
+				passwordsvc.MinPasswordLength, passwordsvc.MaxPasswordLength)})
 			return
 		}
 
-		if settings.SessionTimeoutMinutes != nil && *settings.SessionTimeoutMinutes < 1 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Session timeout must be at least 1 minute"})
+		if settings.SessionTimeoutMinutes != nil &&
+			(time.Duration(*settings.SessionTimeoutMinutes)*time.Minute < authpolicy.MinSessionLifetime ||
+				time.Duration(*settings.SessionTimeoutMinutes)*time.Minute > authpolicy.MaxSessionLifetime) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf(
+				"Session timeout must be between %d and %d minutes",
+				int(authpolicy.MinSessionLifetime.Minutes()), int(authpolicy.MaxSessionLifetime.Minutes()))})
+			return
+		}
+
+		if settings.MaxLoginAttempts != nil &&
+			(*settings.MaxLoginAttempts < authpolicy.MinMaxLoginAttempts || *settings.MaxLoginAttempts > authpolicy.MaxMaxLoginAttempts) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf(
+				"Maximum login attempts must be between %d and %d",
+				authpolicy.MinMaxLoginAttempts, authpolicy.MaxMaxLoginAttempts)})
+			return
+		}
+
+		if settings.LockoutDurationMinutes != nil &&
+			(time.Duration(*settings.LockoutDurationMinutes)*time.Minute < authpolicy.MinLockoutDuration ||
+				time.Duration(*settings.LockoutDurationMinutes)*time.Minute > authpolicy.MaxLockoutDuration) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf(
+				"Lockout duration must be between %d and %d minutes",
+				int(authpolicy.MinLockoutDuration.Minutes()), int(authpolicy.MaxLockoutDuration.Minutes()))})
 			return
 		}
 

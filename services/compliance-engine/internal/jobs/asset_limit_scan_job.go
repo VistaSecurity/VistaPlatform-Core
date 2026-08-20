@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -12,11 +13,15 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/services"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 )
 
 const (
-	assetLimitAlertType          = "asset_limit_approaching"
+	assetLimitAlertType = "asset_limit_approaching"
+	// The billable_items key enforcement resolves for the asset cap; see
+	// shared/services.limitTypeToItemKey ("asset").
+	assetLimitItemKey            = "max_assets"
 	assetLimitWarnPercentDefault = 80 // registry baseline rung (severity info)
 	assetLimitHighPercent        = 95 // product high rung (severity high)
 )
@@ -130,21 +135,25 @@ func (j *AssetLimitScanJob) scanTenant(ctx context.Context, tenantID uuid.UUID) 
 		return nil
 	}
 
-	// Plan asset limit. tenants + subscription_tiers are GLOBAL reference
-	// tables (no RLS policy) — read via bypass, filter by tenant explicitly.
-	var maxAssets sql.NullInt64
-	err := j.bypassDB.QueryRowContext(ctx, `
-		SELECT st.max_assets FROM tenants t
-		JOIN subscription_tiers st ON t.subscription_tier_id = st.id
-		WHERE t.id = $1
-	`, tenantID).Scan(&maxAssets)
-	if err == sql.ErrNoRows {
-		return nil // tenant has no tier — nothing to measure against
-	}
+	// Plan asset limit, resolved through shared/entitlements — the SAME source
+	// that enforces the cap.
+	//
+	// This used to read subscription_tiers.max_assets directly, a legacy column
+	// the admin plan editor never writes and that enforcement stopped consulting.
+	// So the alert measured against a different number than the one that
+	// rejects an asset: a free tenant was warned "Asset usage at 80% of plan
+	// limit" at 40 assets when 100 was enforced, and a tenant on an
+	// admin-created plan (NULL max_assets) was classified UNLIMITED and got no
+	// warning at all before hitting a hard 402.
+	limit, err := j.assetLimit(ctx, tenantID)
 	if err != nil {
-		return fmt.Errorf("load tier limit: %w", err)
+		return fmt.Errorf("load asset limit: %w", err)
 	}
-	if !maxAssets.Valid || maxAssets.Int64 <= 0 {
+	if limit == nil {
+		return nil // tenant has no tier / unresolvable — nothing to measure against
+	}
+	maxAssets := *limit
+	if maxAssets <= 0 {
 		// Unlimited plan — resolve any open alert, nothing to warn about.
 		j.resolve(ctx, tenantID, map[string]interface{}{
 			"observed":    "plan asset limit is unlimited",
@@ -161,21 +170,49 @@ func (j *AssetLimitScanJob) scanTenant(ctx context.Context, tenantID uuid.UUID) 
 	}
 
 	warnPercent := j.warnPercent(ctx, tenantID)
-	pct := float64(used) / float64(maxAssets.Int64) * 100
+	pct := float64(used) / float64(maxAssets) * 100
 	severity := assetSeverity(pct, warnPercent, assetLimitHighPercent)
 	if severity == "" {
 		j.resolve(ctx, tenantID, map[string]interface{}{
 			"observed":     "asset usage fell below the warning threshold",
 			"used":         used,
-			"limit":        maxAssets.Int64,
+			"limit":        maxAssets,
 			"percent":      int(pct),
 			"warn_percent": warnPercent,
 			"observed_at":  time.Now().Format(time.RFC3339),
 		})
 		return nil
 	}
-	j.raise(ctx, tenantID, used, maxAssets.Int64, pct, severity, warnPercent)
+	j.raise(ctx, tenantID, used, maxAssets, pct, severity, warnPercent)
 	return nil
+}
+
+// assetLimit returns the tenant's ENFORCED max_assets cap.
+//
+// Returns (nil, nil) when the tenant has no tier or the item cannot be
+// resolved — there is nothing to measure against, so no alert and no
+// auto-resolve. Returns a pointer to 0 or a negative for "unlimited", matching
+// the caller's existing convention.
+func (j *AssetLimitScanJob) assetLimit(ctx context.Context, tenantID uuid.UUID) (*int64, error) {
+	resolver := entitlements.NewPostgresResolver(j.bypassDB.DB)
+	ent, err := resolver.Resolve(ctx, tenantID, assetLimitItemKey)
+	if errors.Is(err, entitlements.ErrUnknownItem) || errors.Is(err, entitlements.ErrUnknownTenant) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	qty, ok := ent.QuantityValue()
+	if !ok {
+		return nil, nil
+	}
+	if qty == nil {
+		// Catalog "unlimited" (quantity: null). 0 is this caller's unlimited.
+		zero := int64(0)
+		return &zero, nil
+	}
+	v := int64(*qty)
+	return &v, nil
 }
 
 // warnPercent returns the tenant's warn rung, honoring a {"percent": N}

@@ -195,7 +195,7 @@ func (s *Server) Start(addr string) error {
 // and patched:
 //
 //   - Infra entries (postgres/redis/influxdb/nats/grafana) and the gateway
-//     don't expose a VistaPlatform-style /health response — including them
+//     don't expose a Vista Platform-style /health response — including them
 //     would just clutter the About page with "unreachable" rows.
 //   - The config map historically omits monitoring-service (self) and
 //     pcap-processor. Both expose /health on port 8080 like every other
@@ -369,14 +369,23 @@ func (s *Server) getHealthOverview(c *gin.Context) {
 func (s *Server) getAdminSystemStatus(c *gin.Context) {
 	status := s.healthService.GetSystemStatus()
 
-	// Add platform metrics
+	// Add platform metrics.
+	//
+	// The error is NOT discarded (B-41): `if err == nil { ... }` left
+	// total_tenants / active_tenants / total_users / total_assets at their Go
+	// zero values inside a 200 with nothing logged, so a broken query reported a
+	// healthy, empty platform. The response schema marks all four required, so a
+	// failure has to be visible rather than answered with fabricated zeros.
 	platformMetrics, err := s.metricsService.GetPlatformMetrics()
-	if err == nil {
-		status.Metrics.TotalTenants = platformMetrics.TotalTenants
-		status.Metrics.ActiveTenants = platformMetrics.ActiveTenants
-		status.Metrics.TotalUsers = platformMetrics.TotalUsers
-		status.Metrics.TotalAssets = platformMetrics.TotalAssets
+	if err != nil {
+		log.Printf("[admin-status] platform metrics query failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
 	}
+	status.Metrics.TotalTenants = platformMetrics.TotalTenants
+	status.Metrics.ActiveTenants = platformMetrics.ActiveTenants
+	status.Metrics.TotalUsers = platformMetrics.TotalUsers
+	status.Metrics.TotalAssets = platformMetrics.TotalAssets
 
 	c.JSON(http.StatusOK, status)
 }
@@ -384,14 +393,18 @@ func (s *Server) getAdminSystemStatus(c *gin.Context) {
 func (s *Server) getAdminSystemMetrics(c *gin.Context) {
 	status := s.healthService.GetSystemStatus()
 
-	// Add platform metrics
+	// Add platform metrics — see getAdminSystemStatus for why the error is
+	// surfaced instead of being swallowed behind a zero-valued 200 (B-41).
 	platformMetrics, err := s.metricsService.GetPlatformMetrics()
-	if err == nil {
-		status.Metrics.TotalTenants = platformMetrics.TotalTenants
-		status.Metrics.ActiveTenants = platformMetrics.ActiveTenants
-		status.Metrics.TotalUsers = platformMetrics.TotalUsers
-		status.Metrics.TotalAssets = platformMetrics.TotalAssets
+	if err != nil {
+		log.Printf("[admin-metrics] platform metrics query failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
 	}
+	status.Metrics.TotalTenants = platformMetrics.TotalTenants
+	status.Metrics.ActiveTenants = platformMetrics.ActiveTenants
+	status.Metrics.TotalUsers = platformMetrics.TotalUsers
+	status.Metrics.TotalAssets = platformMetrics.TotalAssets
 
 	c.JSON(http.StatusOK, status.Metrics)
 }

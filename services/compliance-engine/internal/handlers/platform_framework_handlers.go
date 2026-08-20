@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"log"
 	"net/http"
+	"strings"
 
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/services"
@@ -376,6 +378,27 @@ func (h *PlatformFrameworkHandlers) ListControlMeasurements(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"measurements": measurements})
 }
 
+// measurementError classifies a measurement-rule write failure.
+//
+// Everything used to collapse to a bare 500, which was harmless only while the
+// endpoint could not succeed at all: now that it can, a rejected rule is the
+// normal failure and the admin has to be told WHICH rule type or operator the
+// measurement type allows. The rule builder shows the details verbatim, so
+// only the validator's own messages are surfaced — anything else stays a 500
+// with the reason in the log. Mirrors the tenant custom-policy handler.
+func measurementError(c *gin.Context, verb string, err error, fallback string) {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "validation failed"):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Validation failed", "details": msg})
+	case strings.Contains(msg, "measurement type not found"):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Measurement type not found", "details": msg})
+	default:
+		log.Printf("%s control measurement: %v", verb, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fallback})
+	}
+}
+
 // AddControlMeasurement adds a measurement mapping to a control
 func (h *PlatformFrameworkHandlers) AddControlMeasurement(c *gin.Context) {
 	controlIDStr := c.Param("id")
@@ -395,9 +418,7 @@ func (h *PlatformFrameworkHandlers) AddControlMeasurement(c *gin.Context) {
 
 	measurement, err := h.platformFrameworkService.AddControlMeasurement(controlID, &input)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to add control measurement",
-		})
+		measurementError(c, "add", err, "Failed to add control measurement")
 		return
 	}
 
@@ -438,9 +459,7 @@ func (h *PlatformFrameworkHandlers) UpdateControlMeasurement(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Measurement not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to update control measurement",
-		})
+		measurementError(c, "update", err, "Failed to update control measurement")
 		return
 	}
 

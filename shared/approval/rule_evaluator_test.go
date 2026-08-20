@@ -135,6 +135,54 @@ func TestEvaluateRuleSourceAndConfidence(t *testing.T) {
 		}
 	})
 
+	// The "cloud_discovery" and "all" branches were unreachable until the
+	// segment rule gained a per-source setting: both writers hard-coded
+	// "sensor_discoveries" and nothing else could author a rule. These pin them
+	// as live code, in both polarities.
+	cloudDiscovery := Discovery{
+		TenantID: uuid.New(),
+		Metadata: []byte(`{"discovery_method":"cloud_api","cloud_provider":"aws","cloud_region":"us-east-1"}`),
+	}
+	sensorDiscovery := Discovery{TenantID: uuid.New(), Confidence: 0.9}
+
+	t.Run("cloud_discovery rule matches a cloud discovery", func(t *testing.T) {
+		rule := segmentRule(segmentID, true)
+		rule.Conditions["source"] = "cloud_discovery"
+		matched, err := e.EvaluateRule(rule, cloudDiscovery, onSegment(segmentID))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !matched {
+			t.Fatal("a cloud_discovery rule did not match a cloud discovery — the branch is dead code again")
+		}
+	})
+
+	t.Run("cloud_discovery rule skips a sensor discovery", func(t *testing.T) {
+		rule := segmentRule(segmentID, true)
+		rule.Conditions["source"] = "cloud_discovery"
+		matched, err := e.EvaluateRule(rule, sensorDiscovery, onSegment(segmentID))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if matched {
+			t.Fatal("a cloud-only rule matched a sensor discovery")
+		}
+	})
+
+	t.Run("all matches both sources", func(t *testing.T) {
+		rule := segmentRule(segmentID, true)
+		rule.Conditions["source"] = "all"
+		for name, d := range map[string]Discovery{"cloud": cloudDiscovery, "sensor": sensorDiscovery} {
+			matched, err := e.EvaluateRule(rule, d, onSegment(segmentID))
+			if err != nil {
+				t.Fatalf("unexpected error for %s: %v", name, err)
+			}
+			if !matched {
+				t.Fatalf(`a rule with source "all" did not match the %s discovery`, name)
+			}
+		}
+	})
+
 	t.Run("min_confidence is enforced", func(t *testing.T) {
 		rule := segmentRule(segmentID, true)
 		rule.Conditions["min_confidence"] = 0.8

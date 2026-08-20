@@ -129,7 +129,7 @@ The service creates a discovery job, enumerates and interrogates the resources, 
 
 **UI:** Discovery → Approvals.
 
-Cloud-discovered assets appear alongside sensor-discovered ones with hostname, port, protocol, protocol version, cipher suite and certificate detail. They carry `discovery_method = 'cloud_api'` and arrive as `pending_approval` unless a network-space auto-approval rule promotes them to `monitoring`.
+Cloud-discovered assets appear alongside sensor-discovered ones with hostname, port, protocol, protocol version, cipher suite and certificate detail. They carry `discovery_method = 'cloud_api'` and arrive as `pending_approval` — unless the cloud segment they belong to (the per-region segment created from their `cloud_provider`/`cloud_region`) has auto-approve enabled **with cloud discoveries among its sources**, in which case they go straight to `monitoring`. Cloud coverage is off on every pre-existing segment and is enabled per segment in Settings → Infrastructure; see [Asset Approval](asset-approval.md#which-discoveries-a-segment-auto-approves).
 
 Approved resources appear as Infrastructure Assets with their Crypto Configurations. Cloud device types render with readable names ("AWS S3 bucket", "AWS KMS key") on Discovery → Devices and in the job drawer, and map to CMDB asset types: load balancers to **appliance**, managed services (API Gateway, CloudFront, KMS, S3) to **service**, and RDS instances to **server**.
 

@@ -31,7 +31,9 @@ const sevColor = (s: string) => SEVERITY_COLOR[s] ?? 'var(--neutral)';
 
 /* ------------------------------- breakdown ------------------------------- */
 
-const BREAKDOWN_LABELS: { key: keyof import('./support-queries').HealthBreakdown; label: string }[] = [
+type FactorKey = 'resource_efficiency' | 'performance_metrics' | 'security_posture' | 'business_activity' | 'cost_optimization';
+
+const BREAKDOWN_LABELS: { key: FactorKey; label: string }[] = [
   { key: 'resource_efficiency', label: 'Resource efficiency' },
   { key: 'performance_metrics', label: 'Performance' },
   { key: 'security_posture', label: 'Security posture' },
@@ -39,13 +41,23 @@ const BREAKDOWN_LABELS: { key: keyof import('./support-queries').HealthBreakdown
   { key: 'cost_optimization', label: 'Cost optimization' },
 ];
 
-function TenantHealthDrawer({ summary, onClose }: { summary: TenantHealthSummary; onClose: () => void }) {
+// A factor is null when the peer service supplying it was unreachable. That is
+// NOT a zero — rendering it as an empty bar would restate the very bug this
+// replaced (an unreachable peer showing as a plausible number). Show the gap.
+const UNAVAILABLE = 'Unavailable';
+
+export function TenantHealthDrawer({ summary, onClose }: { summary: TenantHealthSummary; onClose: () => void }) {
   const id = summary.tenant_id;
   const detailQ = useTenantHealthDetail(id);
   const alertsQ = useTenantHealthAlerts(id);
   const detail = detailQ.data;
   const alerts = alertsQ.data ?? [];
   const recommendations = detail?.recommendations ?? [];
+  // health_status 'unknown' means NOTHING could be measured — overall_score is
+  // 0 for want of data, not because the tenant is unwell. Never render it as a
+  // score.
+  const unmeasured = summary.health_status === 'unknown';
+  const unavailableSources = detail?.score_breakdown.unavailable_sources ?? [];
 
   return (
     <Modal
@@ -58,8 +70,8 @@ function TenantHealthDrawer({ summary, onClose }: { summary: TenantHealthSummary
     >
       {/* score header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-        <div style={{ fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 30, color: healthColor(summary.overall_score), lineHeight: 1 }}>
-          {Math.round(summary.overall_score)}
+        <div style={{ fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 30, color: unmeasured ? 'var(--op-t3)' : healthColor(summary.overall_score), lineHeight: 1 }}>
+          {unmeasured ? '—' : Math.round(summary.overall_score)}
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           <StatusTag status={statusKey(summary.health_status)} />
@@ -75,15 +87,29 @@ function TenantHealthDrawer({ summary, onClose }: { summary: TenantHealthSummary
         {detail && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {BREAKDOWN_LABELS.map(({ key, label }) => {
-              const v = detail.score_breakdown[key] ?? 0;
+              const v = detail.score_breakdown[key];
+              const measured = typeof v === 'number';
               return (
                 <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                   <span style={{ fontSize: 12, color: 'var(--op-t2)', width: 150, flex: 'none' }}>{label}</span>
-                  <MiniBar pct={v} color={healthColor(v)} />
-                  <span className="mono" style={{ fontSize: 11.5, color: 'var(--op-t1)', width: 32, textAlign: 'right', flex: 'none' }}>{Math.round(v)}</span>
+                  {measured
+                    ? <MiniBar pct={v} color={healthColor(v)} />
+                    : <span style={{ flex: 1, fontSize: 11.5, color: 'var(--op-t3)', fontStyle: 'italic' }}>{UNAVAILABLE}</span>}
+                  <span className="mono" style={{ fontSize: 11.5, color: measured ? 'var(--op-t1)' : 'var(--op-t3)', width: 32, textAlign: 'right', flex: 'none' }}>
+                    {measured ? Math.round(v) : '—'}
+                  </span>
                 </div>
               );
             })}
+            {unavailableSources.length > 0 && (
+              <div style={{ fontSize: 11.5, color: 'var(--warn)', marginTop: 2 }}>
+                {unmeasured
+                  ? 'No health factor could be measured — these services were unreachable: '
+                  : 'Some factors could not be measured — these services were unreachable: '}
+                <span className="mono">{unavailableSources.join(', ')}</span>
+                {!unmeasured && ` (score reflects ${Math.round((detail.score_breakdown.data_completeness ?? 0) * 100)}% of the factor weight).`}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -197,7 +223,12 @@ export function TenantHealthPage() {
                   {t.tenant_name || <span className="mono" style={{ fontSize: 11 }}>{t.tenant_id.slice(0, 8)}</span>}
                 </td>
                 <td style={{ textAlign: 'right' }}>
-                  <span className="mono" style={{ fontWeight: 700, color: healthColor(t.overall_score) }}>{Math.round(t.overall_score)}</span>
+                  {/* 'unknown' = no factor could be measured. Showing 0 would
+                      read as "critically unhealthy" for a tenant we simply
+                      failed to poll. */}
+                  {t.health_status === 'unknown'
+                    ? <span className="mono t-muted" title="No health factor could be measured">—</span>
+                    : <span className="mono" style={{ fontWeight: 700, color: healthColor(t.overall_score) }}>{Math.round(t.overall_score)}</span>}
                 </td>
                 <td><StatusTag status={statusKey(t.health_status)} /></td>
                 <td style={{ textAlign: 'right' }}>

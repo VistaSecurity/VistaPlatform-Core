@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "title": "VistaPlatform Helm chart values",
+  "title": "Vista Platform Helm chart values",
   "type": "object",
   "additionalProperties": true,
   "required": [

@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
-  title: VistaPlatform — inventory-service API
+  title: Vista Platform — inventory-service API
   version: 0.1.0
   description: "Spec-first contract for inventory-service (ADR-0001). Started as the second\nvertical slice after the cbom-service/scopes pilot, covering the\n**Infrastructure Assets** resource — the CMDB configuration items\n(servers / endpoints / services) discovered and tracked per tenant — and\nextended with the **Certificates** resource (the X.509 certificate\ninventory the UI lists, opens, and visualizes the chain of).\n\n## Scope of this spec\n\nCovers the core endpoints on the **v2 (CMDB-aligned)** path surface\n`/api/v2/inventory-service/...`:\n\nInfrastructure assets:\n\n  - `GET    /infrastructure-assets`          — list (paginated)\n  - `GET    /infrastructure-assets/{id}`     — get one\n  - `PUT    /infrastructure-assets/{id}`     — update\n  - `POST   /infrastructure-assets/approve`  — bulk approve (pending → monitoring)\n  - `POST   /infrastructure-assets/deny`     — bulk deny\n\nCertificates:\n\n  - `GET    /certificates`                       — list (paginated)\n  - `GET    /certificates/expiring`              — expiring + recently-expired list (dashboard shape)\n  - `GET    /certificates/{id}`                  — get one\n  - `GET    /certificates/{id}/chain`            — flat issuer chain\n  - `POST   /certificates/{id}/rebuild-chain`    — rebuild one chain (RBAC-gated)\n  - `POST   /certificates/rebuild-all-chains`    — bulk rebuild all chains (RBAC-gated)\n  - `POST   /certificates`                        — manually add a certificate (RBAC assets.manage)\n  - `POST   /certificates/upload`                 — upload a PEM file (RBAC assets.manage)\n  - `PUT    /certificates/{id}`                   — update a certificate (RBAC assets.update)\n\nStill out of scope: the broader asset surface (search, facets, stats,\nlifecycle, crypto, hard delete, etc.) and the remaining certificate read\nhelpers the UI calls (search / by-issuer / history) — those exist server-side\nbut are not yet specced in this slice (tracked separately).\n\nCrypto configurations:\n\n    ## Shape status (important)\n\nThese paths document the **current, pre-envelope shapes** the service\nreturns today, captured from the real gin handlers (single resources wrapped\nas `{ \"asset\": {...} }`, the list wrapped as `{ \"assets\": [...],\n\"pagination\": {...} }`, approve/deny as `{ \"message\": \"...\", \"count\": N }`,\nerrors mostly as `{ \"error\": \"string\" }`). They are specced as-is per\nADR-0001 step 2, and the Go contract test\n(`services/inventory-service/internal/handlers/asset_contract_test.go`)\nasserts the live handlers match them.\n\nThe **go-forward ADR-0002 envelope** (`Error`, `Pagination`, the `data`\nwrapper) is defined under `components.schemas` as the documented standard\nthat NEW or HARDENED endpoints conform to. The current v2 asset paths do not\nyet use it; they are hardened to it when the frontend-v2 surface first\nconsumes them (ADR-0001 step 5), at which point this file and the contract\ntest move together.\n"
   contact:
-    name: VistaPlatform Platform
+    name: Vista Security
 servers:
 - url: /api/v2/inventory-service
   description: inventory-service v2 (CMDB-aligned), mounted behind the API gateway.
@@ -3550,6 +3550,18 @@ components:
           - boolean
           - 'null'
           description: Omitted/null keeps the current value on update (create default false).
+        auto_approve_sources:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+            enum:
+            - sensor
+            - cloud
+          description: 'Which discovery sources auto-approval covers for this segment.
+            Omitted/null keeps the current value on update and defaults to ["sensor"]
+            on create, so cloud coverage is always an explicit opt-in.'
         tags:
           type: object
           additionalProperties: true
@@ -3675,6 +3687,15 @@ components:
           type: boolean
         auto_approve_discoveries:
           type: boolean
+        auto_approve_sources:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: 'Which discovery sources this segment auto-approves ("sensor",
+            "cloud"). A segment stored before the setting existed reads back as
+            ["sensor"].'
         tags:
           type:
           - object
@@ -6600,7 +6621,11 @@ components:
           description: IPs, CIDRs, or hostnames to scan (max 1000).
         execution_mode:
           type: string
-          description: 'How the scan is dispatched: `auto`, `cloud`, or `sensors`.'
+          description: >-
+            How the scan is dispatched: `auto` (platform decides) or `cloud`
+            (platform sensor). `sensors` is REJECTED with 400 — discovery jobs
+            cannot be dispatched to tenant-deployed sensors; no dispatcher
+            exists, and such jobs used to run from the platform cluster instead.
         protocols:
           type: array
           items:
@@ -6611,11 +6636,6 @@ components:
           items:
             type: integer
           description: Ports to probe (e.g. 443, 22, 8443). Empty = service default.
-        preferred_sensor_ids:
-          type: array
-          items:
-            type: string
-          description: Sensor IDs to prefer when execution_mode routes via sensors.
         retention_cap_mb:
           type:
           - integer

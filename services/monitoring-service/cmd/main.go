@@ -90,8 +90,10 @@ func main() {
 	// Initialize API server
 	server := api.NewServer(cfg, db, bypassDB, healthService, metricsService, logStorageService, alertingService)
 
-	// Initialize resource collector
-	resourceCollector := jobs.NewResourceCollector(logrus.StandardLogger(), db, bypassDB)
+	// Initialize resource collector. It no longer takes a database handle: the
+	// only thing it used one for was picking a tenant to attribute host
+	// metrics to, which is not a thing a query can answer.
+	resourceCollector := jobs.NewResourceCollector(logrus.StandardLogger())
 
 	// Initialize metrics aggregator
 	metricsAggregator := jobs.NewMetricsAggregator(cfg, healthService, metricsService)

@@ -273,9 +273,15 @@ func permissionIDSetToSlice(set map[uuid.UUID]struct{}) []uuid.UUID {
 //     allowed.
 //
 // `wanted` is the requested set; `current` is the role's existing grants.
+//
+// `delegated` is the set of permission NAMES exempted from guard (2) by a named
+// role-delegation exception (see role_delegations_gen.go). It is passed nil by
+// every caller that EDITS a role's permission set — minting a permission onto a
+// role is not delegating a role, and the exception must not reach it. Only
+// AssignUserRole, which hands an existing role to a user, supplies one.
 func (s *RBACService) validateGrantable(
 	ctx context.Context, tx *sql.Tx, tenantID, actorID uuid.UUID,
-	wanted []uuid.UUID, current map[uuid.UUID]struct{},
+	wanted []uuid.UUID, current map[uuid.UUID]struct{}, delegated map[string]struct{},
 ) error {
 	if len(wanted) == 0 {
 		return nil
@@ -328,9 +334,13 @@ func (s *RBACService) validateGrantable(
 	}
 	var denied []string
 	for _, id := range added {
-		if _, ok := held[id]; !ok {
-			denied = append(denied, known[id])
+		if _, ok := held[id]; ok {
+			continue
 		}
+		if _, exempt := delegated[known[id]]; exempt {
+			continue
+		}
+		denied = append(denied, known[id])
 	}
 	if len(denied) > 0 {
 		sort.Strings(denied)
@@ -429,7 +439,9 @@ func (s *RBACService) UpdateRolePermissions(tenantID, roleID, actorID uuid.UUID,
 		if err != nil {
 			return err
 		}
-		if err := s.validateGrantable(ctx, tx, tenantID, actorID, permissionIDs, current); err != nil {
+		// nil delegations: this REWRITES a role's permission set. A delegation
+		// lets an actor hand over a role, not mint the permission elsewhere.
+		if err := s.validateGrantable(ctx, tx, tenantID, actorID, permissionIDs, current, nil); err != nil {
 			return err
 		}
 
@@ -480,7 +492,9 @@ func (s *RBACService) CreateTenantRole(tenantID, actorID uuid.UUID, req CreateRo
 	// RLS-scoped write: tenant_roles carries tenant_isolation, so app.tenant_id
 	// must satisfy the policy WITH CHECK on the INSERT.
 	err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		if err := s.validateGrantable(ctx, tx, tenantID, actorID, permissionIDs, map[uuid.UUID]struct{}{}); err != nil {
+		// nil delegations: same reason as UpdateRolePermissions — a new custom
+		// role is a place to mint permissions, not a role being handed over.
+		if err := s.validateGrantable(ctx, tx, tenantID, actorID, permissionIDs, map[uuid.UUID]struct{}{}, nil); err != nil {
 			return err
 		}
 
@@ -743,7 +757,15 @@ func (s *RBACService) AssignUserRole(tenantID, userID, roleID, actorID uuid.UUID
 		if err != nil {
 			return err
 		}
-		if err := s.validateGrantable(ctx, tx, tenantID, actorID, permissionIDSetToSlice(rolePermissions), map[uuid.UUID]struct{}{}); err != nil {
+		// This hands an EXISTING role to a user, so the named role-delegation
+		// exceptions apply here (and only here, plus the equivalent guard in
+		// internal/api/users.go). Empty for every pairing not listed in
+		// standards/permissions.yaml.
+		delegated, err := DelegatedPermissionNames(ctx, tx, tenantID, actorID, roleID)
+		if err != nil {
+			return err
+		}
+		if err := s.validateGrantable(ctx, tx, tenantID, actorID, permissionIDSetToSlice(rolePermissions), map[uuid.UUID]struct{}{}, delegated); err != nil {
 			return err
 		}
 

@@ -1,4 +1,4 @@
-# values-ha.yaml — high-availability overlay for the VistaPlatform Helm chart.
+# values-ha.yaml — high-availability overlay for the Vista Platform Helm chart.
 #
 # Apply alongside the base values.yaml and your customer values:
 #

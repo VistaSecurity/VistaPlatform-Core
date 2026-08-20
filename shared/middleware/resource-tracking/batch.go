@@ -145,24 +145,7 @@ func (bp *BatchProcessor) sendBatch(metrics []ResourceMetrics) {
 		return
 	}
 
-	// Aggregate metrics by tenant
-	tenantMetrics := make(map[uuid.UUID]*BatchRequest)
-
-	for _, metric := range metrics {
-		if _, exists := tenantMetrics[metric.TenantID]; !exists {
-			tenantMetrics[metric.TenantID] = &BatchRequest{
-				TenantID: metric.TenantID,
-			}
-		}
-
-		// Aggregate the metrics
-		tenantMetrics[metric.TenantID].APICalls += metric.APICalls
-		tenantMetrics[metric.TenantID].DatabaseQueries += metric.DatabaseQueries
-		tenantMetrics[metric.TenantID].MemoryUsageMB += metric.MemoryUsageMB
-		tenantMetrics[metric.TenantID].CPUUsagePercent += metric.CPUUsagePercent
-		tenantMetrics[metric.TenantID].StorageUsedMB += metric.StorageUsedMB
-		tenantMetrics[metric.TenantID].NetworkBytes += metric.NetworkBytes
-	}
+	tenantMetrics := aggregateByTenant(metrics)
 
 	// Send aggregated metrics for each tenant
 	for _, request := range tenantMetrics {
@@ -175,6 +158,42 @@ func (bp *BatchProcessor) sendBatch(metrics []ResourceMetrics) {
 			bp.circuit.RecordSuccess()
 		}
 	}
+}
+
+// aggregateByTenant folds a batch of per-request measurements into one request
+// per tenant.
+//
+// API calls and payload bytes are counters over the batch interval, so they
+// sum. Database queries sum only across the requests that actually counted
+// them: a request that did not instrument its queries contributes nothing
+// rather than a zero, and if none did, the field stays nil — not measured.
+//
+// The batch previously also summed CPUUsagePercent, adding percentages across
+// requests to produce a figure with no meaning that grew without bound as
+// traffic rose. Those fields no longer exist; see ResourceMetrics.
+func aggregateByTenant(metrics []ResourceMetrics) map[uuid.UUID]*BatchRequest {
+	tenantMetrics := make(map[uuid.UUID]*BatchRequest)
+
+	for _, metric := range metrics {
+		agg, exists := tenantMetrics[metric.TenantID]
+		if !exists {
+			agg = &BatchRequest{TenantID: metric.TenantID}
+			tenantMetrics[metric.TenantID] = agg
+		}
+
+		agg.APICalls += metric.APICalls
+		agg.NetworkBytes += metric.NetworkBytes
+
+		if metric.DatabaseQueries != nil {
+			if agg.DatabaseQueries == nil {
+				var zero int64
+				agg.DatabaseQueries = &zero
+			}
+			*agg.DatabaseQueries += *metric.DatabaseQueries
+		}
+	}
+
+	return tenantMetrics
 }
 
 // sendSingleRequest sends a single metrics request to the tracker service

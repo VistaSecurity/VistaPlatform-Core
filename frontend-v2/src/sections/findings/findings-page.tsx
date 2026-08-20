@@ -22,6 +22,7 @@ import { useBatchEvaluate, useCryptoRisks, useFindingsList, useFrameworkContext 
 import { assetOf, catOf, isOpenWf, issueLabel, sevLevel, sevRank, targetLabel, wfOf, WF_COLOR, WF_LABEL, type ComplianceFinding, type ControlRef, type CryptoRisk } from './model';
 import { DEFAULT_FINDINGS_LENS } from './lenses';
 import { coverageLine, formatScore, normalizeControlStatus, notAssessedReasonText, CONTROL_STATUS_LABEL, NOT_ASSESSED_LABEL } from './control-status';
+import { downloadCsv, buildCryptoRiskCsvRows, buildComplianceFindingCsvRows, CRYPTO_RISK_CSV_HEADER, COMPLIANCE_FINDING_CSV_HEADER, type ControlMeta } from './export-csv';
 
 const GRID = '12px minmax(0,1.7fr) 118px minmax(0,1.5fr) minmax(0,1.25fr) 122px';
 const SEVS: RiskLevel[] = [...LEVELS];
@@ -30,8 +31,6 @@ type Sel =
   | { kind: 'crypto'; risk: CryptoRisk }
   | { kind: 'compliance'; finding: ComplianceFinding; fw: string; control?: ControlRef }
   | null;
-
-interface ControlMeta { fwId: string; fwName: string; control: ControlRef }
 
 interface Group {
   key: string;
@@ -207,13 +206,22 @@ export function FindingsPage() {
 
   const toggle = (k: string) => setOpen((s) => { const n = new Set(s); if (n.has(k)) n.delete(k); else n.add(k); return n; });
 
-  const onExport = async () => {
-    const { data } = await clients.inventory.GET('/crypto-risks/export', { parseAs: 'text' });
-    if (typeof data !== 'string') return;
-    const url = URL.createObjectURL(new Blob([data], { type: 'text/csv' }));
-    const a = document.createElement('a');
-    a.href = url; a.download = 'crypto-risks.csv'; a.click();
-    URL.revokeObjectURL(url);
+  // B-31: this used to always hit GET /crypto-risks/export — wrong dataset on
+  // the two compliance lenses (a different service's findings entirely),
+  // ignored every filter on the crypto lenses, and silently did nothing on a
+  // non-2xx. Building the CSV client-side from the rows already loaded and
+  // filtered on screen (as Inventory's exportCsv does) fixes all three: the
+  // export always matches what the current lens + filters show, and there's
+  // no network call left to fail silently.
+  const exportRows: (CryptoRisk | ComplianceFinding)[] = complianceLens ? complianceFiltered : filtered;
+  const onExport = () => {
+    if (exportRows.length === 0) { toast.error('No findings to export for the current filters.'); return; }
+    const stamp = new Date().toISOString().slice(0, 10);
+    if (complianceLens) {
+      downloadCsv(`vista-findings-compliance-${stamp}.csv`, COMPLIANCE_FINDING_CSV_HEADER, buildComplianceFindingCsvRows(complianceFiltered, controlMeta));
+    } else {
+      downloadCsv(`vista-findings-crypto-risks-${stamp}.csv`, CRYPTO_RISK_CSV_HEADER, buildCryptoRiskCsvRows(filtered));
+    }
   };
 
   // ---- crypto row ----
@@ -329,7 +337,9 @@ export function FindingsPage() {
             {(ctxQ.data?.status?.frameworks ?? []).map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
           </select>
         )}
-        <button className="ui-btn sm" onClick={onExport}><Icon name="download" size={13} />Export</button>
+        <button className="ui-btn sm" onClick={onExport} disabled={exportRows.length === 0} style={{ opacity: exportRows.length === 0 ? 0.5 : 1 }} title="Export the current view as CSV">
+          <Icon name="download" size={13} />Export
+        </button>
       </div>
 
       {/* L-6: device-interrogation / discovery findings never appear on this page —

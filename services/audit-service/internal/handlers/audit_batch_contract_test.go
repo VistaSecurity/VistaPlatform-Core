@@ -1,7 +1,7 @@
 package handlers
 
 // Contract tests for the remaining audit-service admin-ui surfaces (ADR-0001):
-// retention-policies, alerts, analytics, compliance-reports. Batched into one
+// retention-policies, analytics, compliance-reports. Batched into one
 // slice because they share the audit-service spec, the handlers package, and
 // the activity-logs harness — they don't conflict with each other.
 //
@@ -202,121 +202,6 @@ func TestContract_UpdateRetentionPolicy_500(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newRetentionEngine(&stubRetentionService{updateErr: errAudit})
 	w := do(eng, http.MethodPut, base+"/retention-policies/"+aUUID, strings.NewReader(retentionBody))
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
-	}
-	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
-}
-
-// ================================ alerts =====================================
-
-type stubAlertService struct {
-	alerts    []services.Alert
-	alertsErr error
-	ackErr    error
-}
-
-func (s *stubAlertService) GetRules(context.Context) []services.AlertRule { return nil }
-func (s *stubAlertService) GetAlerts(context.Context, string, int) ([]services.Alert, error) {
-	return s.alerts, s.alertsErr
-}
-func (s *stubAlertService) AcknowledgeAlert(context.Context, uuid.UUID, uuid.UUID) error {
-	return s.ackErr
-}
-
-func newAlertEngine(svc alertService, withUser bool) *gin.Engine {
-	gin.SetMode(gin.TestMode)
-	r := gin.New()
-	h := &AlertHandler{service: svc}
-	g := r.Group(base)
-	if withUser {
-		g.Use(func(c *gin.Context) { c.Set("userID", uuid.New()); c.Next() })
-	}
-	g.GET("/alerts", h.GetAlerts)
-	g.POST("/alerts/:id/acknowledge", h.AcknowledgeAlert)
-	return r
-}
-
-func sampleAlert() services.Alert {
-	now := time.Now().UTC()
-	return services.Alert{
-		ID:           uuid.New(),
-		RuleID:       uuid.New(),
-		RuleName:     "Failed logins",
-		Severity:     "high",
-		Message:      "10 failed logins in 5m",
-		EventCount:   10,
-		SampleEvents: []map[string]interface{}{{"ip": "10.0.0.1"}},
-		TriggeredAt:  now,
-		Status:       "open",
-	}
-}
-
-func TestContract_GetAlerts_200(t *testing.T) {
-	sv := loadSpec(t)
-	eng := newAlertEngine(&stubAlertService{alerts: []services.Alert{sampleAlert()}}, true)
-	w := do(eng, http.MethodGet, base+"/alerts", nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
-	}
-	sv.assertConforms(t, "AlertListResponse", w.Body.Bytes())
-}
-
-func TestContract_GetAlerts_200_empty(t *testing.T) {
-	sv := loadSpec(t)
-	eng := newAlertEngine(&stubAlertService{alerts: nil}, true)
-	w := do(eng, http.MethodGet, base+"/alerts?status=resolved", nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
-	}
-	sv.assertConforms(t, "AlertListResponse", w.Body.Bytes())
-}
-
-func TestContract_GetAlerts_500(t *testing.T) {
-	sv := loadSpec(t)
-	eng := newAlertEngine(&stubAlertService{alertsErr: errAudit}, true)
-	w := do(eng, http.MethodGet, base+"/alerts", nil)
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
-	}
-	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
-}
-
-func TestContract_AcknowledgeAlert_200(t *testing.T) {
-	sv := loadSpec(t)
-	eng := newAlertEngine(&stubAlertService{}, true)
-	w := do(eng, http.MethodPost, base+"/alerts/"+aUUID+"/acknowledge", nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
-	}
-	sv.assertConforms(t, "AuditMessageResponse", w.Body.Bytes())
-}
-
-func TestContract_AcknowledgeAlert_400_badID(t *testing.T) {
-	sv := loadSpec(t)
-	eng := newAlertEngine(&stubAlertService{}, true)
-	w := do(eng, http.MethodPost, base+"/alerts/not-a-uuid/acknowledge", nil)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
-	}
-	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
-}
-
-// No userID in context → 401.
-func TestContract_AcknowledgeAlert_401(t *testing.T) {
-	sv := loadSpec(t)
-	eng := newAlertEngine(&stubAlertService{}, false)
-	w := do(eng, http.MethodPost, base+"/alerts/"+aUUID+"/acknowledge", nil)
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401; body=%s", w.Code, w.Body.String())
-	}
-	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
-}
-
-func TestContract_AcknowledgeAlert_500(t *testing.T) {
-	sv := loadSpec(t)
-	eng := newAlertEngine(&stubAlertService{ackErr: errAudit}, true)
-	w := do(eng, http.MethodPost, base+"/alerts/"+aUUID+"/acknowledge", nil)
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
 	}

@@ -197,13 +197,27 @@ function CouponsTab() {
   );
 }
 
+// Costing component names (shared/costing) for display.
+const COST_COMPONENT_LABELS: Record<string, string> = {
+  api_calls: 'API calls',
+  database: 'Database',
+  storage: 'Storage',
+  network: 'Network',
+  compute: 'Compute',
+};
+
+const costComponentLabel = (key: string) => COST_COMPONENT_LABELS[key] ?? key;
+
 function FinOpsTab() {
   const { data, isLoading } = usePlatformCost();
   const byService = data?.cost_by_service ? Object.entries(data.cost_by_service) : [];
+  // Components with no measurement this period. Listed explicitly so the
+  // platform-cost tile is not read as the whole infrastructure bill.
+  const notMeasured = data?.not_measured ?? [];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12 }}>
-        <StatTile label="Platform cost" value={isLoading ? '…' : money(data?.total_cost_usd ?? 0)} sub="this period" icon={Coins} />
+        <StatTile label="Platform cost" value={isLoading ? '…' : money(data?.total_cost_usd ?? 0)} sub="measured components, this period" icon={Coins} />
         <StatTile label="Tenants billed" value={isLoading ? '…' : num(data?.tenant_count ?? 0)} icon={Building2} />
         <StatTile label="Avg / tenant" value={isLoading ? '…' : money(data?.average_cost_usd ?? 0)} icon={Activity} />
       </div>
@@ -211,9 +225,18 @@ function FinOpsTab() {
         <Panel title="Cost by service">
           <div style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 9 }}>
             {byService.length > 0 ? byService.map(([k, v]) => (
-              <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5 }}><span style={{ color: 'var(--op-t2)' }}>{k}</span><span className="op-num" style={{ color: 'var(--op-t1)', fontWeight: 600 }}>{money(Number(v))}</span></div>
+              <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5 }}><span style={{ color: 'var(--op-t2)' }}>{costComponentLabel(k)}</span><span className="op-num" style={{ color: 'var(--op-t1)', fontWeight: 600 }}>{money(Number(v))}</span></div>
             )) : <Note>{isLoading ? 'Loading…' : 'No service-level cost breakdown.'}</Note>}
+            {notMeasured.map((k) => (
+              <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5 }}><span style={{ color: 'var(--op-t2)' }}>{costComponentLabel(k)}</span><span style={{ color: 'var(--op-t3)' }}>Not measured</span></div>
+            ))}
           </div>
+          {notMeasured.length > 0 && (
+            <div style={{ padding: '0 16px 12px', fontSize: 11, color: 'var(--op-t3)', lineHeight: 1.45 }}>
+              Platform cost covers measured components only. Compute is not attributable per tenant —
+              the platform runs shared service pods, so no per-tenant CPU or memory figure exists.
+            </div>
+          )}
         </Panel>
         <Panel title="Top tenants by cost">
           <table className="op-table">

@@ -254,8 +254,19 @@ Cloud discoveries are processed through the same workflow as sensor discoveries:
 1. **Cloud Discovery** → `device-interrogation-service` discovers cloud resources (AWS, Azure, GCP)
 2. **Storage** → Discoveries written to `sensor_discoveries` table with `metadata->>'discovery_method' = 'cloud_api'`
 3. **Processing** → `discovery-processor-service` polls `sensor_discoveries` and processes batches
-4. **Approval** → Assets created with `pending_approval` status appear in Discovery Approvals modal
-5. **Approval Workflow** → Same approval process as sensor discoveries
+4. **Classification** → A cloud discovery is classified by its `cloud_provider`/`cloud_region` (the per-region cloud segment), not by its address — most cloud resources have no address and are written with an unspecified-address placeholder
+5. **Approval** → Assets are created `pending_approval` and appear in Discovery → Approvals, unless that cloud segment has auto-approve enabled **with cloud among its sources** (Settings → Infrastructure → edit the segment). That is off for every segment created before the setting existed
+6. **Approval Workflow** → Same approval process as sensor discoveries
+
+If cloud assets are queuing when you expect them to auto-approve, check the
+segment's sources first:
+
+```sql
+SELECT name, value, auto_approve_discoveries, metadata->'auto_approve_sources'
+FROM network_segments WHERE tenant_id = '<tenant>' AND network_type = 'cloud';
+```
+
+A `NULL` in the last column means sensor-only — the pre-setting default.
 
 ### Troubleshooting Cloud Discoveries
 

@@ -43,8 +43,14 @@ func (s *AssetService) GetAssetFacets(tenantID uuid.UUID, filters models.AssetFi
 		return nil, fmt.Errorf("unsupported facet level: %s", level)
 	}
 
+	// Inner SELECT groups per ASSET (B-44b): the risk-level HAVING aggregates
+	// MAX(ci.risk_score), and grouping straight by the facet key made that MAX
+	// span the whole bucket — one asset scoring 75 would report all 50 assets in
+	// a business unit as matching risk_level=high. Rolling up per a.id first and
+	// counting the surviving assets in an outer aggregate is the same shape
+	// GetAssets uses (buildAssetListWhereAndHaving over GROUP BY a.id).
 	base := fmt.Sprintf(`
-        SELECT %s AS "key", COUNT(DISTINCT a.id) AS "count"
+        SELECT %s AS "key", a.id AS "asset_id"
         FROM network_assets a
         LEFT JOIN crypto_implementations ci ON a.id = ci.asset_id AND ci.deleted_at IS NULL
         WHERE a.tenant_id = $1 AND a.deleted_at IS NULL
@@ -53,6 +59,17 @@ func (s *AssetService) GetAssetFacets(tenantID uuid.UUID, filters models.AssetFi
 	args := []interface{}{tenantID}
 	argCount := 1
 	whereConds := []string{}
+
+	// Same default scope the asset list applies (buildAssetListWhereAndHaving):
+	// facet counts must describe the same population the list they filter shows,
+	// otherwise a bucket counts pending-approval assets the list never returns.
+	if len(filters.AssetStatus) > 0 {
+		argCount++
+		whereConds = append(whereConds, fmt.Sprintf(`a.asset_status = ANY($%d)`, argCount))
+		args = append(args, pq.Array(filters.AssetStatus))
+	} else {
+		whereConds = append(whereConds, `a.asset_status = 'monitoring'`)
+	}
 
 	if filters.Search != "" {
 		terms := parseSearchQuery(filters.Search)
@@ -180,7 +197,9 @@ func (s *AssetService) GetAssetFacets(tenantID uuid.UUID, filters models.AssetFi
 	}
 
 	argCount++
-	query := base + "\nGROUP BY \"key\"" + having + "\nORDER BY \"count\" DESC, \"key\" ASC\nLIMIT $" + fmt.Sprintf("%d", argCount)
+	query := `SELECT "key", COUNT(*) AS "count" FROM (` +
+		base + "\nGROUP BY \"key\", a.id" + having +
+		"\n) per_asset\nGROUP BY \"key\"\nORDER BY \"count\" DESC, \"key\" ASC\nLIMIT $" + fmt.Sprintf("%d", argCount)
 	args = append(args, limit)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

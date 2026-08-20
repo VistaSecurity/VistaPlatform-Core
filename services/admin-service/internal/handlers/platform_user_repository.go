@@ -25,6 +25,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/shared/models"
+	passwordsvc "github.com/vistasecurity/vistaplatform/shared/security/password"
 )
 
 // errPlatformUserExists is returned by CreatePlatformUser when the email already
@@ -91,6 +92,10 @@ type platformUserStore interface {
 	GetPlatformUser(ctx context.Context, id string) (user models.PlatformUser, found bool, err error)
 	RoleExists(ctx context.Context, roleID string) (bool, error)
 	AdminEmailVerificationRequired(ctx context.Context) bool
+	// PasswordMinLength is the operator-configured password floor
+	// (platform_settings.password_min_length, admin-ui Security ▸ Policy),
+	// never below passwordsvc.MinPasswordLength.
+	PasswordMinLength(ctx context.Context) int
 	CreatePlatformUser(ctx context.Context, in platformUserInsert) (id string, createdAt, updatedAt time.Time, err error)
 	UpdatePlatformUser(ctx context.Context, id string, f platformUserUpdateFields) error
 	UpdatePlatformUserPassword(ctx context.Context, id, hash string, forceChange bool) (affected int64, err error)
@@ -290,6 +295,31 @@ func (r *platformUserRepository) AdminEmailVerificationRequired(ctx context.Cont
 		return false
 	}
 	return b
+}
+
+// PasswordMinLength reads platform_settings.password_min_length. It fails SAFE
+// (built-in floor on any error), because a password rule that silently
+// evaporates is a weakening — the opposite bias to the signup toggles.
+func (r *platformUserRepository) PasswordMinLength(ctx context.Context) int {
+	var raw []byte
+	err := r.db.QueryRowContext(ctx, `
+		SELECT setting_value FROM platform_settings
+		WHERE setting_key = 'password_min_length'
+	`).Scan(&raw)
+	if err != nil {
+		return passwordsvc.MinPasswordLength
+	}
+	var n int
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return passwordsvc.MinPasswordLength
+	}
+	if n < passwordsvc.MinPasswordLength {
+		return passwordsvc.MinPasswordLength
+	}
+	if n > passwordsvc.MaxPasswordLength {
+		return passwordsvc.MaxPasswordLength
+	}
+	return n
 }
 
 func (r *platformUserRepository) CreatePlatformUser(ctx context.Context, in platformUserInsert) (string, time.Time, time.Time, error) {

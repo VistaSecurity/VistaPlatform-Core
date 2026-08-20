@@ -13,7 +13,26 @@ import (
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
-// MeasurementExtractor extracts measurements from inventory for compliance evaluation
+// MeasurementExtractor extracts measurements from inventory for compliance evaluation.
+//
+// # Deleted inventory is not in scope, and forgetting that resurrects findings
+//
+// Asset deletion is a SOFT delete: inventory-service's DeleteAsset only stamps
+// network_assets.deleted_at, and deliberately leaves the asset's
+// crypto_implementations rows alone. FindingsService.OnAssetDeleted then flips
+// that asset's findings to INACTIVE.
+//
+// Every crypto_implementations query below therefore has to carry BOTH
+// `na.deleted_at IS NULL` and `ci.deleted_at IS NULL`. Without them a whole-tenant
+// reconcile re-extracts the deleted asset, recomputes the same violation, and
+// upsertFindings flips the INACTIVE rows straight back to ACTIVE — with
+// workflow_status reset to NEW and resurfaced_at stamped, so the tenant loses
+// triage state and their score drops again for an asset that no longer exists.
+// The two predicates are independent: an asset delete sets only na.deleted_at,
+// while a crypto-implementation delete sets only ci.deleted_at.
+//
+// The `certificates` queries need no equivalent — that table has no deleted_at
+// column; a certificate is either present or gone.
 type MeasurementExtractor struct {
 	db *sqlx.DB
 }
@@ -289,6 +308,8 @@ func (s *MeasurementExtractor) classifyConfigAlgorithmPQC(tenantID, assetID uuid
 		FROM crypto_implementations ci
 		JOIN network_assets na ON ci.asset_id = na.id
 		WHERE ci.tenant_id = $1
+			AND na.deleted_at IS NULL
+			AND ci.deleted_at IS NULL
 			AND ($2::uuid IS NULL OR na.id = $2)
 			AND ci.%s IS NOT NULL
 		ORDER BY ci.last_verified_at DESC
@@ -364,6 +385,8 @@ func (s *MeasurementExtractor) GetConfigSymmetricStrength(tenantID, assetID uuid
 		FROM crypto_implementations ci
 		JOIN network_assets na ON ci.asset_id = na.id
 		WHERE ci.tenant_id = $1
+			AND na.deleted_at IS NULL
+			AND ci.deleted_at IS NULL
 			AND ($2::uuid IS NULL OR na.id = $2)
 			AND ci.symmetric_encryption IS NOT NULL
 		ORDER BY ci.last_verified_at DESC
@@ -494,7 +517,7 @@ func (s *MeasurementExtractor) GetCertificateValidityDays(tenantID, assetID uuid
 // reads as "present" via cipher_suite.
 //
 // The IN-clause must stay in sync with the OT entries of the protocol_type
-// enum (see scripts/database/schema.sql) and with normalizeProtocol() in
+// enum (see scripts/database/schema.sql) and with resolveProtocol() in
 // services/inventory-service/internal/services/asset_service.go.
 func (s *MeasurementExtractor) GetOTProtocolEncryption(tenantID, assetID uuid.UUID) ([]MeasurementValue, error) {
 	query := `
@@ -511,6 +534,8 @@ func (s *MeasurementExtractor) GetOTProtocolEncryption(tenantID, assetID uuid.UU
 		FROM crypto_implementations ci
 		JOIN network_assets na ON ci.asset_id = na.id
 		WHERE ci.tenant_id = $1
+			AND na.deleted_at IS NULL
+			AND ci.deleted_at IS NULL
 			AND ($2::uuid IS NULL OR na.id = $2)
 			AND ci.protocol IN ('Modbus','DNP3','MMS','ICCP','BACnet','BACnet_SC','EtherNet_IP','OPC_UA','HART_IP','S7')
 		ORDER BY ci.last_verified_at DESC
@@ -676,6 +701,8 @@ func (s *MeasurementExtractor) GetTLSVersion(tenantID, assetID uuid.UUID) ([]Mea
 		FROM crypto_implementations ci
 		JOIN network_assets na ON ci.asset_id = na.id
 		WHERE ci.tenant_id = $1
+			AND na.deleted_at IS NULL
+			AND ci.deleted_at IS NULL
 			AND ($2::uuid IS NULL OR na.id = $2)
 			AND ci.protocol = 'TLS'
 			AND ci.protocol_version IS NOT NULL
@@ -752,6 +779,8 @@ func (s *MeasurementExtractor) GetKeyExchangeAlgorithm(tenantID, assetID uuid.UU
 		FROM crypto_implementations ci
 		JOIN network_assets na ON ci.asset_id = na.id
 		WHERE ci.tenant_id = $1
+			AND na.deleted_at IS NULL
+			AND ci.deleted_at IS NULL
 			AND ($2::uuid IS NULL OR na.id = $2)
 			AND ci.key_exchange_algorithm IS NOT NULL
 		ORDER BY ci.last_verified_at DESC
@@ -831,6 +860,8 @@ func (s *MeasurementExtractor) GetSymmetricEncryption(tenantID, assetID uuid.UUI
 		FROM crypto_implementations ci
 		JOIN network_assets na ON ci.asset_id = na.id
 		WHERE ci.tenant_id = $1
+			AND na.deleted_at IS NULL
+			AND ci.deleted_at IS NULL
 			AND ($2::uuid IS NULL OR na.id = $2)
 			AND ci.symmetric_encryption IS NOT NULL
 		ORDER BY ci.last_verified_at DESC
@@ -910,6 +941,8 @@ func (s *MeasurementExtractor) GetHashAlgorithm(tenantID, assetID uuid.UUID) ([]
 		FROM crypto_implementations ci
 		JOIN network_assets na ON ci.asset_id = na.id
 		WHERE ci.tenant_id = $1
+			AND na.deleted_at IS NULL
+			AND ci.deleted_at IS NULL
 			AND ($2::uuid IS NULL OR na.id = $2)
 			AND ci.hash_algorithm IS NOT NULL
 		ORDER BY ci.last_verified_at DESC
@@ -988,6 +1021,8 @@ func (s *MeasurementExtractor) GetCipherSuiteName(tenantID, assetID uuid.UUID) (
 		FROM crypto_implementations ci
 		JOIN network_assets na ON ci.asset_id = na.id
 		WHERE ci.tenant_id = $1
+			AND na.deleted_at IS NULL
+			AND ci.deleted_at IS NULL
 			AND ($2::uuid IS NULL OR na.id = $2)
 			AND ci.cipher_suite IS NOT NULL
 		ORDER BY ci.last_verified_at DESC
@@ -1062,6 +1097,8 @@ func (s *MeasurementExtractor) GetPFSSupport(tenantID, assetID uuid.UUID) ([]Mea
 		FROM crypto_implementations ci
 		JOIN network_assets na ON ci.asset_id = na.id
 		WHERE ci.tenant_id = $1
+			AND na.deleted_at IS NULL
+			AND ci.deleted_at IS NULL
 			AND ($2::uuid IS NULL OR na.id = $2)
 			AND ci.key_exchange_algorithm IS NOT NULL
 		ORDER BY ci.last_verified_at DESC
@@ -1142,6 +1179,8 @@ func (s *MeasurementExtractor) GetTLSCompressionEnabled(tenantID, assetID uuid.U
 		FROM crypto_implementations ci
 		JOIN network_assets na ON ci.asset_id = na.id
 		WHERE ci.tenant_id = $1
+			AND na.deleted_at IS NULL
+			AND ci.deleted_at IS NULL
 			AND ($2::uuid IS NULL OR na.id = $2)
 			AND ci.protocol = 'TLS'
 		ORDER BY ci.last_verified_at DESC

@@ -101,7 +101,7 @@ func (s *CertificateService) IssueCertificate(tenantID, sensorID uuid.UUID, csrP
 	certTemplate := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			Organization: []string{"VistaPlatform Sensor"},
+			Organization: []string{"Vista Platform Sensor"},
 			Country:      []string{"US"},
 			CommonName:   sensorID.String(), // Use sensor ID as CN
 		},

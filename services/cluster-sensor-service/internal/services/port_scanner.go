@@ -36,11 +36,22 @@ func NewPortScanner() *PortScanner {
 }
 
 // sharedOTSMBEligible reports whether a protocol should be probed via the
-// shared OT/SMB prober (TLS/SSH/HTTPS are handled by the bespoke probers).
+// shared OT/SMB prober from the per-open-port loop of a TCP scan (TLS/SSH/HTTPS
+// are handled by the bespoke probers).
+//
+// UDP-registered protocols are excluded here ON PURPOSE and dispatched by
+// dispatchUDPProbes instead. Reaching them from this loop is what made a BACnet
+// job a guaranteed no-op: the loop only runs for ports an `nmap -sS` TCP scan
+// reported open, and a BACnet/IP controller listens on UDP 47808 only, so the
+// Who-Is was never sent and the job reported `completed` with zero findings and
+// zero errors.
+//
+// The transport is read from the shared registry rather than hard-coded, so a
+// prober that changes transport takes its dispatch decision with it.
 func sharedOTSMBEligible(protocol string) bool {
 	switch shareddisc.CanonicalProtocolName(protocol) {
 	case "MODBUS", "OPCUA", "ETHERNETIP", "BACNET", "SMB":
-		return true
+		return !shareddisc.IsUDPProtocol(protocol)
 	}
 	return false
 }
@@ -154,13 +165,37 @@ func validateNmapTarget(target string) error {
 // target: The IP address or hostname to scan (for nmap/connection)
 // originalHostname: The original hostname entered by user (for SNI and display), if nil uses target
 // probeOpts: per-job capability policy (nil means all probes enabled)
+//
+// Two independent dispatches, deliberately not nested:
+//
+//	scanTCPPorts       — find TCP listeners, then probe the protocols that ride
+//	                     on them. A TCP result gates only TCP probes.
+//	dispatchUDPProbes  — send the UDP-registered probers for the requested
+//	                     (protocol, port) pairs regardless of what TCP said,
+//	                     because a TCP scan can say nothing about a UDP service.
+//
+// Neither dispatch changes WHICH HOST is contacted. `target` arrives already
+// authorised — it is one expanded address of a discovery_targets row created
+// from the job's approved target list — and both paths speak only to it, on
+// only the ports that row names.
 func (ps *PortScanner) ScanTarget(target string, ports []int32, protocols []string, originalHostname *string, probeOpts map[string]interface{}) ([]models.DiscoveryFinding, error) {
-	var findings []models.DiscoveryFinding
-
 	// Validate target to prevent nmap argument injection
 	if err := validateNmapTarget(target); err != nil {
 		return nil, fmt.Errorf("target validation failed: %w", err)
 	}
+
+	findings, err := ps.scanTCPPorts(target, ports, protocols, originalHostname, probeOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	return ps.dispatchUDPProbes(findings, target, ports, protocols, originalHostname), nil
+}
+
+// scanTCPPorts runs the TCP port scan (nmap, falling back to a plain connect
+// sweep) and the probes that depend on an open TCP port.
+func (ps *PortScanner) scanTCPPorts(target string, ports []int32, protocols []string, originalHostname *string, probeOpts map[string]interface{}) ([]models.DiscoveryFinding, error) {
+	var findings []models.DiscoveryFinding
 
 	// Convert ports to string slice for nmap
 	portStrings := make([]string, len(ports))
@@ -351,6 +386,167 @@ func (ps *PortScanner) parseNmapOutput(output, target string, ports []int32, pro
 				findings = append(findings, finding)
 			}
 		}
+	}
+
+	return findings
+}
+
+// udpProbeDataPrefix is the finding.Data key prefix for a protocol's probe
+// bookkeeping — the same lower-cased canonical name probeSharedOTSMB already
+// uses for `<proto>_probe_error`.
+func udpProbeDataPrefix(protocol string) string {
+	return strings.ToLower(shareddisc.CanonicalProtocolName(protocol))
+}
+
+// findUDPMergeTarget locates an existing finding on the same port that a UDP
+// probe result belongs on: either one already claimed by this protocol, or the
+// generic tcp/udp row the TCP scan created for an open port. Returns -1 when
+// there is none, in which case an answered probe gets a finding of its own and
+// an unanswered one gets nothing.
+func findUDPMergeTarget(findings []models.DiscoveryFinding, port int, protocol string) int {
+	want := shareddisc.CanonicalProtocolName(protocol)
+	generic := -1
+	for i := range findings {
+		if findings[i].Port != port {
+			continue
+		}
+		switch shareddisc.CanonicalProtocolName(findings[i].Protocol) {
+		case want:
+			return i
+		case "TCP", "UDP", "":
+			if generic < 0 {
+				generic = i
+			}
+		}
+	}
+	return generic
+}
+
+// dispatchUDPProbes runs every UDP-registered prober the job requested, against
+// the ports the job named, WITHOUT requiring an open-TCP result first.
+//
+// This is the fix for B-60. probeBACnet and probeEtherNetIP are registered as
+// UDP probers but were only ever reached from the per-open-port loop of a TCP
+// scan. A BACnet/IP controller listens on UDP 47808 only, so nmap called the
+// port closed, the Who-Is was never sent, and the job reported `completed` with
+// zero findings AND zero errors — an operator reading that concludes the
+// segment has no BACnet devices.
+//
+// New traffic: for a job that requests a UDP-registered protocol, up to
+// `udpProbeAttempts` datagrams now leave the cluster per (protocol, port) pair
+// per target — to targets that were already being TCP-scanned, on ports the job
+// already named. No new host is contacted and no new port is touched.
+//
+// Scope is enforced explicitly, not inherited from the TCP scan that used to
+// gate this by accident:
+//   - the host is `target`, one expanded address of an approved
+//     discovery_targets row — this function never derives another;
+//   - the (protocol, port) pairs come from shareddisc.PlanUDPProbes, which
+//     requires BOTH halves to have been requested and refuses to invent a port;
+//   - the OT protocols that reach here at all were already filtered by
+//     CreateJob against the `ot_active_probing` tier flag and the OT allowlist.
+//
+// An unanswered probe produces NO finding. UDP has no handshake, so silence
+// means "no device" or "device declined" or "packet dropped" and cannot be told
+// apart; recording it as a finding would both invent a device (every stored
+// finding is mirrored into sensor_discoveries and materialises inventory) and
+// dress an inconclusive result up as a measurement. What it does instead is
+// annotate an existing finding for that port, when there is one, with the
+// outcome — so "we asked and heard nothing" stays visible and stays distinct
+// from "the host told us nothing is bound there" (ProbeRefused).
+func (ps *PortScanner) dispatchUDPProbes(findings []models.DiscoveryFinding, target string, ports []int32, protocols []string, originalHostname *string) []models.DiscoveryFinding {
+	portInts := make([]int, 0, len(ports))
+	for _, p := range ports {
+		portInts = append(portInts, int(p))
+	}
+
+	pairs, undispatched := shareddisc.PlanUDPProbes(protocols, portInts)
+	for _, proto := range undispatched {
+		// Say it out loud rather than doing nothing quietly — a silent no-op is
+		// the exact failure this function exists to end.
+		log.Printf("[PortScanner] %s probe requested for %s but none of the requested ports %v is a well-known %s port — not dispatched",
+			proto, target, portInts, proto)
+	}
+	if len(pairs) == 0 {
+		return findings
+	}
+
+	resolvedIP, resolveErr := ps.resolveTargetIP(target)
+	if resolvedIP == "" {
+		log.Printf("[PortScanner] skipping %d UDP probe(s) for %s: %s", len(pairs), target, resolveErr)
+		return findings
+	}
+
+	displayHostname := target
+	sniHostname := target
+	if originalHostname != nil && *originalHostname != "" {
+		displayHostname = *originalHostname
+		sniHostname = *originalHostname
+	}
+
+	for _, pair := range pairs {
+		log.Printf("[PortScanner] Probing %s for %s:%d over UDP (TCP scan result not consulted)", pair.Protocol, target, pair.Port)
+		attempt := ps.otProber.ProbeUDP(sniHostname, resolvedIP, pair.Protocol, pair.Port)
+
+		idx := findUDPMergeTarget(findings, pair.Port, pair.Protocol)
+		if idx < 0 {
+			if !attempt.Answered() {
+				// Nothing answered and there is no open-port finding to hang the
+				// outcome on. Emitting a row here would fabricate a device.
+				verdict := "no device confirmed"
+				if attempt.Outcome.Inconclusive() {
+					verdict = "INCONCLUSIVE — not evidence the device is absent"
+				}
+				log.Printf("[PortScanner] %s probe for %s:%d over UDP: %s after %d attempt(s), no finding recorded (%s) [%s]",
+					pair.Protocol, target, pair.Port, attempt.Outcome, attempt.Attempts, verdict, attempt.Detail)
+				continue
+			}
+			findings = append(findings, models.DiscoveryFinding{
+				ExecutedVia:  "udp-probe",
+				Protocol:     pair.Protocol,
+				Port:         pair.Port,
+				ResolvedIP:   resolvedIP,
+				Hostname:     displayHostname,
+				CreatedAt:    time.Now(),
+				DiscoveredAt: time.Now(),
+				Data:         make(map[string]interface{}),
+			})
+			idx = len(findings) - 1
+		}
+
+		finding := &findings[idx]
+		if finding.Data == nil {
+			finding.Data = make(map[string]interface{})
+		}
+		prefix := udpProbeDataPrefix(pair.Protocol)
+		finding.Data[prefix+"_probe_transport"] = "udp"
+		finding.Data[prefix+"_probe_outcome"] = string(attempt.Outcome)
+		finding.Data[prefix+"_probe_attempts"] = attempt.Attempts
+		if attempt.Outcome.Inconclusive() {
+			// Explicit: this is not "confirmed absent".
+			finding.Data[prefix+"_probe_inconclusive"] = true
+		}
+		if attempt.Detail != "" {
+			finding.Data[prefix+"_probe_error"] = attempt.Detail
+		}
+
+		if !attempt.Answered() {
+			log.Printf("[PortScanner] %s probe for %s:%d over UDP: %s after %d attempt(s) (%s)",
+				pair.Protocol, target, pair.Port, attempt.Outcome, attempt.Attempts, attempt.Detail)
+			continue
+		}
+
+		for k, v := range attempt.Result.Metadata {
+			finding.Data[k] = v
+		}
+		if attempt.Result.Protocol != "" {
+			finding.Protocol = attempt.Result.Protocol
+		}
+		if attempt.Result.Confidence > 0 {
+			finding.ConfidenceScore = attempt.Result.Confidence
+		}
+		log.Printf("[PortScanner] %s probe for %s:%d over UDP answered after %d attempt(s)",
+			pair.Protocol, target, pair.Port, attempt.Attempts)
 	}
 
 	return findings

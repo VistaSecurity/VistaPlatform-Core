@@ -1,6 +1,6 @@
 # Security Policy
 
-VistaPlatform is a security product. A vulnerability here can expose the
+Vista Platform is a security product. A vulnerability here can expose the
 cryptographic inventory of the organizations running it, so we treat reports
 accordingly.
 

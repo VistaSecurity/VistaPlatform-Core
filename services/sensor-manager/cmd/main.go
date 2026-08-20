@@ -307,10 +307,18 @@ func main() {
 		sensorManager.GET("/admin/settings", handler.GetAdminSettings)
 		sensorManager.PUT("/admin/settings", sharedrbac.RequireTenantPermission(db, rbac.PermissionSettingsUpdate), handler.UpdateAdminSettings)
 
-		// Discovery orchestrator. CreateDiscoveryJob is user-initiated;
-		// ReceiveDiscoveryResults is sensor-callback (JWT auth here is
-		// legacy; the sensor-auth path is preferred for new callers).
-		sensorManager.POST("/discovery/jobs", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryCreate), handler.CreateDiscoveryJob)
+		// Discovery results callback (JWT auth here is legacy; the sensor-auth
+		// path is preferred for new callers).
+		//
+		// REMOVED: POST /discovery/jobs. It was a second, inert way to create a
+		// discovery job — it inserted a queued discovery_jobs row carrying an
+		// execution_mode and requested_sensor_ids but NO targets, and nothing
+		// dispatched it. cluster-sensor-service's stuck-job sweep then picked the
+		// row up and ran it through the in-cluster nmap path with zero targets,
+		// so every job created here finished `completed` having scanned nothing.
+		// Discovery jobs are created through inventory-service
+		// (POST /api/v1/inventory-service/discovery/jobs), which proxies to
+		// cluster-sensor-service and writes the targets.
 		sensorManager.POST("/discovery/jobs/:id/results", handler.ReceiveDiscoveryResults)
 
 		// PCAP upload endpoints (tenant RBAC)

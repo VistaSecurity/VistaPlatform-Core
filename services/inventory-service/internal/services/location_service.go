@@ -288,7 +288,7 @@ func (s *LocationService) GetLocationAssets(tenantID, locationID uuid.UUID) ([]m
 			a.first_discovered_at, a.last_seen_at, a.created_at, a.updated_at, a.deleted_at,
 			a.location_id, a.network_segment_id, ns.name AS network_segment_name,
 			a.service_name, a.service_version, a.service_confidence, a.service_identification_method,
-			a.risk_score, a.risk_level
+			a.risk_score, ` + models.RiskLevelCaseSQL("COALESCE(a.risk_score, 0)") + ` AS risk_level
 		FROM network_assets a
 		LEFT JOIN network_segments ns ON ns.id = a.network_segment_id
 		WHERE a.tenant_id = $1 AND a.location_id = $2 AND a.deleted_at IS NULL
@@ -355,9 +355,19 @@ func (s *LocationService) GetLocationSummary(tenantID, locationID uuid.UUID) (*m
 		_ = tx.QueryRow(`SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND location_id = $2 AND deleted_at IS NULL`, tenantID, locationID).Scan(&sum.AssetCount)
 		_ = tx.QueryRow(`SELECT COUNT(*) FROM crypto_implementations ci JOIN network_assets na ON ci.asset_id = na.id WHERE na.tenant_id = $1 AND na.location_id = $2 AND na.deleted_at IS NULL AND ci.deleted_at IS NULL`, tenantID, locationID).Scan(&sum.CryptoConfigCount)
 		_ = tx.QueryRow(`SELECT COUNT(DISTINCT c.id) FROM certificates c JOIN crypto_implementation_certificates cic ON cic.certificate_id = c.id JOIN crypto_implementations ci ON ci.id = cic.crypto_implementation_id JOIN network_assets na ON na.id = ci.asset_id WHERE na.tenant_id = $1 AND na.location_id = $2 AND na.deleted_at IS NULL`, tenantID, locationID).Scan(&sum.CertificateCount)
-		_ = tx.QueryRow(`SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND location_id = $2 AND deleted_at IS NULL AND risk_level = 'Critical'`, tenantID, locationID).Scan(&sum.CriticalFindings)
-		_ = tx.QueryRow(`SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND location_id = $2 AND deleted_at IS NULL AND risk_level = 'High'`, tenantID, locationID).Scan(&sum.HighFindings)
-		_ = tx.QueryRow(`SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND location_id = $2 AND deleted_at IS NULL AND risk_level = 'Medium'`, tenantID, locationID).Scan(&sum.MediumFindings)
+		// Band the stored risk_score rather than reading the risk_level column:
+		// nothing has ever written that column, so it sits at its schema DEFAULT
+		// 'Informational' on every row and these three counters were structurally
+		// always 0. models.RiskBands is the single banding source (CLAUDE.md).
+		// network_assets.risk_score is already the per-asset roll-up (GREATEST
+		// over its implementations), so banding it here bands once, per asset.
+		countByBand := func(band string, dest *int) {
+			_ = tx.QueryRow(`SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND location_id = $2 AND deleted_at IS NULL AND `+
+				models.MustRiskBandSQL("COALESCE(risk_score, 0)", band), tenantID, locationID).Scan(dest)
+		}
+		countByBand("Critical", &sum.CriticalFindings)
+		countByBand("High", &sum.HighFindings)
+		countByBand("Medium", &sum.MediumFindings)
 		_ = tx.QueryRow(`SELECT COUNT(*) FROM certificates c JOIN crypto_implementation_certificates cic ON cic.certificate_id = c.id JOIN crypto_implementations ci ON ci.id = cic.crypto_implementation_id JOIN network_assets na ON na.id = ci.asset_id WHERE na.tenant_id = $1 AND na.location_id = $2 AND na.deleted_at IS NULL AND c.not_after > NOW() AND c.not_after <= NOW() + INTERVAL '30 days'`, tenantID, locationID).Scan(&sum.ExpiringCerts30D)
 		_ = tx.QueryRow(`SELECT COUNT(*) FROM certificates c JOIN crypto_implementation_certificates cic ON cic.certificate_id = c.id JOIN crypto_implementations ci ON ci.id = cic.crypto_implementation_id JOIN network_assets na ON na.id = ci.asset_id WHERE na.tenant_id = $1 AND na.location_id = $2 AND na.deleted_at IS NULL AND c.not_after < NOW()`, tenantID, locationID).Scan(&sum.ExpiredCerts)
 		return nil

@@ -273,6 +273,7 @@
       "status": "active",
       "required_secrets": [
         "INTERNAL_AUTH_SECRET",
+        "ENCRYPTION_MASTER_KEY",
         "JWT_SECRET"
       ],
       "docker": {

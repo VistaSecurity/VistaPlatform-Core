@@ -57,7 +57,7 @@ func (p stubEmailProvider) EmailSender() (emailSender, error) {
 type stubBrandingProvider struct{}
 
 func (stubBrandingProvider) BrandConfig() platformBrandConfig {
-	return platformBrandConfig{PlatformName: "VistaPlatform", AdminUIBase: "https://admin.example.com"}
+	return platformBrandConfig{PlatformName: "Vista Platform", AdminUIBase: "https://admin.example.com"}
 }
 
 // emailNotConfigured is an emailProvider whose resolution fails.

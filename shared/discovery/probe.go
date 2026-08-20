@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"net"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
+	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 )
 
 // ProbeResult is the neutral output of a single active protocol probe. It is
@@ -161,10 +161,12 @@ func (p *Prober) EnumerateTLSVersions(hostname, ip string, port int) []string {
 // CanonicalProtocolName normalizes a protocol value into the registry key:
 // uppercase with hyphens/underscores/spaces/dots/slashes stripped, so
 // "OPC-UA", "OPC UA", and "OPC_UA" all map to "OPCUA".
+//
+// It delegates to cryptoparse.FoldProtocol so the tree holds exactly one
+// definition of "the same protocol, spelled differently". Note the difference in
+// PURPOSE: this returns a lookup KEY for the prober registry, while
+// cryptoparse.NormalizeProtocol returns the canonical protocol_type SPELLING
+// that gets stored.
 func CanonicalProtocolName(protocol string) string {
-	upper := strings.ToUpper(protocol)
-	for _, sep := range []string{"-", "_", " ", ".", "/"} {
-		upper = strings.ReplaceAll(upper, sep, "")
-	}
-	return upper
+	return cryptoparse.FoldProtocol(protocol)
 }

@@ -234,7 +234,7 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 			}
 		}
 
-		classification := p.classifyNetwork(tenantID, discovery.DestIP, discovery.Hostname)
+		classification := p.classifyNetwork(tenantID, discovery.DestIP, discovery.Hostname, cloudResourceHint(discovery))
 		if shouldKeepCloudPlaceholderManaged(discovery, classification) {
 			classification.Ownership = "unknown"
 			classification.Type = "private"
@@ -543,15 +543,17 @@ func (p *BatchProcessor) markProcessed(ctx context.Context, tenantID uuid.UUID, 
 
 // classifyNetwork classifies via inventory-service network-segments/classify-asset; falls back to RFC 1918 on error.
 // Returns one of three Ownership values:
-//   - "internal"    — IP matches a known tenant segment
+//   - "internal"    — IP (or, for a cloud discovery, the cloud segment) matches a known tenant segment
 //   - "third_party" — IP is a public internet address not in any registered segment
 //   - "unknown"     — IP is RFC 1918 private but not in any known segment
-func (p *BatchProcessor) classifyNetwork(tenantID uuid.UUID, ipAddress string, hostname *string) *models.NetworkClassification {
+//
+// cloud is non-nil only for cloud-API discoveries; see cloudResourceHint.
+func (p *BatchProcessor) classifyNetwork(tenantID uuid.UUID, ipAddress string, hostname *string, cloud *client.CloudResourceHint) *models.NetworkClassification {
 	classification := &models.NetworkClassification{
 		Type: "public",
 	}
 
-	resp, err := p.inventoryClient.ClassifyAsset(tenantID, ipAddress, hostname)
+	resp, err := p.inventoryClient.ClassifyAsset(tenantID, ipAddress, hostname, cloud)
 	if err != nil {
 		// Fallback: RFC 1918 private → unknown (unregistered internal subnet),
 		// public → third_party.
@@ -594,6 +596,43 @@ func (p *BatchProcessor) classifyNetwork(tenantID uuid.UUID, ipAddress string, h
 	}
 	classification.SegmentName = resp.SegmentName
 	return classification
+}
+
+// cloudResourceHint extracts the cloud account/region/VPC a discovery came
+// from, or nil if it is not a cloud-API discovery (or is one that named no
+// region — older rows, before the writer stamped cloud_region).
+//
+// This is the fix for the placeholder address. A cloud resource's ownership
+// cannot be read off its IP: a KMS key, a bucket or a managed database has no
+// address at all, so the writer stores an unspecified-address placeholder, and
+// an unspecified address is neither RFC 1918 nor in any CIDR segment — it
+// classified as third_party and was then forced to "unknown", which no segment
+// rule can match. The account and region the resource lives in are what
+// actually say whose it is, and they are already on the row.
+func cloudResourceHint(discovery *models.SensorDiscovery) *client.CloudResourceHint {
+	if discovery == nil || len(discovery.Metadata) == 0 {
+		return nil
+	}
+	var metadata map[string]interface{}
+	if err := json.Unmarshal(discovery.Metadata, &metadata); err != nil {
+		return nil
+	}
+	if method, _ := metadata["discovery_method"].(string); method != "cloud_api" {
+		return nil
+	}
+	provider, _ := metadata["cloud_provider"].(string)
+	region, _ := metadata["cloud_region"].(string)
+	if provider == "" || region == "" {
+		return nil
+	}
+	vpcID, _ := metadata["vpc_id"].(string)
+	env, _ := metadata["environment"].(string)
+	return &client.CloudResourceHint{
+		Provider:    provider,
+		Region:      region,
+		VPCID:       vpcID,
+		Environment: env,
+	}
 }
 
 // shouldKeepCloudPlaceholderManaged returns true for cloud API discoveries that

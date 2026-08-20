@@ -59,6 +59,9 @@ export function CommandCenterPage() {
   const total = sensorTotal + agents.length;
   const online = sensorOnlineCount + onlineCount(agents);
   const offline = total - online;
+  // B-28: any of the three queries feeding this tile failing must not read as
+  // "0 offline, all healthy" — that is a fetch failure wearing a green check.
+  const fleetError = sensorsQ.isError || statsQ.isError || agentsQ.isError;
   const running = jobStatsQ.data?.in_progress ?? 0;
   const failed = jobStatsQ.data?.failed ?? 0;
   const pending = pendingQ.data?.length ?? 0;
@@ -89,7 +92,7 @@ export function CommandCenterPage() {
       <ImportSpreadsheetModal open={importOpen} onClose={() => setImportOpen(false)} />
 
       <div className="fade-up" style={{ display: 'flex', gap: 14, marginBottom: 16 }}>
-        <StatCard label="Fleet online" val={statsQ.isLoading || agentsQ.isLoading ? '…' : `${online}/${total}`} sub={offline > 0 ? `${offline} offline` : 'all healthy'} tone={offline > 0 ? 'var(--warn-strong)' : 'var(--ok)'} icon="radar" to="/discovery/sensors" />
+        <StatCard label="Fleet online" val={fleetError ? '—' : statsQ.isLoading || agentsQ.isLoading ? '…' : `${online}/${total}`} sub={fleetError ? 'Failed to load' : offline > 0 ? `${offline} offline` : 'all healthy'} tone={fleetError ? 'var(--danger)' : offline > 0 ? 'var(--warn-strong)' : 'var(--ok)'} icon="radar" to="/discovery/sensors" />
         <StatCard label="Jobs running" val={dash(jobStatsQ, running)} sub="in progress" tone="var(--info)" icon="loader" to="/discovery/jobs" />
         <StatCard label="Failed jobs" val={dash(jobStatsQ, failed)} sub={failed > 0 ? 'need attention' : 'none failing'} tone={failed > 0 ? 'var(--danger)' : 'var(--app-t3)'} icon="x-circle" to="/discovery/logs" />
         <StatCard label="Pending approvals" val={dash(pendingQ, pending)} sub="awaiting review" tone="var(--info)" icon="inbox" to="/discovery/approvals" />

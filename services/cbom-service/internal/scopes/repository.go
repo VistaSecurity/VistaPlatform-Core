@@ -20,10 +20,17 @@ var ErrNotFound = errors.New("scope not found")
 var ErrSystemScopeDelete = errors.New("system scopes cannot be deleted")
 
 // Repository encapsulates Scope persistence. Tenant isolation is enforced by
-// an explicit tenant_id predicate on every query — RLS is set up but inert in
-// this deployment (the service connects as the table owner), so it must not be
-// relied on as the isolation boundary. The set_config('app.tenant_id') call is
-// kept for defense-in-depth should the connection role ever change.
+// an explicit tenant_id predicate on every query, and that predicate — not RLS
+// — is the isolation boundary.
+//
+// Whether RLS is live depends on how the release is configured: the chart's
+// serviceRls toggle decides whether the service connects as a restricted role
+// (policies enforced) or as the table owner (policies bypassed). Owner is the
+// case on docker-compose dev and is mandatory on managed Postgres where the
+// restricted role cannot be provisioned, so no query here may lean on RLS. The
+// set_config('app.tenant_id') call below keeps the policies matching correctly
+// wherever they *are* live — defence in depth on top of the predicate, never
+// instead of it.
 type Repository struct {
 	db *database.DB
 }
@@ -58,15 +65,20 @@ const scopeColumns = `id, tenant_id, name, description, predicate, version,
 
 // List returns all non-deleted scopes for the given tenant, ordered by
 // (is_system DESC, name ASC) so system defaults appear first.
+//
+// The tenant_id predicate is required, not decorative: with RLS bypassed (see
+// the type comment) a predicate-free list returns every tenant's scopes, which
+// is both a cross-tenant disclosure and a functional break — the by-id Get IS
+// tenant-filtered, so a foreign scope shown here 404s the moment it is used.
 func (r *Repository) List(ctx context.Context, tenantID uuid.UUID) ([]Scope, error) {
 	var scopes []Scope
 	err := r.withTenantSession(ctx, tenantID, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `
 			SELECT `+scopeColumns+`
 			FROM public.scopes
-			WHERE deleted_at IS NULL
+			WHERE tenant_id = $1 AND deleted_at IS NULL
 			ORDER BY is_system DESC, name ASC
-		`)
+		`, tenantID)
 		if err != nil {
 			return fmt.Errorf("scopes: query list: %w", err)
 		}
@@ -85,9 +97,9 @@ func (r *Repository) List(ctx context.Context, tenantID uuid.UUID) ([]Scope, err
 }
 
 // Get returns a single scope by id within the tenant's scope. The tenant_id
-// predicate is the real isolation boundary — RLS is inert because the service
-// connects as the table owner, so every by-id query must filter tenant_id
-// explicitly. Returns ErrNotFound if missing.
+// predicate is the real isolation boundary — RLS may be bypassed depending on
+// how the release connects (see the type comment), so every query must filter
+// tenant_id explicitly. Returns ErrNotFound if missing.
 func (r *Repository) Get(ctx context.Context, tenantID, scopeID uuid.UUID) (*Scope, error) {
 	var out *Scope
 	err := r.withTenantSession(ctx, tenantID, func(tx *sql.Tx) error {
@@ -196,12 +208,18 @@ func (r *Repository) Delete(ctx context.Context, tenantID, scopeID uuid.UUID) er
 
 // CountForTenant returns the number of non-deleted scopes for a tenant. Used
 // by the default-seeder to short-circuit when defaults already exist.
+//
+// The tenant_id predicate is load-bearing here for a second reason: this count
+// is SeedDefaultsIfMissing's short-circuit, so without it any other tenant's
+// scope makes the count non-zero and the tenant being seeded silently never
+// gets its own defaults.
 func (r *Repository) CountForTenant(ctx context.Context, tenantID uuid.UUID) (int, error) {
 	var n int
 	err := r.withTenantSession(ctx, tenantID, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
-			SELECT COUNT(*) FROM public.scopes WHERE deleted_at IS NULL
-		`).Scan(&n)
+			SELECT COUNT(*) FROM public.scopes
+			WHERE tenant_id = $1 AND deleted_at IS NULL
+		`, tenantID).Scan(&n)
 	})
 	return n, err
 }

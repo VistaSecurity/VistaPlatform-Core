@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: VistaPlatform — tenant-health-service API
+  title: Vista Platform — tenant-health-service API
   version: 0.1.0
   description: |
     Spec-first contract for tenant-health-service (ADR-0001). First slice for
@@ -155,7 +155,7 @@ paths:
         - name: status
           in: query
           required: false
-          description: Filter by health_status (excellent / good / fair / poor / critical).
+          description: Filter by health_status (excellent / good / fair / poor / critical / unknown).
           schema:
             type: string
         - name: min_score
@@ -422,23 +422,39 @@ components:
     HealthBreakdown:
       type: object
       additionalProperties: false
-      description: Per-factor scoring, each 0-100 (models.HealthBreakdown).
+      description: >-
+        Per-factor scoring, each 0-100 (models.HealthBreakdown). A factor is
+        `null` when it could NOT be measured because the peer service supplying
+        its raw metrics was unreachable — null means "unknown", never zero.
+        Null factors are excluded from `overall_score`, whose remaining weights
+        are renormalised; `data_completeness` says how much of the total factor
+        weight was actually measured and `unavailable_sources` says which peers
+        were missing.
       required:
         - resource_efficiency
         - performance_metrics
         - security_posture
         - business_activity
         - cost_optimization
+        - data_completeness
       properties:
         resource_efficiency:
-          type: number
+          type: [number, 'null']
         performance_metrics:
-          type: number
+          type: [number, 'null']
         security_posture:
-          type: number
+          type: [number, 'null']
         business_activity:
-          type: number
+          type: [number, 'null']
         cost_optimization:
+          type: [number, 'null']
+        unavailable_sources:
+          description: Peer services that could not be reached during collection.
+          type: [array, 'null']
+          items:
+            type: string
+        data_completeness:
+          description: Fraction of total factor weight actually measured (0-1).
           type: number
     Recommendation:
       type: object
@@ -541,7 +557,7 @@ components:
           type: number
         health_status:
           type: string
-          description: "excellent / good / fair / poor / critical."
+          description: "excellent / good / fair / poor / critical / unknown (unknown = no factor could be measured; overall_score is 0 for want of data, not a score)."
         last_calculated:
           type: string
           format: date-time
@@ -634,6 +650,15 @@ components:
           type: number
         cost_efficiency:
           type: number
+        unavailable_sources:
+          description: >-
+            Peer services that could not be reached while collecting these
+            metrics. The fields those peers feed carry zero values that are NOT
+            measurements — the scorer reports the corresponding factors as
+            unknown rather than scoring them.
+          type: [array, 'null']
+          items:
+            type: string
     HealthAlert:
       type: object
       additionalProperties: false
@@ -718,7 +743,7 @@ components:
           type: number
         health_status:
           type: string
-          description: "excellent / good / fair / poor / critical."
+          description: "excellent / good / fair / poor / critical / unknown (unknown = no factor could be measured; overall_score is 0 for want of data, not a score)."
         score_breakdown:
           $ref: '#/components/schemas/HealthBreakdown'
         recommendations:
@@ -753,7 +778,7 @@ components:
           type: number
         health_status:
           type: string
-          description: "excellent / good / fair / poor / critical."
+          description: "excellent / good / fair / poor / critical / unknown (unknown = no factor could be measured; overall_score is 0 for want of data, not a score)."
         last_calculated:
           type: string
           format: date-time

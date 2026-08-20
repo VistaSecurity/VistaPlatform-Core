@@ -24,7 +24,7 @@ Documentation for **tenants** and **tenant admins** — people who use Vista Pla
 ### Features
 - [Getting Started](./features/getting-started.md) — the onboarding checklist
 - [Inventory & Lenses](./features/inventory-and-lenses.md) — the unified inventory and its switchable lenses
-- [Remediation](./features/remediation.md) — Triage, the ticket Queue, and migration Plans
+- [Remediation](./features/remediation.md) — Alerts, the ticket Queue, and migration Plans
 - [Asset Lifecycle Management](./features/asset-lifecycle-management.md)
 - [Asset Approval](./features/asset-approval.md)
 - [AWS Cloud Discovery](./features/aws-cloud-discovery.md)

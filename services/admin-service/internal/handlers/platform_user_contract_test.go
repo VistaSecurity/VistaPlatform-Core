@@ -56,6 +56,10 @@ type stubPlatformUserStore struct {
 	pwAffected    int64
 	pwErr         error
 	deleteErr     error
+	// passwordMinLength stands in for platform_settings.password_min_length. The
+	// zero value means "unset", which the handler clamps to the built-in floor —
+	// same as the repository's fail-safe read.
+	passwordMinLength int
 }
 
 func (s *stubPlatformUserStore) ListPlatformUsers(context.Context, platformUserListFilters) ([]models.PlatformUser, int, error) {
@@ -69,6 +73,9 @@ func (s *stubPlatformUserStore) RoleExists(context.Context, string) (bool, error
 }
 func (s *stubPlatformUserStore) AdminEmailVerificationRequired(context.Context) bool {
 	return s.emailVerifReq
+}
+func (s *stubPlatformUserStore) PasswordMinLength(context.Context) int {
+	return s.passwordMinLength
 }
 func (s *stubPlatformUserStore) CreatePlatformUser(context.Context, platformUserInsert) (string, time.Time, time.Time, error) {
 	now := time.Now().UTC()

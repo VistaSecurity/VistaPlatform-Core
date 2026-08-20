@@ -89,7 +89,7 @@ Everything a tenant does day-to-day lives in one of these:
 | **Discovery** | Run and review discovery — sensors & agents, jobs, devices, scheduled scans, cloud sources, PCAP upload, and approvals. |
 | **Inventory** | Your unified asset inventory, viewed through switchable **lenses** (infrastructure, certificate, configuration, network, keys, connections, stale, and more). |
 | **Risk & Compliance** | **Posture** (scores, framework transparency, algorithm reference), **Findings**, and **CBOM**. |
-| **Remediation** | **Triage**, **Queue** (the unified ticket work surface), and **Plans** (migration planning). |
+| **Remediation** | **Alerts**, **Queue** (the unified ticket work surface), and **Plans** (migration planning). |
 
 **Organization Settings** (the admin's main workspace) opens from the profile
 menu and replaces the primary rail with its own settings navigation, grouped
@@ -553,9 +553,15 @@ See [Viewing Frameworks, Controls & Measurements](../features/framework-transpar
 
 ### Custom Policies (Enterprise)
 
-Enterprise organizations author their own frameworks — framework → controls →
-measurement rules — under **Organization Settings → Policies → Custom
-Policies**. Full CRUD on your own controls and measurements. See the
+> **Authoring is currently disabled.** Custom Policies are not evaluated
+> today, so authoring new ones (or editing/deleting existing ones) is turned
+> off in the UI until that's fixed. Existing policies stay listed and are
+> not deleted.
+
+Enterprise organizations were intended to author their own frameworks —
+framework → controls → measurement rules — under **Organization Settings →
+Policies → Custom Policies**, with full CRUD on their own controls and
+measurements.
 
 > The old "Copy Framework" workflow has been removed. You **activate** platform
 > frameworks (you don't copy them), and Enterprise tenants build bespoke
@@ -565,7 +571,7 @@ Policies**. Full CRUD on your own controls and measurements. See the
 
 Work that comes out of findings is tracked under **Remediation**:
 
-- **Triage** — review and prioritize incoming remediation items.
+- **Alerts** — the alert inbox: acknowledge, snooze, resolve, or turn an alert into a ticket.
 - **Queue** — the unified ticket work surface (this replaces the old standalone
   Tickets page). Tickets can link to assets, certificates, configurations, and
   findings, support comments and due dates, and can reference an external system

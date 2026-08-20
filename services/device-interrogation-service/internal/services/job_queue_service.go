@@ -200,24 +200,34 @@ func (s *JobQueueService) GetNextJobForAgent(ctx context.Context, agentID uuid.U
 	}
 	defer s.redis.Del(ctx, lockKey)
 
-	// Find next pending job for this agent (or unassigned device_interrogation
-	// jobs) WITHIN THE AGENT'S OWN TENANT.
+	// Atomically claim the next pending job for this agent (or unassigned
+	// device_interrogation jobs) WITHIN THE AGENT'S OWN TENANT. The row lock must
+	// live in the same statement that marks the job assigned; a standalone SELECT
+	// ... FOR UPDATE in autocommit releases the lock before the UPDATE.
+	now := time.Now()
 	query := `
-		SELECT id, tenant_id, job_type, device_id, agent_id, status,
+		WITH candidate AS (
+			SELECT id
+			FROM device_jobs
+			WHERE status = 'pending'
+				AND deleted_at IS NULL
+				AND tenant_id = $2
+				AND (expires_at IS NULL OR expires_at > NOW())
+				AND (
+					(agent_id = $1 AND job_type = 'device_interrogation') OR
+					(agent_id IS NULL AND job_type = 'device_interrogation')
+				)
+			ORDER BY created_at ASC
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE device_jobs dj
+		SET agent_id = $1, status = 'assigned', assigned_at = $3, updated_at = $3
+		FROM candidate
+		WHERE dj.id = candidate.id
+		RETURNING dj.id, dj.tenant_id, dj.job_type, dj.device_id, dj.agent_id, dj.status,
 			credentials, parameters, results, error_message,
 			created_at, assigned_at, started_at, completed_at, expires_at, deleted_at
-		FROM device_jobs
-		WHERE status = 'pending'
-			AND deleted_at IS NULL
-			AND tenant_id = $2
-			AND (expires_at IS NULL OR expires_at > NOW())
-			AND (
-				(agent_id = $1 AND job_type = 'device_interrogation') OR
-				(agent_id IS NULL AND job_type = 'device_interrogation')
-			)
-		ORDER BY created_at ASC
-		LIMIT 1
-		FOR UPDATE SKIP LOCKED
 	`
 
 	// RLS: agent-outbound — keyed by agent id, tenant is the OUTPUT → bypass role.
@@ -225,7 +235,7 @@ func (s *JobQueueService) GetNextJobForAgent(ctx context.Context, agentID uuid.U
 	var credentialsJSONB, parametersJSONB, resultsJSONB []byte
 	var deviceID, agentIDStr sql.NullString
 
-	err = s.bypassDB.QueryRowContext(ctx, query, agentID, agentTenant).Scan(
+	err = s.bypassDB.QueryRowContext(ctx, query, agentID, agentTenant, now).Scan(
 		&job.ID, &job.TenantID, &job.JobType, &deviceID, &agentIDStr, &job.Status,
 		&credentialsJSONB, &parametersJSONB, &resultsJSONB, &job.ErrorMessage,
 		&job.CreatedAt, &job.AssignedAt, &job.StartedAt, &job.CompletedAt, &job.ExpiresAt, &job.DeletedAt,
@@ -257,22 +267,6 @@ func (s *JobQueueService) GetNextJobForAgent(ctx context.Context, agentID uuid.U
 		_ = json.Unmarshal(resultsJSONB, &job.Results)
 	}
 
-	// Assign job to agent and mark as assigned
-	now := time.Now()
-	updateQuery := `
-		UPDATE device_jobs
-		SET agent_id = $1, status = 'assigned', assigned_at = $2, updated_at = $2
-		WHERE id = $3
-	`
-	_, err = s.bypassDB.ExecContext(ctx, updateQuery, agentID, now, job.ID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to assign job: %w", err)
-	}
-
-	job.AgentID = &agentID
-	job.Status = models.JobStatusAssigned
-	job.AssignedAt = &now
-
 	return job, nil
 }
 
@@ -293,22 +287,32 @@ func (s *JobQueueService) GetNextJobForPlatform(ctx context.Context) (*models.De
 	}
 	defer s.redis.Del(ctx, lockKey)
 
-	// Find next pending job for platform (cloud_discovery or device_interrogation with no agent_id)
+	// Atomically claim the next pending job for platform (cloud_discovery or
+	// device_interrogation with no agent_id). Keep the lock and status update in
+	// one statement so an agent poll cannot claim the same unassigned job.
+	now := time.Now()
 	query := `
-		SELECT id, tenant_id, job_type, device_id, agent_id, integration_id, status,
+		WITH candidate AS (
+			SELECT id
+			FROM device_jobs
+			WHERE status = 'pending'
+				AND deleted_at IS NULL
+				AND (expires_at IS NULL OR expires_at > NOW())
+				AND (
+					job_type = 'cloud_discovery' OR
+					(job_type = 'device_interrogation' AND agent_id IS NULL)
+				)
+			ORDER BY created_at ASC
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE device_jobs dj
+		SET status = 'assigned', assigned_at = $1, updated_at = $1
+		FROM candidate
+		WHERE dj.id = candidate.id
+		RETURNING dj.id, dj.tenant_id, dj.job_type, dj.device_id, dj.agent_id, dj.integration_id, dj.status,
 			credentials, parameters, results, error_message,
 			created_at, assigned_at, started_at, completed_at, expires_at, deleted_at
-		FROM device_jobs
-		WHERE status = 'pending'
-			AND deleted_at IS NULL
-			AND (expires_at IS NULL OR expires_at > NOW())
-			AND (
-				job_type = 'cloud_discovery' OR
-				(job_type = 'device_interrogation' AND agent_id IS NULL)
-			)
-		ORDER BY created_at ASC
-		LIMIT 1
-		FOR UPDATE SKIP LOCKED
 	`
 
 	// RLS: cross-tenant background sweep (no single tenant) → bypass role.
@@ -316,7 +320,7 @@ func (s *JobQueueService) GetNextJobForPlatform(ctx context.Context) (*models.De
 	var credentialsJSONB, parametersJSONB, resultsJSONB []byte
 	var deviceID, agentIDStr, integrationIDStr sql.NullString
 
-	err = s.bypassDB.QueryRowContext(ctx, query).Scan(
+	err = s.bypassDB.QueryRowContext(ctx, query, now).Scan(
 		&job.ID, &job.TenantID, &job.JobType, &deviceID, &agentIDStr, &integrationIDStr, &job.Status,
 		&credentialsJSONB, &parametersJSONB, &resultsJSONB, &job.ErrorMessage,
 		&job.CreatedAt, &job.AssignedAt, &job.StartedAt, &job.CompletedAt, &job.ExpiresAt, &job.DeletedAt,
@@ -351,21 +355,6 @@ func (s *JobQueueService) GetNextJobForPlatform(ctx context.Context) (*models.De
 	if len(resultsJSONB) > 0 {
 		_ = json.Unmarshal(resultsJSONB, &job.Results)
 	}
-
-	// Mark as assigned (agent_id remains NULL for platform jobs)
-	now := time.Now()
-	updateQuery := `
-		UPDATE device_jobs
-		SET status = 'assigned', assigned_at = $1, updated_at = $1
-		WHERE id = $2
-	`
-	_, err = s.bypassDB.ExecContext(ctx, updateQuery, now, job.ID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to assign job: %w", err)
-	}
-
-	job.Status = models.JobStatusAssigned
-	job.AssignedAt = &now
 
 	return job, nil
 }
@@ -436,7 +425,48 @@ func (s *JobQueueService) UpdateJobStatus(
 		return fmt.Errorf("failed to update job status: %w", err)
 	}
 
+	// Reconcile the interrogation schedule that dispatched this job, if any.
+	//
+	// This is the hook point precisely because it is the ONE choke point every
+	// executor passes through — the in-cluster platform worker, an agent
+	// submitting results, the async cloud-discovery goroutine and the
+	// dispatch-failure paths in GetNextJob all land here. Attaching the outcome
+	// to any single executor would have left the schedule stuck on 'pending'
+	// whenever a different one ran the job.
+	//
+	// Non-fatal: a job's own status is the record of record; failing to attribute
+	// it to a schedule must never fail the status update itself.
+	if err := recordScheduleOutcome(ctx, s.bypassDB, jobID, status, errorMessage, result); err != nil {
+		log.Printf("[JobQueueService] Warning: failed to record schedule outcome for job %s: %v", jobID, err)
+	}
+
 	return nil
+}
+
+// jobResultAssetCount reports how many assets a job result actually delivered.
+//
+// len(result.Assets) alone is not it: the in-cluster device-interrogation
+// executor materializes its assets itself and forwards an intentionally EMPTY
+// asset list (that emptiness is what prevents double-materialization), carrying
+// the real figure in Metadata["assets_count"]. The cloud-discovery paths use the
+// same metadata key. Reading only the slice reports 0 for a run that discovered
+// a dozen devices.
+func jobResultAssetCount(result *models.JobResult) int {
+	if result == nil {
+		return 0
+	}
+	if n := len(result.Assets); n > 0 {
+		return n
+	}
+	switch v := result.Metadata["assets_count"].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64: // survives a JSON round-trip through device_jobs.results
+		return int(v)
+	}
+	return 0
 }
 
 // RecordDiscoveryJob stamps onto a device job the discovery job its results have
@@ -471,12 +501,18 @@ func (s *JobQueueService) RecordDiscoveryJob(ctx context.Context, jobID, discove
 
 // GetJobByID retrieves a job by its ID.
 //
+// integration_id is part of the projection. It was missing, so every consumer
+// of this method saw IntegrationID == nil on a cloud discovery job — which is
+// how a scheduled cloud discovery came to be recorded as
+// executed_via=device_interrogation / execution_mode=sensors. Its sibling
+// GetNextJobForPlatform always selected the column; this one did not.
+//
 // RLS: keyed by job id with no tenant input (the owning tenant is the OUTPUT) —
 // used by the result processor before the tenant is known — so it runs on the
 // bypass role.
 func (s *JobQueueService) GetJobByID(ctx context.Context, jobID uuid.UUID) (*models.DeviceJob, error) {
 	query := `
-		SELECT id, tenant_id, job_type, device_id, agent_id, status,
+		SELECT id, tenant_id, job_type, device_id, agent_id, integration_id, status,
 			credentials, parameters, results, error_message,
 			created_at, assigned_at, started_at, completed_at, expires_at, deleted_at
 		FROM device_jobs
@@ -485,10 +521,10 @@ func (s *JobQueueService) GetJobByID(ctx context.Context, jobID uuid.UUID) (*mod
 
 	job := &models.DeviceJob{}
 	var credentialsJSONB, parametersJSONB, resultsJSONB []byte
-	var deviceID, agentIDStr sql.NullString
+	var deviceID, agentIDStr, integrationIDStr sql.NullString
 
 	err := s.bypassDB.QueryRowContext(ctx, query, jobID).Scan(
-		&job.ID, &job.TenantID, &job.JobType, &deviceID, &agentIDStr, &job.Status,
+		&job.ID, &job.TenantID, &job.JobType, &deviceID, &agentIDStr, &integrationIDStr, &job.Status,
 		&credentialsJSONB, &parametersJSONB, &resultsJSONB, &job.ErrorMessage,
 		&job.CreatedAt, &job.AssignedAt, &job.StartedAt, &job.CompletedAt, &job.ExpiresAt, &job.DeletedAt,
 	)
@@ -508,6 +544,10 @@ func (s *JobQueueService) GetJobByID(ctx context.Context, jobID uuid.UUID) (*mod
 	if agentIDStr.Valid {
 		id, _ := uuid.Parse(agentIDStr.String)
 		job.AgentID = &id
+	}
+	if integrationIDStr.Valid {
+		id, _ := uuid.Parse(integrationIDStr.String)
+		job.IntegrationID = &id
 	}
 	if len(credentialsJSONB) > 0 {
 		_ = json.Unmarshal(credentialsJSONB, &job.Credentials)

@@ -442,6 +442,44 @@ func buildAssetContext(asset, implementation map[string]interface{}) assetContex
 	return context
 }
 
+// dedupeComponentRefs guarantees the one invariant the emitted document cannot
+// survive without: a bom-ref names exactly one component.
+//
+// Every builder here derives its ref from the component id, which the
+// accumulator keeps unique, so this should find nothing. It exists because the
+// cost of being wrong about that is a document rejected by the validator an
+// auditor runs — the schema's uniqueItems fires on both `components` and
+// `dependencies`, and edges resolved by a shared ref are ambiguous even when
+// the schema passes. A future builder that reintroduces a collision gets a
+// suffixed ref rather than a broken artifact.
+//
+// Deterministic by construction: components arrive in a stable order (the
+// inputs are sorted before assembly), so the same estate produces the same
+// refs on every run. Renaming rather than dropping is deliberate — the
+// duplicate is a real component, and deleting evidence to satisfy a validator
+// would be the worse trade.
+func dedupeComponentRefs(components []models.CBOMComponent) {
+	used := make(map[string]bool, len(components))
+	for i := range components {
+		c := &components[i]
+		if c.BOMRef == "" {
+			continue
+		}
+		if !used[c.BOMRef] {
+			used[c.BOMRef] = true
+			continue
+		}
+		for n := 2; ; n++ {
+			candidate := fmt.Sprintf("%s/dup-%d", c.BOMRef, n)
+			if !used[candidate] {
+				c.BOMRef = candidate
+				used[candidate] = true
+				break
+			}
+		}
+	}
+}
+
 // resolveComponentRefs turns the cross-references our components carry into
 // bom-refs that name components in the same document.
 //
@@ -456,6 +494,10 @@ func buildAssetContext(asset, implementation map[string]interface{}) assetContex
 // the formatter drops unresolvable edges anyway and leaving them on the model
 // would just move the confusion.
 func resolveComponentRefs(components []models.CBOMComponent) {
+	// Refs are made unique before anything is indexed by them, so the maps below
+	// (and every edge resolved through them) name one component each.
+	dedupeComponentRefs(components)
+
 	refByComponentID := make(map[string]string, len(components))
 	knownRefs := make(map[string]bool, len(components))
 	// Algorithm components are addressable by code as well, so a key that names
@@ -872,7 +914,7 @@ func buildAlgorithmComponents(
 		details := enrichAlgorithmDetails(source, algorithmLookup)
 		component := models.CBOMComponent{
 			ID:               componentID,
-			BOMRef:           "crypto/algorithm/" + sanitizeComponentIDPart(source.Code),
+			BOMRef:           algorithmComponentRef(implementationID, source.Role, source.Code),
 			Name:             source.Code,
 			Type:             models.CBOMComponentTypeAlgorithm,
 			AssetID:          context.AssetID,
@@ -1317,6 +1359,30 @@ func protocolComponentID(implementationID string) string {
 
 func algorithmComponentID(implementationID, role, code string) string {
 	return fmt.Sprintf("algorithm:%s:%s:%s", implementationID, role, sanitizeComponentIDPart(code))
+}
+
+// algorithmComponentRef is the published bom-ref for an algorithm component.
+//
+// It is derived from the same tuple as algorithmComponentID, and that is the
+// whole point. A bom-ref identifies a component *within its document*: the
+// CycloneDX schema puts uniqueItems on both `components` and `dependencies`,
+// and dependency edges are resolved by ref. The ref used to be
+// `crypto/algorithm/<code>` while components were de-duplicated on
+// (implementation, role, code) — so an ordinary TLS configuration with an RSA
+// key exchange and an RSA certificate key emitted two components, byte-equal
+// after serialisation, under one ref. The artifact an auditor validates was
+// rejected outright.
+//
+// Keying the ref off the component id makes the mapping injective: distinct
+// components cannot collide, and the same component always publishes the same
+// ref. It also disambiguates the milder case — identical crypto on two assets
+// is two components, and a dependency edge now names exactly one of them.
+func algorithmComponentRef(implementationID, role, code string) string {
+	return fmt.Sprintf("crypto/algorithm/%s/%s/%s",
+		sanitizeComponentIDPart(implementationID),
+		sanitizeComponentIDPart(role),
+		sanitizeComponentIDPart(code),
+	)
 }
 
 func keyComponentID(keyID string) string {

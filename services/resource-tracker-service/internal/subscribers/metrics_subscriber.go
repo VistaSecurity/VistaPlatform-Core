@@ -98,27 +98,46 @@ func convertMetricsEventToRequest(e *events.MetricsEvent) *models.ResourceMetric
 		TenantID: tenantID,
 	}
 
-	// Map numeric fields with type-safe extraction
+	// Map numeric fields with type-safe extraction.
+	//
+	// An absent key leaves its field nil — NOT MEASURED — rather than zero.
+	// The producer omits a key precisely when it has no measurement to report,
+	// and recording that as a measured zero is what let unmeasured components
+	// be priced as though they had been observed.
+	//
+	// Every key read here must exist in the publisher's map. `network_bytes`
+	// did not: monitoring-service published `network_bytes_in` and
+	// `network_bytes_out`, so this lookup missed on every event and the value
+	// was discarded in silence. The publisher now emits `network_bytes` as a
+	// per-interval delta — see the counter/delta note in resource_collector.go;
+	// a bare rename would have billed a tenant for the pod's uptime, because
+	// the in/out figures are since-boot counters.
 	if v, ok := m["api_calls"].(float64); ok {
-		req.APICalls = int(v)
+		req.APICalls = int64Ptr(v)
 	}
 	if v, ok := m["database_queries"].(float64); ok {
-		req.DatabaseQueries = int(v)
+		req.DatabaseQueries = int64Ptr(v)
 	}
 	if v, ok := m["memory_usage_mb"].(float64); ok {
-		req.MemoryUsageMB = int(v)
+		req.MemoryUsageMB = int64Ptr(v)
 	}
 	if v, ok := m["cpu_usage_percent"].(float64); ok {
-		req.CPUUsagePercent = v
+		req.CPUUsagePercent = &v
 	} else if v, ok := m["cpu_load_percent"].(float64); ok {
-		req.CPUUsagePercent = v
+		req.CPUUsagePercent = &v
 	}
 	if v, ok := m["storage_used_mb"].(float64); ok {
-		req.StorageUsedMB = int(v)
+		req.StorageUsedMB = int64Ptr(v)
 	}
 	if v, ok := m["network_bytes"].(float64); ok {
-		req.NetworkBytes = int64(v)
+		req.NetworkBytes = int64Ptr(v)
 	}
 
 	return req
+}
+
+// int64Ptr converts a JSON number to a *int64 measurement.
+func int64Ptr(v float64) *int64 {
+	i := int64(v)
+	return &i
 }

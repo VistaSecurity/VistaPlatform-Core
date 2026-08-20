@@ -101,12 +101,12 @@ func (m *BootstrapCAManager) GenerateBootstrapCA(encryptionKey string) (*Bootstr
 	caTemplate := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			Organization:       []string{"VistaPlatform"},
-			OrganizationalUnit: []string{"VistaPlatform"},
+			Organization:       []string{"Vista Platform"},
+			OrganizationalUnit: []string{"Vista Platform"},
 			Country:            []string{"US"},
 			Province:           []string{"Florida"},
 			Locality:           []string{"Orlando"},
-			CommonName:         "VistaPlatform Bootstrap CA",
+			CommonName:         "Vista Platform Bootstrap CA",
 		},
 		NotBefore:             notBefore,
 		NotAfter:              notAfter,

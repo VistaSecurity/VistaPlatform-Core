@@ -184,6 +184,11 @@ export function NetworkSegmentModal({ open, segment, onClose }: { open: boolean;
   const [description, setDescription] = useState('');
   const [isActive, setIsActive] = useState(true);
   const [autoApprove, setAutoApprove] = useState(false);
+  // Which discovery sources auto-approval covers. Sensor-only is the stored
+  // default for every segment that predates the setting, so cloud coverage is
+  // always something the tenant ticks on purpose.
+  const [approveSensor, setApproveSensor] = useState(true);
+  const [approveCloud, setApproveCloud] = useState(false);
 
   useEffect(() => {
     setName(segment?.name ?? '');
@@ -197,10 +202,26 @@ export function NetworkSegmentModal({ open, segment, onClose }: { open: boolean;
     setDescription(segment?.description ?? '');
     setIsActive(segment?.is_active ?? true);
     setAutoApprove(segment?.auto_approve_discoveries ?? false);
+    const sources = segment?.auto_approve_sources ?? ['sensor'];
+    setApproveSensor(sources.includes('sensor'));
+    setApproveCloud(sources.includes('cloud'));
   }, [segment, open]);
 
+  // A cloud VPC segment can only ever be matched by cloud discoveries — no IP
+  // ever falls inside "cloud://aws/us-east-1". Default a NEW one to cloud, so
+  // turning auto-approve on there does not quietly cover nothing. Existing
+  // segments keep whatever is stored.
+  const pickSegType = (next: string) => {
+    setSegType(next);
+    if (isEdit) return;
+    const cloudish = next === 'cloud_vpc';
+    setApproveSensor(!cloudish);
+    setApproveCloud(cloudish);
+  };
+
   const valueValid = validateSegmentValue(segType, value);
-  const valid = name.trim().length > 0 && valueValid && !!networkType && !!environment;
+  const sourcesValid = !autoApprove || approveSensor || approveCloud;
+  const valid = name.trim().length > 0 && valueValid && !!networkType && !!environment && sourcesValid;
   const placeholder = SEGMENT_TYPES.find((t) => t.value === segType)?.placeholder;
 
   const save = useMutation({
@@ -217,6 +238,10 @@ export function NetworkSegmentModal({ open, segment, onClose }: { open: boolean;
         description: description.trim() || undefined,
         is_active: isActive,
         auto_approve_discoveries: autoApprove,
+        auto_approve_sources: [
+          ...(approveSensor ? ['sensor' as const] : []),
+          ...(approveCloud ? ['cloud' as const] : []),
+        ],
       };
       const res = isEdit
         ? await clients.inventory.PUT('/network-segments/{id}', { params: { path: { id: segment!.id } }, body })
@@ -246,7 +271,7 @@ export function NetworkSegmentModal({ open, segment, onClose }: { open: boolean;
         <div style={{ flex: 1.4 }}><ModalField label="Name"><ModalInput data-autofocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Prod DMZ" /></ModalField></div>
         <div style={{ flex: 1 }}>
           <ModalField label="Type">
-            <ModalSelect value={segType} onChange={(e) => setSegType(e.target.value)}>
+            <ModalSelect value={segType} onChange={(e) => pickSegType(e.target.value)}>
               {SEGMENT_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
             </ModalSelect>
           </ModalField>
@@ -295,6 +320,35 @@ export function NetworkSegmentModal({ open, segment, onClose }: { open: boolean;
           <span style={{ fontSize: 12.5, color: 'var(--app-t1)' }}>Auto-approve discoveries</span>
         </label>
       </div>
+      {autoApprove && (
+        <div style={{ marginTop: 10, padding: '10px 12px', border: '1px solid var(--app-border)', borderRadius: 8 }}>
+          <div style={{ fontSize: 11.5, color: 'var(--app-t2)', marginBottom: 8 }}>
+            Auto-approve which discoveries on this segment? Assets from a checked source skip
+            Discovery → Approvals and go straight to monitoring.
+          </div>
+          <div style={{ display: 'flex', gap: 24 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5, color: 'var(--app-t1)' }}>
+              <input type="checkbox" checked={approveSensor} onChange={(e) => setApproveSensor(e.target.checked)} />
+              Sensor discoveries
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5, color: 'var(--app-t1)' }}>
+              <input type="checkbox" checked={approveCloud} onChange={(e) => setApproveCloud(e.target.checked)} />
+              Cloud discoveries
+            </label>
+          </div>
+          {segType === 'cloud_vpc' && !approveCloud && (
+            <div style={{ fontSize: 11, color: 'var(--app-t3)', marginTop: 8 }}>
+              A cloud VPC segment is only ever matched by cloud discoveries — with “Cloud
+              discoveries” unchecked, this segment auto-approves nothing.
+            </div>
+          )}
+          {!sourcesValid && (
+            <div style={{ fontSize: 11, color: 'var(--danger-text)', marginTop: 8 }}>
+              Pick at least one source, or turn auto-approve off.
+            </div>
+          )}
+        </div>
+      )}
     </Modal>
   );
 }

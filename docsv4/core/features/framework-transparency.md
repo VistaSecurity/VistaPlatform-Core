@@ -44,7 +44,7 @@ grid under **Risk & Compliance → Posture**, and on each control group under
 |---|---|---|
 | **PASS** | The control was checked, and nothing in scope violated it. | Zero open findings against that control. |
 | **FAIL** | The control was checked, and at least one thing violated it. | One or more open findings against that control — *any* severity, on *any* asset. |
-| **Not assessed** | The control was not checked, so we are not claiming anything about it. | No measurement rule configured, nothing in scope to check, or the check itself failed. Hover the result to see which. |
+| **Not assessed** | The control was not checked, so we are not claiming anything about it. | No measurement rule configured, nothing in scope to check, the control has not been evaluated since it last changed, or the check itself failed. Hover the result to see which. |
 
 Three things are worth spelling out, because each one used to work differently:
 
@@ -64,7 +64,7 @@ Three things are worth spelling out, because each one used to work differently:
 
 ### Why a control shows "Not assessed"
 
-Hovering a **Not assessed** result tells you which of three situations applies:
+Hovering a **Not assessed** result tells you which of four situations applies:
 
 - **No measurements configured** — the control exists in the framework but nobody
   has written the rule that measures it yet. Common in a framework still being
@@ -72,6 +72,11 @@ Hovering a **Not assessed** result tells you which of three situations applies:
 - **Nothing in scope to check** — the rule is fine, but you have no matching
   inventory. A control about SSH host keys is not assessed if the platform has
   not discovered any SSH services yet.
+- **Not evaluated yet** — the control is new, or its rule was changed, and your
+  inventory has not been re-evaluated against it yet. Re-evaluation is queued
+  automatically when a framework's rules change; the control moves to PASS or
+  FAIL once it completes. Until then the control is left out of your score
+  entirely, rather than being counted as a free pass for a check nothing has run.
 - **Check failed** — the platform tried to measure the control and could not.
   This is a data-quality signal: it usually clears on the next evaluation, and
   it is worth raising if it persists.

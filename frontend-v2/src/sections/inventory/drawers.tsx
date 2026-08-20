@@ -4,6 +4,7 @@ import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rb
 import { clients } from '../../lib/clients';
 import { DrawerCloseBtn as CloseBtn, DrawerShell, Icon, LevelDot, MetaRow, RiskChip, RiskGauge, SectionLabel, levelFromScore, riskColor } from '../../components/ui';
 import { DeleteAssetButton, RestoreAssetButton, ScanAssetButton } from './bulk-actions';
+import { serviceConfidence } from './lens-helpers';
 import {
   PROVENANCE_LABEL,
   PROVENANCE_TITLE,
@@ -344,7 +345,7 @@ export function AssetDrawer({ assetId, seed, onOpenConfig, onClose, onEdit, acti
         )}
 
         <SectionLabel icon="circle-alert">Asset details</SectionLabel>
-        <MetaRow k="Service" v={[a.service_name, a.service_version].filter(Boolean).join(' ') as string} />
+        <ServiceMetaRow a={a} />
         <MetaRow k="Operating system" v={a.operating_system as string} />
         <MetaRow k="Environment" v={a.environment as string} />
         <MetaRow k="Business unit" v={a.business_unit as string} />
@@ -359,6 +360,30 @@ export function AssetDrawer({ assetId, seed, onOpenConfig, onClose, onEdit, acti
         <MetaRow k="Risk score" v={risk} mono />
       </div>
     </DrawerShell>
+  );
+}
+
+// The Service row, with the qualifier the backend has always sent and nobody
+// ever showed. A name inferred from a port number now reads as "Best guess ·
+// from port"; a name read out of a banner reads as "Confirmed · from banner".
+// Muted and inline — this is a meta row, not a warning.
+function ServiceMetaRow({ a }: { a: Record<string, unknown> }) {
+  const name = [a.service_name, a.service_version].filter(Boolean).join(' ');
+  const { qualifier, title } = serviceConfidence({
+    service_confidence: a.service_confidence as string | null,
+    service_identification_method: a.service_identification_method as string | null,
+  });
+  return (
+    <MetaRow
+      k="Service"
+      title={name && title ? title : undefined}
+      v={name ? (
+        <>
+          {name}
+          {qualifier && <span style={{ color: 'var(--app-t3)', fontWeight: 400 }}> · {qualifier}</span>}
+        </>
+      ) : ''}
+    />
   );
 }
 

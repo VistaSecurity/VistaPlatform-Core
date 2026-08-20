@@ -82,6 +82,7 @@ describe('notAssessedReasonText', () => {
     expect(notAssessedReasonText('no_measurements')).toBe('No measurement rule is configured for this control.');
     expect(notAssessedReasonText('nothing_in_scope')).toBe('Nothing in scope to check.');
     expect(notAssessedReasonText('check_error')).toBe('The check failed. This usually clears on the next evaluation.');
+    expect(notAssessedReasonText('not_evaluated')).toBe('This control has not been evaluated since it last changed.');
   });
 
   it('falls back to an honest sentence for an unknown or missing reason', () => {

@@ -41,7 +41,7 @@ func (g *CSRGenerator) GenerateCSR(agentID uuid.UUID, privateKey *rsa.PrivateKey
 	// Create CSR template
 	csrTemplate := x509.CertificateRequest{
 		Subject: pkix.Name{
-			Organization: []string{"VistaPlatform Device Agent"},
+			Organization: []string{"Vista Platform Device Agent"},
 			Country:      []string{"US"},
 			CommonName:   agentID.String(), // Use agent ID as CN
 		},

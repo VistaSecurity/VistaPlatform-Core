@@ -110,8 +110,8 @@ Cloud discoveries are automatically processed by the `discovery-processor-servic
 
 1. **Unified Pipeline**: GCP discoveries flow through the same `sensor_discoveries` pipeline as AWS, Azure, and sensor discoveries
 2. **Auto-Processing**: The `discovery-processor-service` automatically processes discoveries within seconds
-3. **Network Classification**: Discoveries are classified by network space
-4. **Auto-Approval**: Auto-approval rules are evaluated based on network space
+3. **Network Classification**: Discoveries are classified by the cloud segment for their project/region — a cloud resource's ownership comes from the account it lives in, not from an IP address it may not have
+4. **Auto-Approval**: The segment's auto-approval rule is evaluated. It applies only if that segment has auto-approve enabled **and** lists cloud discoveries among its sources — off on every pre-existing segment; see [Asset Approval](asset-approval.md#which-discoveries-a-segment-auto-approves)
 5. **Asset Creation**: Assets are created with `monitoring` (if auto-approved) or `pending_approval` status
 
 ### 5. Review and Approve Assets

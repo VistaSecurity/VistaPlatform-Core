@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: VistaPlatform — device-interrogation-service API
+  title: Vista Platform — device-interrogation-service API
   version: 0.1.0
   description: |
     Spec-first contract for device-interrogation-service (ADR-0001). First slice
@@ -41,7 +41,7 @@ info:
     `{ "stats": {...} }`, errors as `{ "error": "string" }`). The go-forward
     ADR-0002 envelope is defined under components.schemas for future hardening.
   contact:
-    name: VistaPlatform Platform
+    name: Vista Security
 servers:
 - url: /api/v1/device-interrogation-service
   description: device-interrogation-service v1, mounted behind the API gateway.

@@ -291,6 +291,23 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 			users.GET("/:id", middleware.RequirePermission(rbacService, "users.read"), GetUser(db))
 			users.PUT("/:id", middleware.RequirePermission(rbacService, "users.update"), UpdateUser(db))
 			users.DELETE("/:id", middleware.RequirePermission(rbacService, "users.delete"), DeleteUser(db))
+
+			// Data subject requests. Both are administrative acts over
+			// one named person's data, so they sit on users.manage rather than
+			// the users.read the roster uses.
+			users.GET("/:id/data-export", middleware.RequirePermission(rbacService, "users.manage"), ExportUserData(db))
+			users.POST("/:id/erase", middleware.RequirePermission(rbacService, "users.manage"), EraseUser(db))
+		}
+
+		// Self-service data export. Its own group rather than /users/me/... —
+		// a static segment beside the :id param on the same level is exactly
+		// the router conflict that is easy to introduce and hard to notice.
+		// No permission beyond being signed in: anyone may ask what is held
+		// about them.
+		me := authServiceGroup.Group("/me")
+		me.Use(middleware.RequireAuth(cfg, jwtService))
+		{
+			me.GET("/data-export", ExportMyData(db))
 		}
 
 		// Current tenant management routes. Write operations on tenant
@@ -469,9 +486,15 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 		// the registry's public_exceptions or it 404s on every Kubernetes
 		// install — which is exactly how platform branding silently broke.
 
-		// Admin impersonation routes (platform admin only)
+		// Admin impersonation routes (platform admin only).
+		//
+		// PlatformCookiesFirst: COOKIE_DOMAIN is a parent domain, so a browser
+		// holding both a web-ui and an admin-ui session sends BOTH cookie pairs
+		// here. Without the preference the tenant pair matched first, admin-ui
+		// authenticated as the tenant user, and RequirePlatformPermission below
+		// denied it — surfacing as "Couldn't load impersonation history".
 		adminImpersonation := authServiceGroup.Group("/admin")
-		adminImpersonation.Use(middleware.RequireAuth(cfg, jwtService))
+		adminImpersonation.Use(middleware.RequireAuth(cfg, jwtService, middleware.PlatformCookiesFirst()))
 		adminImpersonation.Use(middleware.RequireNotRevoked(authService.Redis()))
 		// Platform permission check using shared RBAC service
 		adminImpersonation.Use(middleware.RequirePlatformPermission(sharedRBACService, sharedrbac.PermissionPlatformImpersonate))
@@ -488,7 +511,9 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 
 		// Tenant security endpoints - For tenant health service (platform admin only)
 		tenantSecurity := authServiceGroup.Group("/tenant/:tenantId")
-		tenantSecurity.Use(middleware.RequireAuth(cfg, jwtService))
+		// Platform-admin only, so the same shared-domain cookie hazard applies —
+		// see PlatformCookiesFirst on the /admin group above.
+		tenantSecurity.Use(middleware.RequireAuth(cfg, jwtService, middleware.PlatformCookiesFirst()))
 		tenantSecurity.Use(middleware.RequireAnyRole("platform_admin", "super_admin"))
 		{
 			tenantSecurity.GET("/security-summary", getTenantSecuritySummaryHandler(authService))

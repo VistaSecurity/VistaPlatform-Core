@@ -38,7 +38,7 @@ func TestParsePlatformRefreshToken_AcceptsES256WhenSigning(t *testing.T) {
 
 	InitTokenSigning(mustPlatformSigner(t))
 
-	_, refresh, err := generateTokens("11111111-1111-1111-1111-111111111111", "admin@example.com", "super_admin", refreshES256Secret, false)
+	_, refresh, err := generateTokens("11111111-1111-1111-1111-111111111111", "admin@example.com", "super_admin", refreshES256Secret, false, defaultPlatformSessionTTL)
 	if err != nil {
 		t.Fatalf("generateTokens: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestParsePlatformRefreshToken_StillAcceptsLegacyHS256(t *testing.T) {
 	t.Cleanup(func() { platformSigner = prev })
 	platformSigner = nil // force the HS256 mint path
 
-	_, refresh, err := generateTokens("11111111-1111-1111-1111-111111111111", "admin@example.com", "super_admin", refreshES256Secret, false)
+	_, refresh, err := generateTokens("11111111-1111-1111-1111-111111111111", "admin@example.com", "super_admin", refreshES256Secret, false, defaultPlatformSessionTTL)
 	if err != nil {
 		t.Fatalf("generateTokens: %v", err)
 	}

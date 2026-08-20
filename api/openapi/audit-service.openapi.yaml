@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: VistaPlatform — audit-service API
+  title: Vista Platform — audit-service API
   version: 0.1.0
   description: |
     Spec-first contract for audit-service (ADR-0001). Covers the tenant-facing
@@ -43,7 +43,7 @@ info:
     NEW or HARDENED endpoints conform to; the current paths are hardened to it
     when the frontend-v2 surface first consumes them (ADR-0001 step 5).
   contact:
-    name: VistaPlatform Platform
+    name: Vista Security
 servers:
 - url: /api/v1/audit-service
   description: audit-service v1, mounted behind the API gateway.
@@ -482,58 +482,6 @@ paths:
                 $ref: '#/components/schemas/RetentionPolicyResponse'
         '400':
           $ref: '#/components/responses/LegacyBadRequest'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-
-  # ===========================================================================
-  # Triggered alerts (admin-ui audit alerts).
-  # ===========================================================================
-  /alerts:
-    get:
-      operationId: getAlerts
-      tags:
-      - alerts
-      summary: List triggered alerts
-      description: 'Filter by `status` (default "open"). `alerts` is null when none match.'
-      parameters:
-      - name: status
-        in: query
-        required: false
-        schema:
-          type: string
-      responses:
-        '200':
-          description: The matching alerts.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AlertListResponse'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-  /alerts/{id}/acknowledge:
-    post:
-      operationId: acknowledgeAlert
-      tags:
-      - alerts
-      summary: Acknowledge a triggered alert
-      parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: string
-          format: uuid
-      responses:
-        '200':
-          description: Acknowledgement confirmation.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AuditMessageResponse'
-        '400':
-          $ref: '#/components/responses/LegacyBadRequest'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
         '500':
           $ref: '#/components/responses/LegacyServerError'
 
@@ -1464,67 +1412,6 @@ components:
           type: integer
         is_active:
           type: boolean
-    Alert:
-      type: object
-      additionalProperties: false
-      description: |
-        A triggered alert (services.Alert). `sample_events`, `acknowledged_at`,
-        `acknowledged_by`, `resolved_at` are omitempty.
-      required:
-        - id
-        - rule_id
-        - rule_name
-        - severity
-        - message
-        - event_count
-        - triggered_at
-        - status
-      properties:
-        id:
-          type: string
-          format: uuid
-        rule_id:
-          type: string
-          format: uuid
-        rule_name:
-          type: string
-        severity:
-          type: string
-        message:
-          type: string
-        event_count:
-          type: integer
-        sample_events:
-          type: array
-          items:
-            type: object
-            additionalProperties: true
-        triggered_at:
-          type: string
-          format: date-time
-        acknowledged_at:
-          type: string
-          format: date-time
-        acknowledged_by:
-          type: string
-          format: uuid
-        resolved_at:
-          type: string
-          format: date-time
-        status:
-          type: string
-          description: "open / acknowledged / resolved."
-    AlertListResponse:
-      type: object
-      additionalProperties: false
-      description: 'Envelope `{ "alerts": [...] }`. `alerts` is null when none match.'
-      required:
-        - alerts
-      properties:
-        alerts:
-          type: [array, 'null']
-          items:
-            $ref: '#/components/schemas/Alert'
     AnalyticsSummaryResponse:
       type: object
       additionalProperties: false

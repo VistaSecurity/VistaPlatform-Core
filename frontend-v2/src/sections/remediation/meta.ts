@@ -1,7 +1,6 @@
-import type { complianceEngineComponents, auditServiceComponents } from '@vistasecurity/api-contract';
+import type { complianceEngineComponents } from '@vistasecurity/api-contract';
 
 export type Ticket = complianceEngineComponents['schemas']['Ticket'];
-export type AuditAlert = auditServiceComponents['schemas']['Alert'];
 
 export const PRIORITY_COLOR: Record<string, string> = {
   critical: 'var(--danger)', high: 'var(--warn-strong)', medium: 'var(--warn)', low: 'var(--ok)',

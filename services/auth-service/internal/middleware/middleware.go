@@ -107,6 +107,36 @@ type AuthOption func(*authOpts)
 
 type authOpts struct {
 	allowImpersonation bool
+	revocation         sharedmw.RevocationChecker
+	revocationSet      bool
+	platformFirst      bool
+}
+
+// WithRevocationChecker overrides the JWT revocation denylist reader that
+// RequireAuth consults. Production leaves it unset: RequireAuth resolves a
+// Redis-backed checker from REDIS_URL exactly once, mirroring
+// shared/middleware.RequireJWTAuth, so every RequireAuth-guarded route honors
+// the denylist with no per-call-site wiring. Pass a stub from tests.
+func WithRevocationChecker(rc sharedmw.RevocationChecker) AuthOption {
+	return func(o *authOpts) { o.revocation, o.revocationSet = rc, true }
+}
+
+// PlatformCookiesFirst flips the cookie-pair preference so the PLATFORM pair
+// (platform_access_token / platform_csrf_token) is tried before the tenant pair.
+//
+// COOKIE_DOMAIN is a parent domain (".<publicHost>"), so a browser holding both
+// a web-ui and an admin-ui session sends BOTH cookie sets to auth-service. With
+// the default tenant-first order, admin-ui's calls to a platform-only route
+// authenticate as the TENANT user and the platform gate then denies them — the
+// operator sees "Couldn't load impersonation history" with no hint that the
+// tenant session is the cause. Apply this to platform-only route groups.
+//
+// This is a PREFERENCE, not shared/middleware's StrictCookiePair: the tenant
+// pair is still tried as a fallback, so a caller holding only tenant cookies
+// still reaches the platform-permission gate and gets the same 403 it always
+// got, rather than a 401 that the UI would misread as session expiry.
+func PlatformCookiesFirst() AuthOption {
+	return func(o *authOpts) { o.platformFirst = true }
 }
 
 // AllowImpersonation extends a route's accepted token-type allowlist from
@@ -129,9 +159,34 @@ func AllowImpersonation() AuthOption {
 // a shared domain: the tenant pair (web-ui) and the platform pair (admin-ui).
 // RequireAuth tries them in this order so a request authenticates regardless of
 // which UI issued it. for why the platform fallback is required here.
-var authCookiePairs = []struct{ access, csrf string }{
+var authCookiePairs = []cookiePair{
 	{access: "access_token", csrf: "csrf_token"},
 	{access: "platform_access_token", csrf: "platform_csrf_token"},
+}
+
+type cookiePair struct{ access, csrf string }
+
+// platformFirstCookiePairs is authCookiePairs with the platform pair promoted —
+// see PlatformCookiesFirst.
+var platformFirstCookiePairs = []cookiePair{
+	authCookiePairs[1],
+	authCookiePairs[0],
+}
+
+// defaultRevocationChecker is the process-wide denylist reader RequireAuth uses
+// when a call site does not pass WithRevocationChecker. Resolved once from
+// REDIS_URL, the same way shared/middleware.RequireJWTAuth does it; nil (check
+// skipped, fail-open) when REDIS_URL is unset or unparseable.
+var (
+	defaultRevocation     sharedmw.RevocationChecker
+	defaultRevocationOnce sync.Once
+)
+
+func getDefaultRevocationChecker() sharedmw.RevocationChecker {
+	defaultRevocationOnce.Do(func() {
+		defaultRevocation = sharedmw.RedisRevocationCheckerFromEnv()
+	})
+	return defaultRevocation
 }
 
 // RequireInternalOnly accepts ONLY HMAC-signed service-to-service calls
@@ -164,6 +219,14 @@ func RequireAuth(cfg *config.Config, jwtService *auth.JWTService, options ...Aut
 	for _, fn := range options {
 		fn(&opts)
 	}
+	revocation := opts.revocation
+	if !opts.revocationSet {
+		revocation = getDefaultRevocationChecker()
+	}
+	cookiePairs := authCookiePairs
+	if opts.platformFirst {
+		cookiePairs = platformFirstCookiePairs
+	}
 	return func(c *gin.Context) {
 		// Allow internal service-to-service calls without auth
 		if isInternalServiceCall(c) {
@@ -185,7 +248,7 @@ func RequireAuth(cfg *config.Config, jwtService *auth.JWTService, options ...Aut
 		if len(authHeader) >= 7 && authHeader[:7] == "Bearer " {
 			token = authHeader[7:]
 		} else {
-			for _, p := range authCookiePairs {
+			for _, p := range cookiePairs {
 				cookie, err := c.Cookie(p.access)
 				if err != nil || cookie == "" {
 					continue
@@ -237,6 +300,23 @@ func RequireAuth(cfg *config.Config, jwtService *auth.JWTService, options ...Aut
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"error": "Invalid token type",
 			})
+			c.Abort()
+			return
+		}
+
+		// Reject tokens whose jti is on the revocation denylist that Logout and
+		// StopAdminImpersonation write to. Without this, auth-service was
+		// the ONE service that ignored its own denylist: a token revoked by "Sign
+		// out" kept working here for the rest of its JWT_EXPIRY — reading /auth/me
+		// and /auth/sessions, mutating tenant users, and minting a personal access
+		// token that outlives the revoked session — while every other service
+		// (which goes through shared RequireJWTAuth) answered 401.
+		//
+		// Fail-open on a denylist outage is deliberate and matches the shared
+		// middleware: the checker returns false when Redis errors, so a Redis
+		// outage degrades to "not revoked" rather than locking everyone out.
+		if revocation != nil && claims.ID != "" && revocation.IsRevoked(c.Request.Context(), claims.ID) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token revoked"})
 			c.Abort()
 			return
 		}

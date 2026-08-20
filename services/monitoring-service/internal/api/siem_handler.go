@@ -14,9 +14,9 @@ import (
 )
 
 // defaultCEFVendor is the CEF/LEEF DeviceVendor field emitted in SIEM events.
-const defaultCEFVendor = "VistaPlatform"
+const defaultCEFVendor = "Vista Platform"
 
-// cefVendor returns the SIEM DeviceVendor string. Defaults to "VistaPlatform";
+// cefVendor returns the SIEM DeviceVendor string. Defaults to "Vista Platform";
 // customers mid-migration whose SIEM parsers/correlation rules still key on the
 // pre-rebrand "CryptoInventory" vendor can set SIEM_CEF_VENDOR=CryptoInventory
 // until they re-tune their SIEM side. See.

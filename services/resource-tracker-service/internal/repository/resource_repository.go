@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/services/resource-tracker-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/costing"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
@@ -76,18 +78,24 @@ func (r *ResourceRepository) GetResourceUsageByTenant(tenantID uuid.UUID, period
 		timeFilter = "timestamp >= NOW() - INTERVAL '24 hours'"
 	}
 
+	// The aggregates deliberately carry NO COALESCE: SUM/AVG over a column that
+	// is NULL in every sample returns NULL, which is precisely "not measured",
+	// and COALESCE(...,0) would relabel that as a measured zero.
+	//
+	// storage_used_mb is a point-in-time GAUGE, so it is averaged, not summed —
+	// summing a gauge multiplies the answer by the number of samples in the
+	// window.
 	//nolint:gosec // intentional — placeholder concatenation only; values are parameterized via args slice
 	query := fmt.Sprintf(`
-		SELECT 
+		SELECT
 			tenant_id,
-			COALESCE(SUM(api_calls), 0) as total_api_calls,
-			COALESCE(SUM(database_queries), 0) as total_db_queries,
-			COALESCE(AVG(memory_usage_mb), 0) as avg_memory_mb,
-			COALESCE(AVG(cpu_usage_percent), 0) as avg_cpu_percent,
-			COALESCE(SUM(storage_used_mb), 0) as total_storage_mb,
-			COALESCE(SUM(network_bytes), 0) as total_network_bytes,
-			COALESCE(SUM(cost_usd), 0) as total_cost_usd
-		FROM tenant_resource_usage 
+			SUM(api_calls) as total_api_calls,
+			SUM(database_queries) as total_db_queries,
+			AVG(memory_usage_mb) as avg_memory_mb,
+			AVG(cpu_usage_percent) as avg_cpu_percent,
+			AVG(storage_used_mb) as mean_storage_mb,
+			SUM(network_bytes) as total_network_bytes
+		FROM tenant_resource_usage
 		WHERE tenant_id = $1 AND %s
 		GROUP BY tenant_id
 	`, timeFilter)
@@ -96,18 +104,20 @@ func (r *ResourceRepository) GetResourceUsageByTenant(tenantID uuid.UUID, period
 	response.TenantID = tenantID
 	response.Period = period
 
+	measured := windowMeasurements{window: periodWindow(period)}
+	var avgMemoryMB, avgCPUPercent sql.NullFloat64
+
 	// RLS-scoped read over tenant_resource_usage.
 	ctx := context.Background()
 	err := shareddatabase.WithTenantTx(ctx, r.db, tenantID, func(tx *sql.Tx) error {
 		scanErr := tx.QueryRowContext(ctx, query, tenantID).Scan(
 			&response.TenantID,
-			&response.TotalAPICalls,
-			&response.TotalDBQueries,
-			&response.AvgMemoryMB,
-			&response.AvgCPUPercent,
-			&response.TotalStorageMB,
-			&response.TotalNetworkMB,
-			&response.TotalCostUSD,
+			&measured.apiCalls,
+			&measured.databaseQueries,
+			&avgMemoryMB,
+			&avgCPUPercent,
+			&measured.storageMeanMB,
+			&measured.networkBytes,
 		)
 		if scanErr == sql.ErrNoRows {
 			return nil // no data is not an error for this aggregate
@@ -118,11 +128,20 @@ func (r *ResourceRepository) GetResourceUsageByTenant(tenantID uuid.UUID, period
 		return nil, err
 	}
 
-	// Convert network bytes to MB
-	response.TotalNetworkMB = response.TotalNetworkMB / (1024 * 1024)
+	response.TotalAPICalls = int(measured.apiCalls.Int64)
+	response.TotalDBQueries = int(measured.databaseQueries.Int64)
+	response.AvgMemoryMB = avgMemoryMB.Float64
+	response.AvgCPUPercent = avgCPUPercent.Float64
+	response.TotalStorageMB = int(measured.storageMeanMB.Float64)
+	response.TotalNetworkMB = float64(measured.networkBytes.Int64) / (1024 * 1024)
 
-	// Calculate cost breakdown
-	response.CostBreakdown = r.calculateCostBreakdown(&response)
+	// The headline and the itemisation come from one costing.Compute call, so
+	// they cannot disagree. total_cost_usd is NOT read back from the stored
+	// per-sample cost_usd column: that column prices only the per-unit
+	// components and summing it beside a differently-derived breakdown is the
+	// exact contradiction this replaces.
+	response.CostBreakdown = r.calculateCostBreakdown(measured)
+	response.TotalCostUSD = response.CostBreakdown.TotalCost
 
 	return &response, nil
 }
@@ -219,16 +238,26 @@ func (r *ResourceRepository) GetCostTrend(tenantID uuid.UUID, period string) ([]
 		interval = "1 hour"
 	}
 
+	// Each bucket is priced from its own raw aggregates through the same
+	// costing.Compute the point-in-time reads use, rather than from
+	// SUM(cost_usd): the stored column prices only the per-unit components, so
+	// summing it here would draw a trend line that disagrees with the headline
+	// plotted above it.
 	//nolint:gosec // intentional — placeholder concatenation only; values are parameterized via args slice
 	query := fmt.Sprintf(`
-		SELECT 
+		SELECT
 			DATE_TRUNC('%s', timestamp) as time_bucket,
-			COALESCE(SUM(cost_usd), 0) as cost_usd
-		FROM tenant_resource_usage 
+			SUM(api_calls) as total_api_calls,
+			SUM(database_queries) as total_db_queries,
+			AVG(storage_used_mb) as mean_storage_mb,
+			SUM(network_bytes) as total_network_bytes
+		FROM tenant_resource_usage
 		WHERE tenant_id = $1 AND %s
 		GROUP BY time_bucket
 		ORDER BY time_bucket
 	`, interval, timeFilter)
+
+	bucketWindow := bucketDuration(interval)
 
 	// RLS-scoped read over tenant_resource_usage.
 	ctx := context.Background()
@@ -242,9 +271,17 @@ func (r *ResourceRepository) GetCostTrend(tenantID uuid.UUID, period string) ([]
 
 		for rows.Next() {
 			var dp models.CostDataPoint
-			if e := rows.Scan(&dp.Timestamp, &dp.CostUSD); e != nil {
+			measured := windowMeasurements{window: bucketWindow}
+			if e := rows.Scan(
+				&dp.Timestamp,
+				&measured.apiCalls,
+				&measured.databaseQueries,
+				&measured.storageMeanMB,
+				&measured.networkBytes,
+			); e != nil {
 				return e
 			}
+			dp.CostUSD = costing.Compute(measured.usage(), costing.DefaultRates()).TotalUSD
 			dataPoints = append(dataPoints, dp)
 		}
 		return rows.Err()
@@ -276,22 +313,26 @@ func (r *ResourceRepository) GetAllTenantsResourceUsage(period string) ([]models
 		timeFilter = "timestamp >= NOW() - INTERVAL '24 hours'"
 	}
 
+	// No COALESCE, and storage is averaged rather than summed — see the note on
+	// the same aggregates in GetResourceUsageByTenant. Ordering is by measured
+	// API volume rather than by SUM(cost_usd): cost is now derived at read time
+	// from these aggregates, so ordering by the stored column would rank the
+	// list by a number no longer shown.
 	//nolint:gosec // intentional — placeholder concatenation only; values are parameterized via args slice
 	query := fmt.Sprintf(`
-		SELECT 
+		SELECT
 			t.id as tenant_id,
 			t.name as tenant_name,
-			COALESCE(SUM(ru.api_calls), 0) as total_api_calls,
-			COALESCE(SUM(ru.database_queries), 0) as total_db_queries,
-			COALESCE(AVG(ru.memory_usage_mb), 0) as avg_memory_mb,
-			COALESCE(AVG(ru.cpu_usage_percent), 0) as avg_cpu_percent,
-			COALESCE(SUM(ru.storage_used_mb), 0) as total_storage_mb,
-			COALESCE(SUM(ru.network_bytes), 0) as total_network_bytes,
-			COALESCE(SUM(ru.cost_usd), 0) as total_cost_usd
+			SUM(ru.api_calls) as total_api_calls,
+			SUM(ru.database_queries) as total_db_queries,
+			AVG(ru.memory_usage_mb) as avg_memory_mb,
+			AVG(ru.cpu_usage_percent) as avg_cpu_percent,
+			AVG(ru.storage_used_mb) as mean_storage_mb,
+			SUM(ru.network_bytes) as total_network_bytes
 		FROM tenants t
 		LEFT JOIN tenant_resource_usage ru ON t.id = ru.tenant_id AND %s
 		GROUP BY t.id, t.name
-		ORDER BY total_cost_usd DESC
+		ORDER BY total_api_calls DESC NULLS LAST
 	`, timeFilter)
 
 	// RLS: cross-tenant — runs directly on the bypass connection (no
@@ -306,18 +347,18 @@ func (r *ResourceRepository) GetAllTenantsResourceUsage(period string) ([]models
 	var summaries []models.TenantResourceSummary
 	for rows.Next() {
 		var summary models.TenantResourceSummary
-		var totalNetworkBytes int64
+		measured := windowMeasurements{window: periodWindow(period)}
+		var avgMemoryMB, avgCPUPercent sql.NullFloat64
 
 		err := rows.Scan(
 			&summary.TenantID,
 			&summary.TenantName,
-			&summary.CurrentUsage.TotalAPICalls,
-			&summary.CurrentUsage.TotalDBQueries,
-			&summary.CurrentUsage.AvgMemoryMB,
-			&summary.CurrentUsage.AvgCPUPercent,
-			&summary.CurrentUsage.TotalStorageMB,
-			&totalNetworkBytes,
-			&summary.CurrentUsage.TotalCostUSD,
+			&measured.apiCalls,
+			&measured.databaseQueries,
+			&avgMemoryMB,
+			&avgCPUPercent,
+			&measured.storageMeanMB,
+			&measured.networkBytes,
 		)
 		if err != nil {
 			return nil, err
@@ -325,8 +366,14 @@ func (r *ResourceRepository) GetAllTenantsResourceUsage(period string) ([]models
 
 		summary.CurrentUsage.TenantID = summary.TenantID
 		summary.CurrentUsage.Period = period
-		summary.CurrentUsage.TotalNetworkMB = float64(totalNetworkBytes) / (1024 * 1024)
-		summary.CurrentUsage.CostBreakdown = r.calculateCostBreakdown(&summary.CurrentUsage)
+		summary.CurrentUsage.TotalAPICalls = int(measured.apiCalls.Int64)
+		summary.CurrentUsage.TotalDBQueries = int(measured.databaseQueries.Int64)
+		summary.CurrentUsage.AvgMemoryMB = avgMemoryMB.Float64
+		summary.CurrentUsage.AvgCPUPercent = avgCPUPercent.Float64
+		summary.CurrentUsage.TotalStorageMB = int(measured.storageMeanMB.Float64)
+		summary.CurrentUsage.TotalNetworkMB = float64(measured.networkBytes.Int64) / (1024 * 1024)
+		summary.CurrentUsage.CostBreakdown = r.calculateCostBreakdown(measured)
+		summary.CurrentUsage.TotalCostUSD = summary.CurrentUsage.CostBreakdown.TotalCost
 
 		// Get cost and resource trends
 		costTrend, _ := r.GetCostTrend(summary.TenantID, period)
@@ -404,23 +451,86 @@ func (r *ResourceRepository) GetActiveAlerts(tenantID uuid.UUID) ([]models.Resou
 }
 
 // Helper function to calculate cost breakdown
-func (r *ResourceRepository) calculateCostBreakdown(usage *models.ResourceUsageResponse) models.ResourceBreakdown {
-	// Simple cost calculation - in production, these would be configurable rates
-	apiCost := float64(usage.TotalAPICalls) * 0.0001        // $0.0001 per API call
-	databaseCost := float64(usage.TotalDBQueries) * 0.00005 // $0.00005 per query
-	storageCost := float64(usage.TotalStorageMB) * 0.023    // $0.023 per GB per month
-	computeCost := usage.AvgCPUPercent * 0.1                // $0.1 per CPU percent
-	networkCost := usage.TotalNetworkMB * 0.09              // $0.09 per GB
+// calculateCostBreakdown prices an aggregated window through shared/costing.
+//
+// This used to be an independent third rate card that applied the per-GB
+// storage and network rates to megabyte counts (a 1024x error each) and priced
+// AVG(cpu_usage_percent) as compute. It now delegates, so the repository, the
+// persister and the admin cost pages can no longer drift apart.
+func (r *ResourceRepository) calculateCostBreakdown(m windowMeasurements) models.ResourceBreakdown {
+	b := costing.Compute(m.usage(), costing.DefaultRates())
 
-	totalCost := apiCost + databaseCost + storageCost + computeCost + networkCost
+	pick := func(name string) *float64 {
+		if v, ok := b.Components[name]; ok {
+			return &v
+		}
+		return nil
+	}
 
 	return models.ResourceBreakdown{
-		APICost:      apiCost,
-		DatabaseCost: databaseCost,
-		StorageCost:  storageCost,
-		ComputeCost:  computeCost,
-		NetworkCost:  networkCost,
-		TotalCost:    totalCost,
+		APICost:      pick(costing.ComponentAPICalls),
+		DatabaseCost: pick(costing.ComponentDatabase),
+		StorageCost:  pick(costing.ComponentStorage),
+		ComputeCost:  pick(costing.ComponentCompute),
+		NetworkCost:  pick(costing.ComponentNetwork),
+		TotalCost:    b.TotalUSD,
+		NotMeasured:  b.NotMeasured,
+	}
+}
+
+// windowMeasurements carries the raw aggregates for one costing window,
+// preserving NULL (not measured) as nil rather than collapsing it to zero.
+type windowMeasurements struct {
+	window          time.Duration
+	apiCalls        sql.NullInt64
+	databaseQueries sql.NullInt64
+	networkBytes    sql.NullInt64
+	storageMeanMB   sql.NullFloat64
+}
+
+func (m windowMeasurements) usage() costing.Usage {
+	u := costing.Usage{Window: m.window}
+	if m.apiCalls.Valid {
+		u.APICalls = &m.apiCalls.Int64
+	}
+	if m.databaseQueries.Valid {
+		u.DatabaseQueries = &m.databaseQueries.Int64
+	}
+	if m.networkBytes.Valid {
+		u.NetworkBytes = &m.networkBytes.Int64
+	}
+	if m.storageMeanMB.Valid {
+		u.StorageBytes = costing.Float64(m.storageMeanMB.Float64 * 1024 * 1024)
+	}
+	return u
+}
+
+// bucketDuration maps a DATE_TRUNC interval to the duration one bucket spans,
+// so a trend point's storage term is prorated over the bucket rather than over
+// the whole requested period.
+func bucketDuration(interval string) time.Duration {
+	switch interval {
+	case "5 minutes":
+		return 5 * time.Minute
+	case "1 day":
+		return 24 * time.Hour
+	default: // "1 hour"
+		return time.Hour
+	}
+}
+
+// periodWindow maps a period label to the duration its aggregates cover.
+// Storage is rated per GB-month, so the window is part of the price.
+func periodWindow(period string) time.Duration {
+	switch period {
+	case "1h":
+		return time.Hour
+	case "7d":
+		return 7 * 24 * time.Hour
+	case "30d":
+		return 30 * 24 * time.Hour
+	default: // "24h" and anything unrecognised
+		return 24 * time.Hour
 	}
 }
 

@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -90,15 +91,18 @@ func (j *LogRetentionJob) runRetentionPolicy(ctx context.Context) {
 	}
 
 	// Step 1: Archive logs older than 90 days (move from hot to archive)
-	archivedCount, err := j.archiveOldLogs(ctx, jobID)
-	if err != nil {
-		j.logger.Printf("ERROR: Failed to archive logs: %v", err)
+	// Both step errors are kept and joined below. Reusing one `err` let the
+	// delete step's (usually nil) result overwrite an archive failure, so a
+	// failed archive was recorded as a completed job.
+	archivedCount, archiveErr := j.archiveOldLogs(ctx, jobID)
+	if archiveErr != nil {
+		j.logger.Printf("ERROR: Failed to archive logs: %v", archiveErr)
 	}
 
 	// Step 2: Delete logs older than 365 days (soft delete for compliance)
-	deletedCount, err := j.deleteOldLogs(ctx, jobID)
-	if err != nil {
-		j.logger.Printf("ERROR: Failed to delete logs: %v", err)
+	deletedCount, deleteErr := j.deleteOldLogs(ctx, jobID)
+	if deleteErr != nil {
+		j.logger.Printf("ERROR: Failed to delete logs: %v", deleteErr)
 	}
 
 	// Step 3: Cleanup S3 objects for deleted logs (optional - keep for compliance)
@@ -108,8 +112,7 @@ func (j *LogRetentionJob) runRetentionPolicy(ctx context.Context) {
 	duration := time.Since(startTime)
 
 	// Record job completion
-	err = j.recordJobCompletion(ctx, jobID, archivedCount, deletedCount, 0, duration, err)
-	if err != nil {
+	if err := j.recordJobCompletion(ctx, jobID, archivedCount, deletedCount, 0, duration, errors.Join(archiveErr, deleteErr)); err != nil {
 		j.logger.Printf("ERROR: Failed to record job completion: %v", err)
 		return
 	}
@@ -197,17 +200,26 @@ func (j *LogRetentionJob) recordJobCompletion(ctx context.Context, jobID uuid.UU
 		errorMessage = jobError.Error()
 	}
 
+	// Two things this statement gets wrong if you write it the obvious way, and
+	// neither is visible from Go — the row simply never leaves 'running':
+	//
+	//  1. No updated_at. platform_log_retention_jobs has created_at /
+	//     started_at / completed_at only (see schema.sql); setting updated_at
+	//     raised 42703. completed_at already carries the finish timestamp.
+	//  2. The counters must be cast. `$2 + $3 + $4` is `unknown + unknown`,
+	//     which Postgres refuses as ambiguous (42725, "operator is not
+	//     unique") — a parameter only borrows a type from the column it is
+	//     assigned to, never from an arithmetic expression.
 	query := `
 		UPDATE platform_log_retention_jobs
 		SET execution_status = $1,
-		    logs_processed = $2 + $3 + $4,
-		    logs_archived = $2,
-		    logs_deleted = $3,
-		    logs_scrubbed = $4,
+		    logs_processed = $2::int + $3::int + $4::int,
+		    logs_archived = $2::int,
+		    logs_deleted = $3::int,
+		    logs_scrubbed = $4::int,
 		    completed_at = NOW(),
 		    duration_ms = $5,
-		    error_message = $6,
-		    updated_at = NOW()
+		    error_message = $6
 		WHERE id = $7
 	`
 

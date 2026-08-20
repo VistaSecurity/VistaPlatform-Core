@@ -125,7 +125,7 @@ type CBOMAlgorithmDetails struct {
 	ClassicalSecurityLevel   int      `json:"classical_security_level,omitempty"`    // Bits of classical security
 	NistQuantumSecurityLevel int      `json:"nist_quantum_security_level,omitempty"` // NIST PQC level 0-5
 
-	// Assessment (VistaPlatform-specific enrichment)
+	// Assessment (Vista Platform-specific enrichment)
 	Role                     string   `json:"role,omitempty"`
 	Category                 string   `json:"category"`
 	Strength                 string   `json:"strength,omitempty"`           // weak/acceptable/strong/recommended

@@ -3,7 +3,9 @@ package password
 import (
 	"crypto/rand"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -158,10 +160,68 @@ func GenerateRandomPassword(length int) (string, error) {
 	return string(b), nil
 }
 
-// ValidatePasswordStrength enforces baseline password policy.
+// MinPasswordLength is the built-in minimum, and a FLOOR the operator-configured
+// policy can raise but never lower. A settings write must not be able to weaken
+// authentication below what the code guarantees.
+const MinPasswordLength = 8
+
+// MaxPasswordLength is bcrypt's 72-byte input limit.
+const MaxPasswordLength = 72
+
+// ValidatePasswordStrength enforces the baseline password policy at the built-in
+// minimum length.
+//
+// Prefer ValidatePasswordStrengthWithPolicy on any path that has a *sql.DB: this
+// form ignores the operator's configured password_min_length, which is how that
+// setting came to be saved, displayed, and enforced by nothing.
 func ValidatePasswordStrength(password string) error {
-	if len(password) < 8 {
-		return errors.New("password must be at least 8 characters long")
+	return ValidatePasswordStrengthWithMinLength(password, MinPasswordLength)
+}
+
+// PolicyMinLength returns the operator-configured minimum password length from
+// platform_settings.password_min_length (admin-ui → Security ▸ Policy), never
+// below MinPasswordLength.
+//
+// Fails SAFE, not open: a missing row, an unparseable value or a query error
+// yields the built-in floor. Unlike the signup toggles — which fail open because
+// a settings hiccup must not wall off the only route in — a password rule that
+// silently evaporates is a weakening, so the fallback is the stricter answer.
+func PolicyMinLength(db *sql.DB) int {
+	if db == nil {
+		return MinPasswordLength
+	}
+	var raw []byte
+	if err := db.QueryRow(`SELECT setting_value FROM platform_settings WHERE setting_key = 'password_min_length'`).Scan(&raw); err != nil {
+		return MinPasswordLength
+	}
+	var configured int
+	if err := json.Unmarshal(raw, &configured); err != nil {
+		return MinPasswordLength
+	}
+	if configured < MinPasswordLength {
+		return MinPasswordLength
+	}
+	if configured > MaxPasswordLength {
+		return MaxPasswordLength
+	}
+	return configured
+}
+
+// ValidatePasswordStrengthWithPolicy enforces the baseline policy at the
+// operator-configured minimum length. This is the form every password-setting
+// route should use.
+func ValidatePasswordStrengthWithPolicy(db *sql.DB, password string) error {
+	return ValidatePasswordStrengthWithMinLength(password, PolicyMinLength(db))
+}
+
+// ValidatePasswordStrengthWithMinLength enforces the baseline password policy at
+// an explicit minimum length. minLength is clamped to MinPasswordLength.
+func ValidatePasswordStrengthWithMinLength(password string, minLength int) error {
+	if minLength < MinPasswordLength {
+		minLength = MinPasswordLength
+	}
+	if len(password) < minLength {
+		return fmt.Errorf("password must be at least %d characters long", minLength)
 	}
 
 	if len(password) > 72 {

@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/cluster-sensor-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 	"github.com/vistasecurity/vistaplatform/shared/events"
@@ -248,6 +250,22 @@ func (jp *JobProcessor) processDiscoveryJob(job *models.DiscoveryJob) error {
 	if job.ExecutionMode == "cloud" {
 		log.Printf("Job %s is a cloud discovery job, delegating to device-interrogation-service", job.ID)
 		return jp.delegateToDeviceInterrogation(job)
+	}
+
+	// "sensors" means "run this from a tenant-deployed sensor", and there is no
+	// dispatcher for that. This branch used to be absent, so such a job fell
+	// through to the in-cluster nmap path below: the scan ran from the platform
+	// cluster, could not reach a target only the tenant's sensor can see, and the
+	// job finished `completed` with zero findings and no indication the sensor was
+	// never involved. Fail it loudly instead.
+	//
+	// Creation is now rejected at every entry point, so this only catches rows
+	// written before that guard existed (or by a future writer that forgets it) —
+	// which is exactly when a silent wrong-executor run would be hardest to spot.
+	if strings.EqualFold(strings.TrimSpace(job.ExecutionMode), "sensors") {
+		log.Printf("Job %s requests tenant-sensor execution, which has no dispatcher; failing rather than running it in-cluster", job.ID)
+		return fmt.Errorf("execution_mode \"sensors\" is not supported: this job asked to run on a tenant-deployed sensor, " +
+			"and dispatching discovery jobs to sensors is not implemented. Re-create the job with execution_mode \"cloud\" or \"auto\"")
 	}
 
 	// Read scanning options from job metadata
@@ -590,8 +608,11 @@ func (jp *JobProcessor) storeFinding(finding *models.DiscoveryFinding) error {
 	// RLS-scoped INSERT over discovery_findings; finding.TenantID scopes the tx
 	// so the row's tenant_id satisfies the policy WITH CHECK.
 	err := jp.withTenantTxx(context.Background(), finding.TenantID, func(tx *sqlx.Tx) error {
+		// Protocol is canonicalized on the way in so every discovery path stores
+		// one spelling — see cryptoparse.NormalizeProtocol.
 		return tx.QueryRow(query,
-			finding.JobID, finding.TargetID, finding.TenantID, finding.ExecutedVia, finding.Protocol,
+			finding.JobID, finding.TargetID, finding.TenantID, finding.ExecutedVia,
+			cryptoparse.NormalizeProtocol(finding.Protocol),
 			finding.Port, resolvedIP, finding.Hostname, finding.ConfidenceScore, detailsJSON, finding.CreatedAt).Scan(&finding.ID)
 	})
 	if err != nil {
@@ -658,7 +679,7 @@ func (jp *JobProcessor) mirrorFindingToSensorDiscoveries(job *models.DiscoveryJo
 			INSERT INTO sensor_discoveries
 				(sensor_id, tenant_id, batch_id, protocol, dest_ip, port, confidence, metadata, hostname, "timestamp", created_at)
 			VALUES ($1, $2, $3, $4, $5::inet, $6, $7, $8::jsonb, $9, NOW(), NOW())
-		`, sensorID, finding.TenantID, job.ID, finding.Protocol, finding.ResolvedIP, finding.Port,
+		`, sensorID, finding.TenantID, job.ID, cryptoparse.NormalizeProtocol(finding.Protocol), finding.ResolvedIP, finding.Port,
 			finding.ConfidenceScore, string(metaJSON), hostname)
 		return e
 	})

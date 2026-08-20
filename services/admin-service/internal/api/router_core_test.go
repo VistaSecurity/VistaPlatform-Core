@@ -132,7 +132,6 @@ func TestCoreRouter_BuildsAndMountsTheOperatorConsole(t *testing.T) {
 		// security + System Health
 		"GET /api/v1/admin-service/admin/security/events",
 		"GET /api/v1/admin-service/admin/security/dashboard-stats",
-		"GET /api/v1/admin-service/admin/security/compliance",
 		"GET /api/v1/admin-service/admin/monitoring/health",
 		"GET /api/v1/admin-service/admin/monitoring/logs",
 		// liveness
@@ -141,6 +140,26 @@ func TestCoreRouter_BuildsAndMountsTheOperatorConsole(t *testing.T) {
 	for _, r := range want {
 		if !routes[r] {
 			t.Errorf("Core router is missing %q", r)
+		}
+	}
+}
+
+// The compliance-framework routes read public.compliance_framework_status, a
+// table with no writer anywhere in the product — no Go INSERT, no seed, no chart
+// job. They served an empty table behind a 200 on every deployment forever, so
+// they were removed rather than left as a permanently blank panel. This is the
+// ratchet: re-adding a route without a producer fails here.
+//
+// If a real producer is ever built, delete this test in the same commit that
+// adds the writer — do not weaken it.
+func TestCoreRouter_MountsNoProducerlessComplianceRoutes(t *testing.T) {
+	routes := coreRouteSet(t)
+	for _, r := range []string{
+		"GET /api/v1/admin-service/admin/security/compliance",
+		"GET /api/v1/admin-service/admin/security/compliance/:framework",
+	} {
+		if routes[r] {
+			t.Errorf("router mounts %q — that route reads a table nothing writes to", r)
 		}
 	}
 }

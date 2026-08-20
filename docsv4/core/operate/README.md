@@ -2,9 +2,9 @@
 render_macros: false
 ---
 
-# Operating VistaPlatform
+# Operating Vista Platform
 
-Documentation for deploying and running VistaPlatform — solutions engineers,
+Documentation for deploying and running Vista Platform — solutions engineers,
 platform operators, and anyone standing up the platform for their own
 organization.
 
@@ -17,6 +17,7 @@ organization.
 | Run a production pre-flight | [Production Checklist](./deployment/production-checklist.md) |
 | Operate the platform day-to-day | [Platform Admin Guide](./platform-admin-guide.md) |
 | Monitor and alert | [Monitoring Setup](./monitoring/setup.md) |
+| Work out which legal documents are yours to write | [Legal documents for operators](./legal/README.md) |
 | Troubleshoot issues | [Common Issues](./troubleshooting/common-issues.md) |
 
 ## Contents
@@ -35,6 +36,10 @@ organization.
 - [Startup & Shutdown](./startup-shutdown.md) — Service lifecycle management
 - [Container Runtime Images](./container-runtime-images.md) — Source of truth for all runtime images
 - [Notification Providers](./operations/notification-providers.md) — Slack, Email, Webhook, PagerDuty
+
+### Legal
+- [Legal documents for operators](./legal/README.md) — who is responsible for what when the software is self-hosted, and how click-through acceptance is recorded
+- [Data Processing Agreement template](./legal/data-processing-agreement.md) — for when you run a deployment on someone else's behalf, with the technical measures annex pre-filled
 
 ### Monitoring
 - [Monitoring Setup](./monitoring/setup.md)

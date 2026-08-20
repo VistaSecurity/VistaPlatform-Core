@@ -41,8 +41,8 @@ func (g *CSRGenerator) GenerateCSR(entityID uuid.UUID, privateKey *rsa.PrivateKe
 	// Create CSR template
 	csrTemplate := x509.CertificateRequest{
 		Subject: pkix.Name{
-			Organization:       []string{"VistaPlatform"},
-			OrganizationalUnit: []string{"VistaPlatform"},
+			Organization:       []string{"Vista Platform"},
+			OrganizationalUnit: []string{"Vista Platform"},
 			Country:            []string{"US"},
 			Province:           []string{"Florida"},
 			Locality:           []string{"Orlando"},

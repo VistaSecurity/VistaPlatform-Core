@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: VistaPlatform — resource-tracker-service API
+  title: Vista Platform — resource-tracker-service API
   version: 0.1.0
   description: |
     Spec-first contract for resource-tracker-service (ADR-0001). First slice for

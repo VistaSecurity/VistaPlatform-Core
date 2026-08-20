@@ -274,21 +274,28 @@ export function CmdbJobsModal({ profile, open, onClose }: { profile: CMDBProfile
             <thead>
               <tr style={{ position: 'sticky', top: 0, background: 'var(--app-panel)' }}>
                 <th style={th}>When</th><th style={th}>Trigger</th><th style={th}>Status</th>
-                <th style={th}>Pushed</th><th style={th}>Reconciled</th><th style={th}>Failed</th><th style={th}>Skipped</th>
+                <th style={th}>Created</th><th style={th}>Updated</th><th style={th}>Failed</th><th style={th}>Skipped</th>
               </tr>
             </thead>
             <tbody>
-              {jobs.map((j: CMDBJob) => (
+              {jobs.map((j: CMDBJob) => {
+                // Created / updated come from the run summary. They split what
+                // items_pushed aggregates, so a run that keeps reporting new CIs
+                // for inventory you already synced is visible rather than hidden
+                // behind one "pushed" total.
+                const counts = (j.summary ?? {}) as { created?: number; updated?: number };
+                return (
                 <tr key={j.id} style={{ borderTop: '1px solid var(--app-border)' }}>
                   <td style={td}>{relTime(j.completed_at ?? j.started_at ?? j.created_at)}</td>
                   <td style={td}>{j.trigger_type}</td>
                   <td style={td}><STag color={jobTone(j.status)}>{j.status}</STag></td>
-                  <td style={td}>{j.items_pushed}</td>
-                  <td style={td}>{j.items_reconciled}</td>
+                  <td style={td}>{counts.created ?? j.items_pushed}</td>
+                  <td style={td}>{counts.updated ?? 0}</td>
                   <td style={{ ...td, color: j.items_failed ? 'var(--danger)' : undefined }}>{j.items_failed}</td>
                   <td style={td}>{j.items_skipped}</td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

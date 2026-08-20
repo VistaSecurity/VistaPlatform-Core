@@ -4,7 +4,7 @@ Guidance for Claude Code (or any AI coding assistant) working in this repository
 
 ## What this repository is
 
-This is **VistaPlatform Core** — the open, self-hostable edition of a
+This is **Vista Platform Core** — the free, source-available, self-hostable edition of a
 multi-tenant platform for cryptographic asset inventory and compliance
 (discovering TLS/SSH/crypto configurations across a network, evaluating them
 against compliance frameworks like PCI-DSS or NIST, and producing CBOM

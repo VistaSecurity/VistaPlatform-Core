@@ -136,12 +136,12 @@ KUBE ?= $(HOME)/.kube/config
 KUBE_NS ?= vistaplatform
 
 cluster-suspend: ## Scale all vistaplatform deployments to 0 (pause cluster without destroying data)
-	@echo "Suspending VistaPlatform on RKE2 cluster (namespace: $(KUBE_NS))..."
+	@echo "Suspending Vista Platform on RKE2 cluster (namespace: $(KUBE_NS))..."
 	@KUBECONFIG=$(KUBE) kubectl -n $(KUBE_NS) scale deployment --all --replicas=0
 	@echo "Done. All pods stopped. Run 'make cluster-resume' to bring them back."
 
 cluster-resume: ## Scale all vistaplatform deployments back to 1
-	@echo "Resuming VistaPlatform on RKE2 cluster (namespace: $(KUBE_NS))..."
+	@echo "Resuming Vista Platform on RKE2 cluster (namespace: $(KUBE_NS))..."
 	@KUBECONFIG=$(KUBE) kubectl -n $(KUBE_NS) scale deployment --all --replicas=1
 	@echo "Done. Waiting for rollout..."
 	@KUBECONFIG=$(KUBE) kubectl -n $(KUBE_NS) rollout status deployment --timeout=120s 2>&1 || true

@@ -485,6 +485,59 @@ func TestContract_VerifyCBOMArtifact_200(t *testing.T) {
 	sv.assertConforms(t, "VerifyResponse", w.Body.Bytes())
 }
 
+// TestContract_VerifyCBOMArtifact_NotCheckedIsDistinctFromMismatch pins the
+// three-state shape the drawer renders. "Could not read the bytes" and "the
+// bytes do not match" are different answers to an operator holding evidence,
+// and the only thing on the wire that separates them is the presence of
+// hash_recomputed — hash_valid is false in both. Collapsing them tells someone
+// with an intact artifact that its integrity check failed.
+func TestContract_VerifyCBOMArtifact_NotCheckedIsDistinctFromMismatch(t *testing.T) {
+	sv := loadSpec(t)
+	a := sampleArtifact()
+
+	decode := func(t *testing.T, store *stubArtifactStore) map[string]any {
+		t.Helper()
+		eng := newEngine(handlerDeps{artifacts: store})
+		w := do(eng, http.MethodPost, "/api/v1/cbom-service/cbom/artifacts/"+aUUID+"/verify", nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+		}
+		sv.assertConforms(t, "VerifyResponse", w.Body.Bytes())
+		var body map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("unmarshal verify response: %v", err)
+		}
+		return body
+	}
+
+	t.Run("bytes unreadable — not checked", func(t *testing.T) {
+		body := decode(t, &stubArtifactStore{
+			getResult:        &a,
+			inlineContentErr: errors.New("object expired"),
+		})
+		if body["hash_valid"] != false {
+			t.Errorf("hash_valid = %v, want false", body["hash_valid"])
+		}
+		if _, present := body["hash_recomputed"]; present {
+			t.Errorf("hash_recomputed must be omitted when nothing was hashed; got %v", body["hash_recomputed"])
+		}
+	})
+
+	t.Run("bytes readable but different — mismatch", func(t *testing.T) {
+		body := decode(t, &stubArtifactStore{
+			getResult:     &a,
+			inlineContent: []byte(`{"tampered":true}`),
+		})
+		if body["hash_valid"] != false {
+			t.Errorf("hash_valid = %v, want false", body["hash_valid"])
+		}
+		got, present := body["hash_recomputed"]
+		if !present || got == "" {
+			t.Errorf("hash_recomputed must carry the hash we computed; got %v (present=%v)", got, present)
+		}
+	})
+}
+
 // TestContract_DriftIsCaught proves the guardrail actually validates: a body
 // that drifts from the contract (a CBOMArtifact missing required fields, plus
 // an undeclared field that additionalProperties:false forbids) MUST be

@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: VistaPlatform — admin-service API
+  title: Vista Platform — admin-service API
   version: 0.1.0
   description: |
     Spec-first contract for admin-service (ADR-0001). First slice for this
@@ -1020,7 +1020,7 @@ paths:
       tags:
       - security
       summary: List security events
-      description: 'Platform security monitoring (admin-ui Security page). Filterable by event_type/severity/status/risk_level/tenant_id/time-range; paginated. Uses a `{ data, meta }` envelope. Returns 503 if the security service is not initialized.'
+      description: 'The security-relevant slice of the platform activity trail (audit.activity_logs), for admin-ui Security ▸ Dashboard: authentication / user / tenant / config events, plus every failure and every producer-flagged row. Filterable by event_type/category/success/requires_attention/tenant_id/time-range; paginated. Uses a `{ data, meta }` envelope. Returns 503 if the security service is not initialized.'
       parameters:
       - name: limit
         in: query
@@ -1038,22 +1038,19 @@ paths:
         required: false
         schema:
           type: string
-      - name: severity
+      - name: category
         in: query
         required: false
+        description: activity_logs event_category (authentication, user, tenant, config, …).
         schema:
           type: string
-      - name: status
+      - name: success
         in: query
         required: false
+        description: 'Filter by outcome. "false" isolates failures.'
         schema:
           type: string
-      - name: risk_level
-        in: query
-        required: false
-        schema:
-          type: string
-      - name: is_anomaly
+      - name: requires_attention
         in: query
         required: false
         schema:
@@ -1099,55 +1096,6 @@ paths:
                 $ref: '#/components/schemas/SecurityDashboardResponse'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-        '503':
-          $ref: '#/components/responses/LegacyServerError'
-  /admin/security/compliance:
-    get:
-      operationId: getAllComplianceFrameworks
-      tags:
-      - security
-      summary: List compliance framework statuses
-      description: 'All compliance frameworks with their assessment status. Uses a `{ data, meta: { count } }` envelope. Returns 503 if the security service is not initialized.'
-      responses:
-        '200':
-          description: The compliance frameworks.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ComplianceFrameworkListResponse'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-        '503':
-          $ref: '#/components/responses/LegacyServerError'
-  /admin/security/compliance/{framework}:
-    get:
-      operationId: getComplianceFrameworkStatus
-      tags:
-      - security
-      summary: Get a compliance framework's status
-      parameters:
-      - name: framework
-        in: path
-        required: true
-        schema:
-          type: string
-      responses:
-        '200':
-          description: The compliance framework status.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ComplianceFrameworkResponse'
-        '400':
-          $ref: '#/components/responses/LegacyBadRequest'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '404':
-          $ref: '#/components/responses/LegacyNotFound'
         '500':
           $ref: '#/components/responses/LegacyServerError'
         '503':
@@ -3351,6 +3299,14 @@ paths:
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '422':
+          description: >-
+            The body still contains template placeholders and the request did
+            not acknowledge them. Nothing was published.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegalPlaceholderRejection'
         '500':
           $ref: '#/components/responses/LegacyServerError'
   /admin/legal/acceptances:
@@ -3910,7 +3866,7 @@ components:
     AdminLegalDocument:
       type: object
       additionalProperties: false
-      required: [id, doc_type, version, title, body, content_hash, is_current, effective_date, published_at]
+      required: [id, doc_type, version, title, body, content_hash, is_current, effective_date, published_at, placeholders]
       properties:
         id: { type: string, format: uuid }
         doc_type:
@@ -3924,6 +3880,14 @@ components:
         effective_date: { type: string, format: date-time }
         published_at: { type: string, format: date-time }
         published_by: { type: string, format: uuid, nullable: true }
+        placeholders:
+          type: array
+          description: >-
+            Unedited-template markers found in this version's body, e.g.
+            "[YOUR LEGAL ENTITY]". Always present; empty means the document has
+            been filled in. Computed server-side so the console never re-derives
+            what counts as a placeholder. Capped at 10 entries.
+          items: { type: string }
     AdminLegalVersion:
       type: object
       additionalProperties: false
@@ -3959,6 +3923,23 @@ components:
           enum: [terms_of_service, privacy_policy]
         title: { type: string }
         body: { type: string }
+        acknowledge_placeholders:
+          type: boolean
+          default: false
+          description: >-
+            Publish a body that still contains "[BRACKETED]" template markers.
+            Without it such a body is rejected with 422. The console sets it
+            only after an explicit confirmation naming what was found.
+    LegalPlaceholderRejection:
+      type: object
+      additionalProperties: false
+      required: [error, placeholders]
+      properties:
+        error: { type: string }
+        placeholders:
+          type: array
+          description: The distinct markers found, capped at 10.
+          items: { type: string }
     LegalAcceptanceRow:
       type: object
       additionalProperties: false
@@ -4560,7 +4541,6 @@ components:
         - support_email
         - max_tenants
         - default_trial_days
-        - maintenance_mode
         - registration_enabled
         - block_personal_email_domains
         - email_verification_required
@@ -4597,8 +4577,6 @@ components:
           type: [integer, 'null']
         default_trial_days:
           type: [integer, 'null']
-        maintenance_mode:
-          type: [boolean, 'null']
         registration_enabled:
           type: [boolean, 'null']
         block_personal_email_domains:
@@ -5008,7 +4986,12 @@ components:
     StorageTestResponse:
       type: object
       additionalProperties: true
-      description: 'Result of POST /admin/storage/test. `success` is false when the integration is not in a connected state (still 200).'
+      description: >-
+        Result of POST /admin/storage/test. The check resolves the AWS integration's
+        stored credentials and issues an S3 HeadBucket against the configured bucket,
+        so `success` is false (still 200) when the integration is not in a connected
+        state, when its credentials cannot be decrypted, or when the bucket cannot be
+        reached with them.
       required: [success, message, artifact_type, bucket]
       properties:
         success:
@@ -5791,91 +5774,54 @@ components:
     SecurityEvent:
       type: object
       additionalProperties: false
-      description: 'A security/threat event (security.SecurityEvent). The non-required fields are omitempty in Go — absent (not null) when unset.'
+      description: 'One security-relevant row of the platform activity trail (security.SecurityEvent, read from audit.activity_logs). Every field maps to a column: there is no severity, threat score, anomaly flag or triage status because activity_logs records none, and deriving them would present a guess as a measurement. `description` carries error_message and is set only on failures. The non-required fields are omitempty in Go — absent (not null) when unset.'
       required:
       - id
-      - event_id
       - event_type
-      - severity
       - category
-      - title
-      - service_name
-      - threat_score
-      - is_anomaly
-      - risk_level
-      - status
+      - action
+      - success
       - requires_attention
+      - user_type
       - timestamp
-      - detected_at
       - created_at
-      - updated_at
       properties:
         id:
           type: string
           format: uuid
-        event_id:
-          type: string
-        correlation_id:
-          type: string
-        trace_id:
-          type: string
         event_type:
-          type: string
-        severity:
           type: string
         category:
           type: string
-        title:
+        action:
           type: string
+        resource_type:
+          type: string
+        resource_id:
+          type: string
+          format: uuid
         description:
           type: string
-        message:
-          type: string
-        service_name:
-          type: string
-        source_ip:
-          type: string
-        user_agent:
-          type: string
+        success:
+          type: boolean
+        requires_attention:
+          type: boolean
         user_id:
           type: string
           format: uuid
+        user_email:
+          type: string
         user_type:
           type: string
         tenant_id:
           type: string
           format: uuid
+        source_ip:
+          type: string
+        user_agent:
+          type: string
         request_id:
           type: string
-        request_method:
-          type: string
-        request_path:
-          type: string
-        response_status:
-          type: integer
-        threat_score:
-          type: number
-        is_anomaly:
-          type: boolean
-        anomaly_type:
-          type: string
-        risk_level:
-          type: string
-        status:
-          type: string
-        assigned_to:
-          type: string
-          format: uuid
-        resolved_at:
-          type: string
-          format: date-time
-        resolution_notes:
-          type: string
-        related_events:
-          type: array
-          items:
-            type: string
-            format: uuid
         metadata:
           type: object
           additionalProperties: true
@@ -5887,91 +5833,10 @@ components:
           type: array
           items:
             type: string
-        requires_attention:
-          type: boolean
         timestamp:
           type: string
           format: date-time
-        detected_at:
-          type: string
-          format: date-time
         created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-    ComplianceFrameworkStatus:
-      type: object
-      additionalProperties: false
-      description: 'A compliance framework assessment status (security.ComplianceFrameworkStatus). Non-required fields are omitempty — absent (not null) when unset.'
-      required:
-      - id
-      - framework_name
-      - overall_status
-      - compliance_score
-      - total_requirements
-      - compliant_requirements
-      - non_compliant_requirements
-      - pending_requirements
-      - created_at
-      - updated_at
-      properties:
-        id:
-          type: string
-          format: uuid
-        framework_name:
-          type: string
-        framework_version:
-          type: string
-        overall_status:
-          type: string
-        compliance_score:
-          type: number
-        last_assessed_at:
-          type: string
-          format: date-time
-        next_assessment_due:
-          type: string
-          format: date-time
-        assessment_frequency_days:
-          type: integer
-        total_requirements:
-          type: integer
-        compliant_requirements:
-          type: integer
-        non_compliant_requirements:
-          type: integer
-        pending_requirements:
-          type: integer
-        status_details:
-          type: object
-          additionalProperties: true
-        findings:
-          type: array
-          items:
-            type: string
-        recommendations:
-          type: array
-          items:
-            type: string
-        evidence_urls:
-          type: array
-          items:
-            type: string
-        audit_trail_urls:
-          type: array
-          items:
-            type: string
-        assessed_by:
-          type: string
-          format: uuid
-        notes:
-          type: string
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
           type: string
           format: date-time
     SecurityEventListResponse:
@@ -6003,7 +5868,7 @@ components:
     SecurityDashboardResponse:
       type: object
       additionalProperties: false
-      description: 'Envelope for GET /admin/security/dashboard-stats. `data` is a free-form metrics object.'
+      description: 'Envelope for GET /admin/security/dashboard-stats. `data` is a free-form metrics object; the keys the service emits today are total_events, failed_events, requires_attention, failed_logins, events_by_category and events_by_outcome.'
       required:
       - data
       - meta
@@ -6023,34 +5888,6 @@ components:
             timestamp:
               type: string
               format: date-time
-    ComplianceFrameworkResponse:
-      type: object
-      additionalProperties: false
-      required:
-      - data
-      properties:
-        data:
-          $ref: '#/components/schemas/ComplianceFrameworkStatus'
-    ComplianceFrameworkListResponse:
-      type: object
-      additionalProperties: false
-      description: 'Envelope for GET /admin/security/compliance. `data` is null when there are none (nil slice).'
-      required:
-      - data
-      - meta
-      properties:
-        data:
-          type: [array, 'null']
-          items:
-            $ref: '#/components/schemas/ComplianceFrameworkStatus'
-        meta:
-          type: object
-          additionalProperties: true
-          required:
-          - count
-          properties:
-            count:
-              type: integer
     BillableItem:
       type: object
       additionalProperties: false
@@ -6134,7 +5971,7 @@ components:
     TenantCost:
       type: object
       additionalProperties: false
-      description: 'A tenant cost record for a period (services.TenantCost). The two maps are null when unset.'
+      description: 'A tenant cost record for a period (services.TenantCost). total_cost_usd is always the sum of cost_breakdown — both come from one costing computation. Components that could not be measured are absent from cost_breakdown and named in not_measured; render those as "not measured", never as $0.00.'
       required:
       - tenant_id
       - tenant_name
@@ -6142,6 +5979,7 @@ components:
       - period_end
       - total_cost_usd
       - cost_breakdown
+      - not_measured
       - resource_usage
       properties:
         tenant_id:
@@ -6157,17 +5995,25 @@ components:
           format: date-time
         total_cost_usd:
           type: number
+          description: 'Sum of the priced components in cost_breakdown. Not an estimate of the full cost: components listed in not_measured are excluded, not extrapolated.'
         cost_breakdown:
           type: [object, 'null']
+          description: 'Priced components only, keyed by component name (api_calls, database, storage, network).'
           additionalProperties:
             type: number
+        not_measured:
+          type: [array, 'null']
+          description: 'Components with no measurement over the period, and therefore not priced. compute is always present: the platform runs shared service pods, so no per-tenant CPU or memory figure exists.'
+          items:
+            type: string
         resource_usage:
           type: [object, 'null']
+          description: 'Raw quantities behind the cost. A null value means the quantity was not measured, as distinct from measured zero.'
           additionalProperties: true
     PlatformCostSummary:
       type: object
       additionalProperties: false
-      description: 'A platform-wide cost summary (services.PlatformCostSummary). The slice/maps are null when unset.'
+      description: 'A platform-wide cost summary (services.PlatformCostSummary). total_cost_usd is the sum of cost_by_service — both come from one costing computation per tenant. cost_by_resource was removed: its compute entry was a flat 30% of the total with no measurement behind it, and nothing rendered it.'
       required:
       - period_start
       - period_end
@@ -6176,7 +6022,7 @@ components:
       - average_cost_usd
       - top_tenants
       - cost_by_service
-      - cost_by_resource
+      - not_measured
       properties:
         period_start:
           type: string
@@ -6196,12 +6042,14 @@ components:
             $ref: '#/components/schemas/TenantCost'
         cost_by_service:
           type: [object, 'null']
+          description: 'Priced components only, summed across tenants.'
           additionalProperties:
             type: number
-        cost_by_resource:
-          type: [object, 'null']
-          additionalProperties:
-            type: number
+        not_measured:
+          type: [array, 'null']
+          description: 'Components no tenant had a measurement for over the period, and therefore not priced.'
+          items:
+            type: string
     TenantCostHistoryResponse:
       type: object
       additionalProperties: false

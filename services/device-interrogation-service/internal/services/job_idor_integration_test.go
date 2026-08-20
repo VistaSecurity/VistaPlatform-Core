@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -176,5 +177,90 @@ func TestIntegration_GetNextJobForAgent_CrossTenantClaimBlocked(t *testing.T) {
 	}
 	if gotA == nil || gotA.ID != unassigned.ID {
 		t.Fatalf("GetNextJobForAgent(agentA) = %v, want the tenant-A unassigned job %s", gotA, unassigned.ID)
+	}
+}
+
+// TestIntegration_GetNextJob_UnassignedJobClaimedOnce exercises the race between
+// the in-cluster platform worker and a tenant agent. They use different Redis
+// locks, so the database claim itself must be atomic or both can receive the
+// same unassigned device_interrogation job.
+func TestIntegration_GetNextJob_UnassignedJobClaimedOnce(t *testing.T) {
+	db := testdb.Connect(t)
+
+	addr := os.Getenv("REDIS_URL")
+	if addr == "" {
+		addr = "localhost:6379"
+	}
+	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	t.Cleanup(func() { _ = rdb.Close() })
+	ctx := context.Background()
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		t.Skipf("Redis unreachable at %s (%v) — skipping job-claim integration test", addr, err)
+	}
+
+	tenantID := testdb.NewTenant(t, db)
+	agentID := insertDeviceAgent(t, db, tenantID)
+	_, _ = rdb.Del(ctx, "device_job:lock:agent:"+agentID.String(), "device_job:lock:platform").Result()
+
+	deviceSvc := NewDeviceService(db)
+	hostname := "race-target-" + uuid.New().String()[:8] + ".example.test"
+	dev, err := deviceSvc.CreateDevice(ctx, tenantID, models.CreateDeviceRequest{
+		DeviceType: "cisco_ios",
+		Hostname:   &hostname,
+	})
+	if err != nil {
+		t.Fatalf("CreateDevice = %v, want nil", err)
+	}
+
+	jobQueue := NewJobQueueService(db, db, rdb)
+	unassigned, err := jobQueue.CreateJob(ctx, models.CreateDeviceJobRequest{
+		TenantID: tenantID,
+		JobType:  models.JobTypeDeviceInterrogation,
+		DeviceID: &dev.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateJob(unassigned) = %v, want nil", err)
+	}
+
+	type claimResult struct {
+		who string
+		job *models.DeviceJob
+		err error
+	}
+	start := make(chan struct{})
+	results := make(chan claimResult, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		got, e := jobQueue.GetNextJobForAgent(ctx, agentID)
+		results <- claimResult{who: "agent", job: got, err: e}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		got, e := jobQueue.GetNextJobForPlatform(ctx)
+		results <- claimResult{who: "platform", job: got, err: e}
+	}()
+	close(start)
+	wg.Wait()
+	close(results)
+
+	claims := 0
+	for res := range results {
+		if res.err != nil {
+			t.Fatalf("%s claim returned error: %v", res.who, res.err)
+		}
+		if res.job == nil {
+			continue
+		}
+		if res.job.ID != unassigned.ID {
+			t.Fatalf("%s claimed unrelated job %s, want %s", res.who, res.job.ID, unassigned.ID)
+		}
+		claims++
+	}
+	if claims != 1 {
+		t.Fatalf("unassigned job was claimed %d times, want exactly once", claims)
 	}
 }

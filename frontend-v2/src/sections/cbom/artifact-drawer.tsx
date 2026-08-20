@@ -7,7 +7,7 @@ import { useNavigate } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { useFeature } from '@vistasecurity/primitives/features';
 import { Icon } from '../../components/ui';
-import { fmtBytes, fmtDateTime, relTime, Pill } from './kit';
+import { fmtBytes, fmtDateTime, hashVerdict, relTime, Pill } from './kit';
 import { artifactName, downloadArtifact, useArtifact, useDeleteArtifact, useVerify, type CBOMArtifact, type Layer, type VerifyResponse } from './queries';
 
 function Row({ label, children, mono }: { label: string; children: React.ReactNode; mono?: boolean }) {
@@ -20,16 +20,18 @@ function Row({ label, children, mono }: { label: string; children: React.ReactNo
 }
 
 function VerifyResult({ v }: { v: VerifyResponse }) {
-  const hashTone = v.hash_valid ? 'var(--ok)' : 'var(--danger)';
+  // Three states — see hashVerdict. "Not checked" must not render as a mismatch.
+  const hash = hashVerdict(v);
   return (
     <div style={{ marginTop: 11, padding: '11px 13px', borderRadius: 10, background: 'var(--app-panel2)', border: '1px solid var(--app-border)' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <Icon name={v.hash_valid ? 'badge-check' : 'shield-x'} size={15} style={{ color: hashTone }} />
-        <span style={{ fontSize: 12.5, fontWeight: 600, color: hashTone }}>{v.hash_valid ? 'Hash verified' : 'Hash mismatch'}</span>
+        <Icon name={hash.icon} size={15} style={{ color: hash.tone }} />
+        <span style={{ fontSize: 12.5, fontWeight: 600, color: hash.tone }}>{hash.label}</span>
       </div>
-      {!v.hash_valid && v.hash_recomputed && (
-        <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', marginTop: 6, wordBreak: 'break-all' }}>
-          expected {v.hash_stored.slice(0, 24)}… · got {v.hash_recomputed.slice(0, 24)}…
+      {hash.detail && (
+        <div className={hash.state === 'mismatch' ? 'mono' : undefined}
+          style={{ fontSize: hash.state === 'mismatch' ? 10.5 : 11.5, color: 'var(--app-t3)', marginTop: 6, wordBreak: 'break-all', lineHeight: 1.5 }}>
+          {hash.detail}
         </div>
       )}
       <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 8, fontSize: 11.5, color: 'var(--app-t2)' }}>

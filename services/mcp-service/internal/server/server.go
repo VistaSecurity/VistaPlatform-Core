@@ -20,14 +20,14 @@ import (
 // gateway as <gateway>/api/v1/mcp-service/mcp.
 const MCPPath = "/api/v1/mcp-service/mcp"
 
-// NewMCPServer builds the MCP server with the full VistaPlatform tool catalog.
+// NewMCPServer builds the MCP server with the full Vista Platform tool catalog.
 func NewMCPServer(deps *tools.Deps) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{
 		Name:    "vistaplatform",
-		Title:   "VistaPlatform Cryptographic Inventory",
+		Title:   "Vista Platform Cryptographic Inventory",
 		Version: strings.TrimSpace(version.Get().Service),
 	}, &mcp.ServerOptions{
-		Instructions: "Read-only access to this tenant's VistaPlatform cryptographic asset inventory, " +
+		Instructions: "Read-only access to this tenant's Vista Platform cryptographic asset inventory, " +
 			"compliance posture and CBOM artifacts. Start broad (vistaplatform_get_risk_summary, " +
 			"vistaplatform_list_compliance_frameworks) and drill down with the query tools. " +
 			"All data is scoped to the tenant that owns the API token; identifiers are UUIDs " +
@@ -66,7 +66,7 @@ func authMiddleware(ex *platform.Exchanger, rec *auditlog.Recorder, next http.Ha
 				Outcome: auditlog.OutcomeTokenMissing,
 				Request: reqCtx,
 			})
-			unauthorized(w, "Missing bearer token. Pass a VistaPlatform API token (qvpat_...) in the Authorization header; mint one in Settings → API Tokens.")
+			unauthorized(w, "Missing bearer token. Pass a Vista Platform API token (qvpat_...) in the Authorization header; mint one in Settings → API Tokens.")
 			return
 		}
 		// Exchange records its own outcome — accepted, rejected or backend

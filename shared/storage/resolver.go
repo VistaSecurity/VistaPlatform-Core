@@ -70,10 +70,20 @@ func (p *DatabaseIntegrationProvider) GetAWSCredentials(ctx context.Context, int
 		encryptedConfigJSON []byte
 	)
 
+	// The column is `config`, NOT `encrypted_config`. platform_integrations has
+	// never had an `encrypted_config` column — admin-service's IntegrationService
+	// writes the per-field-encrypted map into `config` jsonb — so this query used
+	// to fail with `column "encrypted_config" does not exist` on every call, which
+	// is why S3 artifact storage could never activate on any install. Keep the
+	// name aligned with the writer (admin-service integrations/service.go) and the
+	// DDL; TestIntegration_GetAWSCredentials_ReadsConfigColumn pins it.
+	//
+	// deleted_at IS NULL: platform_integrations is soft-deleted. Without this a
+	// deleted integration still handed out live credentials.
 	err := p.db.QueryRowContext(ctx, `
-		SELECT integration_type, encrypted_config
+		SELECT integration_type, config
 		FROM platform_integrations
-		WHERE id = $1 AND is_active = true
+		WHERE id = $1 AND is_active = true AND deleted_at IS NULL
 	`, integrationID).Scan(&integrationType, &encryptedConfigJSON)
 
 	if err == sql.ErrNoRows {

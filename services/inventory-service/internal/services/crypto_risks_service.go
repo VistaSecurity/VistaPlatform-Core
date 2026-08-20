@@ -144,18 +144,26 @@ func (s *CryptoRisksService) GetSummary(tenantID uuid.UUID) (*CryptoRisksSummary
 			OR ` + highRiskKeySizeSQL("ci.key_size", "ci.key_exchange_algorithm") + `
 		  )
 		  AND NOT (
-			UPPER(ci.protocol_version) IN ('SSLV2', 'SSLV3', 'SSL2', 'SSL3')
-			OR UPPER(ci.protocol_version) LIKE '%TLS%1.0%'
-			OR UPPER(ci.protocol_version) LIKE '%TLS%1%0%'
+			-- NULL-SAFETY (B-39): every operand of a negated OR chain must be
+			-- FALSE rather than NULL when its column is NULL. A LIKE test on a
+			-- NULL column is NULL; NULL OR FALSE is NULL; NOT NULL is NULL — and
+			-- the row is silently dropped from the bucket even though it was
+			-- already classified High above. SSH configurations have cipher_suite
+			-- NULL by construction, so every SSH host went missing from this
+			-- counter. COALESCE(col,'') is the convention the generated helpers
+			-- beside this (singleDESSQL / criticallyWeakKeySizeSQL) already use.
+			UPPER(COALESCE(ci.protocol_version, '')) IN ('SSLV2', 'SSLV3', 'SSL2', 'SSL3')
+			OR UPPER(COALESCE(ci.protocol_version, '')) LIKE '%TLS%1.0%'
+			OR UPPER(COALESCE(ci.protocol_version, '')) LIKE '%TLS%1%0%'
 			OR (ci.protocol_version IS NOT NULL AND (
 				ci.protocol_version = '1.0'
 				OR ci.protocol_version LIKE '1.0%'
 				OR ci.protocol_version LIKE '%1.0'
 			))
-			OR UPPER(ci.cipher_suite) LIKE '%RC4%'
+			OR UPPER(COALESCE(ci.cipher_suite, '')) LIKE '%RC4%'
 			OR ` + singleDESSQL("ci.cipher_suite") + `
-			OR UPPER(ci.cipher_suite) LIKE '%NULL%'
-			OR UPPER(ci.hash_algorithm) LIKE '%MD5%'
+			OR UPPER(COALESCE(ci.cipher_suite, '')) LIKE '%NULL%'
+			OR UPPER(COALESCE(ci.hash_algorithm, '')) LIKE '%MD5%'
 			OR ` + criticallyWeakKeySizeSQL("ci.key_size", "ci.key_exchange_algorithm") + `
 		  )
 	`
@@ -196,11 +204,14 @@ func (s *CryptoRisksService) GetSummary(tenantID uuid.UUID) (*CryptoRisksSummary
 		  AND ci.deleted_at IS NULL
 		  AND ci.risk_score IS NOT NULL AND ci.risk_score > 0
 		  AND NOT (
-			UPPER(ci.protocol_version) IN ('SSLV2', 'SSLV3', 'SSL2', 'SSL3')
-			OR UPPER(ci.protocol_version) LIKE '%TLS%1.0%'
-			OR UPPER(ci.protocol_version) LIKE '%TLS%1%0%'
-			OR UPPER(ci.protocol_version) LIKE '%TLS%1.1%'
-			OR UPPER(ci.protocol_version) LIKE '%TLS%1%1%'
+			-- COALESCE for the same reason as the High counter above (B-39): a
+			-- NULL operand makes the whole negated OR chain NULL, dropping the
+			-- row. Kept byte-identical to ListRisks' severity=informational filter.
+			UPPER(COALESCE(ci.protocol_version, '')) IN ('SSLV2', 'SSLV3', 'SSL2', 'SSL3')
+			OR UPPER(COALESCE(ci.protocol_version, '')) LIKE '%TLS%1.0%'
+			OR UPPER(COALESCE(ci.protocol_version, '')) LIKE '%TLS%1%0%'
+			OR UPPER(COALESCE(ci.protocol_version, '')) LIKE '%TLS%1.1%'
+			OR UPPER(COALESCE(ci.protocol_version, '')) LIKE '%TLS%1%1%'
 			OR (ci.protocol_version IS NOT NULL AND (
 				ci.protocol_version = '1.0'
 				OR ci.protocol_version = '1.1'
@@ -209,14 +220,14 @@ func (s *CryptoRisksService) GetSummary(tenantID uuid.UUID) (*CryptoRisksSummary
 				OR ci.protocol_version LIKE '%1.0'
 				OR ci.protocol_version LIKE '%1.1'
 			))
-			OR UPPER(ci.cipher_suite) LIKE '%RC4%'
-			OR UPPER(ci.cipher_suite) LIKE '%DES%'
-			OR UPPER(ci.cipher_suite) LIKE '%NULL%'
-			OR UPPER(ci.cipher_suite) LIKE '%EXPORT%'
-			OR UPPER(ci.hash_algorithm) LIKE '%MD5%'
-			OR UPPER(ci.hash_algorithm) LIKE '%MD4%'
-			OR UPPER(ci.hash_algorithm) LIKE '%SHA1%'
-			OR UPPER(ci.hash_algorithm) LIKE '%SHA-1%'
+			OR UPPER(COALESCE(ci.cipher_suite, '')) LIKE '%RC4%'
+			OR UPPER(COALESCE(ci.cipher_suite, '')) LIKE '%DES%'
+			OR UPPER(COALESCE(ci.cipher_suite, '')) LIKE '%NULL%'
+			OR UPPER(COALESCE(ci.cipher_suite, '')) LIKE '%EXPORT%'
+			OR UPPER(COALESCE(ci.hash_algorithm, '')) LIKE '%MD5%'
+			OR UPPER(COALESCE(ci.hash_algorithm, '')) LIKE '%MD4%'
+			OR UPPER(COALESCE(ci.hash_algorithm, '')) LIKE '%SHA1%'
+			OR UPPER(COALESCE(ci.hash_algorithm, '')) LIKE '%SHA-1%'
 			OR ` + anyWeakKeySizeSQL("ci.key_size", "ci.key_exchange_algorithm") + `
 			OR EXISTS (
 				SELECT 1 FROM crypto_implementation_certificates cic
@@ -409,11 +420,11 @@ func (s *CryptoRisksService) ListRisks(tenantID uuid.UUID, filters CryptoRiskFil
 				severityConditions = append(severityConditions, `(
 					ci.risk_score IS NOT NULL AND ci.risk_score > 0
 					AND NOT (
-						UPPER(ci.protocol_version) IN ('SSLV2', 'SSLV3', 'SSL2', 'SSL3')
-						OR UPPER(ci.protocol_version) LIKE '%TLS%1.0%'
-						OR UPPER(ci.protocol_version) LIKE '%TLS%1%0%'
-						OR UPPER(ci.protocol_version) LIKE '%TLS%1.1%'
-						OR UPPER(ci.protocol_version) LIKE '%TLS%1%1%'
+						UPPER(COALESCE(ci.protocol_version, '')) IN ('SSLV2', 'SSLV3', 'SSL2', 'SSL3')
+						OR UPPER(COALESCE(ci.protocol_version, '')) LIKE '%TLS%1.0%'
+						OR UPPER(COALESCE(ci.protocol_version, '')) LIKE '%TLS%1%0%'
+						OR UPPER(COALESCE(ci.protocol_version, '')) LIKE '%TLS%1.1%'
+						OR UPPER(COALESCE(ci.protocol_version, '')) LIKE '%TLS%1%1%'
 						OR (ci.protocol_version IS NOT NULL AND (
 							ci.protocol_version = '1.0'
 							OR ci.protocol_version = '1.1'
@@ -422,14 +433,14 @@ func (s *CryptoRisksService) ListRisks(tenantID uuid.UUID, filters CryptoRiskFil
 							OR ci.protocol_version LIKE '%1.0'
 							OR ci.protocol_version LIKE '%1.1'
 						))
-						OR UPPER(ci.cipher_suite) LIKE '%RC4%'
-						OR UPPER(ci.cipher_suite) LIKE '%DES%'
-						OR UPPER(ci.cipher_suite) LIKE '%NULL%'
-						OR UPPER(ci.cipher_suite) LIKE '%EXPORT%'
-						OR UPPER(ci.hash_algorithm) LIKE '%MD5%'
-						OR UPPER(ci.hash_algorithm) LIKE '%MD4%'
-						OR UPPER(ci.hash_algorithm) LIKE '%SHA1%'
-						OR UPPER(ci.hash_algorithm) LIKE '%SHA-1%'
+						OR UPPER(COALESCE(ci.cipher_suite, '')) LIKE '%RC4%'
+						OR UPPER(COALESCE(ci.cipher_suite, '')) LIKE '%DES%'
+						OR UPPER(COALESCE(ci.cipher_suite, '')) LIKE '%NULL%'
+						OR UPPER(COALESCE(ci.cipher_suite, '')) LIKE '%EXPORT%'
+						OR UPPER(COALESCE(ci.hash_algorithm, '')) LIKE '%MD5%'
+						OR UPPER(COALESCE(ci.hash_algorithm, '')) LIKE '%MD4%'
+						OR UPPER(COALESCE(ci.hash_algorithm, '')) LIKE '%SHA1%'
+						OR UPPER(COALESCE(ci.hash_algorithm, '')) LIKE '%SHA-1%'
 						OR `+anyWeakKeySizeSQL("ci.key_size", "ci.key_exchange_algorithm")+`
 						OR EXISTS (
 							SELECT 1 FROM crypto_implementation_certificates cic
@@ -529,10 +540,14 @@ func (s *CryptoRisksService) ListRisks(tenantID uuid.UUID, filters CryptoRiskFil
 
 	// Search filter
 	if filters.Search != "" {
+		// na.ip_address is INET and ci.protocol is the protocol_type ENUM; neither
+		// has an ILIKE (~~*) operator, so both need an explicit ::text cast or the
+		// statement fails at plan time. Same defect/fix as the Configuration-lens
+		// search in crypto_implementation_service.go.
 		conditions = append(conditions, fmt.Sprintf(`(
 			na.hostname ILIKE $%d
-			OR na.ip_address ILIKE $%d
-			OR ci.protocol ILIKE $%d
+			OR na.ip_address::text ILIKE $%d
+			OR ci.protocol::text ILIKE $%d
 			OR ci.cipher_suite ILIKE $%d
 		)`, argPos, argPos, argPos, argPos))
 		args = append(args, "%"+filters.Search+"%")

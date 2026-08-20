@@ -178,12 +178,29 @@ type ClassifyResponse struct {
 	NetworkType string  `json:"network_type"`
 }
 
-// ClassifyAsset calls POST /api/v2/inventory-service/network-segments/classify-asset with HMAC and X-Tenant-ID
-func (c *InventoryClient) ClassifyAsset(tenantID uuid.UUID, ipAddress string, hostname *string) (*ClassifyResponse, error) {
+// CloudResourceHint identifies the cloud account/region/VPC a discovery came
+// from. Present only for cloud-API discoveries, where it — not the address —
+// is what ownership resolves from.
+type CloudResourceHint struct {
+	Provider    string
+	Region      string
+	VPCID       string
+	Environment string
+}
+
+// ClassifyAsset calls POST /api/v2/inventory-service/network-segments/classify-asset with HMAC and X-Tenant-ID.
+// cloud may be nil; when set, inventory-service classifies by cloud segment rather than by address.
+func (c *InventoryClient) ClassifyAsset(tenantID uuid.UUID, ipAddress string, hostname *string, cloud *CloudResourceHint) (*ClassifyResponse, error) {
 	url := fmt.Sprintf("%s/api/v2/inventory-service/network-segments/classify-asset", c.baseURL)
 	reqBody := map[string]interface{}{"ip_address": ipAddress}
 	if hostname != nil {
 		reqBody["hostname"] = *hostname
+	}
+	if cloud != nil {
+		reqBody["cloud_provider"] = cloud.Provider
+		reqBody["cloud_region"] = cloud.Region
+		reqBody["vpc_id"] = cloud.VPCID
+		reqBody["environment"] = cloud.Environment
 	}
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {

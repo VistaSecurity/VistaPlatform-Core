@@ -177,7 +177,8 @@ func sshObservationFromFinding(f IngestFinding) sshObservation {
 	var obs sshObservation
 	raw := f.RawData
 
-	isSSHProtocol := normalizeProtocol(f.Protocol) == "SSH"
+	protocol, verdict := resolveProtocol(f.Protocol)
+	isSSHProtocol := verdict == protocolEnum && protocol == "SSH"
 	if raw == nil {
 		obs.Present = isSSHProtocol
 		return obs

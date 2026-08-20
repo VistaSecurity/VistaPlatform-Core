@@ -185,4 +185,20 @@ describe('settingsPageMeta', () => {
     // Usage reads a Core route — gating it would be wrong, not merely cautious.
     expect(settingsPageMeta('usage').feature).toBeUndefined();
   });
+
+  // B-05 interim mitigation: custom policies are never evaluated —
+  // no finding, no score, for any tenant — so authoring must stay disabled
+  // independent of the `custom_policies` entitlement, even once a tenant is
+  // Enterprise-licensed. This pins the registry flag the page consults
+  // (pages-custom-policies.tsx reads `meta.authoringDisabled`); it does not
+  // by itself prove the page hides its buttons — see that file's comments.
+  // Mutation check: deleting `authoringDisabled` from the nav.ts entry (or
+  // its message) turns this red.
+  it('keeps Custom Policy authoring disabled regardless of entitlement, pending #1439', () => {
+    const meta = settingsPageMeta('custom-policies');
+    expect(meta.feature).toBe('custom_policies'); // entitlement gate unchanged
+    expect(meta.authoringDisabled, 'custom-policies must carry an authoringDisabled notice').toBeTruthy();
+    expect(meta.authoringDisabled!.message).toMatch(/1439/);
+    expect(meta.authoringDisabled!.message.length).toBeGreaterThan(40);
+  });
 });

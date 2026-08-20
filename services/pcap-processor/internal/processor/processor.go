@@ -23,6 +23,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/pcap-processor/internal/config"
 	"github.com/vistasecurity/vistaplatform/pcap-processor/internal/tlsparse"
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
+	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
@@ -601,7 +602,8 @@ func (p *Processor) insertDiscoveriesIntoPipeline(ctx context.Context, jobID uui
 				sensorID,
 				tenantID,
 				batchID,
-				d.Protocol,
+				// Canonical protocol_type spelling — see cryptoparse.NormalizeProtocol.
+				cryptoparse.NormalizeProtocol(d.Protocol),
 				d.DestIP,
 				d.DestPort,
 				0.85,

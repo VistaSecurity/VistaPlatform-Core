@@ -1,4 +1,4 @@
-// Package tools defines the read-only MCP tool surface of VistaPlatform.
+// Package tools defines the read-only MCP tool surface of Vista Platform.
 //
 // Design rules (v1):
 //   - Read-only. Every tool carries ReadOnlyHint and wraps a GET (or the
@@ -144,7 +144,7 @@ func requireUUID(field, v string) (string, error) {
 	return id.String(), nil
 }
 
-// Register adds every VistaPlatform tool to the server.
+// Register adds every Vista Platform tool to the server.
 func Register(s *mcp.Server, d *Deps) {
 	registerInventoryTools(s, d)
 	registerComplianceTools(s, d)

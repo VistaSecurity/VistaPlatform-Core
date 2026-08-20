@@ -1,8 +1,8 @@
-# VistaPlatform
+# Vista Platform
 
 **Find every piece of cryptography in your estate, and prove what it is.**
 
-VistaPlatform discovers cryptographic assets across your network, builds an
+Vista Platform discovers cryptographic assets across your network, builds an
 inventory of the certificates, keys, algorithms and configurations actually in
 use, tells you which of them a quantum computer will break, and generates a
 CycloneDX **Cryptographic Bill of Materials** you can hand to an auditor.
@@ -10,7 +10,7 @@ CycloneDX **Cryptographic Bill of Materials** you can hand to an auditor.
 It is a self-hosted platform, not a SaaS. Your inventory never leaves your
 infrastructure.
 
-> **Beta — use at your own risk.** VistaPlatform is pre-1.0. It discovers,
+> **Beta — use at your own risk.** Vista Platform is pre-1.0. It discovers,
 > assesses and generates a CBOM today, but interfaces, schema and chart values
 > change between 0.x releases without notice, there is no guaranteed upgrade
 > path, and there is no SLA. **The software is provided "AS IS", without
@@ -30,7 +30,7 @@ Most organizations cannot answer basic questions about their own cryptography:
 - Can we produce evidence of any of that for an auditor?
 
 Spreadsheets go stale the day they are written. Scanners tell you about hosts,
-not about crypto. VistaPlatform is built around the inventory being *current* —
+not about crypto. Vista Platform is built around the inventory being *current* —
 discovery runs continuously, and compliance is evaluated against what is
 actually deployed rather than what was documented.
 
@@ -69,10 +69,12 @@ materials for exactly that boundary.
 
 ## Editions
 
-Core is a complete product for a single organization. Nothing that matters for
-security is held back: tenant isolation, service-mesh mTLS, datastore TLS,
-RBAC, and audit logging are all here, because paywalling security in a security
-product is indefensible.
+Vista Platform ships in three editions — **Vista Platform Core** (free and
+source-available, this repository), **Vista Platform Enterprise** and **Vista
+Platform MSP**. Core is a complete product for a single organization. Nothing
+that matters for security is held back: tenant isolation, service-mesh mTLS,
+datastore TLS, RBAC, and audit logging are all here, because paywalling
+security in a security product is indefensible.
 
 | | Core | Enterprise | MSP |
 |---|---|---|---|
@@ -177,7 +179,7 @@ issues — see [SECURITY.md](SECURITY.md).
   no licence key, no phone-home.
 - ✅ **Read, fork and patch the source**, including the sensor and agent code
   you deploy inside your own network. You should be able to inspect what you run.
-- 🚫 **Don't sell it back to the market** — you can't offer VistaPlatform, or
+- 🚫 **Don't sell it back to the market** — you can't offer Vista Platform, or
   something substantially similar built from it, to others as a commercial
   product or service. That's what the paid MSP edition is for.
 - ⏳ **Every release becomes Apache-2.0 two years after it ships**, automatically
@@ -190,8 +192,12 @@ use is permitted, it almost certainly is — email
 [product@vistasecurity.io](mailto:product@vistasecurity.io) if you want that
 in writing.
 
-Enterprise and MSP features are not in this repository and are licensed
-commercially. See [NOTICE](NOTICE) for third-party components.
+The licensor is **LakeShore Labs LLC**, which does business as **Vista
+Security**.
+
+Vista Platform Enterprise and Vista Platform MSP features are not in this
+repository and are licensed commercially. See [NOTICE](NOTICE) for third-party
+components.
 
 ## Disclaimer — use at your own risk
 
