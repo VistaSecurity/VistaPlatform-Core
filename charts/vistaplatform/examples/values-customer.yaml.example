@@ -182,13 +182,39 @@ image:
 #
 # Leave the list empty (default) to disable edge probing.
 # -----------------------------------------------------------------------------
+# If your edge certificate chains to a private/internal CA (not a publicly
+# trusted one), the probe's TLS verification will fail — a container image
+# ships its own CA bundle at build time and does NOT inherit whatever your
+# host OS trusts, even if the same cluster nodes do trust that CA. Two ways
+# to handle it, in order of preference:
+#
+#   1. (Recommended) Hand monitoring-service your CA so it verifies for real:
+#      kubectl create secret generic my-internal-ca --from-file=ca.crt=/path/to/ca.crt
+#      backends:
+#        monitoring-service:
+#          extraEnv:
+#            - name: EXTRA_TRUSTED_CA_PATH
+#              value: /app/certs/extra-ca/ca.crt
+#          extraVolumeMounts:
+#            - name: extra-ca
+#              mountPath: /app/certs/extra-ca
+#              readOnly: true
+#          extraVolumes:
+#            - name: extra-ca
+#              secret:
+#                secretName: my-internal-ca
+#
+#   2. insecureSkipVerify: true — only when there's no CA to hand the process
+#      at all (a throwaway self-signed cert with no private root). This turns
+#      verification off entirely, so a genuine break (wrong hostname, expired
+#      cert) stops surfacing as a finding — prefer option 1.
 # monitoring:
 #   syntheticChecks:
 #     - name: edge-tenant
 #       url: https://vistaplatform.example.com/api/v1/auth-service/health
 #     - name: edge-admin
 #       url: https://admin.vistaplatform.example.com/api/v1/auth-service/health
-#       # insecureSkipVerify: true  # lab clusters only (internal CA not in pod trust store)
+#       # insecureSkipVerify: true  # see option 2 above — last resort only
 #       # expectedStatus: 200       # optional, default 200
 #       # timeoutSeconds: 5         # optional, default 5
 

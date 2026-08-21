@@ -7,6 +7,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-08-21
+
+Small operator-facing cleanup — the admin-ui login screen carried leftover
+design-kit mockup content, Mission Control mislabeled disabled services as
+"degraded," monitoring-service's health-check peer list had silently drifted
+from the service registry, and re-authenticating after a session timeout
+could show a confusing "couldn't verify legal terms" error even though login
+itself succeeded — plus two protocols gaining a real home in the inventory,
+a dead alert-instances API removed, and a UDP sweep gap on the
+customer-deployed sensor closed.
+
+### Added
+
+- **Two protocols that had no home in the inventory now have one: QUIC and
+  PPTP.** Both were previously normalized into whichever existing value looked
+  closest, which asserted something untrue about the endpoint — filing an
+  HTTP/3 service as TLS claims a TCP listener that may not exist, and folding
+  PPTP into the generic VPN value hid the single most dangerous VPN
+  configuration a collector can report behind the same label as a modern one.
+  PPTP additionally carries a catalogue entry, so a discovered PPTP endpoint
+  scores as the risk it is rather than scoring zero. Protocols that genuinely
+  have no distinct meaning to the inventory (SNMP, L2TP/IPSec, SSL VPN,
+  STARTTLS) are deliberately left to pass through un-normalized rather than
+  given a wrong home.
+
+  Operators upgrading should know these are Postgres `ENUM` values, which
+  Postgres cannot remove once added; the migration adds them idempotently and
+  is safe to re-apply.
+
+### Removed
+
+- **The audit-service `alert-instances` API** (`GET /alert-instances`,
+  `POST /alert-instances/{id}/acknowledge`, `POST /alert-instances/{id}/resolve`).
+  They read and updated a table nothing has ever written, so the list could only
+  return empty and the two mutations could only report "not found". No screen
+  called them. This is the same defect as **Remediation → Triage** in 0.11.0,
+  one layer down. Alert lifecycle stays where it works — **Remediation →
+  Alerts**, which has real state, an evidence trail and ticket creation. The
+  neighbouring **Settings → Alert Rules** is unaffected.
+
+### Fixed
+
+- **Admin-ui login screen showed fake environment/status placeholders.**
+  A "production · us-east-1" pill (with a decorative red status dot) and a
+  stats box ("Fleet online 86%", "Active tenants 11", "Recurring revenue
+  $387k") were leftover design-kit mockup content ported verbatim in and
+  never wired to real data — actively misleading on any non-AWS deployment.
+  Both removed.
+- **Mission Control's "Degraded services" tile counted disabled services as
+  degraded.** A service an operator intentionally disabled (e.g. not deployed
+  under Core edition) was lumped in with genuinely degraded/down services via
+  a `status !== 'healthy'` filter. The tile now excludes `disabled` and is
+  relabeled "Services needing attention" to reflect that it can include both
+  degraded and down services.
+- **monitoring-service never health-checked pcap-processor or mcp-service.**
+  Both are registered in `standards/service-registry.yaml` and deployed in
+  every environment, but were missing from monitoring-service's hand-maintained
+  peer list (`internal/config/config.go`), so neither ever appeared in System
+  Health → Services or counted toward Mission Control's status tile — even
+  while unhealthy. Added. (Follow-up tracked in: this list should be
+  registry-generated like docker-compose/Traefik are, so this class of drift
+  can't recur silently.)
+- **Synthetic edge-probe TLS verification failed permanently on a private-CA
+  deployment.** A monitoring-service synthetic check against an edge
+  certificate signed by a private CA reported "down" continuously — not
+  intermittently — because the container's CA trust store doesn't inherit
+  whatever the host OS trusts (they're separate stores), so the cert never
+  verified.
+  Added `ExtraTrustedCACertPath` / `EXTRA_TRUSTED_CA_PATH` so a synthetic check
+  can trust an operator-supplied CA in addition to the system pool — a real
+  fix, not `insecureSkipVerify`, so a genuine break still surfaces as a
+  finding.
+- **Re-logging in after a session timeout could show "couldn't verify legal
+  terms" even though login succeeded.** The shared API client's session-expiry
+  interceptor exempted *any* path containing `/auth/` (except one ending in
+  `/auth/me`) from real session-expiry handling — wrongly sweeping in
+  `/auth/legal/pending` and `/auth/legal/accept`, both of which require an
+  active session. A 401 on either during the brief window right after
+  re-login skipped proper recovery and surfaced as a bare error in the
+  legal-acceptance modal instead of a clean redirect. Replaced the blanket
+  `/auth/` exemption with an explicit allowlist of the endpoints that
+  legitimately run before a session exists (login, refresh, registration,
+  SSO handshake steps, etc.) — everything else, including the legal
+  endpoints, now goes through real session-expiry handling.
+- **A tenant's security-summary endpoint 500'd on every single call.**
+  `GetTenantSecuritySummary` (auth-service) queried a `severity` column on
+  `audit.audit_logs` that has never existed in the schema. The error was
+  meant to be tolerated (falling back to a zero count), but a bare Postgres
+  statement error aborts the whole transaction, so the intended fallback
+  didn't actually recover — the later commit failed too, 500ing the entire
+  summary even though the primary user-metrics query above it had already
+  succeeded. Removed the bogus column reference and moved each optional
+  count onto its own `SAVEPOINT`, so a future error in one genuinely
+  degrades to zero instead of taking the whole endpoint down.
+- **UDP-based OT probing never ran on a network sweep either.** 0.11.0 fixed
+  this for the in-cluster Platform Sensor; the customer-deployed sensor had the
+  same defect on its CIDR/range sweep path, which probed only the ports a TCP
+  connect scan reported open. BACnet listens on UDP alone, so a swept segment
+  reported no BACnet devices with no errors — the same false clean bill of
+  health. EtherNet/IP was affected identically. Probes of a named host and
+  protocol were never affected. An unanswered probe is recorded as inconclusive
+  rather than as an absence, and a sweep now bounds its UDP wait so a silent
+  host cannot stall the scan.
+
 ## [0.11.0] - 2026-08-20
 
 A data-flow audit swept ~250k lines across 20 dimensions and found 60 defects

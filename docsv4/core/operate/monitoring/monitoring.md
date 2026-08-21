@@ -216,7 +216,7 @@ Configure Grafana alert rules for:
 - **Total Tenants**: Active tenant count
 - **Total Users**: Active user count
 - **API Gateway Throughput**: Total requests through gateway
-- **Cost Tracking**: Real-time AWS costs and resource usage costs
+- **Cost Tracking**: Platform-wide AWS cost synchronization. Per-tenant compute cost is not currently measured — it reports as "not measured" pending a per-tenant attribution model, rather than an estimated figure.
 - **Health Scores**: Tenant health scores and trends
 
 ### Database Metrics

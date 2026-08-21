@@ -2132,6 +2132,27 @@ func (a *AuthService) UpdateUserAvatar(userID uuid.UUID, avatarURL string) error
 	return nil
 }
 
+// bestEffortCount runs a scalar COUNT query inside a SAVEPOINT so a failure
+// (missing table/column, permission error, etc.) degrades to 0 instead of
+// aborting the enclosing transaction. Without the savepoint, a Postgres
+// statement error poisons the whole transaction — every later statement,
+// including the eventual Commit, fails too, so "swallow this one error"
+// silently doesn't work unless it is scoped to its own savepoint. name must be
+// a fixed caller-supplied identifier (never user input) — it is interpolated
+// directly because SAVEPOINT does not accept a bind parameter for its name.
+func bestEffortCount(tx *sql.Tx, name, query string, args ...any) int {
+	ctx := context.Background()
+	if _, err := tx.ExecContext(ctx, "SAVEPOINT "+name); err != nil {
+		return 0
+	}
+	var count int
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		_, _ = tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+name)
+		return 0
+	}
+	return count
+}
+
 // TenantSecuritySummary represents security metrics for a tenant
 type TenantSecuritySummary struct {
 	TenantID           uuid.UUID `json:"tenant_id"`
@@ -2170,8 +2191,15 @@ func (a *AuthService) GetTenantSecuritySummary(tenantID uuid.UUID) (*TenantSecur
 
 	// RLS-scoped: users, audit.activity_logs, and audit.audit_logs all carry
 	// tenant_isolation policies. The tenant is known, so all three reads run
-	// inside one WithTenantTx (app.tenant_id set). The audit counts keep their
-	// existing "tolerate error → 0" semantics by swallowing errors locally.
+	// inside one WithTenantTx (app.tenant_id set). The audit counts are
+	// best-effort ("tolerate error → 0"), each guarded by its own SAVEPOINT: a
+	// bare Postgres statement error aborts the WHOLE transaction, so swallowing
+	// the error locally without rolling back to a savepoint does not actually
+	// recover anything — the poisoned transaction still fails tx.Commit() below,
+	// 500ing the entire summary even though the primary users query already
+	// succeeded. (This is exactly how a stray reference to a nonexistent
+	// audit.audit_logs.severity column below took this whole endpoint down on
+	// every call rather than just zeroing one optional count.)
 	err := shareddatabase.WithTenantTx(context.Background(), a.db, tenantID, func(tx *sql.Tx) error {
 		scanErr := tx.QueryRowContext(context.Background(), query, tenantID).Scan(
 			&unverifiedCount,
@@ -2187,26 +2215,25 @@ func (a *AuthService) GetTenantSecuritySummary(tenantID uuid.UUID) (*TenantSecur
 		}
 
 		// Count failed login events from activity logs (last 24 hours; users.failed_login_attempts is cumulative, not time-bounded)
-		if e := tx.QueryRowContext(context.Background(), `
+		failedLogins = bestEffortCount(tx, "sec_summary_failed_logins", `
 			SELECT COUNT(*)
 			FROM audit.activity_logs
 			WHERE tenant_id = $1
 			  AND event_type = 'user.login_failed'
 			  AND occurred_at > NOW() - INTERVAL '24 hours'
-		`, tenantID).Scan(&failedLogins); e != nil {
-			failedLogins = 0
-		}
+		`, tenantID)
 
-		// Query actual security alerts from audit logs (last 24 hours)
-		if e := tx.QueryRowContext(context.Background(), `
+		// Count security-relevant audit events (last 24 hours). audit.audit_logs
+		// has no severity column — the high/critical clause this once had
+		// referenced one that never existed, which is what poisoned the
+		// transaction on every single call (see comment above).
+		securityAlerts = bestEffortCount(tx, "sec_summary_security_alerts", `
 			SELECT COUNT(*)
 			FROM audit.audit_logs
 			WHERE tenant_id = $1
 			  AND created_at > NOW() - INTERVAL '24 hours'
-			  AND (action ILIKE '%failed%' OR action ILIKE '%lockout%' OR action ILIKE '%unauthorized%' OR severity IN ('high', 'critical'))
-		`, tenantID).Scan(&securityAlerts); e != nil {
-			securityAlerts = 0
-		}
+			  AND (action ILIKE '%failed%' OR action ILIKE '%lockout%' OR action ILIKE '%unauthorized%')
+		`, tenantID)
 		return nil
 	})
 	if err != nil {

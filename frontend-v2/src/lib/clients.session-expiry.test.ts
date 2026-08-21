@@ -114,6 +114,21 @@ describe('session-expiry middleware (401 → handler → replay)', () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
+  // The regression this guards: the exemption used to be a blacklist
+  // ("anything containing /auth/ except /auth/me"), which swept in the
+  // session-only legal endpoints. A 401 there during the window right after
+  // re-login skipped session recovery and surfaced as a bare "couldn't verify
+  // legal terms" error. These sit behind RequireAuth, so a 401 IS an expired
+  // session and must reach the handler.
+  it('session-only /auth/* endpoints are NOT exempt (legal gate, logout, sessions)', async () => {
+    const handler = vi.fn(async () => true);
+    contract.setSessionExpiredHandler(handler);
+    const client = contract.createAuthServiceClient({ baseUrl: 'http://api.test', fetch: fetchQueue(401, 401) });
+
+    await fire(client, 'GET', '/auth/legal/pending');
+    expect(handler).toHaveBeenCalled();
+  });
+
   it('with no handler registered the 401 passes through untouched', async () => {
     const fetchStub = fetchQueue(401);
     const client = contract.createAuthServiceClient({ baseUrl: 'http://api.test', fetch: fetchStub });

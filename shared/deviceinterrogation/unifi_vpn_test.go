@@ -225,6 +225,49 @@ func TestUnifiVPNAssets_L2TPCarriesIPsecCrypto(t *testing.T) {
 	}
 }
 
+// TestUnifiVPNAssets_PPTPCarriesProtocolVersion pins the one typed field a PPTP
+// asset must set, and it is not obvious why it matters.
+//
+// PPTP reports no cipher, no key size and no hash — the controller API states
+// none of them, and inventing them would be fabrication. That leaves
+// protocol_version as the ONLY field classifyAndLinkAlgorithms can link to the
+// algorithms catalogue. With it empty, nothing links,
+// catalogueRiskForImplementation answers "not assessed", and the row scores 0 —
+// banding Informational. So the most dangerous VPN a UniFi controller can
+// report would arrive at the BOTTOM of the customer's risk list, which is worse
+// than the pre- behaviour of dropping it: it is a silent false negative
+// rather than a visible absence.
+//
+// 'PPTP' is the code of the seeded protocol_version row (risk 95). Change one
+// and this test tells you to change the other.
+func TestUnifiVPNAssets_PPTPCarriesProtocolVersion(t *testing.T) {
+	confs := []map[string]interface{}{{
+		"name":     "legacy-dialin",
+		"purpose":  "remote-user-vpn",
+		"vpn_type": "pptp-server",
+	}}
+
+	assets := unifiVPNAssets(confs, "192.0.2.1")
+	if len(assets) != 1 {
+		t.Fatalf("expected 1 asset, got %d", len(assets))
+	}
+	a := assets[0]
+
+	if a.Protocol != "PPTP" || a.Port != 1723 {
+		t.Errorf("protocol/port = %s/%d, want PPTP/1723", a.Protocol, a.Port)
+	}
+	if a.ProtocolVersion == nil || *a.ProtocolVersion != "PPTP" {
+		t.Fatalf("ProtocolVersion = %v, want \"PPTP\" — without it the "+
+			"implementation links no algorithm and scores 0 (Informational)", a.ProtocolVersion)
+	}
+	// And still no invented crypto: PPTP's weakness is the protocol itself,
+	// carried by the catalogue row, not by fields the controller never stated.
+	if a.CipherSuite != nil || a.KeySize != nil || a.HashAlgorithm != nil || a.KeyExchangeAlg != nil {
+		t.Errorf("PPTP crypto fields must stay unset (got cipher=%v keySize=%v hash=%v kex=%v)",
+			a.CipherSuite, a.KeySize, a.HashAlgorithm, a.KeyExchangeAlg)
+	}
+}
+
 // TestUnifiInterrogate_EmitsVPNAssets drives the full interrogate() flow
 // against a mock UniFi-OS (UDM-style) controller and asserts the VPN
 // networkconf entry surfaces as a vpn_gateway asset alongside the managed

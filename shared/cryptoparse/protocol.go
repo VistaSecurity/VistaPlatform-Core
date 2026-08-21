@@ -30,6 +30,7 @@ func FoldProtocol(protocol string) string {
 // reverse) is a build failure, not a silent drift.
 var canonicalProtocols = []string{
 	"TLS", "SSH", "IPSec", "VPN", "Database", "API", "SMB", "Kerberos",
+	"QUIC", "PPTP",
 	"Modbus", "DNP3", "MMS", "ICCP", "IEC62351", "OPC_UA",
 	"EtherNet_IP", "BACnet", "BACnet_SC", "HART_IP", "S7",
 }
@@ -44,12 +45,13 @@ var canonicalProtocols = []string{
 // case variant of the same word.
 //
 // What is deliberately NOT here: cross-protocol relabelling. "HTTPS", "SSL",
-// "QUIC", "WireGuard", "OpenVPN", "IKEv2" are left alone. Collapsing HTTPS to
-// TLS or WireGuard to VPN is a semantic judgement that DISCARDS what was
-// actually observed on the wire, and it already happens later and on purpose,
-// where a row crosses into the enum-typed `crypto_implementations.protocol`
-// (inventory-service's resolveProtocol). This function only ever changes how
-// a protocol is SPELLED, never which protocol it is.
+// "WireGuard", "OpenVPN", "IKEv2", "SSL VPN", "L2TP/IPSec" are left alone.
+// Collapsing HTTPS to TLS or WireGuard to VPN is a semantic judgement that
+// DISCARDS what was actually observed on the wire, and it already happens later
+// and on purpose, where a row crosses into the enum-typed
+// `crypto_implementations.protocol` (inventory-service's resolveProtocol). This
+// function only ever changes how a protocol is SPELLED, never which protocol it
+// is.
 var extraProtocolAliases = map[string]string{
 	"MODBUSTCP":   "Modbus",      // "Modbus/TCP", "ModbusTCP", "Modbus-TCP"
 	"DNP30":       "DNP3",        // "DNP3.0"
@@ -90,8 +92,8 @@ var protocolByFold = func() map[string]string {
 // normalises instead and the stored value is canonical.
 //
 // AN UNRECOGNISED PROTOCOL PASSES THROUGH. Producers legitimately observe
-// protocols the enum does not model — QUIC, SNMP, WireGuard, OpenVPN, PPTP,
-// L2TP/IPSec, IKEv2, "SSL VPN". Storing one of those un-normalised is strictly
+// protocols the enum does not model — SNMP, WireGuard, OpenVPN, IKEv2,
+// "SSL VPN", "L2TP/IPSec". Storing one of those un-normalised is strictly
 // better than dropping it or coercing it to a default: the string is the only
 // record that the observation happened. Surrounding whitespace is trimmed;
 // otherwise an unknown value is returned byte-for-byte.

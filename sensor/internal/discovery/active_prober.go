@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 	"time"
@@ -20,10 +21,32 @@ import (
 	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 )
 
+// sweepMaxUDPProbeTimeout bounds how long one UDP datagram is waited for during
+// a network sweep, independent of the job's per-probe timeout.
+//
+// A sweep fans out over every host in a CIDR, and a UDP probe cannot fail fast:
+// with no handshake to refuse, an absent device costs the full timeout twice
+// (see udpProbeAttempts). At the sensor's 30s job timeout that is two minutes
+// per host of waiting for silence, which would turn a one-minute /24 sweep into
+// an hour. ScanOpenPorts already caps its connect timeout for exactly this
+// reason — "a connect probe should be quick even if the full-probe timeout is
+// long" — and this is the same trade at the same point in the same scan. OT
+// devices answer a Who-Is from a local segment in milliseconds; a device that
+// has not answered in two seconds is not going to.
+//
+// A targeted probe (ProbeTarget, and the in-cluster Platform Sensor) keeps the
+// full timeout: there the operator named the host and the protocol, so patience
+// is warranted and the fan-out is one.
+const sweepMaxUDPProbeTimeout = 2 * time.Second
+
 // ActiveProber handles active probing for TLS/SSH discovery
 type ActiveProber struct {
 	timeout time.Duration
 	prober  *shareddisc.Prober
+
+	// sweepUDPProber is `prober` with a bounded timeout, used only by the sweep
+	// path's UDP dispatch. See sweepMaxUDPProbeTimeout.
+	sweepUDPProber *shareddisc.Prober
 }
 
 // NewActiveProber creates a new active prober. The protocol probes themselves
@@ -31,9 +54,14 @@ type ActiveProber struct {
 // sensor-side orchestration (DNS resolution, the ip×protocol×port sweep, TLS
 // version enumeration) and maps shared ProbeResults onto the sensor model.
 func NewActiveProber(timeout time.Duration) *ActiveProber {
+	sweepUDPTimeout := timeout
+	if sweepUDPTimeout <= 0 || sweepUDPTimeout > sweepMaxUDPProbeTimeout {
+		sweepUDPTimeout = sweepMaxUDPProbeTimeout
+	}
 	return &ActiveProber{
-		timeout: timeout,
-		prober:  shareddisc.NewProber(timeout),
+		timeout:        timeout,
+		prober:         shareddisc.NewProber(timeout),
+		sweepUDPProber: shareddisc.NewProber(sweepUDPTimeout),
 	}
 }
 
@@ -121,14 +149,43 @@ func (p *ActiveProber) ProbeTarget(target string, protocols []string, ports []in
 
 // SweepHost discovers open crypto/secure-protocol ports on a single host and
 // identifies the crypto on each via the shared prober — the "find listeners +
-// identify crypto" path for network-sweep jobs (CIDR/range targets). The cheap
-// TCP-connect scan runs first so only open ports get the (more expensive)
-// protocol probes.
+// identify crypto" path for network-sweep jobs (CIDR/range targets).
+//
+// Two independent dispatches, deliberately not nested:
+//
+//	sweepTCPPorts  — the cheap TCP-connect scan first, then the (more expensive)
+//	                 protocol probes for the ports that answered. A TCP result
+//	                 gates TCP probes, which is all it can speak to.
+//	sweepUDPProbes — the UDP-registered probers for the requested ports,
+//	                 regardless of what TCP said, because a TCP connect scan can
+//	                 say nothing whatsoever about a UDP-only service.
+//
+// Neither dispatch changes WHICH HOST is contacted. `host` arrives already
+// expanded from the job's target list, and both paths speak only to it, on only
+// the ports the job named (or the curated default crypto port set when it named
+// none).
 func (p *ActiveProber) SweepHost(host string, ports []int, _ models.DiscoveryOptions) []models.DiscoveryFinding {
+	return p.sweepUDPProbes(p.sweepTCPPorts(host, ports), host, ports)
+}
+
+// sweepTCPPorts runs the TCP-connect scan and the protocol probes that genuinely
+// depend on an open TCP port.
+func (p *ActiveProber) sweepTCPPorts(host string, ports []int) []models.DiscoveryFinding {
 	open := p.prober.ScanOpenPorts(host, ports, 0)
 	var findings []models.DiscoveryFinding
 	for _, port := range open {
 		for _, protocol := range shareddisc.ProtocolsForPort(port) {
+			// UDP-registered probers are excluded here ON PURPOSE and dispatched
+			// by sweepUDPProbes instead. Reaching them from this loop is what
+			// made a BACnet sweep a guaranteed no-op, and leaving them here as
+			// well would now send every datagram twice.
+			//
+			// The transport is read from the shared prober registry rather than
+			// hard-coded, so a prober that changes transport takes its dispatch
+			// decision with it.
+			if shareddisc.IsUDPProtocol(protocol) {
+				continue
+			}
 			res, err := p.prober.Probe(host, host, protocol, port)
 			if err != nil || res == nil {
 				continue
@@ -139,6 +196,109 @@ func (p *ActiveProber) SweepHost(host string, ports []int, _ models.DiscoveryOpt
 		}
 	}
 	return findings
+}
+
+// sweepUDPProbes runs every UDP-registered prober the swept port set implies,
+// WITHOUT requiring an open-TCP result first.
+//
+// This is the sensor half of B-60. probeBACnet and probeEtherNetIP are
+// registered as UDP probers, but the only path SweepHost had to them ran over
+// the ports ScanOpenPorts reported open — a TCP connect scan. A BACnet/IP
+// controller listens on UDP 47808 and nothing else, so the connect failed, the
+// Who-Is was never sent, and the sweep returned no findings and no errors. An
+// operator reading that concludes the segment has no BACnet devices: a false
+// clean bill of health on a building-automation network.
+//
+// New traffic: for each swept host, up to two datagrams per (protocol, port)
+// pair now leave the sensor — to hosts that were already being TCP-scanned, on
+// ports that were already being TCP-connected. No new host is contacted and no
+// new port is touched.
+//
+// Scope is enforced explicitly rather than inherited by accident from the TCP
+// scan that used to gate it:
+//   - the host is `host`, one already-expanded address of the job's target
+//     list — this function never derives another;
+//   - the protocols are derived FROM the swept ports (udpProtocolsForPorts), so
+//     a port the job did not ask about contributes no protocol;
+//   - shareddisc.PlanUDPProbes then re-checks both halves and refuses to invent
+//     a port, so an OT protocol can never spray datagrams across 443/8443.
+//
+// An unanswered probe produces NO finding. UDP has no handshake, so silence
+// means "no device" or "device declined to answer" or "datagram dropped" and
+// there is no way to tell which; recording it would both invent a device (a
+// sensor finding is mirrored into sensor_discoveries and materialises inventory)
+// and dress an inconclusive result up as a measurement. Unlike the in-cluster
+// Platform Sensor there is no open-port row to annotate instead — a sweep
+// finding IS a positive protocol identification — so the outcome is logged,
+// with no_answer kept distinct from refused.
+func (p *ActiveProber) sweepUDPProbes(findings []models.DiscoveryFinding, host string, ports []int) []models.DiscoveryFinding {
+	protocols := udpProtocolsForPorts(ports)
+	if len(protocols) == 0 {
+		return findings
+	}
+
+	pairs, undispatched := shareddisc.PlanUDPProbes(protocols, ports)
+	for _, protocol := range undispatched {
+		// Unreachable while the protocols are derived from the ports: it would
+		// mean the curated port map and PortSpeaks disagree about the same pair.
+		// Logged rather than dropped because a silent no-op is the exact failure
+		// this function exists to end.
+		log.Printf("[Sweep] %s has a UDP prober but none of the swept ports %v is a well-known %s port — not dispatched", protocol, ports, protocol)
+	}
+
+	for _, pair := range pairs {
+		attempt := p.sweepUDPProber.ProbeUDP(host, host, pair.Protocol, pair.Port)
+		if !attempt.Answered() {
+			verdict := "no device confirmed"
+			if attempt.Outcome.Inconclusive() {
+				verdict = "INCONCLUSIVE — not evidence the device is absent"
+			}
+			log.Printf("[Sweep] %s probe for %s:%d over UDP: %s after %d attempt(s), no finding recorded (%s) [%s]",
+				pair.Protocol, host, pair.Port, attempt.Outcome, attempt.Attempts, verdict, attempt.Detail)
+			continue
+		}
+
+		finding := probeResultToFinding(attempt.Result)
+		finding.Target = host
+		prefix := strings.ToLower(shareddisc.CanonicalProtocolName(pair.Protocol))
+		finding.RawMetadata[prefix+"_probe_transport"] = "udp"
+		finding.RawMetadata[prefix+"_probe_outcome"] = string(attempt.Outcome)
+		finding.RawMetadata[prefix+"_probe_attempts"] = attempt.Attempts
+		findings = append(findings, *finding)
+
+		log.Printf("[Sweep] %s probe for %s:%d over UDP answered after %d attempt(s)",
+			pair.Protocol, host, pair.Port, attempt.Attempts)
+	}
+
+	return findings
+}
+
+// udpProtocolsForPorts derives the UDP-registered protocols a sweep should
+// dispatch from the ports it was asked to sweep.
+//
+// A sweep has no protocol list of its own — it asks each port what it speaks —
+// so this is the sweep's equivalent of the caller-supplied protocols the
+// in-cluster path passes to PlanUDPProbes. It deliberately uses
+// WellKnownProtocolsForPort, not ProtocolsForPort: the latter falls back to TLS
+// for unknown ports, and a fallback has no business deciding that a port the
+// curated map has never heard of should receive OT discovery datagrams.
+func udpProtocolsForPorts(ports []int) []string {
+	var protocols []string
+	seen := make(map[string]bool)
+	for _, port := range ports {
+		wellKnown, ok := shareddisc.WellKnownProtocolsForPort(port)
+		if !ok {
+			continue
+		}
+		for _, protocol := range wellKnown {
+			if !shareddisc.IsUDPProtocol(protocol) || seen[protocol] {
+				continue
+			}
+			seen[protocol] = true
+			protocols = append(protocols, protocol)
+		}
+	}
+	return protocols
 }
 
 // enumerateTLSVersions probes each TLS port with forced MinVersion/MaxVersion

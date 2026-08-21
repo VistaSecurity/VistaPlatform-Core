@@ -19,7 +19,7 @@ Segments are required before running discovery; the onboarding wizard includes a
 ### Asset Enrichment
 
 - **Environment and location** – Set from the segment that matches the asset’s IP/hostname.
-- **Service name** – Set from port heuristic, SSH/SMTP/FTP banners, or JA3S (passive). Can be overridden manually on the asset (PUT infrastructure-assets/:id/service).
+- **Service name** – Set from port heuristic, SSH/SMTP/FTP banners, or JA3S (passive). Can be overridden manually on the asset (PUT infrastructure-assets/:id/service). The asset drawer labels how the name was determined — e.g. "Best guess · from port" for a port-number inference vs. "Confirmed · from banner" for a name read directly off a banner.
 
 Asset table and asset detail modal show **Location**, **Environment**, and **Service** (with confidence).
 

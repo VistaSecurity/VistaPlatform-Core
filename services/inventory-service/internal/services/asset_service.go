@@ -361,13 +361,49 @@ func resolveProtocol(protocol string) (string, protocolVerdict) {
 		return "TLS", protocolEnum // HTTPS is TLS over HTTP
 	case "TLS", "SSL":
 		return "TLS", protocolEnum
+	// STARTTLS names the upgrade, not a different protocol: what the session
+	// ends up speaking is TLS, and the sensor's STARTTLS assembler already
+	// emits "TLS" (starttls_assembler.go). This arm is defensive — the string
+	// is a routing label inside analyzePacket that no discovery currently
+	// carries — but it is true, and being true costs nothing.
+	case "STARTTLS":
+		return "TLS", protocolEnum
+	// A FortiGate SSL-VPN portal is TLS on 443/10443, and the collector reads a
+	// real TLS version, cipher suite, key size and hash off it
+	// (convertSSLVPNToAsset). Filing it as TLS is what puts those measurements
+	// under the two protocol='TLS' compliance rules, which is where a portal
+	// still offering TLS 1.0 has to be caught; filing it as VPN would hide it
+	// from every one of them. That it is a VPN is not lost — the same asset
+	// carries asset_type "vpn_gateway".
+	case "SSL VPN", "SSL-VPN", "SSLVPN", "SSL_VPN":
+		return "TLS", protocolEnum
 	case "SSH":
 		return "SSH", protocolEnum
+	// QUIC gets its own enum value rather than a mapping. Its handshake is
+	// TLS 1.3, but the record layer, version negotiation and transport are
+	// QUIC's own and it runs over UDP, so calling it TLS asserts a TCP endpoint
+	// that does not exist and hands the TLS-version rule a version string
+	// ("QUIC v1 (TLS 1.3)") it cannot read.
+	case "QUIC", "HTTP/3", "HTTP3", "H3":
+		return "QUIC", protocolEnum
+	// PPTP likewise. Mapping it to VPN would file the most dangerous VPN a
+	// collector can report under the same label as WireGuard. Note that the
+	// enum value alone scores nothing: PPTP carries no cipher or version to
+	// link, so its risk comes from the PPTP row in the `algorithms` catalogue,
+	// reached via the protocol_version the UniFi collector stamps.
+	case "PPTP":
+		return "PPTP", protocolEnum
 	// IKE and IKEv2 are the key-exchange half of an IPSec association, which is
 	// what the Cisco collector reports them as (parseIKEv2SA stamps "IKEv2").
 	// IKEV2 had no arm, so every Cisco IKEv2 SA — a real, correctly identified
 	// VPN association — was filed as TLS.
-	case "IPSEC", "IP-SEC", "IKE", "IKEV2", "IKE-V2", "IKE_V2":
+	// L2TP/IPSec is IPSec for every purpose this column serves: L2TP itself
+	// carries no cryptography, IPSec provides all of it, and UniFi's
+	// unifiFillIPsecCrypto populates encryption, hash, DH group and IKE version
+	// from the same proposal set a plain IPSec tunnel reports. The L2TP framing
+	// stays in metadata. Same treatment IKE/IKEv2 already get.
+	case "IPSEC", "IP-SEC", "IKE", "IKEV2", "IKE-V2", "IKE_V2",
+		"L2TP/IPSEC", "L2TP-IPSEC", "L2TP_IPSEC", "L2TPIPSEC", "L2TP OVER IPSEC":
 		return "IPSec", protocolEnum
 	case "VPN", "WIREGUARD", "OPENVPN":
 		return "VPN", protocolEnum
@@ -420,6 +456,17 @@ func resolveProtocol(protocol string) (string, protocolVerdict) {
 	case "NONE", "HTTP":
 		return "", protocolPlaintext
 
+	// DELIBERATELY UNMODELLED, so it is not "fixed" by the next reader.
+	//
+	// SNMP. shared/deviceinterrogation/probers.go stamps it on the one asset
+	// SNMPInterrogator emits, which represents the DEVICE and carries only
+	// sysDescr/sysName OIDs — no cipher, no version, no key. There is no
+	// cryptographic observation in it to record, and a row here would carry
+	// empty crypto columns, score 0, and enlarge the risk and PQC denominators
+	// with something never measured. The asset itself is still recorded by the
+	// caller. (That a v2c interrogation SUCCEEDED does prove plaintext SNMP
+	// management is enabled — a real security fact, but a finding about the
+	// device's management plane, not a negotiated-protocol measurement.)
 	default:
 		return "", protocolUnrecognized
 	}

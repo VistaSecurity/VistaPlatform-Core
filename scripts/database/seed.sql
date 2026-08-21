@@ -1018,6 +1018,21 @@ INSERT INTO algorithms (code, category, name, description, strength, deprecation
 ON CONFLICT (code) DO NOTHING;
 
 -- =================================================================
+-- Legacy VPN Protocols
+-- =================================================================
+-- PPTP has no salvageable cryptography, so there is no component row to link --
+-- the protocol_version row IS the assessment. The UniFi collector reports a
+-- pptp-server network with no cipher and no version (the controller API states
+-- neither), so without this row the implementation links no algorithm at all
+-- and catalogueRiskForImplementation returns "not assessed" -- score 0,
+-- Informational. That would put the most dangerous VPN a customer can run at
+-- the bottom of their risk list. The collector stamps protocol_version = 'PPTP'
+-- for exactly this lookup.
+INSERT INTO algorithms (code, category, name, description, strength, deprecation_status, risk_score, recommended_alternatives, migration_guidance, compliance_mappings, is_standard, algorithm_family, primitive) VALUES
+('PPTP', 'protocol_version', 'PPTP (Point-to-Point Tunneling Protocol)', 'PPTP offers no usable confidentiality. Authentication is MS-CHAPv2, whose security reduces to a single DES key and is recoverable in a bounded offline attack; encryption is MPPE, an RC4 stream cipher whose session keys are derived from the MS-CHAPv2 exchange, so breaking authentication yields the traffic keys. MPPE also provides no integrity protection. Detecting an enabled PPTP server is itself the finding -- there is no configuration that makes it safe.', 'weak', 'obsolete', 95, ARRAY['WIREGUARD', 'IKEV2'], 'Disable the PPTP server and migrate remote-access users to WireGuard or IKEv2/IPsec. PPTP cannot be hardened -- MS-CHAPv2 and MPPE are the protocol, not options within it. Treat any credential used over PPTP as exposed and rotate it.', '{"NIST": "not-approved", "PCI-DSS": "non-compliant", "FIPS": "non-compliant"}'::jsonb, true, 'PPTP', 'other')
+ON CONFLICT (code) DO NOTHING;
+
+-- =================================================================
 -- IPSec / IKE Protocol Algorithms
 -- =================================================================
 INSERT INTO algorithms (code, category, name, description, strength, deprecation_status, risk_score, recommended_alternatives, migration_guidance, compliance_mappings, is_standard, algorithm_family, primitive) VALUES

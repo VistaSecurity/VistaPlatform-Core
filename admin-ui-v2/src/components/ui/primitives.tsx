@@ -14,6 +14,7 @@ const STATUS: Record<string, StatusMeta> = {
   running: { c: 'var(--info)', label: 'Running' }, investigating: { c: 'var(--info)', label: 'Investigating' },
   onboarding: { c: 'var(--info)', label: 'Onboarding' },
   queued: { c: 'var(--neutral)', label: 'Queued' }, idle: { c: 'var(--neutral)', label: 'Idle' },
+  disabled: { c: 'var(--neutral)', label: 'Disabled' },
   off: { c: 'var(--neutral)', label: 'Off' }, invited: { c: 'var(--neutral)', label: 'Invited' },
   completed: { c: 'var(--ok)', label: 'Completed' }, pending: { c: 'var(--neutral)', label: 'Pending' },
   cancelled: { c: 'var(--neutral)', label: 'Cancelled' }, canceled_job: { c: 'var(--neutral)', label: 'Cancelled' },

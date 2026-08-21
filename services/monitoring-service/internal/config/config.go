@@ -47,6 +47,17 @@ type Config struct {
 	// backend Service reports healthy. Populated from SYNTHETIC_CHECKS_JSON
 	// at startup.
 	SyntheticChecks []SyntheticCheck
+
+	// ExtraTrustedCACertPath optionally points at a PEM file (mounted from an
+	// operator-supplied Secret) added to the system trust pool used to
+	// verify synthetic-check TLS connections. Self-hosted deployments whose
+	// edge certificate chains to a private CA — one their host OS trusts but
+	// their containers don't, since container images ship their own CA
+	// bundle independent of the node's — need this to make a synthetic check
+	// verify for real rather than reaching for InsecureSkipVerify. Empty
+	// leaves the system pool untouched (the common case: public ACME/CA
+	// certs verify with no extra trust needed).
+	ExtraTrustedCACertPath string
 }
 
 type ServiceConfig struct {
@@ -74,10 +85,13 @@ type SyntheticCheck struct {
 	ExpectedStatus int `json:"expectedStatus,omitempty"`
 	// TimeoutSeconds caps the probe at this many seconds. Defaults to 5.
 	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
-	// InsecureSkipVerify disables TLS verification for this probe. Use only
-	// in lab clusters where the edge cert is signed by an internal CA that
-	// the monitoring-service pod doesn't trust. Production deployments
-	// using publicly-trusted certs should leave this false.
+	// InsecureSkipVerify disables TLS verification for this probe entirely.
+	// Prefer ExtraTrustedCACertPath (above) when the edge cert chains to a
+	// private CA — that verifies for real instead of turning verification
+	// off, so a genuine break (wrong hostname, expired cert) still surfaces
+	// as a finding instead of being silently skipped. Only reach for this
+	// when there's no CA to hand the process at all (e.g. a throwaway
+	// self-signed cert with no private root).
 	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 	// HostHeader overrides the HTTP Host header sent with the probe. Use when
 	// the probe must reach the edge by IP or an internal address while still
@@ -125,15 +139,16 @@ func Load() *Config {
 		IncidentHooksEnabled: incidentHooksEnabled,
 		RetentionJobInterval: time.Duration(retentionHours) * time.Hour,
 		// mTLS Configuration
-		UseMTLS:            sharedconfig.GetEnvAsBool("USE_MTLS", true),
-		TLSPort:            sharedconfig.GetEnv("TLS_PORT", "8443"),
-		ServiceCertPath:    sharedconfig.GetEnv("SERVICE_CERT_PATH", "/app/certs/server-cert.pem"),
-		ServiceKeyPath:     sharedconfig.GetEnv("SERVICE_KEY_PATH", "/app/certs/server-key.pem"),
-		ClientCertPath:     sharedconfig.GetEnv("CLIENT_CERT_PATH", "/app/certs/client-cert.pem"),
-		ClientKeyPath:      sharedconfig.GetEnv("CLIENT_KEY_PATH", "/app/certs/client-key.pem"),
-		PlatformCACertPath: sharedconfig.GetEnv("PLATFORM_CA_CERT_PATH", "/app/certs/platform-ca-cert.pem"),
-		TraefikAPIURL:      sharedconfig.GetEnv("TRAEFIK_API_URL", "http://api-gateway:8080"),
-		SyntheticChecks:    syntheticChecks,
+		UseMTLS:                sharedconfig.GetEnvAsBool("USE_MTLS", true),
+		TLSPort:                sharedconfig.GetEnv("TLS_PORT", "8443"),
+		ServiceCertPath:        sharedconfig.GetEnv("SERVICE_CERT_PATH", "/app/certs/server-cert.pem"),
+		ServiceKeyPath:         sharedconfig.GetEnv("SERVICE_KEY_PATH", "/app/certs/server-key.pem"),
+		ClientCertPath:         sharedconfig.GetEnv("CLIENT_CERT_PATH", "/app/certs/client-cert.pem"),
+		ClientKeyPath:          sharedconfig.GetEnv("CLIENT_KEY_PATH", "/app/certs/client-key.pem"),
+		PlatformCACertPath:     sharedconfig.GetEnv("PLATFORM_CA_CERT_PATH", "/app/certs/platform-ca-cert.pem"),
+		TraefikAPIURL:          sharedconfig.GetEnv("TRAEFIK_API_URL", "http://api-gateway:8080"),
+		SyntheticChecks:        syntheticChecks,
+		ExtraTrustedCACertPath: sharedconfig.GetEnv("EXTRA_TRUSTED_CA_PATH", ""),
 		Services: map[string]ServiceConfig{
 			"api-gateway": {
 				// GetEnvIfPresent (not GetEnv) so an explicitly-empty
@@ -207,6 +222,16 @@ func Load() *Config {
 			},
 			"discovery-processor-service": {
 				URL:     sharedconfig.PeerServiceURLAuto("DISCOVERY_PROCESSOR_SERVICE_URL", "discovery-processor-service"),
+				Timeout: time.Duration(timeout) * time.Second,
+				Enabled: true,
+			},
+			"pcap-processor": {
+				URL:     sharedconfig.PeerServiceURLAuto("PCAP_PROCESSOR_URL", "pcap-processor"),
+				Timeout: time.Duration(timeout) * time.Second,
+				Enabled: true,
+			},
+			"mcp-service": {
+				URL:     sharedconfig.PeerServiceURLAuto("MCP_SERVICE_URL", "mcp-service"),
 				Timeout: time.Duration(timeout) * time.Second,
 				Enabled: true,
 			},

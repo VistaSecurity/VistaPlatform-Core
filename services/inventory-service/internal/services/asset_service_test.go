@@ -29,6 +29,20 @@ func TestResolveProtocol(t *testing.T) {
 		{"API", "API"},
 		{"REST", "API"},
 
+		// The six protocols live producers emit that had no enum home, as
+		// modelled. Each line is a product decision, not a normalization: the
+		// first two earned enum values of their own, the next three are mapped
+		// onto an existing value because that is what they semantically ARE,
+		// and SNMP is deliberately absent (see TestResolveProtocol_DoesNotFabricate).
+		{"QUIC", "QUIC"},        // sensor + pcap-processor; NOT TLS — its own transport, over UDP
+		{"HTTP/3", "QUIC"},      //
+		{"PPTP", "PPTP"},        // UniFi; kept apart from VPN so it never shares a label with WireGuard
+		{"STARTTLS", "TLS"},     // the upgrade names the transition; the session speaks TLS
+		{"SSL VPN", "TLS"},      // FortiGate portal — TLS on 443/10443, and the TLS controls must see it
+		{"ssl-vpn", "TLS"},      //
+		{"L2TP/IPSec", "IPSec"}, // L2TP carries no crypto; IPSec provides all of it
+		{"l2tp-ipsec", "IPSec"}, //
+
 		// OT/ICS protocols — every alias must land on the canonical enum literal.
 		{"Modbus", "Modbus"},
 		{"MODBUS/TCP", "Modbus"},
@@ -96,15 +110,10 @@ func TestResolveProtocol_DoesNotFabricate(t *testing.T) {
 		{"HTTP", protocolPlaintext},
 		{"http", protocolPlaintext},
 
-		// Real protocols with no enum home. Named here so the list is visible
-		// in code: they are a MODELLING gap, not a normalization bug, and they
-		// must not be quietly filed as something they are not while it is open.
-		{"QUIC", protocolUnrecognized},
+		// SNMP stays deliberately unmodelled — see the default arm's comment.
+		// The SNMP interrogator's asset represents the DEVICE and carries no
+		// cryptographic observation at all, so there is nothing to record.
 		{"SNMP", protocolUnrecognized},
-		{"SSL VPN", protocolUnrecognized},
-		{"PPTP", protocolUnrecognized},
-		{"L2TP/IPSec", protocolUnrecognized},
-		{"STARTTLS", protocolUnrecognized},
 
 		// Genuinely unknown, and empty.
 		{"Custom-Vendor-Thing", protocolUnrecognized},

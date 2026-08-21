@@ -6,7 +6,6 @@ import {
 } from 'lucide-react';
 import { usePlatformAuth } from '@vistasecurity/primitives/platform-auth';
 import { usePlatformBranding, BrandLogo } from '../app/platform-branding';
-import { StatusDot } from '../components/ui/primitives';
 import { staffProviderLabel, startStaffSso, useStaffSsoProviders } from '../lib/staff-sso';
 // Maps a callback ?error= to an operator-facing message.
 const SSO_ERRORS: Record<string, string> = {
@@ -106,28 +105,12 @@ export function LoginPage() {
           <p style={{ margin: '15px 0 0', fontSize: 15, lineHeight: 1.6, color: 'rgba(255,255,255,.58)', maxWidth: 400 }}>
             Operate the VISTA platform end to end — tenants, the discovery fleet, revenue, and the catalog that grades every customer's crypto.
           </p>
-          <div style={{ marginTop: 28, padding: '16px 18px 6px', borderRadius: 'var(--r-lg)', background: 'rgba(255,255,255,.035)', border: '1px solid rgba(255,255,255,.09)', backdropFilter: 'blur(20px)', maxWidth: 360 }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingBottom: 4 }}>
-              <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.13em', textTransform: 'uppercase', color: 'rgba(255,255,255,.4)' }}>Platform status</span>
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5, fontWeight: 600, color: 'var(--ok)' }}><StatusDot status="operational" size={7} />Operational</span>
-            </div>
-            <StatusRow label="Fleet online" value="86%" />
-            <StatusRow label="Active tenants" value="11" />
-            <StatusRow label="Recurring revenue" value="$387k" color="var(--accent-light)" />
-          </div>
         </div>
       </div>
 
       {/* ===== auth form ===== */}
       <div className="login-form">
         <div style={{ width: '100%', maxWidth: 380 }}>
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 22 }}>
-            <span className="op-chip" style={{ cursor: 'default' }}>
-              <span style={{ width: 6, height: 6, borderRadius: 50, background: 'var(--danger)' }} />production
-              <span style={{ color: 'var(--op-t3)' }}>·</span><span className="mono">us-east-1</span>
-            </span>
-          </div>
-
           <div className="op-eyebrow" style={{ color: 'var(--op-accent-text)', marginBottom: 9 }}>Operator sign-in</div>
           <h2 style={{ margin: 0, fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 26, letterSpacing: '-.02em', color: 'var(--op-t1)' }}>Access the control plane</h2>
           <p style={{ margin: '7px 0 24px', fontSize: 13.5, color: 'var(--op-t3)', lineHeight: 1.5 }}>{ssoProviders.length > 0 ? 'Sign in with your company account, or use credentials.' : 'Sign in to operate the platform.'}</p>
@@ -184,15 +167,6 @@ export function LoginPage() {
           </div>
         </div>
       </div>
-    </div>
-  );
-}
-
-function StatusRow({ label, value, color }: { label: string; value: string; color?: string }) {
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderTop: '1px solid rgba(255,255,255,.07)' }}>
-      <span style={{ fontSize: 12.5, color: 'rgba(255,255,255,.55)', flex: 1 }}>{label}</span>
-      <span className="op-num" style={{ fontSize: 13.5, fontWeight: 700, color: color || '#fff' }}>{value}</span>
     </div>
   );
 }

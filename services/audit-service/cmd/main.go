@@ -441,9 +441,20 @@ func newRouter(
 		api.GET("/audit-service/alert-rules/:id", h.alertRule.GetAlertRuleByID)
 		api.PUT("/audit-service/alert-rules/:id", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.alertRule.UpdateAlertRule)
 		api.DELETE("/audit-service/alert-rules/:id", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.alertRule.DeleteAlertRule)
-		api.GET("/audit-service/alert-instances", h.alertRule.GetAlertInstances)
-		api.POST("/audit-service/alert-instances/:id/acknowledge", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.alertRule.AcknowledgeAlert)
-		api.POST("/audit-service/alert-instances/:id/resolve", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.alertRule.ResolveAlert)
+
+		// Removed: GET /alert-instances and POST /alert-instances/:id/{acknowledge,resolve}.
+		// They read and updated audit.alert_instances, a table with no INSERT
+		// anywhere in the tree — so the list could only ever return empty and
+		// the two mutations could only ever 404. Nothing in either UI called
+		// them. This is the same defect as the Triage page removed in,
+		// one layer down.
+		//
+		// Not given a producer, because the rules above are a rule *store*, not
+		// an engine: nothing evaluates audit.alert_rules. A producer would mean
+		// building an evaluator AND a second stateful alert store beside the
+		// working one — the outcome ADR-0006 rejected. Alerts that fire reach
+		// the tenant through the stateful rail (alerts.raise → compliance-engine
+		// → Remediation → Alerts), which owns alert lifecycle.
 
 		// Scheduled Report endpoints (Enterprise). Absent in a Core build — the
 		// runner owns its own routes and permission gating; see

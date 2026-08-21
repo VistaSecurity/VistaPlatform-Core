@@ -239,14 +239,50 @@ export function setSessionExpiredHandler(
   sessionExpiredHandler = handler;
 }
 
-/** Auth-flow endpoints legitimately answer 401 (bad password on /auth/login,
- * dead refresh token on /auth/refresh, SSO handshakes...) — routing those
- * through the session-expiry handler would turn a failed sign-in attempt into
- * a "session expired" redirect, and /auth/refresh must be exempt or the
- * handler's own refresh call would recurse. `/auth/me` (tenant) and
- * `/admin/auth/me` (platform) stay covered: a 401 there IS an expired session. */
+/** Suffixes of endpoints that run BEFORE a session exists — no RequireAuth
+ * middleware in front of them on either auth-service or admin-service — so a
+ * 401 there is a legitimate application response (bad password, dead refresh
+ * token, an expired invite/reset token, an SSO handshake step), never a sign
+ * that an existing session died. `.endsWith()` against these tenant-shaped
+ * suffixes also matches the platform equivalents for free, since platform
+ * routes are literally "/admin" + the same suffix (e.g. "/admin/auth/login"
+ * ends with "/auth/login").
+ *
+ * Deliberately an ALLOWLIST, not a blacklist: every other "/auth/*" endpoint
+ * (session-only routes like /auth/me, /auth/legal/pending, /auth/legal/accept,
+ * /auth/logout, /auth/sessions, /auth/sso/link, /auth/sso/unlink, ...) sits
+ * behind RequireAuth, so a 401 there always means the session expired and
+ * must go through the real recovery/redirect path. The previous blacklist
+ * ("anything containing /auth/ except /auth/me") wrongly swept up every one
+ * of those, including the legal-acceptance endpoints — a stale/expiring
+ * session mid-flow surfaced as a bare "couldn't verify legal terms" error
+ * instead of a clean session-expiry redirect.
+ *
+ * Keep this list in sync with the unauthenticated route registrations in
+ * services/auth-service/internal/api/router.go, services/auth-service/ee/sso/routes.go,
+ * and services/admin-service/internal/api/server.go. */
+const AUTH_FLOW_PATH_SUFFIXES = [
+  "/auth/login",
+  "/auth/refresh",
+  "/auth/register",
+  "/auth/register/complete",
+  "/auth/verify-email",
+  "/auth/resend-verification",
+  "/auth/forgot-password",
+  "/auth/reset-password",
+  "/auth/legal/current",
+  "/auth/initiate",
+  "/auth/methods",
+  "/auth/authenticate",
+  "/auth/complete",
+  "/auth/invitations/lookup",
+  "/auth/invitations/accept",
+  "/auth/sso/platform/register/complete",
+];
+
 function isAuthFlowPath(pathname: string): boolean {
-  return pathname.includes("/auth/") && !pathname.endsWith("/auth/me");
+  if (pathname.includes("/auth/legal/documents/")) return true;
+  return AUTH_FLOW_PATH_SUFFIXES.some((suffix) => pathname.endsWith(suffix));
 }
 
 /**

@@ -254,9 +254,10 @@ func TestIntegration_ExternalConnection_UnmodelledProtocolIsNotCoerced(t *testin
 		port     int
 		want     string
 	}{
-		{protocol: "QUIC", port: 8443, want: "QUIC"}, // real, unmodelled
+		{protocol: "SNMP", port: 8443, want: "SNMP"}, // real, unmodelled
 		{protocol: "tcp", port: 5020, want: "tcp"},   // transport
 		{protocol: "HTTPS", port: 8444, want: "TLS"}, // modelled: canonical literal
+		{protocol: "QUIC", port: 8446, want: "QUIC"}, // modelled since #1459's follow-up; still itself
 		{protocol: "", port: 8445, want: "unknown"},  // nothing observed at all
 	}
 
@@ -303,19 +304,19 @@ func TestIntegration_DeferredFingerprint_KeepsUnmodelledProtocolsDistinct(t *tes
 		return IngestFinding{Port: &port, Protocol: protocol, RawData: map[string]interface{}{}}
 	}
 
-	quic := svc.deferredFindingFingerprint(mk("QUIC"))
+	snmp := svc.deferredFindingFingerprint(mk("SNMP"))
 	tcp := svc.deferredFindingFingerprint(mk("tcp"))
-	if quic == tcp {
-		t.Fatalf("QUIC and tcp findings share deferred fingerprint %q — one would evict the other", quic)
+	if snmp == tcp {
+		t.Fatalf("SNMP and tcp findings share deferred fingerprint %q — one would evict the other", snmp)
 	}
 	// Same protocol twice must still be the SAME fingerprint, or the array grows
 	// on every re-observation.
-	if again := svc.deferredFindingFingerprint(mk("QUIC")); again != quic {
-		t.Fatalf("the same QUIC finding fingerprinted as %q then %q — deferred findings would accumulate", quic, again)
+	if again := svc.deferredFindingFingerprint(mk("SNMP")); again != snmp {
+		t.Fatalf("the same SNMP finding fingerprinted as %q then %q — deferred findings would accumulate", snmp, again)
 	}
 	// And a modelled protocol is unaffected.
 	tls := svc.deferredFindingFingerprint(mk("TLS"))
-	if tls == quic || tls == tcp {
+	if tls == snmp || tls == tcp {
 		t.Fatalf("a TLS finding shares a fingerprint with an unmodelled one (%q)", tls)
 	}
 }

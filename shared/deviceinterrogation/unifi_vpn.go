@@ -98,7 +98,17 @@ func unifiVPNAsset(conf map[string]interface{}, controllerHost string) CryptoAss
 		// the value (MPPE/MS-CHAPv2 are the protocol's known-weak defaults,
 		// but the API does not state them, so they stay out of the typed
 		// fields).
+		//
+		// ProtocolVersion is the ONE typed field that must be set, and it is
+		// not cosmetic: risk is computed from the algorithms linked to an
+		// implementation, and with no cipher, no key size and no hash to link,
+		// protocol_version is the only route to the catalogue. Leaving it empty
+		// links nothing, so catalogueRiskForImplementation answers "not
+		// assessed" and the row bands Informational — the most dangerous VPN a
+		// UniFi controller can report, sitting at the bottom of the risk list.
+		// 'PPTP' resolves to the seeded PPTP protocol_version row (risk 95).
 		asset.Protocol = "PPTP"
+		asset.ProtocolVersion = strPtr("PPTP")
 		asset.Port = 1723
 	default:
 		// Site-to-site IPsec (vpn_type "ipsec-vpn"/"auto-ipsec-vtep", or

@@ -68,7 +68,11 @@ export function OverviewPage() {
   const pastDue = all.filter((t) => tenantStatus(t) === 'past_due').length;
   const suspended = all.filter((t) => tenantStatus(t) === 'suspended').length;
   const services = status?.services ?? [];
-  const degraded = services.filter((s) => s.status !== 'healthy').length;
+  // "disabled" means an operator intentionally opted the service out of
+  // monitoring (e.g. not deployed under this edition) — it is not a problem,
+  // so it must not count toward "needs attention" alongside actual
+  // degraded/down services.
+  const needsAttention = services.filter((s) => s.status !== 'healthy' && s.status !== 'disabled').length;
 
   // Tenants needing attention: suspended > past_due > low health.
   const attention = useMemo(() => {
@@ -114,7 +118,7 @@ export function OverviewPage() {
       <div style={{ display: 'grid', gridTemplateColumns: `repeat(${showTenants ? 4 : 1},1fr)`, gap: 12 }}>
         {showTenants && <StatTile label="Past-due tenants" value={pastDue} icon={CircleDollarSign} accent={pastDue ? 'var(--danger)' : undefined} onClick={() => navigate('/billing')} />}
         {showTenants && <StatTile label="Suspended" value={suspended} icon={Building2} accent={suspended ? 'var(--warn)' : undefined} onClick={() => navigate('/tenants')} />}
-        <StatTile label="Degraded services" value={degraded} icon={Activity} accent={degraded ? 'var(--warn)' : undefined} onClick={() => navigate('/system')} />
+        <StatTile label="Services needing attention" value={needsAttention} icon={Activity} accent={needsAttention ? 'var(--warn)' : undefined} onClick={() => navigate('/system')} />
         {showTenants && <StatTile label="Total tenants" value={num(all.length)} icon={Building2} onClick={() => navigate('/tenants')} />}
       </div>
 

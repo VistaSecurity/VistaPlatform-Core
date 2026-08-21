@@ -82,26 +82,6 @@ func (a AlertActions) Value() (driver.Value, error) {
 	return json.Marshal(a)
 }
 
-// AlertInstance represents a triggered alert
-type AlertInstance struct {
-	ID              uuid.UUID       `json:"id" db:"id"`
-	RuleID          uuid.UUID       `json:"rule_id" db:"rule_id"`
-	RuleName        string          `json:"rule_name" db:"rule_name"`
-	TenantID        *uuid.UUID      `json:"tenant_id,omitempty" db:"tenant_id"`
-	Severity        string          `json:"severity" db:"severity"`
-	EventCount      int             `json:"event_count" db:"event_count"`
-	FirstEventAt    time.Time       `json:"first_event_at" db:"first_event_at"`
-	LastEventAt     time.Time       `json:"last_event_at" db:"last_event_at"`
-	TriggeringEvent json.RawMessage `json:"triggering_event" db:"triggering_event"`
-	Status          string          `json:"status" db:"status"` // "active", "acknowledged", "resolved"
-	AcknowledgedBy  *uuid.UUID      `json:"acknowledged_by,omitempty" db:"acknowledged_by"`
-	AcknowledgedAt  *time.Time      `json:"acknowledged_at,omitempty" db:"acknowledged_at"`
-	ResolvedAt      *time.Time      `json:"resolved_at,omitempty" db:"resolved_at"`
-	Notes           string          `json:"notes,omitempty" db:"notes"`
-	CreatedAt       time.Time       `json:"created_at" db:"created_at"`
-	UpdatedAt       time.Time       `json:"updated_at" db:"updated_at"`
-}
-
 // AlertRuleFilters for querying alert rules
 type AlertRuleFilters struct {
 	TenantID  *uuid.UUID
@@ -110,14 +90,4 @@ type AlertRuleFilters struct {
 	RuleType  string
 	Page      int
 	PageSize  int
-}
-
-// AlertInstanceFilters for querying alert instances
-type AlertInstanceFilters struct {
-	TenantID *uuid.UUID
-	RuleID   *uuid.UUID
-	Status   string
-	Severity string
-	Page     int
-	PageSize int
 }

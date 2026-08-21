@@ -88,8 +88,27 @@ DO $$ BEGIN CREATE TYPE public.location_type AS ENUM (
 
 
 -- TYPE: protocol_type
+--
+-- ADDING A VALUE TAKES TWO EDITS, NOT ONE. This DO block swallows
+-- duplicate_object, so on any database that already has the type the CREATE is
+-- a silent no-op and a value added here alone would never reach an existing
+-- install. Every addition therefore ALSO needs an
+-- `ALTER TYPE public.protocol_type ADD VALUE IF NOT EXISTS '<value>'` in the
+-- POST-MIGRATIONS block at the bottom of this file. Keep the two in step, and
+-- keep both in step with cryptoparse.canonicalProtocols (pinned by
+-- TestNormalizeProtocol_MatchesSchemaEnum) and resolveProtocol().
+-- TestProtocolEnum_AdditionsCarryAnAlterType fails if only one edit is made.
 DO $$ BEGIN CREATE TYPE public.protocol_type AS ENUM (
     'TLS', 'SSH', 'IPSec', 'VPN', 'Database', 'API', 'SMB', 'Kerberos',
+    -- QUIC is not TLS. Its handshake is TLS 1.3, but the record layer, version
+    -- negotiation and transport are QUIC's own, and it runs over UDP -- filing
+    -- an HTTP/3 endpoint as TLS asserts a TCP endpoint that does not exist.
+    'QUIC',
+    -- PPTP is modelled separately from VPN so the single most dangerous VPN
+    -- configuration a collector can report never shares a label with WireGuard.
+    -- Its risk comes from the PPTP row in the `algorithms` catalogue, linked via
+    -- protocol_version -- the protocol column alone scores nothing.
+    'PPTP',
     -- OT/ICS protocols the sensor's industrial discovery emits.
     'Modbus', 'DNP3', 'MMS', 'ICCP', 'IEC62351', 'OPC_UA',
     'EtherNet_IP', 'BACnet', 'BACnet_SC', 'HART_IP', 'S7'
@@ -18240,6 +18259,33 @@ ALTER TABLE public.ticket_comments ENABLE ROW LEVEL SECURITY;
 -- statement here must be safely idempotent against any prior schema
 -- version.
 --
+-- =========================================================================
+-- protocol_type: values added after the type first shipped
+-- =========================================================================
+-- The `CREATE TYPE public.protocol_type` near the top of this file is wrapped in
+-- `EXCEPTION WHEN duplicate_object THEN NULL`, so on any database that already
+-- has the type it is a silent no-op — a value added to that list alone reaches
+-- fresh installs ONLY. These ALTERs are what carry the same values to an
+-- existing database, and they are why the two edits must always be made
+-- together. Removing them does not fail anything at apply time: psql exits 0,
+-- the enum keeps its old values, and ingest starts failing much later with
+-- "invalid input value for enum protocol_type". That silence is what
+-- TestProtocolEnum_AdditionsCarryAnAlterType exists to break.
+--
+-- Bare statements, deliberately: `ALTER TYPE ... ADD VALUE` cannot run inside a
+-- function or DO block ("ALTER TYPE ... ADD cannot be executed from a
+-- function"), so the DO/EXCEPTION idiom this file uses everywhere else is not
+-- available here. `IF NOT EXISTS` (PG 12+) supplies the idempotency instead.
+--
+-- BEFORE 'Modbus' places them exactly where the CREATE TYPE list has them, so
+-- pg_enum reads identically on a fresh install and on an upgraded one. Nothing
+-- today sorts on the enum's ordinal (the one ORDER BY over this column casts to
+-- text first), which is precisely why it is worth pinning now rather than
+-- discovering the divergence from a query written later.
+ALTER TYPE public.protocol_type ADD VALUE IF NOT EXISTS 'QUIC' BEFORE 'Modbus';
+ALTER TYPE public.protocol_type ADD VALUE IF NOT EXISTS 'PPTP' BEFORE 'Modbus';
+
+
 -- =========================================================================
 -- CBOM-CENTRIC REPORTING REDESIGN — Phase 1
 -- Scopes: tenant-owned, named, versioned predicate definitions that define

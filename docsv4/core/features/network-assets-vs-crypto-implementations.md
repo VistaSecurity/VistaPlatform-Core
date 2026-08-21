@@ -45,7 +45,7 @@ Your cryptographic exposure surface — how and where crypto is used.
 
 | Component | Description | Examples |
 |-----------|-------------|----------|
-| **Protocol** | Type of cryptographic protocol | TLS, SSH, IPSec, VPN |
+| **Protocol** | Type of cryptographic protocol | TLS, SSH, IPSec, VPN, QUIC, PPTP, and the OT/ICS protocols (Modbus, DNP3, OPC UA, …) |
 | **Protocol Version** | Specific version in use | TLSv1.3, TLSv1.2, SSH-2.0 |
 | **Cipher Suite** | Negotiated cipher configuration | `TLS_AES_256_GCM_SHA384`, `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256` |
 | **Key Exchange** | Algorithm for key agreement | ECDHE, RSA, DH |
@@ -266,9 +266,31 @@ Some protocols are harder to analyze:
 - UDP-based services (no handshake to analyze)
 - Custom proprietary protocols
 - Encrypted tunnels (can't inspect inner protocol)
-- QUIC/HTTP3 (emerging protocol support)
+- QUIC/HTTP-3 — see below
 
 **Why:** Technical limitations in protocol analysis.
+
+**A note on QUIC.** QUIC connections are recorded as their own protocol rather
+than being reported as TLS, because although a QUIC handshake uses TLS 1.3 for
+key establishment, it runs over UDP with its own transport and record layer —
+describing it as TLS would imply a TCP endpoint that does not exist. How much
+detail a QUIC connection carries depends on where it was observed. For a
+third-party destination the record is deliberately limited to the protocol and
+version: we observe those connections passively and never send traffic to a
+third party to learn more. For endpoints you own, monitor and have elevated, more
+detail is recoverable — see the QUIC/HTTP-3 sections of
+[Third-party and external connections](third-party-and-external-connections.md)
+and [Discovery](discovery.md).
+
+**A note on VPN protocols.** A vendor's own name for a service is mapped to the
+cryptography it actually uses, so an SSL-VPN portal is recorded as TLS (and is
+therefore evaluated by every TLS control, including the deprecated-version ones)
+and an L2TP/IPsec tunnel is recorded as IPsec, which is the half of that pairing
+that provides the encryption. **PPTP is the exception** and is kept as its own
+protocol: it has no cryptography worth grouping with anything else — its
+authentication and its encryption are both broken — so detecting an enabled PPTP
+server is itself a Critical finding, and it is deliberately not filed alongside
+modern VPNs such as WireGuard.
 
 ## Understanding Risk Scores
 

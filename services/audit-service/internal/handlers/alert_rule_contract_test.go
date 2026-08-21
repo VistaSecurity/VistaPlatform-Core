@@ -65,15 +65,6 @@ func (s *stubAlertRuleService) UpdateAlertRule(_ context.Context, _ uuid.UUID, r
 func (s *stubAlertRuleService) DeleteAlertRule(context.Context, uuid.UUID, *uuid.UUID) error {
 	return s.deleteErr
 }
-func (s *stubAlertRuleService) GetAlertInstances(context.Context, models.AlertInstanceFilters) ([]models.AlertInstance, int, error) {
-	return nil, 0, nil
-}
-func (s *stubAlertRuleService) AcknowledgeAlert(context.Context, uuid.UUID, uuid.UUID, string, *uuid.UUID) error {
-	return nil
-}
-func (s *stubAlertRuleService) ResolveAlert(context.Context, uuid.UUID, string, *uuid.UUID) error {
-	return nil
-}
 
 // --- harness ----------------------------------------------------------------
 

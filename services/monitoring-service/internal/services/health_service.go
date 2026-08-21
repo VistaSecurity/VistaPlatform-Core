@@ -3,9 +3,11 @@ package services
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +27,40 @@ type HealthService struct {
 	httpClient *http.Client
 	results    map[string]models.HealthCheckResult
 	mu         sync.RWMutex
+
+	// syntheticRootCAs is the trust pool used to verify synthetic-check TLS
+	// connections. nil means "use Go's default system pool" (the common
+	// case). Built once at startup from config.ExtraTrustedCACertPath so a
+	// bad/missing file is logged once here rather than on every ~30s probe.
+	syntheticRootCAs *x509.CertPool
+}
+
+// buildSyntheticRootCAs adds an operator-supplied CA (see
+// config.ExtraTrustedCACertPath) to the system trust pool for verifying
+// synthetic-check TLS connections. Returns nil (meaning: fall back to Go's
+// default system pool) when no extra CA is configured or the system pool
+// itself is unavailable — never a pool missing publicly-trusted CAs, and
+// never a hard failure that would take down the whole service over one
+// optional probe.
+func buildSyntheticRootCAs(certPath string) *x509.CertPool {
+	if certPath == "" {
+		return nil
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		fmt.Printf("⚠️  synthetic checks: could not load system CA pool, extra trusted CA %s will not be applied: %v\n", certPath, err)
+		return nil
+	}
+	pem, err := os.ReadFile(certPath)
+	if err != nil {
+		fmt.Printf("⚠️  synthetic checks: could not read ExtraTrustedCACertPath %s: %v\n", certPath, err)
+		return nil
+	}
+	if !pool.AppendCertsFromPEM(pem) {
+		fmt.Printf("⚠️  synthetic checks: %s contained no usable PEM certificates\n", certPath)
+		return nil
+	}
+	return pool
 }
 
 func NewHealthService(cfg *config.Config) *HealthService {
@@ -55,7 +91,8 @@ func NewHealthService(cfg *config.Config) *HealthService {
 		httpClient: &http.Client{
 			Timeout: cfg.ServiceTimeout,
 		},
-		results: make(map[string]models.HealthCheckResult),
+		results:          make(map[string]models.HealthCheckResult),
+		syntheticRootCAs: buildSyntheticRootCAs(cfg.ExtraTrustedCACertPath),
 	}
 
 	// Start background health checking
@@ -513,8 +550,10 @@ func (s *HealthService) checkSyntheticHealth(check config.SyntheticCheck) models
 	// Per-check HTTP client so InsecureSkipVerify is scoped to this probe
 	// only — never bleeds into the service-to-service client. The pooling
 	// cost is small (one synthetic check per ~30 s) and the isolation is
-	// the security-correct default.
-	tlsConfig := &tls.Config{InsecureSkipVerify: check.InsecureSkipVerify}
+	// the security-correct default. RootCAs nil (the common case) falls
+	// back to Go's default system pool; s.syntheticRootCAs is only non-nil
+	// when an operator configured ExtraTrustedCACertPath.
+	tlsConfig := &tls.Config{InsecureSkipVerify: check.InsecureSkipVerify, RootCAs: s.syntheticRootCAs}
 	client := &http.Client{
 		Timeout:   timeout,
 		Transport: &http.Transport{TLSClientConfig: tlsConfig},
