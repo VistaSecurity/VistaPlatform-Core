@@ -246,7 +246,7 @@ func (j *LogRetentionJob) GetRetentionJobHistory(ctx context.Context, limit int)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query retention jobs: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var records []RetentionJobRecord
 	for rows.Next() {

@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	stdlog "log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -581,13 +582,18 @@ func (h *ActivityLogHandler) ExportActivityLogs(c *gin.Context) {
 		c.Header("Content-Type", "text/csv")
 		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=audit-logs-%s.csv", time.Now().Format("20060102-150405")))
 
-		// Write CSV header
-		c.Writer.WriteString("ID,Occurred At,Tenant ID,User ID,User Type,User Email,Event Type,Event Category,Action,Resource Type,Resource ID,Success,Error Message,Compliance Tags\n")
+		// Write CSV header. The response is already committed by this point, so
+		// a write failure can only mean the client went away — log it and stop
+		// rather than streaming the rest into a dead connection.
+		if _, err := c.Writer.WriteString("ID,Occurred At,Tenant ID,User ID,User Type,User Email,Event Type,Event Category,Action,Resource Type,Resource ID,Success,Error Message,Compliance Tags\n"); err != nil {
+			stdlog.Printf("[ActivityLog] CSV export aborted while writing header: %v", err)
+			return
+		}
 
 		// Write CSV rows. Every cell goes through escapeCSV, which neutralizes
 		// spreadsheet formula injection and quotes embedded commas/quotes.
 		for _, log := range logs {
-			c.Writer.WriteString(strings.Join([]string{
+			if _, err := c.Writer.WriteString(strings.Join([]string{
 				escapeCSV(log.ID.String()),
 				escapeCSV(log.OccurredAt.Format(time.RFC3339)),
 				escapeCSV(func() string {
@@ -637,7 +643,10 @@ func (h *ActivityLogHandler) ExportActivityLogs(c *gin.Context) {
 					}
 					return ""
 				}()),
-			}, ",") + "\n")
+			}, ",") + "\n"); err != nil {
+				stdlog.Printf("[ActivityLog] CSV export aborted after a partial write: %v", err)
+				return
+			}
 		}
 	}
 }

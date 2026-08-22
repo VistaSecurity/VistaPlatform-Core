@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -522,7 +523,7 @@ func (s *LogStorageService) SearchLogs(ctx context.Context, userID uuid.UUID, us
 		_ = s.recordAccessAudit(ctx, userID, userEmail, "search", "", filters, 0, "error", err.Error(), time.Since(startTime))
 		return nil, 0, fmt.Errorf("failed to query logs: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var results []*LogMetadata
 	for rows.Next() {
@@ -545,8 +546,17 @@ func (s *LogStorageService) SearchLogs(ctx context.Context, userID uuid.UUID, us
 			continue
 		}
 
-		json.Unmarshal(metadataJSON, &metadata.Metadata)
-		json.Unmarshal(tagsJSON, &metadata.Tags)
+		// The row is still returned if either JSONB column fails to decode —
+		// the field is simply left nil, as before. The failure is logged so a
+		// malformed column is visible rather than silently rendering as "no
+		// metadata". Only the log ID and the error are logged: the payloads
+		// themselves may carry tenant data.
+		if err := json.Unmarshal(metadataJSON, &metadata.Metadata); err != nil {
+			log.Printf("[monitoring] WARN: log %s has undecodable metadata column: %v", metadata.LogID, err)
+		}
+		if err := json.Unmarshal(tagsJSON, &metadata.Tags); err != nil {
+			log.Printf("[monitoring] WARN: log %s has undecodable tags column: %v", metadata.LogID, err)
+		}
 		results = append(results, metadata)
 	}
 

@@ -162,9 +162,17 @@ func TestErasureLimitations_AreStated(t *testing.T) {
 // turns "we ran some UPDATEs" into "we confirmed nothing identifying survived".
 // If a table is anonymized but not verified, a silent failure ships as success.
 func TestErasureVerify_CoversEveryAnonymizedTable(t *testing.T) {
-	for _, table := range []string{"users", "api_tokens", "audit.activity_logs"} {
+	for _, table := range []string{"users", "api_tokens", "invitations", "audit.activity_logs"} {
 		if !strings.Contains(erasureVerify, table) {
 			t.Errorf("the erasure verification query does not re-check %s", table)
+		}
+	}
+}
+
+func TestEraseUser_DeletesInvitationsByUserIDOrOriginalEmail(t *testing.T) {
+	for _, want := range []string{"accepted_user_id = $2", "lower(email) = lower($3)"} {
+		if !strings.Contains(erasureInvitationDelete, want) {
+			t.Errorf("invitation erasure does not match %q:\n%s", want, erasureInvitationDelete)
 		}
 	}
 }

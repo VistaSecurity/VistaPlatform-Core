@@ -193,6 +193,6 @@ func (h *Handler) GetSensorCertificate(c *gin.Context) {
 		"revocation_reason": cert.RevocationReason,
 		"is_revoked":        cert.RevokedAt != nil,
 		"is_expired":        time.Now().After(cert.ExpiresAt),
-		"days_until_expiry": int(cert.ExpiresAt.Sub(time.Now()).Hours() / 24),
+		"days_until_expiry": int(time.Until(cert.ExpiresAt).Hours() / 24),
 	})
 }

@@ -242,7 +242,7 @@ func (s *DNP3Stream) processBuffer() {
 		// Find the next sync marker. If we don't see one near the start,
 		// the stream is junk or post-frame trailing bytes — drop and stop.
 		view := buf[consumed:]
-		if !(view[0] == dnp3SyncByte0 && view[1] == dnp3SyncByte1) {
+		if view[0] != dnp3SyncByte0 || view[1] != dnp3SyncByte1 {
 			// Try to resync within the next 64 bytes; further than that
 			// and we're almost certainly looking at non-DNP3 traffic.
 			advanced := false
@@ -408,7 +408,7 @@ func dnp3WalkFrames(buf []byte) dnp3FrameClassification {
 	best := dnp3FrameClassification{kind: dnp3ClassNone}
 	for offset := 0; offset+dnp3HeaderLen <= len(buf); {
 		view := buf[offset:]
-		if !(view[0] == dnp3SyncByte0 && view[1] == dnp3SyncByte1) {
+		if view[0] != dnp3SyncByte0 || view[1] != dnp3SyncByte1 {
 			// Re-sync within a short window; further than that and we're
 			// looking at non-DNP3 bytes (or trailing padding).
 			advanced := false

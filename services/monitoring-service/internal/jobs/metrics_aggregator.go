@@ -69,7 +69,9 @@ func (ma *MetricsAggregator) Start(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			ma.logger.Println("Metrics aggregator stopping")
-			ma.db.Close()
+			if err := ma.db.Close(); err != nil {
+				ma.logger.Printf("Failed to close metrics aggregator database connection: %v", err)
+			}
 			return
 		case <-ticker.C:
 			ma.aggregateMetrics()
@@ -102,9 +104,10 @@ func (ma *MetricsAggregator) processServiceMetrics(service models.ServiceStatus,
 
 	// Determine status based on service health
 	status := "healthy"
-	if service.Status == "down" || service.Status == "unhealthy" {
+	switch service.Status {
+	case "down", "unhealthy":
 		status = "down"
-	} else if service.Status == "degraded" {
+	case "degraded":
 		status = "degraded"
 	}
 

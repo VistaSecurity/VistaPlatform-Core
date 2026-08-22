@@ -179,7 +179,7 @@ func (c *OutboundClient) Register() (*models.SensorConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to send registration request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -276,7 +276,7 @@ func (c *OutboundClient) Heartbeat(health *models.SensorHealth) (*models.SensorC
 	if err != nil {
 		return nil, fmt.Errorf("failed to send heartbeat: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -327,7 +327,7 @@ func (c *OutboundClient) SubmitDiscoveries(discoveries []*models.CryptoDiscovery
 	if err != nil {
 		return fmt.Errorf("failed to send discoveries: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -349,7 +349,7 @@ func (c *OutboundClient) PollForCommands() (*models.SensorCommands, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to poll commands: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -383,7 +383,7 @@ func (c *OutboundClient) SubmitDiscoveryJobResults(response *models.DiscoveryJob
 	if err != nil {
 		return fmt.Errorf("failed to submit discovery job results: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -405,7 +405,7 @@ func (c *OutboundClient) GetConfig() (*models.SensorConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get config: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -439,7 +439,7 @@ func (c *OutboundClient) AcknowledgeCommand(commandID string, response *models.C
 	if err != nil {
 		return fmt.Errorf("failed to send acknowledgment: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

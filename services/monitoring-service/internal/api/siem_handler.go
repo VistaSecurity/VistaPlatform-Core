@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -209,24 +210,37 @@ func (s *Server) exportLogsForSIEM(c *gin.Context) {
 		c.Header("Content-Type", "application/x-ndjson")
 		c.Writer.WriteHeader(http.StatusOK)
 		encoder := json.NewEncoder(c.Writer)
-		for _, log := range siemLogs {
-			encoder.Encode(log)
+		for _, entry := range siemLogs {
+			// The response is already committed, so a write failure (client
+			// disconnected mid-stream) cannot be turned into a status code.
+			// Log it and stop: the export is truncated, and a silent partial
+			// SIEM export is exactly the shape that looks like "no events".
+			if err := encoder.Encode(entry); err != nil {
+				log.Printf("SIEM export: aborting jsonl stream after write error: %v", err)
+				return
+			}
 		}
 	case "cef":
 		// CEF format (Common Event Format for ArcSight, Splunk, etc.)
 		c.Header("Content-Type", "text/plain")
 		c.Writer.WriteHeader(http.StatusOK)
-		for _, log := range siemLogs {
-			cefLine := formatCEF(log)
-			c.Writer.WriteString(cefLine + "\n")
+		for _, entry := range siemLogs {
+			cefLine := formatCEF(entry)
+			if _, err := c.Writer.WriteString(cefLine + "\n"); err != nil {
+				log.Printf("SIEM export: aborting cef stream after write error: %v", err)
+				return
+			}
 		}
 	case "leef":
 		// LEEF format (Log Event Extended Format for QRadar, etc.)
 		c.Header("Content-Type", "text/plain")
 		c.Writer.WriteHeader(http.StatusOK)
-		for _, log := range siemLogs {
-			leefLine := formatLEEF(log)
-			c.Writer.WriteString(leefLine + "\n")
+		for _, entry := range siemLogs {
+			leefLine := formatLEEF(entry)
+			if _, err := c.Writer.WriteString(leefLine + "\n"); err != nil {
+				log.Printf("SIEM export: aborting leef stream after write error: %v", err)
+				return
+			}
 		}
 	}
 }

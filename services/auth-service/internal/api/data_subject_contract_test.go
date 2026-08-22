@@ -144,8 +144,8 @@ func TestContract_EraseUserData(t *testing.T) {
 	r, mock := newDSREngine(t, dsrActor)
 
 	expectTenantScope(mock)
-	mock.ExpectQuery("SELECT true FROM users").
-		WillReturnRows(sqlmock.NewRows([]string{"bool"}).AddRow(true))
+	mock.ExpectQuery("SELECT email FROM users").
+		WillReturnRows(sqlmock.NewRows([]string{"email"}).AddRow("person@example.com"))
 	mock.ExpectExec("UPDATE users SET").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("DELETE FROM api_tokens").WillReturnResult(sqlmock.NewResult(0, 2))
 	mock.ExpectExec("DELETE FROM invitations").WillReturnResult(sqlmock.NewResult(0, 1))
@@ -180,8 +180,8 @@ func TestContract_EraseUserData_RollsBackWhenVerificationFails(t *testing.T) {
 	r, mock := newDSREngine(t, dsrActor)
 
 	expectTenantScope(mock)
-	mock.ExpectQuery("SELECT true FROM users").
-		WillReturnRows(sqlmock.NewRows([]string{"bool"}).AddRow(true))
+	mock.ExpectQuery("SELECT email FROM users").
+		WillReturnRows(sqlmock.NewRows([]string{"email"}).AddRow("person@example.com"))
 	mock.ExpectExec("UPDATE users SET").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("DELETE FROM api_tokens").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("DELETE FROM invitations").WillReturnResult(sqlmock.NewResult(0, 0))

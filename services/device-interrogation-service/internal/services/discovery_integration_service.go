@@ -348,7 +348,7 @@ func (s *DiscoveryIntegrationService) SendDiscoveryNotification(
 		log.Printf("[DiscoveryNotification] Failed to send notification (type=%s): %v", alertType, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		log.Printf("[DiscoveryNotification] Sent %s notification for job %s", alertType, jobID)

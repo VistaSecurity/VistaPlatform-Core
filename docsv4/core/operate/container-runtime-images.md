@@ -77,18 +77,6 @@ Same third-party set as prod, **plus:**
 
 **Local stack note:** `docker-compose.yml` does **not** include `ai-analysis-service`; `docker-compose.prod.yml` does.
 
-### Sample Kubernetes (`k8s/eks/`)
-
-- **Application images:** `*.dkr.ecr.us-east-1.amazonaws.com/crypto-inventory/<service>:latest` (see `04-deployments-backend.yaml`, `06-deployments-frontend.yaml`). Includes **notification-service** and **discovery-processor-service**.
-- **api-gateway:** `traefik:v3.3`
-- **nats:** `nats:2.9-alpine` (different patch stream than compose’s `2.10-alpine`; align intentionally if both are used).
-
-Postgres/Redis/Influx in real EKS deployments are often **managed services** rather than images in this repo; treat those as environment-specific.
-
-### Other template (`k8s/production-balanced/deployments.yaml`)
-
-Placeholder **`gcr.io/PROJECT_ID/...`** images for a subset of services (GCP-oriented sample).
-
 ---
 
 ## Deduplicated third-party catalog (compose-based product)

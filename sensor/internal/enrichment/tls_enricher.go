@@ -243,7 +243,7 @@ func (e *TLSEnricher) probeTLS(ip string, port int, sni string) (*models.Discove
 	if err != nil {
 		return nil, fmt.Errorf("tcp dial: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Track whether the server requests a client certificate (mTLS)
 	serverRequestsClientCert := false
@@ -263,9 +263,14 @@ func (e *TLSEnricher) probeTLS(ip string, port int, sni string) (*models.Discove
 	}
 
 	tlsConn := tls.Client(conn, tlsConfig)
-	defer tlsConn.Close()
+	defer func() { _ = tlsConn.Close() }()
 
-	tlsConn.SetDeadline(time.Now().Add(e.probeTimeout))
+	// The deadline is what bounds the handshake below. If it cannot be set the
+	// probe would block for however long the peer keeps the socket open, so
+	// fail the probe rather than proceeding without a timeout.
+	if err := tlsConn.SetDeadline(time.Now().Add(e.probeTimeout)); err != nil {
+		return nil, fmt.Errorf("set tls probe deadline: %w", err)
+	}
 
 	if err := tlsConn.Handshake(); err != nil {
 		return nil, fmt.Errorf("tls handshake: %w", err)

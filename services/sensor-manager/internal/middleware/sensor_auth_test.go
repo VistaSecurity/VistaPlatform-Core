@@ -36,7 +36,7 @@ func TestSensorAuth_FailClosed_NoClientCert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	r := gin.New()
 	g := r.Group("/sensors")

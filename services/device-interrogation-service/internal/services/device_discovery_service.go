@@ -110,7 +110,7 @@ func (s *DeviceDiscoveryService) attemptUnifiLogin(loginURL string, loginData []
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute login request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -147,7 +147,7 @@ func (s *DeviceDiscoveryService) discoverUniFiDevice(managementURL, username, pa
 	if err != nil {
 		return nil, fmt.Errorf("failed to get device status: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		// If stat/device fails, try the sysinfo endpoint (for UDM/UDR)
@@ -235,7 +235,7 @@ func (s *DeviceDiscoveryService) getUniFiSystemInfo(managementURL string, cookie
 			fmt.Printf("Failed to fetch %s: %v\n", endpoint, err)
 			continue
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			fmt.Printf("Endpoint %s returned status %d\n", endpoint, resp.StatusCode)

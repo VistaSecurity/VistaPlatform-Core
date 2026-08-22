@@ -50,7 +50,7 @@ func main() {
 	if err != nil {
 		logrus.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err = db.Ping(); err != nil {
 		logrus.Fatalf("Failed to ping database: %v", err)

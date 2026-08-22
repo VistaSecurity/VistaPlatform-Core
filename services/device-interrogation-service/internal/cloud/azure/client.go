@@ -42,7 +42,7 @@ func NewClient(ctx context.Context, bypassDB *sql.DB, integrationID uuid.UUID, m
 
 	err := bypassDB.QueryRowContext(ctx, query, integrationID).Scan(&configJSON, &subscriptionID, &region)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("Azure integration not found")
+		return nil, fmt.Errorf("no Azure integration found")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to load Azure integration: %w", err)

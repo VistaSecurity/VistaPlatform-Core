@@ -547,7 +547,7 @@ func (p *Processor) submitResults(ctx context.Context, jobID uuid.UUID, tenantID
 	if err != nil {
 		return fmt.Errorf("submit discoveries: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("sensor-manager returned status %d", resp.StatusCode)

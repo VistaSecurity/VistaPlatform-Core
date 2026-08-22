@@ -19,7 +19,7 @@ func TestSafeDialTimeout_BlocksLoopback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	_, err = SafeDialTimeout("tcp", ln.Addr().String(), 2*time.Second)
 	if err == nil {

@@ -71,7 +71,7 @@ func (r *RBACService) GetUserPermissions(userID, tenantID uuid.UUID) ([]*models.
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user permissions: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var permissions []*models.TenantPermission
 	for rows.Next() {
@@ -126,7 +126,7 @@ func (r *RBACService) GetUserRoles(userID, tenantID uuid.UUID) ([]*models.Tenant
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user roles: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var roles []*models.TenantRole
 	for rows.Next() {
@@ -236,7 +236,7 @@ func (r *RBACService) GetTenantRoles(tenantID uuid.UUID) ([]*models.TenantRole, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tenant roles: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var roles []*models.TenantRole
 	for rows.Next() {
@@ -266,7 +266,7 @@ func (r *RBACService) GetTenantPermissions() ([]*models.TenantPermission, error)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tenant permissions: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var permissions []*models.TenantPermission
 	for rows.Next() {
@@ -311,7 +311,7 @@ func (r *RBACService) GetPermissionMatrix(roleID uuid.UUID) (*models.PermissionM
 	if err != nil {
 		return nil, fmt.Errorf("failed to get permission matrix: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	matrix := &models.PermissionMatrix{
 		RoleID:      roleID,
@@ -342,7 +342,7 @@ func (r *RBACService) UpdateRolePermissions(roleID uuid.UUID, permissionIDs []uu
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Remove existing permissions
 	_, err = tx.Exec("DELETE FROM tenant_role_permissions WHERE role_id = $1", roleID)
@@ -403,7 +403,7 @@ func (r *RBACService) GetPlatformUsers() ([]*models.PlatformUser, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get platform users: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var users []*models.PlatformUser
 	for rows.Next() {
@@ -443,7 +443,7 @@ func (r *RBACService) GetPlatformRoles() ([]*models.PlatformRole, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get platform roles: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var roles []*models.PlatformRole
 	for rows.Next() {
@@ -473,7 +473,7 @@ func (r *RBACService) GetPlatformPermissions() ([]*models.PlatformPermission, er
 	if err != nil {
 		return nil, fmt.Errorf("failed to get platform permissions: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var permissions []*models.PlatformPermission
 	for rows.Next() {
@@ -509,7 +509,7 @@ func (r *RBACService) GetPlatformUserPermissions(userID uuid.UUID) ([]*models.Pl
 	if err != nil {
 		return nil, fmt.Errorf("failed to get platform user permissions: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var permissions []*models.PlatformPermission
 	for rows.Next() {

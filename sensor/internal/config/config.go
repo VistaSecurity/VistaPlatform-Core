@@ -60,20 +60,15 @@ type Config struct {
 	Verbose *bool `json:"verbose"`
 }
 
-// StorageConfig represents storage configuration
+// StorageConfig represents on-disk paths the sensor uses.
+//
+// The sensor does not persist discoveries. Captured findings live in an
+// in-memory buffer until they are submitted to the control plane, and are
+// re-queued in memory on submission failure. DataPath holds supporting files
+// only — the enrollment certificates under certs/ and, in test mode, the
+// test logger's output.
 type StorageConfig struct {
-	MaxStorageSize int64  `json:"max_storage_size"` // bytes
-	RotationSize   int64  `json:"rotation_size"`    // bytes
-	RetentionDays  int    `json:"retention_days"`
-	DataPath       string `json:"data_path"`
-	EncryptionKey  string `json:"encryption_key"`
-	// KeyPath is where the AES encryption key file is stored.
-	// Deliberately separate from DataPath so an attacker who
-	// exfiltrates the discovery data directory does not automatically
-	// obtain the key.  Defaults to an OS-appropriate state directory.
-	KeyPath           string `json:"key_path"`
-	MinFreeSpaceMB    int64  `json:"min_free_space_mb"`  // Minimum free disk space in MB before refusing writes
-	EnableCompression bool   `json:"enable_compression"` // Gzip compress before encrypting
+	DataPath string `json:"data_path"`
 }
 
 // CaptureConfig represents packet capture configuration
@@ -195,14 +190,7 @@ type ConfigFile struct {
 	ReportingIntervalSecs int    `yaml:"reportingIntervalSeconds"`
 	HeartbeatIntervalSecs int    `yaml:"heartbeatIntervalSeconds"`
 	Storage               struct {
-		MaxStorageSize    int64  `yaml:"maxStorageSize"`
-		RotationSize      int64  `yaml:"rotationSize"`
-		RetentionDays     int    `yaml:"retentionDays"`
-		DataPath          string `yaml:"dataPath"`
-		EncryptionKey     string `yaml:"encryptionKey"`
-		KeyPath           string `yaml:"keyPath"`
-		MinFreeSpaceMB    int64  `yaml:"minFreeSpaceMB"`
-		EnableCompression bool   `yaml:"enableCompression"`
+		DataPath string `yaml:"dataPath"`
 	} `yaml:"storage"`
 	Capture struct {
 		Interfaces          []string `yaml:"interfaces"`
@@ -289,14 +277,7 @@ func LoadFromFile(filePath string) (*Config, error) {
 		ReportingInterval: time.Duration(cfgFile.ReportingIntervalSecs) * time.Second,
 		HeartbeatInterval: time.Duration(cfgFile.HeartbeatIntervalSecs) * time.Second,
 		Storage: StorageConfig{
-			MaxStorageSize:    cfgFile.Storage.MaxStorageSize,
-			RotationSize:      cfgFile.Storage.RotationSize,
-			RetentionDays:     cfgFile.Storage.RetentionDays,
-			DataPath:          cfgFile.Storage.DataPath,
-			EncryptionKey:     cfgFile.Storage.EncryptionKey,
-			KeyPath:           cfgFile.Storage.KeyPath,
-			MinFreeSpaceMB:    cfgFile.Storage.MinFreeSpaceMB,
-			EnableCompression: cfgFile.Storage.EnableCompression,
+			DataPath: cfgFile.Storage.DataPath,
 		},
 		Capture: CaptureConfig{
 			Interfaces:          cfgFile.Capture.Interfaces,
@@ -339,12 +320,6 @@ func LoadFromFile(filePath string) (*Config, error) {
 	// Apply defaults for missing values
 	if cfg.Storage.DataPath == "" {
 		cfg.Storage.DataPath = getDefaultDataPath()
-	}
-	if cfg.Storage.KeyPath == "" {
-		cfg.Storage.KeyPath = getDefaultKeyPath()
-	}
-	if cfg.Storage.MinFreeSpaceMB == 0 {
-		cfg.Storage.MinFreeSpaceMB = 100
 	}
 	if cfg.ReportingInterval == 0 {
 		cfg.ReportingInterval = 30 * time.Second
@@ -493,7 +468,7 @@ func mergeEnvVars(cfg *Config) {
 		}
 		cfg.Storage.DataPath = dataPath
 	}
-	if interfaces := getStringSliceEnv("INTERFACES", nil); interfaces != nil && len(interfaces) > 0 {
+	if interfaces := getStringSliceEnv("INTERFACES", nil); len(interfaces) > 0 {
 		// Check if interfaces differ from config file
 		interfacesMatch := len(cfg.Capture.Interfaces) == len(interfaces)
 		if interfacesMatch {
@@ -510,7 +485,7 @@ func mergeEnvVars(cfg *Config) {
 		}
 		cfg.Capture.Interfaces = interfaces
 	}
-	if interfaces := getStringSliceEnv("NETWORK_INTERFACES", nil); interfaces != nil && len(interfaces) > 0 {
+	if interfaces := getStringSliceEnv("NETWORK_INTERFACES", nil); len(interfaces) > 0 {
 		cfg.Network.Interfaces = interfaces
 	}
 	if ipAddr := sharedconfig.GetEnv("SENSOR_IP_ADDRESS", ""); ipAddr != "" {
@@ -559,14 +534,7 @@ func Load() *Config {
 		HeartbeatInterval: getDurationEnv("HEARTBEAT_INTERVAL", 60*time.Second),
 		BatchSize:         getIntEnv("BATCH_SIZE", 100),
 		Storage: StorageConfig{
-			MaxStorageSize:    getInt64Env("MAX_STORAGE_SIZE", 100*1024*1024), // 100MB
-			RotationSize:      getInt64Env("ROTATION_SIZE", 10*1024*1024),     // 10MB
-			RetentionDays:     getIntEnv("RETENTION_DAYS", 7),
-			DataPath:          sharedconfig.GetEnv("DATA_PATH", getDefaultDataPath()),
-			EncryptionKey:     sharedconfig.GetEnv("ENCRYPTION_KEY", ""),
-			KeyPath:           sharedconfig.GetEnv("KEY_PATH", getDefaultKeyPath()),
-			MinFreeSpaceMB:    getInt64Env("MIN_FREE_SPACE_MB", 100), // 100 MB
-			EnableCompression: getBoolEnv("ENABLE_COMPRESSION", true),
+			DataPath: sharedconfig.GetEnv("DATA_PATH", getDefaultDataPath()),
 		},
 		Capture: CaptureConfig{
 			Interfaces:          getStringSliceEnv("INTERFACES", []string{"eth0"}),
@@ -642,15 +610,6 @@ func getIntEnv(key string, defaultValue int) int {
 	return defaultValue
 }
 
-func getInt64Env(key string, defaultValue int64) int64 {
-	if value := os.Getenv(key); value != "" {
-		if intValue, err := strconv.ParseInt(value, 10, 64); err == nil {
-			return intValue
-		}
-	}
-	return defaultValue
-}
-
 func getBoolEnv(key string, defaultValue bool) bool {
 	if value := os.Getenv(key); value != "" {
 		if boolValue, err := strconv.ParseBool(value); err == nil {
@@ -712,33 +671,6 @@ func getIntSliceEnv(key string, defaultValue []int) []int {
 		}
 	}
 	return defaultValue
-}
-
-// getDefaultKeyPath returns the OS-appropriate directory for the encryption key file.
-// Deliberately separate from the data directory so discovery ciphertext and key
-// are not co-located.
-func getDefaultKeyPath() string {
-	switch runtime.GOOS {
-	case "windows":
-		if appData := os.Getenv("APPDATA"); appData != "" {
-			return filepath.Join(appData, "CryptoSensor")
-		}
-		return "CryptoSensorKeys"
-	case "darwin":
-		if home := os.Getenv("HOME"); home != "" {
-			return filepath.Join(home, "Library", "Application Support", "CryptoSensorKeys")
-		}
-		return "/tmp/crypto-sensor-keys"
-	default:
-		// XDG_STATE_HOME preferred; fall back to ~/.local/state
-		if stateHome := os.Getenv("XDG_STATE_HOME"); stateHome != "" {
-			return filepath.Join(stateHome, "crypto-sensor")
-		}
-		if home := os.Getenv("HOME"); home != "" {
-			return filepath.Join(home, ".local", "state", "crypto-sensor")
-		}
-		return "/var/lib/crypto-sensor-keys"
-	}
 }
 
 // getDefaultDataPath returns the appropriate default data path for the current OS

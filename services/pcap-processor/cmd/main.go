@@ -31,7 +31,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	log.Println("Connected to PostgreSQL")
 
 	// Connect to NATS
@@ -77,12 +77,12 @@ func main() {
 	healthHandler := func(w http.ResponseWriter, r *http.Request) {
 		if err := db.Ping(); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprintf(w, `{"status":"unhealthy","error":"database connection failed"}`)
+			_, _ = fmt.Fprint(w, `{"status":"unhealthy","error":"database connection failed"}`)
 			return
 		}
 		if !natsClient.IsConnected() {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprintf(w, `{"status":"unhealthy","error":"NATS not connected"}`)
+			_, _ = fmt.Fprint(w, `{"status":"unhealthy","error":"NATS not connected"}`)
 			return
 		}
 		body, _ := json.Marshal(map[string]interface{}{
@@ -92,7 +92,7 @@ func main() {
 		})
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, string(body))
+		_, _ = fmt.Fprint(w, string(body))
 	}
 
 	mux := http.NewServeMux()

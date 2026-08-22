@@ -74,7 +74,9 @@ func (s *AlertSubscriber) Start() error {
 // Stop drains all subscriptions gracefully.
 func (s *AlertSubscriber) Stop() {
 	if s.subscriber != nil {
-		s.subscriber.Drain()
+		if err := s.subscriber.Drain(); err != nil {
+			log.Printf("[AlertSubscriber] Drain failed: %v", err)
+		}
 	}
 }
 

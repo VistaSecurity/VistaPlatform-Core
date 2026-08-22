@@ -32,7 +32,7 @@ For the EKS deployment, we use the following choices. This document records the 
 - **No AWS-managed option.** NATS runs inside the cluster.
 - **Deployment:** Run NATS as a Kubernetes Deployment (and optionally a StatefulSet for JetStream). Store connection URL in a ConfigMap or Secret (e.g. `nats://nats.crypto-inventory.svc.cluster.local:4222`).
 - **Persistence:** For JetStream, use a PersistentVolumeClaim for the NATS data directory.
-- **In this repo:** Kubernetes manifests in `k8s/eks/` include (or will include) a NATS Deployment and Service so application services can use `NATS_URL` pointing at that Service.
+- **In this repo:** the Helm chart runs NATS in-cluster and wires `NATS_URL` to its Service; see `charts/vistaplatform/values.yaml` under `datastores.nats`.
 
 ## InfluxDB (optional)
 
@@ -43,5 +43,4 @@ For the EKS deployment, we use the following choices. This document records the 
 ## References
 
 - Terraform: `infrastructure/terraform/`
-- EKS walkthrough: eks-deployment-walkthrough.md
 - Service registry: `standards/service-registry.yaml`

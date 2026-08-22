@@ -91,7 +91,6 @@ docker-compose*.yml
 .gitlab-ci.yml
 .travis.yml
 .circleci/
-buildspec.yml
 
 # Temporary files
 tmp/

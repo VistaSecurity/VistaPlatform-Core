@@ -286,7 +286,7 @@ func (r *HealthRepository) GetAllActiveTenantIDs() ([]uuid.UUID, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var tenantIDs []uuid.UUID
 	for rows.Next() {
@@ -407,7 +407,7 @@ func (r *HealthRepository) GetAllTenantHealth(options *GetAllTenantHealthOptions
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var summaries []models.TenantHealthSummary
 	for rows.Next() {
@@ -482,7 +482,7 @@ func (r *HealthRepository) GetHealthBenchmarks() ([]models.HealthBenchmark, erro
 			},
 		}, nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var benchmarks []models.HealthBenchmark
 	for rows.Next() {

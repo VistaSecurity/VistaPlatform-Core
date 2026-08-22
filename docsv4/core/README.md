@@ -7,12 +7,16 @@ Documentation for **tenants** and **tenant admins** — people who use Vista Pla
 | I want to… | Start here |
 |------------|-----------|
 | Get an overview of the platform | [Platform Overview](./platform-overview.md) |
+| Understand how the platform itself is secured | [Security Posture](./security-posture.md) |
 | Learn the platform as an end user | [Tenant User Guide](./guides/tenant-user-guide.md) |
 | Administer my organization's settings | [Tenant Admin Guide](./guides/tenant-admin-guide.md) |
 | Understand CBOM artifacts | [CBOM Artifacts](./cbom/cbom-artifacts.md) |
 | Learn about a specific feature | [Feature Guides](features/) |
 
 ## Contents
+
+### Security
+- [Security Posture](./security-posture.md) — tenant isolation, supply chain, scanning, and the guarantees behind them
 
 ### Guides
 - [Tenant User Guide](./guides/tenant-user-guide.md) — Complete guide for day-to-day use

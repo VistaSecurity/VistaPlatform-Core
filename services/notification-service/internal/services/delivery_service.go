@@ -418,7 +418,7 @@ func (ds *DeliveryService) sendSlack(config map[string]interface{}, req *models.
 	if err != nil {
 		return fmt.Errorf("failed to send Slack webhook: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
@@ -495,7 +495,7 @@ func (ds *DeliveryService) sendWebhook(config map[string]interface{}, req *model
 	if err != nil {
 		return fmt.Errorf("failed to send webhook: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
@@ -552,7 +552,7 @@ func (ds *DeliveryService) sendPagerDuty(config map[string]interface{}, req *mod
 	if err != nil {
 		return fmt.Errorf("failed to send pagerduty notification: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)

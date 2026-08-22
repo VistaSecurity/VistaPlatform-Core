@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -236,7 +237,31 @@ func cleanFieldName(field string) string {
 			result.WriteRune(r)
 		}
 	}
-	return strings.Title(strings.ToLower(result.String()))
+	return titleWords(strings.ToLower(result.String()))
+}
+
+// titleWords upper-cases the first letter of every word, a word being a run
+// that starts at the beginning of the string or after a rune that is not an
+// ASCII letter, digit, or underscore.
+//
+// That is exactly the rule the deprecated strings.Title applied (its
+// isSeparator treats ASCII alphanumerics and '_' as non-separators), so
+// cleanFieldName's output is unchanged for the identifier-shaped input it is
+// ever given — Go struct and database field names.
+func titleWords(s string) string {
+	out := []rune(s)
+	prevIsWordRune := false
+	for i, r := range out {
+		isWordRune := r == '_' ||
+			(r >= '0' && r <= '9') ||
+			(r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z')
+		if !prevIsWordRune {
+			out[i] = unicode.ToTitle(r)
+		}
+		prevIsWordRune = isWordRune
+	}
+	return string(out)
 }
 
 // ExtractAuditMiddleware safely extracts audit middleware from a gin context.

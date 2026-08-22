@@ -69,7 +69,7 @@ func (s *TLSHandshakeService) PerformHandshake(ctx context.Context, hostname str
 			Error:   fmt.Sprintf("connection failed: %v", err),
 		}, nil
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Configure TLS with SNI
 	tlsConfig := &tls.Config{
@@ -78,14 +78,16 @@ func (s *TLSHandshakeService) PerformHandshake(ctx context.Context, hostname str
 	}
 
 	tlsConn := tls.Client(conn, tlsConfig)
-	defer tlsConn.Close()
+	defer func() { _ = tlsConn.Close() }()
 
 	// Set connection deadline
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		deadline = time.Now().Add(s.timeout)
 	}
-	tlsConn.SetDeadline(deadline)
+	if err := tlsConn.SetDeadline(deadline); err != nil {
+		log.Printf("TLS handshake: could not set deadline for %s, handshake may block until the dialer timeout: %v", address, err)
+	}
 
 	// Perform TLS handshake
 	err = tlsConn.Handshake()

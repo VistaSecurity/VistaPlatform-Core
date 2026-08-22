@@ -181,7 +181,7 @@ func dbInterrogatePostgreSQL(ctx context.Context, connStr string) (*DatabaseEncr
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to PostgreSQL: %w", err)
 	}
-	defer targetDB.Close()
+	defer func() { _ = targetDB.Close() }()
 
 	// Set a timeout for the connection
 	targetDB.SetConnMaxLifetime(30 * time.Second)
@@ -284,7 +284,7 @@ func dbInterrogateMySQL(ctx context.Context, connStr string) (*DatabaseEncryptio
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to MySQL: %w", err)
 	}
-	defer targetDB.Close()
+	defer func() { _ = targetDB.Close() }()
 
 	targetDB.SetConnMaxLifetime(30 * time.Second)
 	if err := targetDB.PingContext(ctx); err != nil {
@@ -314,7 +314,7 @@ func dbInterrogateMySQL(ctx context.Context, connStr string) (*DatabaseEncryptio
 	rows, err := targetDB.QueryContext(ctx,
 		"SHOW VARIABLES WHERE Variable_name LIKE '%ssl%' OR Variable_name LIKE '%tls%' OR Variable_name LIKE '%encrypt%'")
 	if err == nil {
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var name, value string
 			if err := rows.Scan(&name, &value); err == nil {

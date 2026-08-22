@@ -56,7 +56,7 @@ func (*CiscoInterrogator) Interrogate(ctx context.Context, device DeviceInfo, cr
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cisco client: %w", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	result, err := client.interrogate(ctx)
 	if err != nil {
@@ -154,7 +154,10 @@ func ciscoKnownHostsCallback() (ssh.HostKeyCallback, bool) {
 // Close closes the SSH connection.
 func (c *ciscoSSHClient) Close() error {
 	if c.session != nil {
-		c.session.Close()
+		// ssh.Session.Close returns io.EOF for a session the remote already
+		// finished, which is the normal case here — the meaningful result is
+		// the client close below.
+		_ = c.session.Close()
 	}
 	if c.client != nil {
 		return c.client.Close()
@@ -168,7 +171,7 @@ func (c *ciscoSSHClient) executeCommand(ctx context.Context, command string) (st
 	if err != nil {
 		return "", fmt.Errorf("failed to create session: %w", err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 
 	output, err := session.CombinedOutput(command)
 	if err != nil {

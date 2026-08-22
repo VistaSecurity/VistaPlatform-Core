@@ -42,7 +42,7 @@ func main() {
 			log.Fatalf("Failed to connect to database: %v", err)
 		}
 	} else {
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 	}
 
 	// Bypass connection for the deliberately cross-tenant paths (registration
@@ -133,13 +133,8 @@ func main() {
 	}
 
 	// Initialize handlers with both legacy and V2 services
+	// The handler's logger is initialized inside NewHandlerWithBoth.
 	handler := handlers.NewHandlerWithBoth(sensorService, sensorServiceV2, repo, db, bypassDB)
-	// Set logger on handler
-	if handler != nil {
-		// Handler now has logger initialized in NewHandlerWithBoth
-		// But we can update it with the configured logger if needed
-		// For now, the logger is initialized in the handler constructor
-	}
 	// Set encryption key for certificate operations
 	if cfg.EncryptionMasterKey != "" {
 		handler.SetEncryptionKey(cfg.EncryptionMasterKey)

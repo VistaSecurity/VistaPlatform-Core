@@ -106,7 +106,7 @@ func (h *Handler) GetAdminSensors(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list sensors"})
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	sensors := make([]AdminSensor, 0)
 	for rows.Next() {

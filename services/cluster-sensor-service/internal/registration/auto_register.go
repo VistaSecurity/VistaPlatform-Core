@@ -87,7 +87,7 @@ func (s *AutoRegisterService) RegisterForAllTenants() error {
 	if err != nil {
 		return fmt.Errorf("failed to query tenants: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var tenantIDs []uuid.UUID
 	for rows.Next() {
@@ -183,7 +183,7 @@ func (s *AutoRegisterService) RegisterForTenant(tenantID uuid.UUID) error {
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

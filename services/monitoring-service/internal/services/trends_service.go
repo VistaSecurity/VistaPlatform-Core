@@ -71,7 +71,7 @@ func (s *MetricsService) GetHistoricalTrends(serviceName, metricType string, win
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var trends []TrendPoint
 	for rows.Next() {

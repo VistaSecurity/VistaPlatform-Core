@@ -2,6 +2,7 @@ package services
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"strings"
 	"time"
@@ -103,8 +104,10 @@ func (a *SSHKeyAnalyzer) probeWithKeyPreference(
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to connect: %w", err)
 	}
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(a.timeout))
+	defer func() { _ = conn.Close() }()
+	if err := conn.SetDeadline(time.Now().Add(a.timeout)); err != nil {
+		log.Printf("SSH key probe %s: could not set connection deadline, probe may block until the SSH client timeout: %v", address, err)
+	}
 
 	var capturedKey ssh.PublicKey
 
@@ -154,7 +157,7 @@ func (a *SSHKeyAnalyzer) probeWithKeyPreference(
 			}
 		}()
 		banner = strings.TrimSpace(string(sshConn.ServerVersion()))
-		sshConn.Close()
+		_ = sshConn.Close()
 	}
 
 	if capturedKey == nil {

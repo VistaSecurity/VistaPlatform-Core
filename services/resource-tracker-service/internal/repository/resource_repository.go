@@ -342,7 +342,7 @@ func (r *ResourceRepository) GetAllTenantsResourceUsage(period string) ([]models
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var summaries []models.TenantResourceSummary
 	for rows.Next() {

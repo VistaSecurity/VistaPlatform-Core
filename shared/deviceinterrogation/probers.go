@@ -128,7 +128,7 @@ func snmpGetSystemInfo(_ context.Context, target, community string, timeout time
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to %s: %w", target, err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	oids := []string{snmpOIDSysDescr, snmpOIDSysName, snmpOIDSysContact, snmpOIDSysLocation}
 	result := make(map[string]string)
@@ -151,7 +151,9 @@ func snmpGet(conn net.Conn, community, oid string, timeout time.Duration) (strin
 		return "", fmt.Errorf("failed to build SNMP request: %w", err)
 	}
 
-	conn.SetDeadline(time.Now().Add(timeout))
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return "", fmt.Errorf("failed to set SNMP deadline: %w", err)
+	}
 	if _, err := conn.Write(request); err != nil {
 		return "", fmt.Errorf("failed to send SNMP request: %w", err)
 	}
@@ -417,7 +419,7 @@ func (p *TLSProber) ProbeTLS(hostname string, port int) (*CryptoAsset, error) {
 	if err != nil {
 		return nil, fmt.Errorf("TCP connect failed: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	tlsConfig := &tls.Config{
 		ServerName:         hostname,
@@ -425,9 +427,11 @@ func (p *TLSProber) ProbeTLS(hostname string, port int) (*CryptoAsset, error) {
 	}
 
 	tlsConn := tls.Client(conn, tlsConfig)
-	defer tlsConn.Close()
+	defer func() { _ = tlsConn.Close() }()
 
-	tlsConn.SetDeadline(time.Now().Add(timeout))
+	if err := tlsConn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, fmt.Errorf("failed to set TLS probe deadline: %w", err)
+	}
 
 	if err := tlsConn.Handshake(); err != nil {
 		return nil, fmt.Errorf("TLS handshake failed: %w", err)
@@ -511,14 +515,21 @@ func (p *TLSProber) EnumerateTLSVersions(hostname string, port int) []string {
 		}
 
 		tlsConn := tls.Client(conn, tlsCfg)
-		tlsConn.SetDeadline(time.Now().Add(timeout))
+		// Without a deadline the handshake below can block indefinitely, so a
+		// failure here means this version cannot be tested — skip it rather
+		// than record an untested version as unaccepted.
+		if err := tlsConn.SetDeadline(time.Now().Add(timeout)); err != nil {
+			_ = tlsConn.Close()
+			_ = conn.Close()
+			continue
+		}
 
 		if err := tlsConn.Handshake(); err == nil {
 			accepted = append(accepted, ver.name)
 		}
 
-		tlsConn.Close()
-		conn.Close()
+		_ = tlsConn.Close()
+		_ = conn.Close()
 	}
 
 	return accepted
@@ -534,8 +545,10 @@ func (p *TLSProber) ProbeSSH(hostname string, port int) (*CryptoAsset, error) {
 	if err != nil {
 		return nil, fmt.Errorf("TCP connect failed: %w", err)
 	}
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(timeout))
+	defer func() { _ = conn.Close() }()
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, fmt.Errorf("failed to set SSH probe deadline: %w", err)
+	}
 
 	asset := &CryptoAsset{
 		Hostname: hostname,
@@ -588,7 +601,7 @@ func (p *TLSProber) ProbeSSH(hostname string, port int) (*CryptoAsset, error) {
 		}()
 
 		asset.SSHInfo.Banner = strings.TrimSpace(string(sshConn.ServerVersion()))
-		sshConn.Close()
+		_ = sshConn.Close()
 	}
 
 	asset.SSHInfo.HostKeyType = hostKeyType
@@ -942,7 +955,7 @@ func (c *httpxClient) get(ctx context.Context, path string) (map[string]interfac
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)

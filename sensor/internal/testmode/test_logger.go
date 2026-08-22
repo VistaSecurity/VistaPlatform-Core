@@ -75,7 +75,12 @@ func (tl *TestLogger) LogDiscovery(discovery interface{}) error {
 	} else {
 		// Try to marshal and unmarshal to get a map
 		if data, err := json.Marshal(discovery); err == nil {
-			json.Unmarshal(data, &entry.Data)
+			if err := json.Unmarshal(data, &entry.Data); err != nil {
+				// Record the failure rather than emitting a silently empty Data
+				// map: "could not decode" and "nothing to report" must not look
+				// identical in the log.
+				entry.Data["_decode_error"] = err.Error()
+			}
 		}
 	}
 
@@ -102,7 +107,12 @@ func (tl *TestLogger) LogHeartbeat(heartbeat interface{}) error {
 	} else {
 		// Try to marshal and unmarshal to get a map
 		if data, err := json.Marshal(heartbeat); err == nil {
-			json.Unmarshal(data, &entry.Data)
+			if err := json.Unmarshal(data, &entry.Data); err != nil {
+				// Record the failure rather than emitting a silently empty Data
+				// map: "could not decode" and "nothing to report" must not look
+				// identical in the log.
+				entry.Data["_decode_error"] = err.Error()
+			}
 		}
 	}
 
@@ -181,10 +191,15 @@ func (tl *TestLogger) writeEntry(entry LogEntry) error {
 
 // rotateFile rotates the log file when it reaches max size
 func (tl *TestLogger) rotateFile() error {
-	// Close current file
+	// Close the current file. It is being WRITTEN, so a failed close can mean
+	// buffered log data never reached disk; surface it rather than renaming a
+	// silently truncated file into the backup set.
 	if tl.file != nil {
-		tl.file.Close()
+		err := tl.file.Close()
 		tl.file = nil
+		if err != nil {
+			return fmt.Errorf("failed to close log file: %w", err)
+		}
 	}
 
 	// Create backup filename with timestamp
@@ -219,7 +234,10 @@ func (tl *TestLogger) cleanupOldBackups() {
 	if len(files) > 5 {
 		// Sort by modification time (oldest first)
 		for i := 0; i < len(files)-5; i++ {
-			os.Remove(files[i])
+			// Best-effort pruning: a backup that cannot be removed simply
+			// lingers until the next rotation retries it. Nothing downstream
+			// reads these files, so there is no correctness signal to act on.
+			_ = os.Remove(files[i])
 		}
 	}
 }

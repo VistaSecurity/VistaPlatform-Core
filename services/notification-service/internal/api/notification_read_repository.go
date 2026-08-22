@@ -105,7 +105,7 @@ func (r *notificationReadRepository) ListPlatformHistory(ctx context.Context, li
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	history := []models.NotificationHistory{}
 	for rows.Next() {

@@ -41,7 +41,7 @@ const fpcTestJWTSecret = "force-password-change-test-secret"
 var loginUserColumns = []string{
 	"id", "email", "first_name", "last_name", "role_id", "role_name",
 	"is_active", "email_verified", "force_password_change",
-	"last_login_at", "created_at", "updated_at", "password_hash",
+	"last_login_at", "created_at", "updated_at", "password_hash", "locked_until",
 }
 
 func newLoginRouter(db *sql.DB) *gin.Engine {
@@ -86,7 +86,7 @@ func expectLoginQueries(mock sqlmock.Sqlmock, userID uuid.UUID, email, passwordH
 		WillReturnRows(sqlmock.NewRows(loginUserColumns).AddRow(
 			userID, email, "Platform", "Admin", uuid.New(), "super_admin",
 			true, true, forceChange,
-			nil, now, now, passwordHash,
+			nil, now, now, passwordHash, nil,
 		))
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE platform_users SET last_login_at")).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -193,6 +193,74 @@ func TestLogin_NoForcePasswordChange_IssuesNormalSession(t *testing.T) {
 	mw := middlewareRouter()
 	if got := hitWithBearer(mw, http.MethodGet, "/api/v1/admin-service/admin/tenants", accessToken); got != http.StatusOK {
 		t.Errorf("normal route with normal token: status = %d, want 200", got)
+	}
+}
+
+func TestLogin_FailedPasswordRecordsLockoutAttempt(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	const correctPassword = "CorrectAdm!nPwd"
+	hash, err := platformPasswordService.HashPassword(correctPassword)
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	userID := uuid.New()
+	now := time.Now()
+	email := "admin@example.com"
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT pu.id, pu.email, pu.first_name, pu.last_name, pu.role_id, pr.name as role_name")).
+		WithArgs(email).
+		WillReturnRows(sqlmock.NewRows(loginUserColumns).AddRow(
+			userID, email, "Platform", "Admin", uuid.New(), "super_admin",
+			true, true, false,
+			nil, now, now, hash, nil,
+		))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT setting_value FROM platform_settings WHERE setting_key = $1")).
+		WithArgs("max_login_attempts").
+		WillReturnRows(sqlmock.NewRows([]string{"setting_value"}).AddRow([]byte("3")))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT setting_value FROM platform_settings WHERE setting_key = $1")).
+		WithArgs("lockout_duration_minutes").
+		WillReturnRows(sqlmock.NewRows([]string{"setting_value"}).AddRow([]byte("60")))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE platform_users")).
+		WithArgs(3, sqlmock.AnyArg(), sqlmock.AnyArg(), userID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	code, _ := doLogin(t, newLoginRouter(db), email, "WrongAdm!nPwd")
+	if code != http.StatusUnauthorized {
+		t.Fatalf("login status = %d, want 401", code)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+func TestLogin_LockedAccountRejectsBeforePasswordCheck(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	userID := uuid.New()
+	now := time.Now()
+	email := "admin@example.com"
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT pu.id, pu.email, pu.first_name, pu.last_name, pu.role_id, pr.name as role_name")).
+		WithArgs(email).
+		WillReturnRows(sqlmock.NewRows(loginUserColumns).AddRow(
+			userID, email, "Platform", "Admin", uuid.New(), "super_admin",
+			true, true, false,
+			nil, now, now, "not-checked", now.Add(time.Hour),
+		))
+
+	code, resp := doLogin(t, newLoginRouter(db), email, "CorrectAdm!nPwd")
+	if code != http.StatusLocked {
+		t.Fatalf("login status = %d, want 423 (resp: %v)", code, resp)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
 	}
 }
 

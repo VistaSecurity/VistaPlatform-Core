@@ -83,7 +83,9 @@ func (hc *HealthCalculator) Start(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			hc.logger.Info("Health calculator stopping")
-			hc.db.Close()
+			if err := hc.db.Close(); err != nil {
+				hc.logger.WithError(err).Warn("Failed to close health calculator database connection")
+			}
 			return
 		case <-ticker.C:
 			hc.calculateAllTenantHealth(ctx)

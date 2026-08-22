@@ -76,6 +76,13 @@ type Email struct {
 // then upgrade, authenticate (only when credentials are configured, so IP-based
 // relays also work), and send — surfacing a precise error at each stage.
 func (es *EmailService) SendEmail(email Email) error {
+	// Refuse a recipient or sender that could break out of the SMTP envelope
+	// before opening the connection — c.Mail/c.Rcpt below write these straight
+	// into SMTP commands. See header_safety.go.
+	if err := validateAddresses(es.fromEmail, email.To); err != nil {
+		return err
+	}
+
 	msg := es.buildMessage(email)
 	addr := fmt.Sprintf("%s:%s", es.smtpHost, es.smtpPort)
 
@@ -83,7 +90,7 @@ func (es *EmailService) SendEmail(email Email) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to smtp server %s: %w", addr, err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	if err := c.Hello(es.heloName()); err != nil {
 		return fmt.Errorf("smtp EHLO failed: %w", err)
@@ -144,29 +151,42 @@ func (es *EmailService) heloName() string {
 func (es *EmailService) buildMessage(email Email) []byte {
 	var msg bytes.Buffer
 
-	// Headers
-	msg.WriteString(fmt.Sprintf("From: %s <%s>\r\n", es.fromName, es.fromEmail))
-	msg.WriteString(fmt.Sprintf("To: %s\r\n", strings.Join(email.To, ", ")))
-	msg.WriteString(fmt.Sprintf("Subject: %s\r\n", email.Subject))
-	msg.WriteString(fmt.Sprintf("Date: %s\r\n", time.Now().Format(time.RFC1123Z)))
+	// Headers. Every interpolated value is sanitized: Subject and the From
+	// display name carry attacker-influenced text (tenant org name, white-label
+	// platform name, user-authored alert threshold name), and a bare CR/LF in
+	// any of them would start a header of the attacker's choosing — classically
+	// "Bcc:" on an invitation. See header_safety.go.
+	//
+	// Recipients are validated (not sanitized) in SendEmail before we get here,
+	// because they also reach the SMTP envelope; the sanitize call below is the
+	// belt to that braces, so buildMessage is safe when called directly in tests.
+	sanitizedTo := make([]string, 0, len(email.To))
+	for _, rcpt := range email.To {
+		sanitizedTo = append(sanitizedTo, sanitizeHeaderValue(rcpt))
+	}
+
+	fmt.Fprintf(&msg, "From: %s <%s>\r\n", sanitizeHeaderValue(es.fromName), sanitizeHeaderValue(es.fromEmail))
+	fmt.Fprintf(&msg, "To: %s\r\n", strings.Join(sanitizedTo, ", "))
+	fmt.Fprintf(&msg, "Subject: %s\r\n", sanitizeHeaderValue(email.Subject))
+	fmt.Fprintf(&msg, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
 	msg.WriteString("MIME-Version: 1.0\r\n")
 
 	if email.HTML != "" {
 		// Multipart message with HTML and text
 		boundary := "boundary123456789"
-		msg.WriteString(fmt.Sprintf("Content-Type: multipart/alternative; boundary=%s\r\n\r\n", boundary))
+		fmt.Fprintf(&msg, "Content-Type: multipart/alternative; boundary=%s\r\n\r\n", boundary)
 
 		// Text part
-		msg.WriteString(fmt.Sprintf("--%s\r\n", boundary))
+		fmt.Fprintf(&msg, "--%s\r\n", boundary)
 		msg.WriteString("Content-Type: text/plain; charset=UTF-8\r\n\r\n")
 		msg.WriteString(email.Body)
 		msg.WriteString("\r\n\r\n")
 
 		// HTML part
-		msg.WriteString(fmt.Sprintf("--%s\r\n", boundary))
+		fmt.Fprintf(&msg, "--%s\r\n", boundary)
 		msg.WriteString("Content-Type: text/html; charset=UTF-8\r\n\r\n")
 		msg.WriteString(email.HTML)
-		msg.WriteString(fmt.Sprintf("\r\n--%s--\r\n", boundary))
+		fmt.Fprintf(&msg, "\r\n--%s--\r\n", boundary)
 	} else {
 		// Plain text message
 		msg.WriteString("Content-Type: text/plain; charset=UTF-8\r\n\r\n")
@@ -319,7 +339,7 @@ func (es *EmailService) SendAlertEmail(to, alertType, message string, details ma
 	// Build details text
 	var detailsText strings.Builder
 	for key, value := range details {
-		detailsText.WriteString(fmt.Sprintf("%s: %v\n", key, value))
+		fmt.Fprintf(&detailsText, "%s: %v\n", key, value)
 	}
 
 	// Text version

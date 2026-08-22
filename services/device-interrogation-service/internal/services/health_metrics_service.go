@@ -3,7 +3,9 @@ package services
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -243,7 +245,7 @@ func (s *HealthMetricsService) GetPlatformHealthSummary(ctx context.Context) (*P
 	`
 	rows, err := s.bypassDB.QueryContext(ctx, deviceTypeQuery)
 	if err == nil {
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var deviceType string
 			var count int
@@ -267,8 +269,11 @@ func (s *HealthMetricsService) GetPlatformHealthSummary(ctx context.Context) (*P
 		&summary.ActiveIntegrations,
 		&summary.ErrorIntegrations,
 	)
-	if err != nil && err != sql.ErrNoRows {
-		// Ignore error - table might not exist yet
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		// Non-fatal: the counts stay zero and the rest of the summary is still
+		// useful. Logged rather than swallowed so a real query failure is
+		// distinguishable from "there genuinely are no integrations".
+		log.Printf("health metrics: integration counts query failed, reporting zeros: %v", err)
 	}
 
 	// Query integrations by provider
@@ -280,7 +285,7 @@ func (s *HealthMetricsService) GetPlatformHealthSummary(ctx context.Context) (*P
 	`
 	rows, err = s.bypassDB.QueryContext(ctx, integrationProviderQuery)
 	if err == nil {
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var provider string
 			var count int
@@ -324,9 +329,13 @@ func (s *HealthMetricsService) GetDeviceHealthTimeline(ctx context.Context, tena
 	if hours <= 0 {
 		hours = 24
 	}
-	if intervalMinutes <= 0 {
-		intervalMinutes = 60 // Default to 1 hour intervals
-	}
+	// intervalMinutes is accepted from the API but is NOT honoured: the query
+	// below buckets with date_trunc('hour', ...), so the timeline is always
+	// hourly. The previous `if intervalMinutes <= 0 { intervalMinutes = 60 }`
+	// defaulting read as if the value mattered while nothing ever consumed it.
+	// Left unused rather than silently defaulted; making the bucket width
+	// configurable is a behaviour change, not lint cleanup.
+	_ = intervalMinutes
 
 	query := `
 		SELECT 

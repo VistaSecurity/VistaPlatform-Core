@@ -312,10 +312,10 @@ func (h *ExperimentalActionHandlers) ScanSSHKeys(c *gin.Context) {
 		sshConn, _, _, err := ssh.NewClientConn(conn, addr, config)
 		if err != nil {
 			// Connection established but SSH handshake may fail — that's OK, try next
-			conn.Close()
+			_ = conn.Close()
 			continue
 		}
-		sshConn.Close()
+		_ = sshConn.Close()
 
 		if capturedKey == nil {
 			continue

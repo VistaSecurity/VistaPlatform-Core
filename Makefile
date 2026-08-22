@@ -158,7 +158,7 @@ verify-generated: ## Verify generated artifacts exist
 
 # Vista Platform - Makefile
 
-.PHONY: help build-services build-sensor build-frontend build-all test test-unit test-integration test-e2e start stop restart logs clean install-deps
+.PHONY: help build-services build-sensor build-frontend build-all test test-unit start stop restart logs clean install-deps
 
 # Default target
 help: ## Show this help message
@@ -775,22 +775,7 @@ test-resource-tracker-service: ## Test resource-tracker-service
 test-tenant-health-service: ## Test tenant-health-service
 	@cd services/tenant-health-service && go test -v ./...
 
-test-integration: ## Run integration tests
-	@echo "Running integration tests..."
-	cd tests/integration && go test ./...
-	@echo "Integration tests completed!"
-
-test-e2e: ## Run end-to-end tests
-	@echo "Running E2E tests..."
-	cd tests/e2e && npm test
-	@echo "E2E tests completed!"
-
-test-load: ## Run load tests
-	@echo "Running load tests..."
-	cd tests && k6 run load-test.js
-	@echo "Load tests completed!"
-
-test: test-unit test-integration ## Run unit and integration tests
+test: test-unit ## Run unit tests (DB-integration tests: make test-integration-db)
 
 # Database Commands
 db-migrate: ## No-op: schema is fully consolidated in schema.sql, applied automatically on fresh deploy
@@ -1042,10 +1027,6 @@ sensor-upload-dry-run: sensor-all-platforms ## Dry run: show what would be uploa
 	@go run scripts/upload-sensor-artifacts.go -artifacts-dir artifacts/sensor -dry-run
 
 # Documentation
-docs-serve: ## Serve documentation locally
-	@echo "Starting documentation server..."
-	cd docs && python3 -m http.server 8000
-
 # Monitoring
 monitor: ## Show system status
 	@echo "=== Docker Services ==="
@@ -1078,7 +1059,7 @@ build-clean: ## Force clean build (clear all caches)
 	@echo "✅ All caches cleared"
 
 # Gateway / Routing Utilities
-.PHONY: registry-check gen-gateway gateway-validate
+.PHONY: registry-check gateway-validate
 
 registry-check: ## Validate service registry JSON
 	@echo "Validating service registry..."
@@ -1088,13 +1069,6 @@ registry-check: ## Validate service registry JSON
 		node -e "JSON.parse(require('fs').readFileSync('config/service-registry.json','utf8'))"; \
 	fi
 	@echo "Service registry is valid."
-
-gen-gateway: node_modules_check registry-check ## Generate Traefik gateway config from service registry
-	@echo "Generating Traefik gateway config from registry..."
-	DEPLOY_ENV=development node scripts/generate-traefik-config.mjs
-	DEPLOY_ENV=ec2-smoke USE_MTLS=true node scripts/generate-traefik-config.mjs
-	DEPLOY_ENV=production USE_MTLS=false node scripts/generate-traefik-config.mjs
-	@echo "Traefik gateway config updated: config/traefik/"
 
 gateway-validate: ## Validate Traefik configuration inside gateway container
 	@echo "Validating Traefik gateway configuration..."

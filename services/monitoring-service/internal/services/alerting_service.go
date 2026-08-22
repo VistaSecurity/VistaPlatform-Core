@@ -50,7 +50,7 @@ func (s *AlertingService) GetAlertThresholds(serviceName *string, enabled *bool)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query alert thresholds: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var thresholds []models.AlertThreshold
 	for rows.Next() {
@@ -421,7 +421,7 @@ func (s *AlertingService) GetAlertHistory(serviceName *string, status *string, l
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to query alert history: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var alerts []models.AlertHistory
 	for rows.Next() {

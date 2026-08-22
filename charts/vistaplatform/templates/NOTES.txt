@@ -131,6 +131,31 @@ deployment guide at docsv4/core/operate/deployment/rke2-v1/deployment-guide.md.
 
 UPGRADE NOTES
 
+  - BACK UP THE DATABASE FIRST. This chart has no migration runner and no down
+    migration: every upgrade re-applies the whole schema under
+    `psql -v ON_ERROR_STOP=1`. That is deliberate (it makes skipping versions
+    safe), but it means a schema statement that your data does not satisfy
+    stops the migration Job partway, and the only way back is a restore.
+{{- if .Values.datastores.postgres.enabled }}
+
+      kubectl -n {{ .Release.Namespace }} exec postgres-0 -- \
+        pg_dump -U {{ .Values.datastores.postgres.user }} -d {{ .Values.datastores.postgres.db }} \
+        > vistaplatform-backup.sql
+{{- else }}
+
+    You are running an external database — take the snapshot with your
+    provider's tooling (e.g. an RDS snapshot) before proceeding.
+{{- end }}
+
+    Afterwards, confirm which release wrote the schema. Run against your
+    database:
+
+      SELECT app_version, chart_version, applied_at
+        FROM schema_migration_status ORDER BY applied_at DESC LIMIT 1;
+
+    Quote that output in any upgrade bug report — it is the fastest way to
+    tell which schema the database is actually on.
+
   - Use `helm upgrade --reset-then-reuse-values` for cross-version upgrades.
     `--reuse-values` carries the previous release's user-supplied image.tag
     forward verbatim, which silently pins new pods to old image bytes — the

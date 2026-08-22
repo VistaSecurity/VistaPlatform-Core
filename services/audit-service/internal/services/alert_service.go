@@ -484,7 +484,7 @@ func (s *AlertService) sendWebhook(ctx context.Context, alert Alert, config map[
 		s.logger.Printf("ERROR: Webhook request failed: %v", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		s.logger.Printf("WARNING: Webhook returned status %d", resp.StatusCode)
@@ -708,7 +708,7 @@ func (s *AlertService) sendToUnifiedNotificationService(ctx context.Context, ale
 	if err != nil {
 		return fmt.Errorf("failed to send HTTP request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("notification service returned status %d", resp.StatusCode)

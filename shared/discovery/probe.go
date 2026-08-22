@@ -115,7 +115,7 @@ func (p *Prober) Probe(hostname, ip, protocol string, port int) (*ProbeResult, e
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	return probe(p, conn, hostname, port)
 }
@@ -148,12 +148,19 @@ func (p *Prober) EnumerateTLSVersions(hostname, ip string, port int) []string {
 			MaxVersion:         ver.id,
 		}
 		tlsConn := tls.Client(conn, tlsCfg)
-		tlsConn.SetDeadline(time.Now().Add(p.timeout))
+		// Without a deadline the handshake below can block indefinitely, so a
+		// failure here means this version cannot be tested — skip it rather
+		// than record an untested version as unaccepted.
+		if err := tlsConn.SetDeadline(time.Now().Add(p.timeout)); err != nil {
+			_ = tlsConn.Close()
+			_ = conn.Close()
+			continue
+		}
 		if err := tlsConn.Handshake(); err == nil {
 			accepted = append(accepted, ver.name)
 		}
-		tlsConn.Close()
-		conn.Close()
+		_ = tlsConn.Close()
+		_ = conn.Close()
 	}
 	return accepted
 }

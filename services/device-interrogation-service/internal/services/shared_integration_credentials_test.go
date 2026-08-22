@@ -15,12 +15,12 @@ func TestCredentialsFromIntegration_ReadsSharedIntegrationsViaBypass(t *testing.
 	if err != nil {
 		t.Fatalf("sqlmock app db: %v", err)
 	}
-	defer appDB.Close()
+	defer func() { _ = appDB.Close() }()
 	bypassDB, bypassMock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock bypass db: %v", err)
 	}
-	defer bypassDB.Close()
+	defer func() { _ = bypassDB.Close() }()
 
 	tenantID := uuid.New()
 	credentialID := uuid.New()
@@ -61,12 +61,12 @@ func TestGetDeviceCredentials_ReadsSharedIntegrationsViaBypass(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock app db: %v", err)
 	}
-	defer appDB.Close()
+	defer func() { _ = appDB.Close() }()
 	bypassDB, bypassMock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock bypass db: %v", err)
 	}
-	defer bypassDB.Close()
+	defer func() { _ = bypassDB.Close() }()
 
 	tenantID := uuid.New()
 	credentialID := uuid.New()

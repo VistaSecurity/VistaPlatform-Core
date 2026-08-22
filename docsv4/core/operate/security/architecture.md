@@ -21,7 +21,6 @@ Traditional sensor architectures require inbound firewall rules, creating securi
 2. **No inbound firewall rules required**
 3. **Control plane responds with commands** via HTTP responses
 4. **Webhook support** for real-time updates (optional)
-5. **Air-gapped export** for isolated environments
 
 ### **Communication Patterns**
 
@@ -109,11 +108,17 @@ POST /api/v1/sensors/{id}/discoveries
 - **Certificate rotation** support
 - **No shared secrets** in configuration
 
-#### **2. Encrypted Storage**
-- **AES-256-GCM** encryption for local data
-- **Ephemeral keys** (generated at startup)
-- **Secure deletion** of sensitive data
-- **Air-gapped export** capability
+#### **2. Discovery Data Handling**
+- **No discovery data is written to disk.** Findings are held in an in-memory
+  buffer and submitted to the control plane over mTLS; a failed submission is
+  re-queued in memory and retried.
+- **Nothing to exfiltrate at rest** — a stolen sensor host yields no stored
+  inventory, only the enrollment certificate (revocable from the console).
+- **Unsubmitted findings do not survive a restart.** If the control plane is
+  unreachable when the sensor stops, its buffered findings are discarded and the
+  affected endpoints are re-observed after it restarts.
+- The sensor's data directory holds enrollment certificates and configuration
+  only.
 
 #### **3. Network Security**
 - **Outbound HTTPS only** (port 443)
@@ -143,20 +148,17 @@ POST /api/v1/sensors/{id}/discoveries
 - No inbound firewall rules
 - Standard enterprise proxy support
 
-### **Scenario 2: Air-Gapped Environment**
-```
-┌─────────────────┐    ┌──────────────────┐
-│   Sensor        │    │  Export File     │
-│   (Offline)     │───▶│  (USB/SFTP)      │
-│   Local Storage │    │  Manual Transfer │
-└─────────────────┘    └──────────────────┘
-```
+### **Scenario 2: Fully Isolated Segment — not currently supported**
 
-**Requirements:**
-- Encrypted local storage
-- Export file generation
-- Manual transfer process
-- Import at control plane
+A sensor in a segment with no network path to the control plane has no way to
+deliver its findings. There is no file-based export from the sensor and no
+corresponding import at the control plane; a sensor deployed this way captures
+traffic and discards it.
+
+For an isolated segment today, either give the sensor an outbound path to the
+control plane (a proxy or a one-way relay is sufficient — see Scenario 1), or
+capture traffic with an external tool and use **PCAP upload** to bring it in
+through the console.
 
 ### **Scenario 3: Hybrid Environment**
 ```
@@ -191,32 +193,31 @@ POST /api/v1/sensors/{id}/discoveries
 
 ### **4. Fault Tolerance**
 - **Sensors continue operating** if control plane is down
-- **Local storage** for offline operation
-- **Automatic retry** mechanisms
+- **In-memory buffering** with automatic retry while it is unreachable
+- Buffered findings are held in memory only, so a sensor restart during an
+  outage drops what had not yet been submitted
 
 ## 📋 **Implementation Checklist**
 
 ### **Sensor Implementation**
 - [x] Outbound-only HTTP client
 - [x] mTLS certificate support
-- [x] Encrypted local storage
+- [x] In-memory buffering with retry
 - [x] Command processing
-- [x] Air-gapped export
 - [x] Heartbeat mechanism
+- [ ] File-based export for isolated segments — not implemented
 
 ### **Control Plane Implementation**
 - [x] Heartbeat endpoint
 - [x] Command generation
 - [x] Discovery ingestion
 - [x] Webhook support
-- [x] Air-gapped import
 - [x] Certificate management
+- [ ] File-based import for isolated segments — not implemented
 
 ### **Security Implementation**
 - [x] mTLS authentication
 - [x] Command signing
-- [x] Encrypted storage
-- [x] Secure deletion
 - [x] Certificate rotation
 - [x] Audit logging
 

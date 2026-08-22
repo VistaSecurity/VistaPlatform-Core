@@ -14,7 +14,9 @@ func init() {
 // signing and encryption capabilities. Ported from the sensor's active prober;
 // returns the neutral ProbeResult.
 func probeSMB(p *Prober, conn net.Conn, _ string, port int) (*ProbeResult, error) {
-	conn.SetDeadline(time.Now().Add(p.timeout))
+	if err := conn.SetDeadline(time.Now().Add(p.timeout)); err != nil {
+		return nil, fmt.Errorf("failed to set SMB probe deadline: %w", err)
+	}
 
 	// Build SMB2 NEGOTIATE Request
 	// Dialects: SMB 2.0.2, 2.1, 3.0, 3.0.2, 3.1.1

@@ -131,17 +131,26 @@ func UploadPlatformBrandingAsset(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 
-		// Generate unique filename
-		ext := filepath.Ext(file.Filename)
-		if ext == "" {
-			switch contentType {
-			case "image/png":
-				ext = ".png"
-			case "image/jpeg":
-				ext = ".jpg"
-			case "image/x-icon":
-				ext = ".ico"
-			}
+		// Generate unique filename. The extension is server-authoritative,
+		// derived from the SNIFFED type — never from file.Filename.
+		//
+		// The previous code took filepath.Ext(file.Filename) and only fell back
+		// to the content type when the caller supplied no extension at all. The
+		// magic-byte check above therefore constrained the file's CONTENT while
+		// the caller still chose the name it was stored under: uploading valid
+		// PNG bytes as filename="evil.svg" persisted a .svg asset under
+		// /uploads/platform-branding/, and SVG is excluded from this allowlist
+		// precisely because it can carry script. Anything that content-types the
+		// served file by extension then hands the browser back an attacker-named
+		// type. auth-service's tenant-branding upload was fixed this way in
+		//this is the same handler on the platform-admin side, which was
+		// missed at the time.
+		ext, ok := brandingExtForType(detectedType)
+		if !ok {
+			// Unreachable while allowedTypes and brandingExtForType agree, but
+			// a mismatch must not fall through to an extension-less file.
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file type. Only PNG, JPEG, and ICO are allowed"})
+			return
 		}
 		filename := fmt.Sprintf("platform-%s-%s%s", assetType, uuid.New().String(), ext)
 
@@ -240,11 +249,36 @@ func uploadToS3(c *gin.Context, file *multipart.FileHeader, filename, contentTyp
 	return result.URL, nil
 }
 
+// brandingExtForType maps a SNIFFED image MIME type to the extension the asset
+// is stored under. This is the only source of a branding asset's extension —
+// the caller-supplied file name never contributes one.
+//
+// Keep in step with the allowedTypes allowlist in UploadPlatformBrandingAsset:
+// a type accepted there but absent here is rejected rather than stored, which is
+// the safe direction to fail.
+func brandingExtForType(detectedType string) (string, bool) {
+	switch detectedType {
+	case "image/png":
+		return ".png", true
+	case "image/jpeg":
+		return ".jpg", true
+	case "image/x-icon":
+		return ".ico", true
+	default:
+		return "", false
+	}
+}
+
+// platformBrandingUploadDir is the on-disk root for locally-stored platform
+// branding assets. It is a var, not a const, only so the handler test can point
+// it at a t.TempDir() — nothing in production reassigns it.
+var platformBrandingUploadDir = filepath.Join("/app", "uploads", "platform-branding")
+
 // uploadToLocalStorage saves the file to local filesystem
 func uploadToLocalStorage(c *gin.Context, file *multipart.FileHeader, filename string) (string, error) {
 	// Create uploads directory for platform branding (0750: owner rwx, group rx,
 	// world none — resolves gosec G301 on the public-readable default)
-	uploadDir := filepath.Join("/app", "uploads", "platform-branding")
+	uploadDir := platformBrandingUploadDir
 	if err := os.MkdirAll(uploadDir, 0o750); err != nil {
 		return "", fmt.Errorf("failed to create upload directory: %w", err)
 	}

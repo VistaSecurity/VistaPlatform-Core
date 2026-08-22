@@ -32,7 +32,7 @@ func skipIfNoRedis(t *testing.T) *Client {
 	t.Cleanup(func() {
 		ctx := context.Background()
 		client.Redis().FlushDB(ctx)
-		client.Close()
+		_ = client.Close()
 	})
 
 	return client

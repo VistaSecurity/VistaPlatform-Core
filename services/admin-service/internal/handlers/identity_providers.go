@@ -20,6 +20,18 @@ import (
 
 var validPlatformProviderTypes = map[string]bool{"google": true, "microsoft": true}
 
+// titleProviderType capitalises a provider type for display. It is only ever
+// called after req.ProviderType has been validated against
+// validPlatformProviderTypes, so the input is a single lower-case ASCII word
+// ("google" / "microsoft") and this is exactly equivalent to the deprecated
+// strings.Title for those inputs.
+func titleProviderType(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
 // purpose: 'signup' = Vista's app for tenant founders; 'admin_login' =
 // staff sign-in to admin-ui. One row per (provider_type, purpose).
 var validPlatformProviderPurposes = map[string]bool{"signup": true, "admin_login": true}
@@ -84,7 +96,7 @@ func ListPlatformIdentityProviders(db *sql.DB) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list identity providers"})
 			return
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		providers := []platformIdPResponse{}
 		for rows.Next() {
 			var p platformIdPResponse
@@ -127,7 +139,7 @@ func CreatePlatformIdentityProvider(db *sql.DB) gin.HandlerFunc {
 		}
 		name := req.ProviderName
 		if name == "" {
-			name = strings.Title(req.ProviderType)
+			name = titleProviderType(req.ProviderType)
 		}
 		scopes := req.Scopes
 		if scopes == "" {

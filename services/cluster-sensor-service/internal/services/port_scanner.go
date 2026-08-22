@@ -147,9 +147,17 @@ func validateNmapTarget(target string) error {
 		return fmt.Errorf("invalid target: must not start with '-'")
 	}
 
-	// Only allow valid hostname characters: alphanumeric, dots, hyphens
+	// Only allow valid hostname characters: alphanumeric, dots, hyphens.
+	// Kept as a positive allowlist — inverting it into a denylist would be the
+	// same predicate but far harder to audit.
+	allowed := func(ch rune) bool {
+		return (ch >= 'a' && ch <= 'z') ||
+			(ch >= 'A' && ch <= 'Z') ||
+			(ch >= '0' && ch <= '9') ||
+			ch == '.' || ch == '-'
+	}
 	for _, ch := range target {
-		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '-') {
+		if !allowed(ch) {
 			return fmt.Errorf("invalid target: contains illegal character %q", ch)
 		}
 	}
@@ -574,7 +582,7 @@ func (ps *PortScanner) fallbackScan(target string, ports []int32, protocols []st
 
 		conn, err := net.DialTimeout("tcp", address, 5*time.Second)
 		if err == nil {
-			conn.Close()
+			_ = conn.Close()
 
 			// Port is open, create findings for each protocol
 			for _, protocol := range protocols {

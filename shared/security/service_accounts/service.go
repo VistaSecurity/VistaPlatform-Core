@@ -160,7 +160,7 @@ func (s *Service) validateTokenLegacyScan(token string) (*models.ServiceAccount,
 	if err != nil {
 		return nil, fmt.Errorf("failed to query service accounts: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var sa models.ServiceAccount

@@ -162,6 +162,47 @@ Sensors and agents are standalone cross-platform binaries. They are in this
 repository and always will be: you should be able to read the code you are
 about to run inside your own network.
 
+## Security
+
+This is a security product, so its own posture is part of the claim.
+
+[![critical CVEs](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FVistaSecurity%2FVistaPlatform-Core%2Fmain%2Fsecurity-scans%2Flatest.json&query=%24.totals.critical&label=critical%20CVEs&color=informational)](security-scans/)
+[![high CVEs](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FVistaSecurity%2FVistaPlatform-Core%2Fmain%2Fsecurity-scans%2Flatest.json&query=%24.totals.high&label=high%20CVEs&color=informational)](security-scans/)
+[![unscanned images](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FVistaSecurity%2FVistaPlatform-Core%2Fmain%2Fsecurity-scans%2Flatest.json&query=%24.totals.images_not_scanned&label=unscanned%20images&color=informational)](security-scans/)
+[![last scanned](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FVistaSecurity%2FVistaPlatform-Core%2Fmain%2Fsecurity-scans%2Flatest.json&query=%24.generated_date&label=last%20scanned&color=informational)](security-scans/)
+
+**[Container scan report](security-scans/)** — every published image is scanned
+nightly with Trivy and the result is committed here, findings and all. The
+counts cover *fixable* CRITICAL and HIGH findings, and an image that could not
+be scanned is reported as unscanned rather than as clean — which is why
+"unscanned images" is a badge and not a footnote. A zero CVE count is only
+meaningful next to it: zero findings across sixteen of eighteen images is not
+the same claim as zero across all eighteen. The "last scanned"
+badge is there on purpose: a vulnerability count with no date on it is not
+evidence of anything.
+
+**[How the platform is built and shipped](docsv4/core/security-posture.md)** —
+tenant isolation through PostgreSQL row-level security, HMAC-signed
+service-to-service calls and optional mesh mTLS, the rule that we collect
+cryptographic *posture* and never key material, keyless cosign signatures with
+SBOM and provenance attestations, and which CI scanners block a merge versus
+which are advisory.
+
+**[Reporting a vulnerability](SECURITY.md)** — please do not open a public
+issue. That page also lists the design tradeoffs we have knowingly accepted,
+including where token revocation fails open and where internal requests have a
+replay window, so you can decide whether they matter to you rather than
+discovering them yourself.
+
+Verify what you pull — images and the chart are cosign-signed, keylessly, and
+logged to Rekor:
+
+```bash
+cosign verify ghcr.io/vistasecurity/auth-service:latest \
+  --certificate-identity-regexp 'https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
 ## Contributing
 
 **Not taking code contributions yet** — see [CONTRIBUTING.md](CONTRIBUTING.md)

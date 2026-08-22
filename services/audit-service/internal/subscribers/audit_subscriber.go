@@ -63,7 +63,9 @@ func (s *AuditSubscriber) Start() error {
 // Stop drains all subscriptions gracefully.
 func (s *AuditSubscriber) Stop() {
 	if s.subscriber != nil {
-		s.subscriber.Drain()
+		if err := s.subscriber.Drain(); err != nil {
+			log.Printf("[AuditSubscriber] Failed to drain subscriptions: %v", err)
+		}
 	}
 }
 

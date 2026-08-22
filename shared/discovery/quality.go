@@ -221,7 +221,7 @@ func queryOCSPResponder(client *http.Client, responderURL string, request []byte
 	if err != nil {
 		return "", ""
 	}
-	defer httpResp.Body.Close()
+	defer func() { _ = httpResp.Body.Close() }()
 
 	if httpResp.StatusCode != http.StatusOK {
 		return "", ""

@@ -241,7 +241,7 @@ func (bp *BatchProcessor) sendSingleRequest(request *BatchRequest) error {
 			return err
 		}
 
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			bp.logger.WithFields(logrus.Fields{

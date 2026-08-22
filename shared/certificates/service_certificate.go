@@ -119,7 +119,7 @@ func (s *ServiceCertificateService) IssueServiceCertificates(serviceName string)
 		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		SubjectKeyId: serverKey.PublicKey.N.Bytes()[:20],
+		SubjectKeyId: serverKey.N.Bytes()[:20],
 	}
 
 	serverCertDER, err := x509.CreateCertificate(rand.Reader, &serverTemplate, caCert, &serverKey.PublicKey, caKey)
@@ -163,7 +163,7 @@ func (s *ServiceCertificateService) IssueServiceCertificates(serviceName string)
 		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		SubjectKeyId: clientKey.PublicKey.N.Bytes()[:20],
+		SubjectKeyId: clientKey.N.Bytes()[:20],
 	}
 
 	clientCertDER, err := x509.CreateCertificate(rand.Reader, &clientTemplate, caCert, &clientKey.PublicKey, caKey)

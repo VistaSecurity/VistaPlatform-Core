@@ -127,17 +127,14 @@ type InterfaceStatEntry struct {
 // SensorConfig represents sensor configuration
 type SensorConfig struct {
 	ReportingInterval int             `json:"reporting_interval"`
-	StorageConfig     StorageConfig   `json:"storage_config"`
 	CaptureConfig     CaptureConfig   `json:"capture_config"`
 	Features          map[string]bool `json:"features"`
 }
 
-// StorageConfig represents storage configuration
-type StorageConfig struct {
-	MaxStorageSize int64 `json:"max_storage_size"`
-	RotationSize   int64 `json:"rotation_size"`
-	RetentionDays  int   `json:"retention_days"`
-}
+// NOTE: there is no StorageConfig here. The control plane may still send a
+// "storage_config" object in update_config payloads (sensor-manager populates
+// one); the sensor ignores it, because it does not persist discoveries. Unknown
+// JSON keys unmarshal away harmlessly, so older control planes stay compatible.
 
 // CaptureConfig represents capture configuration
 type CaptureConfig struct {

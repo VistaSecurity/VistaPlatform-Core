@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 )
@@ -68,7 +69,7 @@ func (d *PIIDetector) loadRules(ctx context.Context) error {
 		// If table doesn't exist yet, return empty rules (will be created by migration)
 		return nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	d.rules = []PIIRule{}
 	for rows.Next() {
@@ -101,8 +102,13 @@ func (d *PIIDetector) DetectAndScrub(ctx context.Context, text string) *PIIDetec
 		RedactionMask: []string{},
 	}
 
-	// Reload rules to ensure we have the latest
-	d.ReloadRules(ctx)
+	// Reload rules to ensure we have the latest. A reload failure leaves the
+	// previously loaded rule set in place, so scrubbing still happens — but it
+	// happens against stale rules, which is worth saying out loud rather than
+	// discarding.
+	if err := d.ReloadRules(ctx); err != nil {
+		log.Printf("[monitoring] WARN: PII rule reload failed, scrubbing with the previously loaded rules: %v", err)
+	}
 
 	scrubbedText := text
 	detectedTypes := make(map[string]bool)

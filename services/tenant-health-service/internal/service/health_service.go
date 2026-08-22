@@ -256,7 +256,7 @@ func (s *HealthService) getPerformanceMetrics(tenantID uuid.UUID) (*PerformanceM
 	if err != nil {
 		return nil, fmt.Errorf("failed to call monitoring-service: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -294,7 +294,7 @@ func (s *HealthService) getSecurityMetrics(tenantID uuid.UUID) (*SecurityMetrics
 	if err != nil {
 		return nil, fmt.Errorf("failed to call auth-service: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -359,7 +359,7 @@ func (s *HealthService) getActivityMetrics(tenantID uuid.UUID) (*ActivityMetrics
 	if err != nil {
 		return nil, fmt.Errorf("failed to call inventory-service: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -397,7 +397,7 @@ func (s *HealthService) getResourceMetrics(tenantID uuid.UUID) (*ResourceMetrics
 	if err != nil {
 		return nil, fmt.Errorf("failed to call resource-tracker-service: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -882,9 +882,10 @@ func (s *HealthService) generateTrendsFromHistory(tenantID uuid.UUID, currentSco
 			}
 		} else {
 			// Simple prediction for limited data
-			if trendDirection == "improving" {
+			switch trendDirection {
+			case "improving":
 				predictedScore = math.Min(100.0, currentScore+trendStrength*5.0)
-			} else if trendDirection == "declining" {
+			case "declining":
 				predictedScore = math.Max(0.0, currentScore-trendStrength*5.0)
 			}
 		}

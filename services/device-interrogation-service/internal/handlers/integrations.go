@@ -594,13 +594,13 @@ func validateIntegrationConfig(integrationType string, config map[string]interfa
 		return awsclient.ValidateConfigMap(config)
 	case "azure":
 		if _, ok := config["tenant_id"]; !ok {
-			return fmt.Errorf("Azure integration requires tenant_id")
+			return fmt.Errorf("missing tenant_id: Azure integration requires it")
 		}
 		if _, ok := config["client_id"]; !ok {
-			return fmt.Errorf("Azure integration requires client_id")
+			return fmt.Errorf("missing client_id: Azure integration requires it")
 		}
 		if _, ok := config["client_secret"]; !ok {
-			return fmt.Errorf("Azure integration requires client_secret")
+			return fmt.Errorf("missing client_secret: Azure integration requires it")
 		}
 	case "gcp":
 		_, hasJSON := config["service_account_json"]

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -56,11 +57,9 @@ func (s *ComplianceService) GetComplianceSummary(ctx context.Context, tenantID *
 	if tenantID != nil {
 		whereClause = fmt.Sprintf("WHERE tenant_id = $%d AND occurred_at >= $%d AND occurred_at <= $%d", argIndex, argIndex+1, argIndex+2)
 		args = []interface{}{*tenantID, startDate, endDate}
-		argIndex += 3
 	} else {
 		whereClause = fmt.Sprintf("WHERE occurred_at >= $%d AND occurred_at <= $%d", argIndex, argIndex+1)
 		args = []interface{}{startDate, endDate}
-		argIndex += 2
 	}
 
 	run := func(db auditQueryer) error {
@@ -111,11 +110,17 @@ func (s *ComplianceService) GetComplianceSummary(ctx context.Context, tenantID *
 
 		// Failed events
 		query = fmt.Sprintf("SELECT COUNT(*) FROM audit.activity_logs %s AND success = false", whereClause)
-		db.QueryRowContext(ctx, query, args...).Scan(&summary.FailedEvents)
+		if err := db.QueryRowContext(ctx, query, args...).Scan(&summary.FailedEvents); err != nil {
+			// A failed count that stays 0 reads as "nothing failed", which is
+			// the opposite of what a query error means.
+			log.Printf("[Compliance] Failed to read failed-event count: %v", err)
+		}
 
 		// Requires attention
 		query = fmt.Sprintf("SELECT COUNT(*) FROM audit.activity_logs %s AND requires_attention = true", whereClause)
-		db.QueryRowContext(ctx, query, args...).Scan(&summary.RequiresAttention)
+		if err := db.QueryRowContext(ctx, query, args...).Scan(&summary.RequiresAttention); err != nil {
+			log.Printf("[Compliance] Failed to read requires-attention count: %v", err)
+		}
 		return nil
 	}
 

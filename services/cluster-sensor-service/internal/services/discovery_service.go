@@ -413,13 +413,14 @@ func (s *DiscoveryService) UpdateJobStatus(jobID, status string, errorMessage *s
 	var query string
 	var args []interface{}
 
-	if status == "running" {
+	switch status {
+	case "running":
 		query = `UPDATE discovery_jobs SET status = $1, started_at = $2, updated_at = $3 WHERE id = $4`
 		args = []interface{}{status, now, now, jobID}
-	} else if status == "completed" || status == "failed" {
+	case "completed", "failed":
 		query = `UPDATE discovery_jobs SET status = $1, completed_at = $2, updated_at = $3, error_message = $4 WHERE id = $5`
 		args = []interface{}{status, now, now, errorMessage, jobID}
-	} else {
+	default:
 		query = `UPDATE discovery_jobs SET status = $1, updated_at = $2 WHERE id = $3`
 		args = []interface{}{status, now, jobID}
 	}

@@ -45,7 +45,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Connect the BYPASSRLS handle (crypto_bypass via BYPASS_DATABASE_URL, falls
 	// back to DATABASE_URL pre-flip) used only by the cross-tenant batch poller.
@@ -84,36 +84,36 @@ func main() {
 		// Check database connection
 		if err := db.Ping(); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprintf(w, `{"status":"unhealthy","error":"database connection failed"}`)
+			_, _ = fmt.Fprint(w, `{"status":"unhealthy","error":"database connection failed"}`)
 			return
 		}
 
 		// Check inventory-service reachability (simple check)
 		if cfg.InventoryServiceURL == "" {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprintf(w, `{"status":"unhealthy","error":"inventory service URL not configured"}`)
+			_, _ = fmt.Fprint(w, `{"status":"unhealthy","error":"inventory service URL not configured"}`)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, healthyJSON())
+		_, _ = fmt.Fprint(w, healthyJSON())
 	})
 
 	// Metrics endpoint (simple version - can be enhanced with Prometheus later)
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprintf(w, "# Discovery Processor Service Metrics\n")
-		fmt.Fprintf(w, "# Poll interval: %d seconds\n", cfg.PollIntervalSeconds)
-		fmt.Fprintf(w, "# Batch size: %d\n", cfg.BatchSize)
-		fmt.Fprintf(w, "# Concurrent batches: %d\n", cfg.ConcurrentBatches)
+		_, _ = fmt.Fprint(w, "# Discovery Processor Service Metrics\n")
+		_, _ = fmt.Fprintf(w, "# Poll interval: %d seconds\n", cfg.PollIntervalSeconds)
+		_, _ = fmt.Fprintf(w, "# Batch size: %d\n", cfg.BatchSize)
+		_, _ = fmt.Fprintf(w, "# Concurrent batches: %d\n", cfg.ConcurrentBatches)
 		// TODO: Add actual metrics (batches processed, findings processed, etc.)
 	})
 
 	// Status endpoint
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{
+		_, _ = fmt.Fprintf(w, `{
 			"service": "discovery-processor-service",
 			"status": "running",
 			"poll_interval_seconds": %d,
@@ -128,20 +128,20 @@ func main() {
 		// Check database connection
 		if err := db.Ping(); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprintf(w, `{"status":"unhealthy","error":"database connection failed"}`)
+			_, _ = fmt.Fprint(w, `{"status":"unhealthy","error":"database connection failed"}`)
 			return
 		}
 
 		// Check inventory-service reachability (simple check)
 		if cfg.InventoryServiceURL == "" {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprintf(w, `{"status":"unhealthy","error":"inventory service URL not configured"}`)
+			_, _ = fmt.Fprint(w, `{"status":"unhealthy","error":"inventory service URL not configured"}`)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, healthyJSON())
+		_, _ = fmt.Fprint(w, healthyJSON())
 	})
 
 	healthServer := &http.Server{

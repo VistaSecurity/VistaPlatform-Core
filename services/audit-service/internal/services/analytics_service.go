@@ -3,7 +3,9 @@ package services
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -176,14 +178,18 @@ func (s *AnalyticsService) GetUserActivitySummary(ctx context.Context, userID uu
 			}
 		}
 
-		// Get last activity
-		db.QueryRowContext(ctx, fmt.Sprintf(`
+		// Get last activity. A user with no activity in range legitimately has
+		// no row, so ErrNoRows leaves LastActivity zero; anything else is a real
+		// failure and must not read as "never active".
+		if err := db.QueryRowContext(ctx, fmt.Sprintf(`
 			SELECT occurred_at
 			FROM audit.activity_logs
 			%s
 			ORDER BY occurred_at DESC
 			LIMIT 1
-		`, userWhereClause), userArgs...).Scan(&summary.LastActivity)
+		`, userWhereClause), userArgs...).Scan(&summary.LastActivity); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[Analytics] Failed to read last activity for user %s: %v", summary.UserID, err)
+		}
 
 		return nil
 	}
@@ -277,7 +283,9 @@ func (s *AnalyticsService) GetAccessPatternAnalysis(ctx context.Context, tenantI
 			FROM audit.activity_logs
 			%s
 		`, whereClause)
-		db.QueryRowContext(ctx, query, args...).Scan(&analysis.TotalUsers, &analysis.ActiveUsers)
+		if err := db.QueryRowContext(ctx, query, args...).Scan(&analysis.TotalUsers, &analysis.ActiveUsers); err != nil {
+			log.Printf("[Analytics] Failed to read user counts: %v", err)
+		}
 
 		// Get events by hour
 		query = fmt.Sprintf(`
@@ -371,7 +379,9 @@ func (s *AnalyticsService) GetAccessPatternAnalysis(ctx context.Context, tenantI
 			FROM audit.activity_logs
 			%s
 		`, whereClause)
-		db.QueryRowContext(ctx, query, args...).Scan(&totalEvents, &failedEvents)
+		if err := db.QueryRowContext(ctx, query, args...).Scan(&totalEvents, &failedEvents); err != nil {
+			log.Printf("[Analytics] Failed to read event totals for failure rate: %v", err)
+		}
 
 		return nil
 	}
@@ -434,7 +444,9 @@ func (s *AnalyticsService) GetComplianceGapAnalysis(ctx context.Context, framewo
 			FROM audit.activity_logs
 			%s
 		`, whereClause)
-		db.QueryRowContext(ctx, query, args...).Scan(&analysis.TotalEvents)
+		if err := db.QueryRowContext(ctx, query, args...).Scan(&analysis.TotalEvents); err != nil {
+			log.Printf("[Analytics] Failed to read total events for framework %q: %v", framework, err)
+		}
 
 		// Get covered categories
 		query = fmt.Sprintf(`

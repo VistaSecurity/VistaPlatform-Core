@@ -205,7 +205,7 @@ func (s *MetricsService) GetPlatformMetricsSummary(start, end time.Time) (*model
 	if err != nil {
 		return nil, fmt.Errorf("failed to query platform metrics: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	summary := &models.PlatformMetricsSummary{
 		StartTime:     start,
@@ -307,16 +307,17 @@ func (s *MetricsService) GetServiceMetrics(serviceName string, window time.Durat
 	// Determine window duration in seconds
 	var windowDuration int
 	var windowStr string
-	if window == time.Minute {
+	switch window {
+	case time.Minute:
 		windowDuration = 60
 		windowStr = "1m"
-	} else if window == time.Hour {
+	case time.Hour:
 		windowDuration = 3600
 		windowStr = "1h"
-	} else if window == 24*time.Hour {
+	case 24 * time.Hour:
 		windowDuration = 86400
 		windowStr = "1d"
-	} else {
+	default:
 		return nil, fmt.Errorf("unsupported window duration: %v", window)
 	}
 
@@ -342,7 +343,7 @@ func (s *MetricsService) GetServiceMetrics(serviceName string, window time.Durat
 	if err != nil {
 		return nil, fmt.Errorf("failed to query service metrics: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	metrics := &models.ServiceMetrics{
 		ServiceName: serviceName,
@@ -431,7 +432,7 @@ func (s *MetricsService) GetServiceMetrics(serviceName string, window time.Durat
 
 	healthRows, err := s.db.Query(healthEventsQuery, serviceName, startTime)
 	if err == nil {
-		defer healthRows.Close()
+		defer func() { _ = healthRows.Close() }()
 		metrics.HealthEvents = []models.ServiceHealthEvent{}
 
 		for healthRows.Next() {
@@ -493,7 +494,7 @@ func (s *MetricsService) GetIncidentHistory(limit int) ([]models.Incident, error
 	if err != nil {
 		return nil, fmt.Errorf("failed to query incident history: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	incidents := []models.Incident{}
 
@@ -548,7 +549,7 @@ func (s *MetricsService) GetUptimeStats() (*models.UptimeStats, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to query services: %w", err)
 	}
-	defer serviceRows.Close()
+	defer func() { _ = serviceRows.Close() }()
 
 	var serviceNames []string
 	for serviceRows.Next() {
@@ -716,7 +717,7 @@ func (s *MetricsService) GetTenantPerformanceSummary(tenantID uuid.UUID) (*model
 		// If resource-tracker is unavailable, return defaults
 		return summary, nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusOK {
 		body, err := io.ReadAll(resp.Body)

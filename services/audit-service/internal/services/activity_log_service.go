@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	stdlog "log"
 	"time"
 
 	"github.com/google/uuid"
@@ -368,15 +369,23 @@ func (s *ActivityLogService) GetActivityLogByID(ctx context.Context, id uuid.UUI
 		return nil, err
 	}
 
-	// Parse JSON fields
+	// Parse JSON fields. A decode failure means the stored JSONB is not the
+	// shape this struct expects — the field stays nil, so surface it rather
+	// than letting "unparseable" read as "the entry had no old/new values".
 	if len(oldValuesJSON) > 0 {
-		json.Unmarshal(oldValuesJSON, &log.OldValues)
+		if err := json.Unmarshal(oldValuesJSON, &log.OldValues); err != nil {
+			stdlog.Printf("[ActivityLog] Failed to decode old_values for log %s: %v", log.ID, err)
+		}
 	}
 	if len(newValuesJSON) > 0 {
-		json.Unmarshal(newValuesJSON, &log.NewValues)
+		if err := json.Unmarshal(newValuesJSON, &log.NewValues); err != nil {
+			stdlog.Printf("[ActivityLog] Failed to decode new_values for log %s: %v", log.ID, err)
+		}
 	}
 	if len(metadataJSON) > 0 {
-		json.Unmarshal(metadataJSON, &log.Metadata)
+		if err := json.Unmarshal(metadataJSON, &log.Metadata); err != nil {
+			stdlog.Printf("[ActivityLog] Failed to decode metadata for log %s: %v", log.ID, err)
+		}
 	}
 	log.ChangedFields = []string(changedFields)
 	log.ComplianceTags = []string(complianceTags)
@@ -412,7 +421,7 @@ func (s *ActivityLogService) GetActivityLogsByIDs(ctx context.Context, ids []uui
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var logs []*models.ActivityLog
 	for rows.Next() {
@@ -434,15 +443,23 @@ func (s *ActivityLogService) GetActivityLogsByIDs(ctx context.Context, ids []uui
 			continue
 		}
 
-		// Parse JSON fields
+		// Parse JSON fields. See GetActivityLogByID: a decode failure leaves the
+		// field nil, which is indistinguishable from "there were no values", so
+		// it has to be surfaced.
 		if len(oldValuesJSON) > 0 {
-			json.Unmarshal(oldValuesJSON, &log.OldValues)
+			if err := json.Unmarshal(oldValuesJSON, &log.OldValues); err != nil {
+				stdlog.Printf("[ActivityLog] Failed to decode old_values for log %s: %v", log.ID, err)
+			}
 		}
 		if len(newValuesJSON) > 0 {
-			json.Unmarshal(newValuesJSON, &log.NewValues)
+			if err := json.Unmarshal(newValuesJSON, &log.NewValues); err != nil {
+				stdlog.Printf("[ActivityLog] Failed to decode new_values for log %s: %v", log.ID, err)
+			}
 		}
 		if len(metadataJSON) > 0 {
-			json.Unmarshal(metadataJSON, &log.Metadata)
+			if err := json.Unmarshal(metadataJSON, &log.Metadata); err != nil {
+				stdlog.Printf("[ActivityLog] Failed to decode metadata for log %s: %v", log.ID, err)
+			}
 		}
 		log.ChangedFields = []string(changedFields)
 		log.ComplianceTags = []string(complianceTags)
@@ -522,11 +539,9 @@ func (s *ActivityLogService) GetActivityLogsSummary(ctx context.Context, tenantI
 	if tenantID != nil {
 		whereClause = fmt.Sprintf("WHERE tenant_id = $%d AND occurred_at >= $%d AND occurred_at <= $%d", argIndex, argIndex+1, argIndex+2)
 		args = []interface{}{*tenantID, startDate, endDate}
-		argIndex += 3
 	} else {
 		whereClause = fmt.Sprintf("WHERE occurred_at >= $%d AND occurred_at <= $%d", argIndex, argIndex+1)
 		args = []interface{}{startDate, endDate}
-		argIndex += 2
 	}
 
 	run := func(db activityQueryer) error {

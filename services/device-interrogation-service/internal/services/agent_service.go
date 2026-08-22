@@ -78,7 +78,7 @@ func (s *AgentService) RegisterDeviceAgentBootstrap(ctx context.Context, req mod
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var tenantID uuid.UUID
 	var profile string
@@ -488,7 +488,7 @@ func (s *AgentService) ListAllAgents(ctx context.Context, tenantID string) ([]*m
 	if err != nil {
 		return nil, fmt.Errorf("failed to list all agents: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var agents []*models.AdminAgent
 	for rows.Next() {

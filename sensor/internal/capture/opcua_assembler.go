@@ -179,7 +179,7 @@ func (s *OPCUAStream) processBuffer() {
 		// UA Binary — drop the buffer.
 		typ := string(view[0:3])
 		flag := view[3]
-		if !(flag == 'F' || flag == 'C' || flag == 'A') || !isOPCUAType(typ) {
+		if (flag != 'F' && flag != 'C' && flag != 'A') || !isOPCUAType(typ) {
 			s.state.buffer = nil
 			return
 		}

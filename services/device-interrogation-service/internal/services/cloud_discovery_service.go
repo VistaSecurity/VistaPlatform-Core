@@ -274,9 +274,10 @@ func (s *CloudDiscoveryService) discoverLoadBalancers(ctx context.Context, tenan
 
 				// Create device
 				deviceType := "aws_alb"
-				if lbType == "nlb" {
+				switch lbType {
+				case "nlb":
 					deviceType = "aws_nlb"
-				} else if lbType == "elb" {
+				case "elb":
 					deviceType = "aws_elb"
 				}
 

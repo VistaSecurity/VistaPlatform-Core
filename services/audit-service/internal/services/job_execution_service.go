@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	stdlog "log"
 	"strings"
 	"time"
 
@@ -260,12 +261,17 @@ func (s *JobExecutionService) GetJobExecutionLogs(ctx context.Context, filters m
 				return err
 			}
 
-			// Parse JSON fields
+			// Parse JSON fields. A decode failure must not read as "this job
+			// recorded no error details".
 			if len(errorDetailsJSON) > 0 {
-				json.Unmarshal(errorDetailsJSON, &log.ErrorDetails)
+				if err := json.Unmarshal(errorDetailsJSON, &log.ErrorDetails); err != nil {
+					stdlog.Printf("[JobExecution] Failed to decode error_details for job log %s: %v", log.ID, err)
+				}
 			}
 			if len(metadataJSON) > 0 {
-				json.Unmarshal(metadataJSON, &log.Metadata)
+				if err := json.Unmarshal(metadataJSON, &log.Metadata); err != nil {
+					stdlog.Printf("[JobExecution] Failed to decode metadata for job log %s: %v", log.ID, err)
+				}
 			}
 
 			logs = append(logs, log)

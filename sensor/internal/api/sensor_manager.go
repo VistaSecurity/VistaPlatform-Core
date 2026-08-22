@@ -141,7 +141,7 @@ func (c *SensorManagerClient) Register() (*models.SensorConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to send registration request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -278,7 +278,7 @@ func (c *SensorManagerClient) SubmitDiscoveries(discoveries []*models.CryptoDisc
 	if err != nil {
 		return fmt.Errorf("failed to send discoveries: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -307,7 +307,7 @@ func (c *SensorManagerClient) ReportHealth(health *models.SensorHealth) error {
 	if err != nil {
 		return fmt.Errorf("failed to send health report: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -329,7 +329,7 @@ func (c *SensorManagerClient) GetConfig() (*models.SensorConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get config: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

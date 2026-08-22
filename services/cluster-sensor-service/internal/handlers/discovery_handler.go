@@ -227,9 +227,10 @@ func (h *DiscoveryHandler) GetJobStatus(c *gin.Context) {
 
 	// Calculate progress (simplified)
 	progress := 0
-	if job.Status == "running" {
+	switch job.Status {
+	case "running":
 		progress = 50
-	} else if job.Status == "completed" {
+	case "completed":
 		progress = 100
 	}
 

@@ -403,19 +403,6 @@ func (h *DeviceHandlers) InterrogateDevice(c *gin.Context) {
 		return
 	}
 
-	// Get user ID from context (if available)
-	userIDVal, exists := c.Get("userID")
-	userID := uuid.Nil
-	if exists {
-		if uid, ok := userIDVal.(uuid.UUID); ok {
-			userID = uid
-		}
-	}
-	// If no user ID, use a system user ID (for device-initiated jobs)
-	if userID == uuid.Nil {
-		userID = uuid.MustParse("00000000-0000-0000-0000-000000000000")
-	}
-
 	// Get device to check if it exists and get device type
 	device, err := h.deviceService.GetDevice(c.Request.Context(), tenantID, deviceID)
 	if err != nil {
@@ -683,18 +670,6 @@ func (h *DeviceHandlers) BulkInterrogateDevices(c *gin.Context) {
 	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
 		return
-	}
-
-	// Get user ID from context (if available)
-	userIDVal, exists := c.Get("userID")
-	userID := uuid.Nil
-	if exists {
-		if uid, ok := userIDVal.(uuid.UUID); ok {
-			userID = uid
-		}
-	}
-	if userID == uuid.Nil {
-		userID = uuid.MustParse("00000000-0000-0000-0000-000000000000")
 	}
 
 	var req BulkInterrogateRequest

@@ -34,12 +34,36 @@ COPY frontend-v2/ ./frontend-v2/
 RUN npm ci
 RUN npm run build -w frontend-v2
 
-# ---- caddy build: compile Caddy on Go 1.26.6 ----
+# ---- caddy build: compile Caddy on Go 1.26.6 with patched dependencies ----
 # The stock caddy:2-alpine binary (even at 2.11.4) is compiled with Go stdlib
 # 1.26.3, which Trivy still flags (CVE-2026-27145/-42504/-42507). Rebuild the
 # Caddy binary ourselves on the repo's Go 1.26.6 toolchain so the runtime carries
 # stdlib 1.26.6 (also clears GO-2026-5856/CVE-2026-42505). Pinned to Caddy v2.11.4
-# (its own CVE fix, and its go.mod already pulls patched x/crypto/x/net/go-jose).
+# (its own CVE fix).
+#
+# Why a wrapper module rather than `go install caddy@<newer>` (added 2026-08):
+# v2.11.4 IS still the latest Caddy release, so there is no version to bump to —
+# but three of the module versions its go.mod selects have been CVE'd since it
+# was cut, and the nightly scan of the published images caught them:
+#   golang.org/x/net       v0.55.0 → 0.56.0  CVE-2026-46600
+#   golang.org/x/text      v0.37.0 → 0.39.0  CVE-2026-56852
+#   google.golang.org/grpc v1.81.0 → 1.82.1  GHSA-hrxh-6v49-42gf
+# `go install pkg@version` deliberately ignores any local go.mod, so it offers no
+# lever to raise a transitive dependency: the only way to upgrade one is to build
+# from a module we control. The three-line main package below is exactly what
+# xcaddy generates for a custom build — caddycmd.Main() plus a blank import of
+# modules/standard.
+#
+# That blank import is LOAD-BEARING. It is what registers file_server,
+# reverse_proxy, encode, header, try_files and respond; a Caddy built without it
+# compiles and runs but rejects both Caddyfiles at load time. If you touch this
+# stage, re-run the container and confirm it actually serves — `caddy version`
+# alone would still pass.
+#
+# The pins ratchet UP only. Each `go get` below raises a module the caddy go.mod
+# would otherwise select at a vulnerable version; MVS takes the max, so these are
+# floors, never downgrades. When a future Caddy release ships these versions or
+# newer, the corresponding line becomes a no-op and can be dropped.
 #
 # GOTOOLCHAIN names the EXACT patch, for the same reason the service Dockerfiles
 # do — but note the reason is NOT go.work compatibility. This stage compiles an
@@ -55,7 +79,30 @@ RUN npm run build -w frontend-v2
 # regardless of which base CI substitutes, and still refuses 1.27.
 FROM ${GO_BUILDER_IMAGE} AS caddybuild
 ENV GOTOOLCHAIN=go1.26.6 CGO_ENABLED=0
-RUN go install github.com/caddyserver/caddy/v2/cmd/caddy@v2.11.4
+WORKDIR /caddybuild
+RUN printf '%s\n' \
+      'package main' \
+      '' \
+      'import (' \
+      '	caddycmd "github.com/caddyserver/caddy/v2/cmd"' \
+      '' \
+      '	// Registers the standard Caddy modules (file_server, reverse_proxy,' \
+      '	// encode, header, try_files, respond) that both Caddyfiles use.' \
+      '	_ "github.com/caddyserver/caddy/v2/modules/standard"' \
+      ')' \
+      '' \
+      'func main() { caddycmd.Main() }' \
+    > main.go \
+ && go mod init vistaplatform.local/caddybuild
+# `go mod tidy` is required, not cosmetic: module-graph pruning leaves the
+# go.sum entries for Caddy's own optional-module imports unresolved after a
+# bare `go get`, and the build fails on ~10 "missing go.sum entry" errors.
+RUN go get github.com/caddyserver/caddy/v2@v2.11.4 \
+ && go get golang.org/x/net@v0.56.0 \
+           golang.org/x/text@v0.39.0 \
+           google.golang.org/grpc@v1.82.1 \
+ && go mod tidy
+RUN go build -o /go/bin/caddy .
 
 # ---- runtime: Caddy static server (mirrors web-ui/Dockerfile.prod) ----
 # Pinned by digest to defeat tag-mover attacks on docker.io/library/caddy.
@@ -66,7 +113,29 @@ RUN go install github.com/caddyserver/caddy/v2/cmd/caddy@v2.11.4
 # runtime Caddy binary is then replaced with the Go-1.26.6 build above to clear
 # the residual stdlib CVEs. See
 # docsv4/internal/developer/security/2026-07-frontend-caddy-cve-remediation.md.
+#
+# The digest is UNCHANGED at 2026-08 and that is deliberate: `caddy:2-alpine` has
+# not been rebuilt since 2026-06-24, so the tag still resolves to exactly this
+# digest and there is no newer one to bump to. The Alpine package CVEs it now
+# carries are cleared in the layer below instead.
 FROM caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+
+# Alpine package currency + surface removal.
+#
+# `apk upgrade` clears the OS-package CVEs this base accumulated while upstream
+# did not rebuild it — at 2026-08 that is c-ares 1.34.6-r0 (CVE-2026-33630) and
+# curl/libcurl 8.19.0-r0 (CVE-2026-5773, CVE-2026-6276). /etc/apk/repositories
+# pins v3.23, so this is a patch-level upgrade within the base's own Alpine
+# branch; it can never silently jump the image to a new Alpine release.
+#
+# Then delete curl outright. Nothing in this image uses it — Caddy is a static
+# Go binary, the HEALTHCHECK below uses busybox wget, and the chart's probes are
+# httpGet. It has no reverse dependencies, so `apk del` cascades away libcurl,
+# c-ares, nghttp2, brotli, zstd, libidn2 and libunistring with it (32 → 23
+# packages). Upgrading alone would have fixed today's five findings, but curl is
+# a high-churn CVE surface that this image cannot use: removing it retires the
+# whole class instead of re-running the version race every quarter.
+RUN apk --no-cache upgrade && apk --no-cache del curl
 
 # Swap in the Go-1.26.6-compiled Caddy binary (stdlib 1.26.6, patched deps).
 # Unlike the stock caddy:2-alpine binary, this one carries NO file capabilities,

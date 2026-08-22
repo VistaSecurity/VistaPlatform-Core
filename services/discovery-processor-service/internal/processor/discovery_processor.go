@@ -120,7 +120,9 @@ func (p *DiscoveryProcessor) Start() error {
 func (p *DiscoveryProcessor) Stop() {
 	close(p.stopChan)
 	if p.subscriber != nil {
-		p.subscriber.Drain()
+		if err := p.subscriber.Drain(); err != nil {
+			log.Printf("Discovery processor: draining NATS subscriber failed: %v", err)
+		}
 	}
 	if p.natsClient != nil {
 		p.natsClient.Close()

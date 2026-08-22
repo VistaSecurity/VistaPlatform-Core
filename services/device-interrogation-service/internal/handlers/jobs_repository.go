@@ -246,7 +246,7 @@ func (r *jobRepository) ListAdminJobs(ctx context.Context, f JobListFilters) ([]
 	if err != nil {
 		return nil, 0, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	jobs := make([]AdminInterrogationJob, 0)
 	for rows.Next() {

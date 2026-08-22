@@ -46,7 +46,9 @@ func (s *DiscoverySubscriber) Start() error {
 // Stop drains all subscriptions gracefully.
 func (s *DiscoverySubscriber) Stop() {
 	if s.subscriber != nil {
-		s.subscriber.Drain()
+		if err := s.subscriber.Drain(); err != nil {
+			log.Printf("[DiscoverySubscriber] Failed to drain subscriptions: %v", err)
+		}
 	}
 }
 

@@ -173,9 +173,11 @@ func (s *TicketService) Create(tenantID, createdBy uuid.UUID, input models.Creat
 		return nil, fmt.Errorf("commit tx: %w", err)
 	}
 
-	// Publish notification if assigned on creation
+	// Publish notification if assigned on creation. Best-effort — the ticket is
+	// already committed, so we discard the error (publishNotification logs
+	// internally). Only the due-date sweep inspects the return value.
 	if result.AssignedTo != nil {
-		s.publishNotification(result.TenantID, "ticket_assigned",
+		_ = s.publishNotification(result.TenantID, "ticket_assigned",
 			fmt.Sprintf("Ticket assigned: %s", result.Title),
 			fmt.Sprintf("You have been assigned ticket \"%s\" (priority: %s)", result.Title, result.Priority),
 			result)
@@ -315,21 +317,23 @@ func (s *TicketService) Update(tenantID, ticketID uuid.UUID, input models.Update
 		return nil, fmt.Errorf("commit tx: %w", err)
 	}
 
-	// Publish notifications for relevant changes
+	// Publish notifications for relevant changes. Best-effort — the update is
+	// already committed, so we discard the errors (publishNotification logs
+	// internally).
 	if input.AssignedTo != nil && *input.AssignedTo != "" {
 		existingAssignee := ""
 		if existing.AssignedTo != nil {
 			existingAssignee = existing.AssignedTo.String()
 		}
 		if *input.AssignedTo != existingAssignee {
-			s.publishNotification(result.TenantID, "ticket_assigned",
+			_ = s.publishNotification(result.TenantID, "ticket_assigned",
 				fmt.Sprintf("Ticket assigned: %s", result.Title),
 				fmt.Sprintf("You have been assigned ticket \"%s\" (priority: %s)", result.Title, result.Priority),
 				result)
 		}
 	}
 	if input.Status != nil && *input.Status != existing.Status {
-		s.publishNotification(result.TenantID, "ticket_status_changed",
+		_ = s.publishNotification(result.TenantID, "ticket_status_changed",
 			fmt.Sprintf("Ticket status changed: %s", result.Title),
 			fmt.Sprintf("Ticket \"%s\" status changed from %s to %s", result.Title, existing.Status, *input.Status),
 			result)
@@ -808,10 +812,11 @@ func (s *TicketService) AddComment(tenantID, ticketID, authorID uuid.UUID, conte
 		return nil, fmt.Errorf("commit tx: %w", err)
 	}
 
-	// Publish notification for comment
+	// Publish notification for comment. Best-effort — the comment is already
+	// committed, so we discard the error (publishNotification logs internally).
 	ticket, _ := s.GetByID(tenantID, ticketID)
 	if ticket != nil {
-		s.publishNotification(tenantID, "ticket_comment_added",
+		_ = s.publishNotification(tenantID, "ticket_comment_added",
 			fmt.Sprintf("New comment on ticket: %s", ticket.Title),
 			fmt.Sprintf("A new comment was added to ticket \"%s\"", ticket.Title),
 			ticket)

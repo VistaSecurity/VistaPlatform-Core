@@ -36,7 +36,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Connect the BYPASSRLS (crypto_bypass) handle used by the deliberately
 	// cross-tenant paths annotated `// RLS: cross-tenant — runs on the bypass

@@ -27,7 +27,7 @@ func TestBuildSensorDiscoveryMetadata_KeyContract(t *testing.T) {
 		},
 	}
 
-	meta := buildSensorDiscoveryMetadata(&deviceID, asset)
+	meta := buildSensorDiscoveryMetadata(&deviceID, nil, asset)
 
 	if got := meta["discovery_method"]; got != "device_interrogation" {
 		t.Errorf("discovery_method = %v, want device_interrogation", got)
@@ -50,6 +50,34 @@ func TestBuildSensorDiscoveryMetadata_KeyContract(t *testing.T) {
 	}
 	if certs[0]["subject_dn"] != "CN=vip.example.com" {
 		t.Errorf("certificate subject_dn = %v", certs[0]["subject_dn"])
+	}
+}
+
+func TestBuildSensorDiscoveryMetadata_CloudJobsUseCloudAPIMarkers(t *testing.T) {
+	integrationID := uuid.New()
+	asset := models.DiscoveredAsset{
+		Hostname: "bucket.example.com",
+		Metadata: map[string]interface{}{
+			"cloud_provider":   "aws",
+			"cloud_region":     "us-east-1",
+			"cloud_account_id": "123456789012",
+			"vpc_id":           "vpc-123",
+		},
+	}
+
+	meta := buildSensorDiscoveryMetadata(nil, &integrationID, asset)
+
+	if got := meta["discovery_method"]; got != "cloud_api" {
+		t.Fatalf("discovery_method = %v, want cloud_api so downstream approval treats scheduled cloud like interactive cloud", got)
+	}
+	if got := meta["integration_id"]; got != integrationID.String() {
+		t.Errorf("integration_id = %v, want %s", got, integrationID)
+	}
+	if got := meta["cloud_provider"]; got != "aws" {
+		t.Errorf("cloud_provider = %v, want aws", got)
+	}
+	if got := meta["cloud_region"]; got != "us-east-1" {
+		t.Errorf("cloud_region = %v, want us-east-1", got)
 	}
 }
 

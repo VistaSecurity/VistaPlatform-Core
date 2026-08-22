@@ -9,7 +9,9 @@ func TestGetEnvIfPresent(t *testing.T) {
 	const key = "TEST_GET_ENV_IF_PRESENT"
 
 	t.Run("unset uses fallback", func(t *testing.T) {
-		os.Unsetenv(key)
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("failed to unset %s: %v", key, err)
+		}
 		if got := GetEnvIfPresent(key, "fallback"); got != "fallback" {
 			t.Fatalf("got %q, want fallback", got)
 		}

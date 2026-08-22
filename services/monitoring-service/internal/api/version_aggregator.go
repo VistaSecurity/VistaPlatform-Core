@@ -208,7 +208,7 @@ func (a *VersionAggregator) probe(ctx context.Context, name, baseURL string) Ser
 		row.Error = err.Error()
 		return row
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		row.Error = "http " + resp.Status

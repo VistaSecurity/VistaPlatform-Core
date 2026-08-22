@@ -471,7 +471,7 @@ func (cm *ChannelManager) GetPlatformChannels() ([]models.PlatformNotificationCh
 	if err != nil {
 		return nil, fmt.Errorf("failed to query platform channels: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var channel models.PlatformNotificationChannel
@@ -599,7 +599,7 @@ func (cm *ChannelManager) GetPlatformChannelsByIDs(channelIDs []uuid.UUID) ([]mo
 	if err != nil {
 		return nil, fmt.Errorf("failed to query channels: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var channels []models.PlatformNotificationChannel
 	for rows.Next() {

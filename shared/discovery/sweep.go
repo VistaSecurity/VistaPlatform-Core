@@ -243,7 +243,7 @@ func (p *Prober) ScanOpenPorts(host string, ports []int, concurrency int) []int 
 			if err != nil {
 				return
 			}
-			conn.Close()
+			_ = conn.Close()
 			mu.Lock()
 			open = append(open, pt)
 			mu.Unlock()

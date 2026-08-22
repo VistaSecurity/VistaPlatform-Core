@@ -131,7 +131,9 @@ func (w *PlatformAgentWorker) Start() {
 func (w *PlatformAgentWorker) Stop() {
 	w.cancel()
 	if w.subscriber != nil {
-		w.subscriber.Drain()
+		if err := w.subscriber.Drain(); err != nil {
+			log.Printf("Platform agent worker: draining NATS subscriber failed: %v", err)
+		}
 	}
 	if w.natsClient != nil {
 		w.natsClient.Close()
@@ -326,6 +328,7 @@ func (w *PlatformAgentWorker) executeCloudDiscovery(ctx context.Context, job *mo
 		for _, cfg := range extractCryptoConfigs(device.Metadata) {
 			asset := w.convertCryptoConfigToAsset(device, cfg)
 			if asset != nil {
+				annotateCloudAssetMetadata(asset, *device, cloudProvider, integrationID)
 				assets = append(assets, *asset)
 			}
 		}
@@ -482,4 +485,20 @@ func (w *PlatformAgentWorker) convertCryptoConfigToAsset(device *models.Device, 
 	}
 
 	return asset
+}
+
+func annotateCloudAssetMetadata(asset *models.DiscoveredAsset, device models.Device, cloudProvider string, integrationID uuid.UUID) {
+	if asset == nil {
+		return
+	}
+	if asset.Metadata == nil {
+		asset.Metadata = make(map[string]interface{})
+	}
+	if cloudProvider != "" {
+		asset.Metadata["cloud_provider"] = cloudProvider
+	}
+	if region := cloudRegionForDevice(device); region != "" {
+		asset.Metadata["cloud_region"] = region
+	}
+	asset.Metadata["integration_id"] = integrationID.String()
 }

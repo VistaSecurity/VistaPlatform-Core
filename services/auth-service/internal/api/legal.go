@@ -41,7 +41,7 @@ func fetchCurrentLegalDocuments(ctx context.Context, db *sql.DB) ([]legalDocumen
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var docs []legalDocument
 	for rows.Next() {
 		var d legalDocument
@@ -73,7 +73,7 @@ func pendingLegalForUser(ctx context.Context, db *sql.DB, userID uuid.UUID) ([]l
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var docs []legalDocument
 	for rows.Next() {
 		var d legalDocument

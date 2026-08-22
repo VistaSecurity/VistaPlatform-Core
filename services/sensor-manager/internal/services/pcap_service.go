@@ -152,7 +152,8 @@ func (s *PcapService) ListJobs(tenantID uuid.UUID, page, limit int, status strin
 	if status != "" {
 		countQuery += fmt.Sprintf(" AND status = $%d", argIdx)
 		args = append(args, status)
-		argIdx++
+		// No further placeholders are appended to countQuery (unlike dataQuery,
+		// which goes on to bind LIMIT/OFFSET), so argIdx is not advanced here.
 	}
 
 	// Data query

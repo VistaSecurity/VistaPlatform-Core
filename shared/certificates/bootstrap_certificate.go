@@ -98,7 +98,7 @@ func (s *BootstrapCertificateService) IssueBootstrapCertificate(serviceName stri
 		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		SubjectKeyId: serviceKey.PublicKey.N.Bytes()[:20], // Use first 20 bytes of modulus
+		SubjectKeyId: serviceKey.N.Bytes()[:20], // Use first 20 bytes of modulus
 	}
 
 	// Sign the certificate

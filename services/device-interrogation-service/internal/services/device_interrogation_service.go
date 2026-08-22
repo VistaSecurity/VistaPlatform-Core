@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/google/uuid"
@@ -45,6 +46,17 @@ func NewDeviceInterrogationService(db, bypassDB *sql.DB, masterKey string) *Devi
 		discoveryIntegration: NewDiscoveryIntegrationService(db, bypassDB),
 		resultProcessor:      NewResultProcessor(db, bypassDB),
 		registry:             di.NewRegistry(),
+	}
+}
+
+// markJobFailed stamps a discovery job "failed" with the given reason. The
+// caller is always on its way out with an error that carries the same reason,
+// so a failure here loses the annotation on the job row, not the signal — but
+// it does mean the row keeps whatever status it had (typically "running"), so
+// it is logged rather than discarded.
+func markJobFailed(ctx context.Context, integration *DiscoveryIntegrationService, jobID uuid.UUID, reason string) {
+	if err := integration.UpdateJobStatus(ctx, jobID, "failed", &reason); err != nil {
+		log.Printf("device-interrogation: failed to mark job %s failed (%q) — the job row may stay in its previous status: %v", jobID, reason, err)
 	}
 }
 
@@ -95,7 +107,7 @@ func (s *DeviceInterrogationService) InterrogateDevice(
 		[]int32{443, 500, 4500},
 	)
 	if err != nil {
-		s.discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr("Failed to create discovery target"))
+		markJobFailed(ctx, s.discoveryIntegration, jobID, "Failed to create discovery target")
 		return uuid.Nil, 0, fmt.Errorf("failed to create discovery target: %w", err)
 	}
 
@@ -103,7 +115,7 @@ func (s *DeviceInterrogationService) InterrogateDevice(
 	username, password, baseURL, insecureSkipVerify, err := s.getDeviceCredentials(ctx, tenantID, device)
 	if err != nil {
 		s.updateDeviceError(ctx, tenantID, deviceID, err.Error())
-		s.discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(err.Error()))
+		markJobFailed(ctx, s.discoveryIntegration, jobID, err.Error())
 		return uuid.Nil, 0, fmt.Errorf("failed to get credentials: %w", err)
 	}
 	coreDevice := buildCoreDeviceInfo(device, baseURL)
@@ -117,7 +129,7 @@ func (s *DeviceInterrogationService) InterrogateDevice(
 
 	interrogator, err := s.registry.Get(device.DeviceType)
 	if err != nil {
-		s.discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(fmt.Sprintf("Unsupported device type: %s", device.DeviceType)))
+		markJobFailed(ctx, s.discoveryIntegration, jobID, fmt.Sprintf("Unsupported device type: %s", device.DeviceType))
 		return uuid.Nil, 0, fmt.Errorf("unsupported device type: %s", device.DeviceType)
 	}
 
@@ -139,14 +151,14 @@ func (s *DeviceInterrogationService) InterrogateDevice(
 		// Best-effort: the caller receives the same reason via the returned
 		// error below, so a failure to stamp the job here loses annotation, not
 		// the signal. Matches the sibling failure paths in this function.
-		_ = s.discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(reason))
+		markJobFailed(ctx, s.discoveryIntegration, jobID, reason)
 		return uuid.Nil, 0, fmt.Errorf("%s: %w", reason, err)
 	}
 
 	result, err := interrogator.Interrogate(ctx, coreDevice, coreCreds)
 	if err != nil {
 		s.updateDeviceError(ctx, tenantID, deviceID, err.Error())
-		s.discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(err.Error()))
+		markJobFailed(ctx, s.discoveryIntegration, jobID, err.Error())
 		return uuid.Nil, 0, fmt.Errorf("device interrogation failed: %w", err)
 	}
 
@@ -263,7 +275,7 @@ func (s *DeviceInterrogationService) materializeInterrogatedAsset(
 	}
 
 	if err := s.resultProcessor.writeSensorDiscovery(
-		ctx, systemSensorID, tenantID, &deviceID, batchID,
+		ctx, systemSensorID, tenantID, &deviceID, nil, batchID,
 		discovered, certFlags, ocspStatus, ocspDetail,
 	); err != nil {
 		fmt.Printf("Warning: failed to write sensor discovery for device %s: %v\n", deviceID, err)
@@ -629,7 +641,7 @@ func (s *DeviceInterrogationService) interrogateDatabase(
 	finding, err := di.InterrogateDatabase(ctx, coreDevice, coreCreds)
 	if err != nil {
 		s.updateDeviceError(ctx, tenantID, device.ID, err.Error())
-		s.discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(err.Error()))
+		markJobFailed(ctx, s.discoveryIntegration, jobID, err.Error())
 		return uuid.Nil, 0, fmt.Errorf("database interrogation failed: %w", err)
 	}
 
@@ -642,7 +654,7 @@ func (s *DeviceInterrogationService) interrogateDatabase(
 
 	dbService := NewDatabaseInterrogationService(s.db)
 	if err := dbService.StoreDatabaseEncryptionFinding(ctx, tenantID, &device.ID, finding); err != nil {
-		s.discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(err.Error()))
+		markJobFailed(ctx, s.discoveryIntegration, jobID, err.Error())
 		return uuid.Nil, 0, fmt.Errorf("failed to store database encryption finding: %w", err)
 	}
 
@@ -679,7 +691,9 @@ func (s *DeviceInterrogationService) interrogateDatabase(
 	}
 
 	s.updateDeviceInterrogationTime(ctx, tenantID, device.ID)
-	s.discoveryIntegration.MarkJobCompleted(ctx, jobID)
+	if err := s.discoveryIntegration.MarkJobCompleted(ctx, jobID); err != nil {
+		log.Printf("device-interrogation: failed to mark job %s completed — the job row may stay 'running': %v", jobID, err)
+	}
 	// One database finding per interrogation.
 	return jobID, 1, nil
 }

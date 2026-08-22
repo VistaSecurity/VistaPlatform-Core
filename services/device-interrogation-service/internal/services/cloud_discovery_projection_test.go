@@ -143,3 +143,25 @@ func TestCloudRegionForDevice(t *testing.T) {
 		})
 	}
 }
+
+func TestAnnotateCloudAssetMetadata_CarriesScheduledCloudContext(t *testing.T) {
+	integrationID := uuid.New()
+	device := models.Device{
+		ID:         uuid.New(),
+		DeviceType: "aws_alb",
+		Metadata:   models.JSONB{"region": "us-west-2"},
+	}
+	asset := &models.DiscoveredAsset{}
+
+	annotateCloudAssetMetadata(asset, device, "aws", integrationID)
+
+	if got := asset.Metadata["cloud_provider"]; got != "aws" {
+		t.Errorf("cloud_provider = %v, want aws", got)
+	}
+	if got := asset.Metadata["cloud_region"]; got != "us-west-2" {
+		t.Errorf("cloud_region = %v, want us-west-2", got)
+	}
+	if got := asset.Metadata["integration_id"]; got != integrationID.String() {
+		t.Errorf("integration_id = %v, want %s", got, integrationID)
+	}
+}

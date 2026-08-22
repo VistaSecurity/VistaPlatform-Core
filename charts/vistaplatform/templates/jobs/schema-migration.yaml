@@ -9,6 +9,24 @@ Keep ALL pod-template content inside this define.
 */}}
 {{- define "vistaplatform.schemaMigration.podTemplate" }}
 {{- $schemaHash := .Files.Get "files/schema/schema.sql" | sha256sum | trunc 10 }}
+{{/*
+The completion marker. seed-data's init container blocks until the row for this
+schema hash exists, so the table is a sequencing barrier first and foremost.
+
+It also records WHICH RELEASE wrote the schema. The hash alone identifies the
+file contents but is not ordered and means nothing to a human, so it cannot
+answer the first question any upgrade bug raises: "what version built this
+database?" Since the repository went public that question is asked about
+databases we cannot inspect, by people reporting a wedged `helm upgrade`, and a
+content hash is not an answer they can act on. app_version/chart_version are.
+
+The two ALTERs make the columns land on installs whose table predates them —
+`ADD COLUMN IF NOT EXISTS` is idempotent and both columns are nullable, so
+there is nothing to backfill and no way for the statement to fail on existing
+rows. Defined once here because the SQL is issued from both the in-cluster and
+external-database branches below, which previously carried it verbatim twice.
+*/}}
+{{- $markerSQL := printf "CREATE TABLE IF NOT EXISTS public.schema_migration_status (schema_hash text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now()); ALTER TABLE public.schema_migration_status ADD COLUMN IF NOT EXISTS app_version text; ALTER TABLE public.schema_migration_status ADD COLUMN IF NOT EXISTS chart_version text; INSERT INTO public.schema_migration_status (schema_hash, app_version, chart_version) VALUES ('%s', '%s', '%s') ON CONFLICT (schema_hash) DO UPDATE SET applied_at = now(), app_version = EXCLUDED.app_version, chart_version = EXCLUDED.chart_version;" $schemaHash .Chart.AppVersion .Chart.Version }}
     metadata:
       labels:
         {{- include "vistaplatform.labels" . | nindent 8 }}
@@ -72,16 +90,16 @@ Keep ALL pod-template content inside this define.
               done
               echo "Applying schema (hash: {{ $schemaHash }})..."
               psql -v ON_ERROR_STOP=1 -f /schema/schema.sql
-              echo "Recording schema-migration completion marker..."
-              psql -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS public.schema_migration_status (schema_hash text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now()); INSERT INTO public.schema_migration_status (schema_hash) VALUES ('{{ $schemaHash }}') ON CONFLICT (schema_hash) DO UPDATE SET applied_at = now();"
+              echo "Recording schema-migration completion marker (app {{ .Chart.AppVersion }}, chart {{ .Chart.Version }})..."
+              psql -v ON_ERROR_STOP=1 -c "{{ $markerSQL }}"
               {{- else }}
               until pg_isready -d "$DATABASE_URL"; do
                 sleep 2
               done
               echo "Applying schema (hash: {{ $schemaHash }})..."
               psql -v ON_ERROR_STOP=1 -d "$DATABASE_URL" -f /schema/schema.sql
-              echo "Recording schema-migration completion marker..."
-              psql -v ON_ERROR_STOP=1 -d "$DATABASE_URL" -c "CREATE TABLE IF NOT EXISTS public.schema_migration_status (schema_hash text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now()); INSERT INTO public.schema_migration_status (schema_hash) VALUES ('{{ $schemaHash }}') ON CONFLICT (schema_hash) DO UPDATE SET applied_at = now();"
+              echo "Recording schema-migration completion marker (app {{ .Chart.AppVersion }}, chart {{ .Chart.Version }})..."
+              psql -v ON_ERROR_STOP=1 -d "$DATABASE_URL" -c "{{ $markerSQL }}"
               {{- end }}
               echo "Schema applied successfully."
           volumeMounts:

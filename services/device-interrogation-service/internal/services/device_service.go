@@ -45,18 +45,6 @@ func (s *DeviceService) encryptPassword(password string) (string, error) {
 	return enc.Encrypt(password)
 }
 
-// decryptPassword decrypts a password using the master encryption key
-func (s *DeviceService) decryptPassword(encrypted string) (string, error) {
-	if encrypted == "" {
-		return "", nil
-	}
-	enc, err := encryption.NewService(s.encryptionKey)
-	if err != nil {
-		return "", fmt.Errorf("failed to initialize encryption: %w", err)
-	}
-	return enc.Decrypt(encrypted)
-}
-
 // maskPassword masks a password for display in API responses
 func maskPassword(password string) string {
 	if len(password) == 0 {

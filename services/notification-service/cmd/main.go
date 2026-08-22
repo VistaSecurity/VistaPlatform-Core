@@ -27,7 +27,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer sqlDB.Close()
+	defer func() { _ = sqlDB.Close() }()
 	db := sqlx.NewDb(sqlDB, "postgres")
 
 	// BYPASSRLS handle (crypto_bypass; falls back to DATABASE_URL pre-flip) for
@@ -183,7 +183,9 @@ func main() {
 	if natsClient != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		natsClient.GracefulShutdown(ctx)
+		if err := natsClient.GracefulShutdown(ctx); err != nil {
+			log.Printf("NATS client failed to shut down gracefully: %v", err)
+		}
 	}
 
 	log.Println("Notification service stopped")

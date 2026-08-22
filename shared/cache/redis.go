@@ -236,11 +236,9 @@ func (c *Client) GetOrSet(ctx context.Context, key string, target interface{}, t
 		return nil // Cache hit
 	}
 
-	// If error is not "key not found", return the error
-	if err != redis.Nil {
-		// Log but don't fail - fall through to loader
-		// This implements "fail open" for cache errors
-	}
+	// Any Get failure — a real cache error as much as redis.Nil — falls through
+	// to the loader. This is a deliberate "fail open": an unreachable cache
+	// must degrade to a slower answer, never to no answer.
 
 	// Cache miss - call loader
 	value, err := loader()

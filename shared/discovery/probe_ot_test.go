@@ -64,14 +64,14 @@ func TestProbeModbus_ReadDeviceIdentificationOK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	go func() {
 		conn, err := listener.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
 		// Read the 11-byte request.
 		req := make([]byte, 11)
@@ -120,7 +120,7 @@ func TestProbeModbus_ReadDeviceIdentificationOK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	prober := NewProber(2 * time.Second)
 	finding, err := probeModbus(prober, conn, "", 502)
@@ -154,14 +154,14 @@ func TestProbeModbus_ExceptionResponseStillIdentifiesDevice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	go func() {
 		conn, err := listener.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		req := make([]byte, 11)
 		_, _ = conn.Read(req)
 		// Exception response: function code | 0x80, exception code 0x01 (illegal function).
@@ -174,7 +174,7 @@ func TestProbeModbus_ExceptionResponseStillIdentifiesDevice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	prober := NewProber(2 * time.Second)
 	finding, err := probeModbus(prober, conn, "", 502)
@@ -203,14 +203,14 @@ func TestProbeOPCUA_AckResponseParsesCorrectly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	go func() {
 		conn, err := listener.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		// Read enough to drain the HEL message.
 		buf := make([]byte, 4096)
 		_, _ = conn.Read(buf)
@@ -230,7 +230,7 @@ func TestProbeOPCUA_AckResponseParsesCorrectly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	prober := NewProber(2 * time.Second)
 	finding, err := probeOPCUA(prober, conn, "device.local", 4840)
@@ -259,7 +259,7 @@ func TestProbeEtherNetIP_ListIdentityResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen udp: %v", err)
 	}
-	defer pc.Close()
+	defer func() { _ = pc.Close() }()
 	udpAddr := pc.LocalAddr().(*net.UDPAddr)
 
 	go func() {
@@ -336,7 +336,7 @@ func TestProbeBACnet_IAmResponseDecodesDeviceInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen udp: %v", err)
 	}
-	defer pc.Close()
+	defer func() { _ = pc.Close() }()
 	udpAddr := pc.LocalAddr().(*net.UDPAddr)
 
 	go func() {

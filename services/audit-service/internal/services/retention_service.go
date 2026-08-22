@@ -62,7 +62,7 @@ func (s *RetentionService) GetRetentionPolicies(ctx context.Context) ([]Retentio
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var policies []RetentionPolicy
 	for rows.Next() {
@@ -167,7 +167,7 @@ func (s *RetentionService) GetLogsForArchival(ctx context.Context, policy *Reten
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var logIDs []uuid.UUID
 	for rows.Next() {
@@ -204,7 +204,7 @@ func (s *RetentionService) GetLogsForDeletion(ctx context.Context, policy *Reten
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var logIDs []uuid.UUID
 	for rows.Next() {
@@ -264,7 +264,7 @@ func (s *RetentionService) FilterArchivedLogs(ctx context.Context, logIDs []uuid
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	// A scan error must NOT be swallowed here: this is the gate that decides
 	// which rows are safe to delete, and dropping an id silently would only

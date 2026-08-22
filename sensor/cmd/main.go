@@ -30,7 +30,6 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor/internal/discovery"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/enrichment"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/models"
-	"github.com/vistasecurity/vistaplatform/sensor/internal/storage"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/testmode"
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
 	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
@@ -45,7 +44,6 @@ type Sensor struct {
 	config        *config.Config
 	configPath    string // Path to the config file for saving updates
 	packetCapture *capture.PacketCapture
-	storage       *storage.EncryptedStorage
 	apiClient     *api.OutboundClient
 	sensorManager *api.SensorManagerClient
 	jobExecutor   *discovery.JobExecutor
@@ -469,13 +467,6 @@ func main() {
 func (s *Sensor) initialize() error {
 	log.Println("🔧 Initializing sensor components...")
 
-	// Initialize encrypted storage
-	storage, err := storage.NewEncryptedStorage(s.config)
-	if err != nil {
-		return fmt.Errorf("failed to initialize storage: %v", err)
-	}
-	s.storage = storage
-
 	// Initialize packet capture
 	packetCapture := capture.NewPacketCapture(s.config)
 	s.packetCapture = packetCapture
@@ -786,13 +777,9 @@ func (s *Sensor) handleDiscovery(discovery *models.CryptoDiscovery) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Add to in-memory list
+	// Add to in-memory list. This buffer is the only copy until submitDiscoveries
+	// ships it upstream; it is drained on success and re-queued on failure.
 	s.discoveries = append(s.discoveries, discovery)
-
-	// Store in encrypted storage
-	if err := s.storage.StoreDiscovery(discovery); err != nil {
-		log.Printf("❌ Failed to store discovery: %v", err)
-	}
 
 	log.Printf("🔍 Discovery: %s on %s:%d (confidence: %.2f)",
 		discovery.Protocol, discovery.DestIP, discovery.Port, discovery.Confidence)
@@ -1004,17 +991,6 @@ func (s *Sensor) updateConfig(config *models.SensorConfig) {
 		s.config.ReportingInterval = time.Duration(config.ReportingInterval) * time.Second
 	}
 
-	// Update storage config only for non-zero values
-	if config.StorageConfig.MaxStorageSize > 0 {
-		s.config.Storage.MaxStorageSize = config.StorageConfig.MaxStorageSize
-	}
-	if config.StorageConfig.RotationSize > 0 {
-		s.config.Storage.RotationSize = config.StorageConfig.RotationSize
-	}
-	if config.StorageConfig.RetentionDays > 0 {
-		s.config.Storage.RetentionDays = config.StorageConfig.RetentionDays
-	}
-
 	// Update capture config
 	s.config.Capture.ActiveProbing = config.CaptureConfig.ActiveProbing
 	s.config.Capture.NetworkDiscovery = config.CaptureConfig.NetworkDiscovery
@@ -1057,9 +1033,9 @@ func (s *Sensor) cleanup() {
 	if len(s.discoveries) > 0 {
 		// Validate sensor ID before submitting (must be valid UUID)
 		if s.config.SensorID == "" {
-			log.Printf("⚠️  Cannot submit %d remaining discoveries: no sensor ID. Discoveries saved to encrypted storage.", len(s.discoveries))
+			log.Printf("⚠️  Discarding %d unsubmitted discoveries: no sensor ID. They are not persisted anywhere.", len(s.discoveries))
 		} else if _, err := uuid.Parse(s.config.SensorID); err != nil {
-			log.Printf("⚠️  Cannot submit %d remaining discoveries: invalid sensor ID format '%s' (must be UUID). Discoveries saved to encrypted storage.", len(s.discoveries), s.config.SensorID)
+			log.Printf("⚠️  Discarding %d unsubmitted discoveries: invalid sensor ID format '%s' (must be UUID). They are not persisted anywhere.", len(s.discoveries), s.config.SensorID)
 		} else {
 			log.Printf("📤 Submitting %d remaining discoveries...", len(s.discoveries))
 			if err := s.apiClient.SubmitDiscoveries(s.discoveries); err != nil {
@@ -1070,15 +1046,13 @@ func (s *Sensor) cleanup() {
 		}
 	}
 
-	// Close storage
-	if s.storage != nil {
-		s.storage.Close()
-	}
-
 	// Close test logger
 	if s.testLogger != nil {
-		s.testLogger.Close()
-		log.Printf("🧪 Test logger closed")
+		if err := s.testLogger.Close(); err != nil {
+			log.Printf("⚠️  Error closing test logger: %v", err)
+		} else {
+			log.Printf("🧪 Test logger closed")
+		}
 	}
 
 	log.Println("✅ Cleanup completed")
@@ -1882,14 +1856,22 @@ urlLoop:
 		fmt.Printf("📁 Configuration saved to: %s\n", configPath)
 	}
 
-	// Set environment variables for current session
-	os.Setenv("CONTROL_PLANE_URL", controlPlaneURL)
-	if registrationKey != "" {
-		os.Setenv("REGISTRATION_KEY", registrationKey)
+	// Set environment variables for current session. These are how the wizard's
+	// answers reach startSensorWithConfig below, so a failed Setenv would start
+	// the sensor with that setting silently missing — fail loudly instead.
+	setSessionEnv := func(key, value string) {
+		if err := os.Setenv(key, value); err != nil {
+			fmt.Printf("❌ Failed to apply %s to this session: %v\n", key, err)
+			os.Exit(1)
+		}
 	}
-	os.Setenv("REPORTING_INTERVAL", fmt.Sprintf("%ds", interval))
-	os.Setenv("DATA_PATH", dataPath)
-	os.Setenv("INTERFACES", strings.Join(selectedInterfaces, ","))
+	setSessionEnv("CONTROL_PLANE_URL", controlPlaneURL)
+	if registrationKey != "" {
+		setSessionEnv("REGISTRATION_KEY", registrationKey)
+	}
+	setSessionEnv("REPORTING_INTERVAL", fmt.Sprintf("%ds", interval))
+	setSessionEnv("DATA_PATH", dataPath)
+	setSessionEnv("INTERFACES", strings.Join(selectedInterfaces, ","))
 
 	fmt.Println("\n✅ Configuration saved! Starting sensor...")
 	fmt.Println("Press Ctrl+C to stop the sensor")
@@ -1897,15 +1879,6 @@ urlLoop:
 
 	// Start the sensor with the configured settings
 	startSensorWithConfig(verbose)
-}
-
-// generateSensorID generates a unique sensor ID
-func generateSensorID() string {
-	hostname, _ := os.Hostname()
-	if hostname == "" {
-		hostname = "unknown"
-	}
-	return fmt.Sprintf("%s-%d", hostname, time.Now().Unix())
 }
 
 // NetworkInterface represents a network interface
@@ -2136,7 +2109,7 @@ func outboundIPFor(controlPlaneURL string) string {
 	if err != nil {
 		return ""
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if udpAddr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
 		return udpAddr.IP.String()
 	}
@@ -2259,7 +2232,7 @@ func selectInterfacesTUI(interfaces []NetworkInterface, defaultIdx int) ([]strin
 	if err != nil {
 		return nil, err
 	}
-	defer term.Restore(fd, oldState)
+	defer func() { _ = term.Restore(fd, oldState) }()
 
 	checked := make([]bool, len(interfaces))
 	cursor := 0
@@ -2270,12 +2243,12 @@ func selectInterfacesTUI(interfaces []NetworkInterface, defaultIdx int) ([]strin
 
 	out := os.Stdout
 	// Instructions printed once, above the redrawn list.
-	fmt.Fprint(out, "\r\n  ↑/↓ move    space toggle    enter confirm    (connected NIC pre-selected)\r\n")
+	_, _ = fmt.Fprint(out, "\r\n  ↑/↓ move    space toggle    enter confirm    (connected NIC pre-selected)\r\n")
 
 	firstRender := true
 	for {
 		if !firstRender {
-			fmt.Fprintf(out, "\x1b[%dA", len(interfaces)) // move cursor up to overwrite
+			_, _ = fmt.Fprintf(out, "\x1b[%dA", len(interfaces)) // move cursor up to overwrite
 		}
 		firstRender = false
 		for i, iface := range interfaces {
@@ -2295,7 +2268,7 @@ func selectInterfacesTUI(interfaces []NetworkInterface, defaultIdx int) ([]strin
 			if i == defaultIdx {
 				tag = "  (connected)"
 			}
-			fmt.Fprintf(out, "\r\x1b[K %s %s %s%s\r\n", pointer, box, label, tag)
+			_, _ = fmt.Fprintf(out, "\r\x1b[K %s %s %s%s\r\n", pointer, box, label, tag)
 		}
 
 		key, err := readInterfaceKey()
@@ -2304,8 +2277,8 @@ func selectInterfacesTUI(interfaces []NetworkInterface, defaultIdx int) ([]strin
 		}
 		switch key {
 		case keyCtrlC:
-			term.Restore(fd, oldState)
-			fmt.Fprint(out, "\r\n")
+			_ = term.Restore(fd, oldState)
+			_, _ = fmt.Fprint(out, "\r\n")
 			fmt.Println("Setup cancelled.")
 			os.Exit(1)
 		case keyEnter:
@@ -2315,7 +2288,7 @@ func selectInterfacesTUI(interfaces []NetworkInterface, defaultIdx int) ([]strin
 					selected = append(selected, interfaces[i].Name)
 				}
 			}
-			fmt.Fprint(out, "\r\n")
+			_, _ = fmt.Fprint(out, "\r\n")
 			return selected, nil
 		case keySpace:
 			checked[cursor] = !checked[cursor]
@@ -2562,11 +2535,7 @@ func createConfigFile(configPath, controlPlaneURL, registrationKey string, inter
 		RegistrationKey       string `yaml:"registrationKey"`
 		ReportingIntervalSecs int    `yaml:"reportingIntervalSeconds"`
 		Storage               struct {
-			MaxStorageSize int64  `yaml:"maxStorageSize"`
-			RotationSize   int64  `yaml:"rotationSize"`
-			RetentionDays  int    `yaml:"retentionDays"`
-			DataPath       string `yaml:"dataPath"`
-			EncryptionKey  string `yaml:"encryptionKey"`
+			DataPath string `yaml:"dataPath"`
 		} `yaml:"storage"`
 		Capture struct {
 			Interfaces       []string `yaml:"interfaces"`
@@ -2583,11 +2552,7 @@ func createConfigFile(configPath, controlPlaneURL, registrationKey string, inter
 		RegistrationKey:       registrationKey,
 		ReportingIntervalSecs: interval,
 	}
-	cfg.Storage.MaxStorageSize = 104857600 // 100 MB
-	cfg.Storage.RotationSize = 10485760    // 10 MB
-	cfg.Storage.RetentionDays = 7
 	cfg.Storage.DataPath = dataPath
-	cfg.Storage.EncryptionKey = ""
 	cfg.Capture.Interfaces = interfaces
 	cfg.Capture.ActiveProbing = true
 	cfg.Capture.NetworkDiscovery = true
@@ -2605,28 +2570,24 @@ func createConfigFile(configPath, controlPlaneURL, registrationKey string, inter
 	// Write config with proper quoting for Windows paths.
 	// Note: sensorId is intentionally omitted — the control plane assigns it
 	// during registration and Sensor.saveConfigFile() writes it back afterward.
-	configContent.WriteString(fmt.Sprintf("controlPlaneUrl: %s\n", cfg.ControlPlaneURL))
-	configContent.WriteString(fmt.Sprintf("registrationKey: %s\n", cfg.RegistrationKey))
-	configContent.WriteString(fmt.Sprintf("reportingIntervalSeconds: %d\n", cfg.ReportingIntervalSecs))
+	fmt.Fprintf(&configContent, "controlPlaneUrl: %s\n", cfg.ControlPlaneURL)
+	fmt.Fprintf(&configContent, "registrationKey: %s\n", cfg.RegistrationKey)
+	fmt.Fprintf(&configContent, "reportingIntervalSeconds: %d\n", cfg.ReportingIntervalSecs)
 
 	configContent.WriteString("storage:\n")
-	configContent.WriteString(fmt.Sprintf("  maxStorageSize: %d\n", cfg.Storage.MaxStorageSize))
-	configContent.WriteString(fmt.Sprintf("  rotationSize: %d\n", cfg.Storage.RotationSize))
-	configContent.WriteString(fmt.Sprintf("  retentionDays: %d\n", cfg.Storage.RetentionDays))
-	configContent.WriteString(fmt.Sprintf("  dataPath: %q\n", cfg.Storage.DataPath))
-	configContent.WriteString(fmt.Sprintf("  encryptionKey: %q\n", cfg.Storage.EncryptionKey))
+	fmt.Fprintf(&configContent, "  dataPath: %q\n", cfg.Storage.DataPath)
 
 	configContent.WriteString("capture:\n")
 	configContent.WriteString("  interfaces:\n")
 	for _, iface := range cfg.Capture.Interfaces {
 		// Always quote interface names to handle Windows device paths with backslashes
-		configContent.WriteString(fmt.Sprintf("    - %q\n", iface))
+		fmt.Fprintf(&configContent, "    - %q\n", iface)
 	}
-	configContent.WriteString(fmt.Sprintf("  activeProbing: %t\n", cfg.Capture.ActiveProbing))
-	configContent.WriteString(fmt.Sprintf("  networkDiscovery: %t\n", cfg.Capture.NetworkDiscovery))
-	configContent.WriteString(fmt.Sprintf("  maxConnections: %d\n", cfg.Capture.MaxConnections))
-	configContent.WriteString(fmt.Sprintf("  timeoutSeconds: %d\n", cfg.Capture.TimeoutSeconds))
-	configContent.WriteString(fmt.Sprintf("  bufferSize: %d\n", cfg.Capture.BufferSize))
+	fmt.Fprintf(&configContent, "  activeProbing: %t\n", cfg.Capture.ActiveProbing)
+	fmt.Fprintf(&configContent, "  networkDiscovery: %t\n", cfg.Capture.NetworkDiscovery)
+	fmt.Fprintf(&configContent, "  maxConnections: %d\n", cfg.Capture.MaxConnections)
+	fmt.Fprintf(&configContent, "  timeoutSeconds: %d\n", cfg.Capture.TimeoutSeconds)
+	fmt.Fprintf(&configContent, "  bufferSize: %d\n", cfg.Capture.BufferSize)
 
 	if serverCACertPath != "" {
 		configContent.WriteString("\n# Platform CA approved during setup. The sensor verifies every control-plane\n")
@@ -2637,8 +2598,8 @@ func createConfigFile(configPath, controlPlaneURL, registrationKey string, inter
 	}
 
 	// Add footer comment
-	configContent.WriteString(fmt.Sprintf("\n# Environment variables (for reference)\n# CONTROL_PLANE_URL=%s\n# REGISTRATION_KEY=%s\n# REPORTING_INTERVAL=%ds\n# DATA_PATH=%s\n# INTERFACES=%s\n",
-		controlPlaneURL, registrationKey, interval, dataPath, strings.Join(interfaces, ",")))
+	fmt.Fprintf(&configContent, "\n# Environment variables (for reference)\n# CONTROL_PLANE_URL=%s\n# REGISTRATION_KEY=%s\n# REPORTING_INTERVAL=%ds\n# DATA_PATH=%s\n# INTERFACES=%s\n",
+		controlPlaneURL, registrationKey, interval, dataPath, strings.Join(interfaces, ","))
 
 	// Write config file
 	if err := os.WriteFile(configPath, []byte(configContent.String()), 0644); err != nil {

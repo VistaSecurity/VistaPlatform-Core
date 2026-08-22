@@ -7,66 +7,6 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor/internal/smbutil"
 )
 
-// buildSMB2NegotiateResponse constructs a minimal SMB2 NEGOTIATE Response
-// wrapped in a NetBIOS Session header.
-func buildSMB2NegotiateResponse(dialect uint16, secMode uint16, caps uint32, encCiphers []uint16) []byte {
-	// SMB2 NEGOTIATE Response body (minimum 65 bytes, we use 128 for safety)
-	bodySize := 128
-	// For 3.1.1 with negotiate contexts, we need more space
-	contextBytes := []byte{}
-	if dialect == 0x0311 && len(encCiphers) > 0 {
-		// Build encryption capabilities context
-		//   ContextType(2) + DataLength(2) + Reserved(4) + CipherCount(2) + Ciphers(2*N)
-		dataLen := 2 + 2*len(encCiphers)
-		ctx := make([]byte, 8+dataLen)
-		binary.LittleEndian.PutUint16(ctx[0:2], smbNegotiateContextEncryption)
-		binary.LittleEndian.PutUint16(ctx[2:4], uint16(dataLen))
-		binary.LittleEndian.PutUint16(ctx[8:10], uint16(len(encCiphers)))
-		for i, c := range encCiphers {
-			binary.LittleEndian.PutUint16(ctx[10+2*i:12+2*i], c)
-		}
-		// Pad to 8-byte alignment
-		for len(ctx)%8 != 0 {
-			ctx = append(ctx, 0)
-		}
-		contextBytes = ctx
-	}
-
-	body := make([]byte, bodySize)
-	binary.LittleEndian.PutUint16(body[0:2], 65) // StructureSize
-	binary.LittleEndian.PutUint16(body[2:4], secMode)
-	binary.LittleEndian.PutUint16(body[4:6], dialect)
-
-	if dialect == 0x0311 {
-		binary.LittleEndian.PutUint16(body[6:8], 1) // NegotiateContextCount (MS-SMB2)
-		binary.LittleEndian.PutUint32(body[24:28], caps)
-		// Negotiate contexts appended after body; offset from start of SMB2 header.
-		binary.LittleEndian.PutUint32(body[60:64], uint32(64+len(body)))
-	} else {
-		binary.LittleEndian.PutUint32(body[24:28], caps)
-	}
-
-	// SMB2 header (64 bytes)
-	header := make([]byte, 64)
-	copy(header[0:4], smb2Magic)
-	binary.LittleEndian.PutUint16(header[4:6], 64) // StructureSize
-	binary.LittleEndian.PutUint16(header[12:14], smb2CommandNegotiate)
-	binary.LittleEndian.PutUint32(header[16:20], 0x01) // Flags: Response
-
-	smb2Packet := append(header, body...)
-	smb2Packet = append(smb2Packet, contextBytes...)
-
-	// NetBIOS header: Type(1)=0x00 + Length(3)
-	nbHeader := make([]byte, 4)
-	nbHeader[0] = 0x00
-	pktLen := len(smb2Packet)
-	nbHeader[1] = byte(pktLen >> 16)
-	nbHeader[2] = byte(pktLen >> 8)
-	nbHeader[3] = byte(pktLen)
-
-	return append(nbHeader, smb2Packet...)
-}
-
 func TestSMBDialectName(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

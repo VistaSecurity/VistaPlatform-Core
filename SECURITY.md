@@ -75,6 +75,17 @@ Findings we particularly want:
   those are yours to set. Report them if the *chart defaults* are unsafe.
 - Automated scanner output with no demonstrated impact.
 
+## Our own posture
+
+Two things you can check rather than take on trust:
+
+- **[Container scan report](security-scans/)** — every published image, scanned
+  nightly with Trivy, results committed to this repository. Images that could
+  not be scanned are reported as unscanned, not as clean.
+- **[How the platform is built and shipped](docsv4/core/security-posture.md)** —
+  tenant isolation, service-to-service authentication, the collect-posture-never-key-material
+  rule, supply-chain signing, and which CI scanners gate a merge.
+
 ## Known design tradeoffs
 
 These are deliberate, and visible in the source. We would rather state them here

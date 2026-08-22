@@ -6,7 +6,6 @@ import (
 	"crypto/rsa"
 	"crypto/sha1"
 	"crypto/sha256"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
@@ -422,10 +421,6 @@ func ClassifyCertValidationError(err error) (status, detail string) {
 	return shareddisc.ClassifyValidationError(err)
 }
 
-func isSelfSignedCertificate(cert *x509.Certificate) bool {
-	return shareddisc.IsSelfSigned(cert)
-}
-
 // VerifyDNSName returns the host string to use as x509.VerifyOptions.DNSName
 // when the dial target is host (often a raw IP). Delegates to the shared
 // discovery primitive so the sensor and the in-cluster Platform Sensor resolve
@@ -516,78 +511,6 @@ func ExtractCertificatesFromX509(certs []*x509.Certificate) []models.Certificate
 			KeySize:                 keySize,
 			ChainOrder:              i, // 0 = leaf, 1+ = intermediates
 		}
-		result = append(result, info)
-	}
-
-	return result
-}
-
-func extractCertificates(certs []*tls.Certificate) []models.CertificateInfo {
-	var result []models.CertificateInfo
-
-	for i, cert := range certs {
-		if cert.Leaf == nil {
-			continue
-		}
-
-		// Extract PEM from certificate
-		var pemBytes []byte
-		if cert.Certificate != nil && len(cert.Certificate) > 0 {
-			pemBlock := &pem.Block{
-				Type:  "CERTIFICATE",
-				Bytes: cert.Certificate[0],
-			}
-			pemBytes = pem.EncodeToMemory(pemBlock)
-		}
-
-		// Calculate fingerprints
-		var fingerprintSHA256Hex, fingerprintSHA1Hex string
-		if cert.Leaf.Raw != nil {
-			fingerprintSHA256 := sha256.Sum256(cert.Leaf.Raw)
-			fingerprintSHA256Hex = hex.EncodeToString(fingerprintSHA256[:])
-			fingerprintSHA1 := sha1.Sum(cert.Leaf.Raw)
-			fingerprintSHA1Hex = hex.EncodeToString(fingerprintSHA1[:])
-		}
-
-		// Extract SANs
-		sans := make([]string, 0)
-		sans = append(sans, cert.Leaf.DNSNames...)
-		sans = append(sans, cert.Leaf.EmailAddresses...)
-		for _, ip := range cert.Leaf.IPAddresses {
-			sans = append(sans, ip.String())
-		}
-
-		// Extract key usage
-		keyUsage := extractKeyUsage(cert.Leaf.KeyUsage)
-		extKeyUsage := extractExtendedKeyUsage(cert.Leaf.ExtKeyUsage)
-
-		// Calculate key size
-		keySize := calculateKeySize(cert.Leaf.PublicKey)
-
-		subjectDN := cert.Leaf.Subject.String()
-		issuerDN := cert.Leaf.Issuer.String()
-
-		info := models.CertificateInfo{
-			SerialNumber:            cert.Leaf.SerialNumber.String(),
-			SubjectDN:               subjectDN,
-			IssuerDN:                issuerDN,
-			Subject:                 subjectDN, // Keep for backward compatibility
-			Issuer:                  issuerDN,  // Keep for backward compatibility
-			NotBefore:               cert.Leaf.NotBefore,
-			NotAfter:                cert.Leaf.NotAfter,
-			KeyAlgorithm:            cert.Leaf.PublicKeyAlgorithm.String(),
-			SignatureAlg:            cert.Leaf.SignatureAlgorithm.String(),
-			IsCA:                    cert.Leaf.IsCA,
-			CertificatePEM:          string(pemBytes),
-			FingerprintSHA256:       fingerprintSHA256Hex,
-			FingerprintSHA1:         fingerprintSHA1Hex,
-			SubjectAlternativeNames: sans,
-			KeyUsage:                keyUsage,
-			ExtendedKeyUsage:        extKeyUsage,
-			KeySize:                 keySize,
-			ChainOrder:              i, // 0 = leaf, 1+ = intermediates
-		}
-
 		result = append(result, info)
 	}
 

@@ -435,48 +435,6 @@ END;
 $$;
 
 
--- FUNCTION: calculate_tenant_cost(uuid, timestamp with time zone, timestamp with time zone)
-CREATE OR REPLACE FUNCTION public.calculate_tenant_cost(p_tenant_id uuid, p_period_start timestamp with time zone, p_period_end timestamp with time zone) RETURNS numeric
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-    total_cost DECIMAL(10,4) := 0;
-    cost_rates JSONB;
-BEGIN
-    -- Get cost rates from config
-    SELECT config_value INTO cost_rates
-    FROM resource_tracking_config
-    WHERE config_key = 'cost_rates';
-
-
-    -- Calculate total cost for the period
-    SELECT COALESCE(SUM(
-        (api_calls * (cost_rates->>'api_call_cost')::DECIMAL) +
-        (database_queries * (cost_rates->>'database_query_cost')::DECIMAL) +
-        (storage_used_mb * (cost_rates->>'storage_cost_per_gb_month')::DECIMAL / 1024) +
-        (cpu_usage_percent * (cost_rates->>'cpu_cost_per_percent')::DECIMAL) +
-        (network_bytes * (cost_rates->>'network_cost_per_gb')::DECIMAL / (1024 * 1024 * 1024))
-    ), 0) INTO total_cost
-    FROM tenant_resource_usage
-    WHERE tenant_id = p_tenant_id
-    AND timestamp BETWEEN p_period_start AND p_period_end;
-
-
-    RETURN total_cost;
-END;
-$$;
-
-
--- FUNCTION: cleanup_expired_dashboard_cache()
-CREATE OR REPLACE FUNCTION public.cleanup_expired_dashboard_cache() RETURNS void
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    DELETE FROM dashboard_cache WHERE expires_at < NOW();
-END;
-$$;
-
-
 -- FUNCTION: cleanup_old_aws_cost_data(integer)
 CREATE OR REPLACE FUNCTION public.cleanup_old_aws_cost_data(retention_days integer DEFAULT 365) RETURNS integer
     LANGUAGE plpgsql
@@ -682,26 +640,6 @@ BEGIN
 
 
     RETURN (result::text)::boolean;
-END;
-$$;
-
-
--- FUNCTION: get_system_health_summary()
-CREATE OR REPLACE FUNCTION public.get_system_health_summary() RETURNS TABLE(service_name character varying, health_status character varying, avg_response_time numeric, error_rate numeric, last_check timestamp with time zone)
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    RETURN QUERY
-    SELECT
-        shm.service_name,
-        shm.health_status,
-        AVG(shm.response_time_ms) as avg_response_time,
-        (COUNT(*) FILTER (WHERE shm.health_status = 'down') * 100.0 / COUNT(*)) as error_rate,
-        MAX(shm.timestamp) as last_check
-    FROM system_health_metrics shm
-    WHERE shm.timestamp > NOW() - INTERVAL '1 hour'
-    GROUP BY shm.service_name, shm.health_status
-    ORDER BY shm.service_name;
 END;
 $$;
 
@@ -1004,21 +942,6 @@ END;
 $$;
 
 
--- FUNCTION: update_tenant_usage(uuid, character varying, integer)
-CREATE OR REPLACE FUNCTION public.update_tenant_usage(p_tenant_id uuid, p_metric_type character varying, p_delta integer) RETURNS void
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    INSERT INTO tenant_usage_tracking (tenant_id, metric_type, current_count, last_updated)
-    VALUES (p_tenant_id, p_metric_type, GREATEST(0, p_delta), NOW())
-    ON CONFLICT (tenant_id, metric_type)
-    DO UPDATE SET
-        current_count = GREATEST(0, tenant_usage_tracking.current_count + p_delta),
-        last_updated = NOW();
-END;
-$$;
-
-
 -- FUNCTION: update_tenant_user_count()
 CREATE OR REPLACE FUNCTION public.update_tenant_user_count() RETURNS trigger
     LANGUAGE plpgsql
@@ -1299,28 +1222,6 @@ CREATE TABLE IF NOT EXISTS audit.activity_logs_y2026m08 (
 );
 
 
--- TABLE: alert_instances
-CREATE TABLE IF NOT EXISTS audit.alert_instances (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    rule_id uuid NOT NULL,
-    tenant_id uuid,
-    severity character varying(20) NOT NULL,
-    event_count integer DEFAULT 1 NOT NULL,
-    first_event_at timestamp without time zone NOT NULL,
-    last_event_at timestamp without time zone NOT NULL,
-    triggering_event jsonb NOT NULL,
-    status character varying(20) DEFAULT 'active'::character varying NOT NULL,
-    acknowledged_by uuid,
-    acknowledged_at timestamp without time zone,
-    resolved_at timestamp without time zone,
-    notes text,
-    created_at timestamp without time zone DEFAULT now() NOT NULL,
-    updated_at timestamp without time zone DEFAULT now() NOT NULL,
-    CONSTRAINT alert_instances_severity_check CHECK (((severity)::text = ANY ((ARRAY['critical'::character varying, 'high'::character varying, 'medium'::character varying, 'low'::character varying])::text[]))),
-    CONSTRAINT alert_instances_status_check CHECK (((status)::text = ANY ((ARRAY['active'::character varying, 'acknowledged'::character varying, 'resolved'::character varying])::text[])))
-);
-
-
 -- TABLE: alert_rules
 CREATE TABLE IF NOT EXISTS audit.alert_rules (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -1337,24 +1238,6 @@ CREATE TABLE IF NOT EXISTS audit.alert_rules (
     updated_at timestamp without time zone DEFAULT now() NOT NULL,
     CONSTRAINT alert_rules_rule_type_check CHECK (((rule_type)::text = ANY ((ARRAY['threshold'::character varying, 'pattern'::character varying, 'anomaly'::character varying])::text[]))),
     CONSTRAINT alert_rules_severity_check CHECK (((severity)::text = ANY ((ARRAY['critical'::character varying, 'high'::character varying, 'medium'::character varying, 'low'::character varying])::text[])))
-);
-
-
--- TABLE: audit_logs
-CREATE TABLE IF NOT EXISTS audit.audit_logs (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    tenant_id uuid,
-    user_id uuid,
-    action character varying(100) NOT NULL,
-    resource_type character varying(100),
-    resource_id uuid,
-    old_values jsonb,
-    new_values jsonb,
-    ip_address inet,
-    user_agent text,
-    success boolean DEFAULT true,
-    error_message text,
-    created_at timestamp with time zone DEFAULT now()
 );
 
 
@@ -1392,25 +1275,6 @@ CREATE OR REPLACE VIEW audit.partition_info AS
      LEFT JOIN pg_stat_user_tables ON ((pg_stat_user_tables.relid = c.oid)))
   WHERE ((n.nspname = 'audit'::name) AND (c.relname ~~ 'activity_logs_y%'::text))
   ORDER BY c.relname;
-
-
--- TABLE: retention_jobs
-CREATE TABLE IF NOT EXISTS audit.retention_jobs (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    policy_id uuid,
-    job_type character varying(50) NOT NULL,
-    logs_processed integer DEFAULT 0,
-    logs_archived integer DEFAULT 0,
-    logs_deleted integer DEFAULT 0,
-    logs_moved_to_cold_storage integer DEFAULT 0,
-    started_at timestamp with time zone DEFAULT now(),
-    completed_at timestamp with time zone,
-    duration_ms integer,
-    error_message text,
-    metadata jsonb DEFAULT '{}'::jsonb,
-    created_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT valid_job_type CHECK (((job_type)::text = ANY ((ARRAY['archive'::character varying, 'delete'::character varying, 'cold_storage'::character varying, 'full_retention'::character varying])::text[])))
-);
 
 
 -- TABLE: retention_policies
@@ -1503,31 +1367,6 @@ CREATE TABLE IF NOT EXISTS audit.siem_integrations (
 );
 
 
--- TABLE: access_pattern_analysis
-CREATE TABLE IF NOT EXISTS public.access_pattern_analysis (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    pattern_type character varying(50) NOT NULL,
-    pattern_key character varying(255) NOT NULL,
-    baseline_metrics jsonb DEFAULT '{}'::jsonb,
-    current_metrics jsonb DEFAULT '{}'::jsonb,
-    anomaly_score numeric(5,2) DEFAULT 0.0,
-    is_anomaly boolean DEFAULT false,
-    anomaly_details jsonb DEFAULT '{}'::jsonb,
-    confidence numeric(5,2) DEFAULT 0.0,
-    tenant_id uuid,
-    user_id uuid,
-    service_name character varying(100),
-    analysis_period_start timestamp with time zone NOT NULL,
-    analysis_period_end timestamp with time zone NOT NULL,
-    analyzed_at timestamp with time zone DEFAULT now(),
-    metadata jsonb DEFAULT '{}'::jsonb,
-    created_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT valid_anomaly_score CHECK (((anomaly_score >= 0.0) AND (anomaly_score <= 100.0))),
-    CONSTRAINT valid_confidence CHECK (((confidence >= 0.0) AND (confidence <= 100.0))),
-    CONSTRAINT valid_pattern_type CHECK (((pattern_type)::text = ANY ((ARRAY['user_access'::character varying, 'ip_access'::character varying, 'endpoint_access'::character varying, 'geographic'::character varying, 'temporal'::character varying, 'behavioral'::character varying])::text[])))
-);
-
-
 -- TABLE: resource_alerts
 CREATE TABLE IF NOT EXISTS public.resource_alerts (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -1591,22 +1430,6 @@ CREATE OR REPLACE VIEW public.active_resource_alerts AS
   ORDER BY ra.severity DESC, ra.created_at DESC;
 
 
--- TABLE: agent_ca_certificates
-CREATE TABLE IF NOT EXISTS public.agent_ca_certificates (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    tenant_id uuid NOT NULL,
-    ca_cert_pem text NOT NULL,
-    ca_key_pem_encrypted text NOT NULL,
-    serial_number bigint NOT NULL,
-    issued_at timestamp with time zone DEFAULT now(),
-    expires_at timestamp with time zone NOT NULL,
-    is_active boolean DEFAULT true,
-    revoked_certificates text[] DEFAULT ARRAY[]::text[],
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now()
-);
-
-
 -- TABLE: agent_certificates
 CREATE TABLE IF NOT EXISTS public.agent_certificates (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -1618,40 +1441,6 @@ CREATE TABLE IF NOT EXISTS public.agent_certificates (
     expires_at timestamp with time zone NOT NULL,
     revoked_at timestamp with time zone,
     revocation_reason character varying(50),
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now()
-);
-
-
--- TABLE: ai_analysis_results
-CREATE TABLE IF NOT EXISTS public.ai_analysis_results (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    tenant_id uuid NOT NULL,
-    model_id uuid NOT NULL,
-    target_type character varying(50) NOT NULL,
-    target_id uuid NOT NULL,
-    analysis_type character varying(100) NOT NULL,
-    confidence_score numeric(3,2),
-    results jsonb NOT NULL,
-    anomaly_detected boolean DEFAULT false,
-    risk_level character varying(20),
-    created_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT valid_confidence CHECK (((confidence_score IS NULL) OR ((confidence_score >= 0.0) AND (confidence_score <= 1.0)))),
-    CONSTRAINT valid_risk_level CHECK (((risk_level IS NULL) OR ((risk_level)::text = ANY ((ARRAY['low'::character varying, 'medium'::character varying, 'high'::character varying, 'critical'::character varying])::text[]))))
-);
-
-
--- TABLE: ai_models
-CREATE TABLE IF NOT EXISTS public.ai_models (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    name character varying(255) NOT NULL,
-    version character varying(50) NOT NULL,
-    model_type character varying(100) NOT NULL,
-    description text,
-    file_path character varying(500),
-    hyperparameters jsonb DEFAULT '{}'::jsonb,
-    metrics jsonb DEFAULT '{}'::jsonb,
-    active boolean DEFAULT false,
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now()
 );
@@ -1697,48 +1486,6 @@ CREATE TABLE IF NOT EXISTS public.algorithms (
     CONSTRAINT valid_primitive CHECK (((primitive IS NULL) OR ((primitive)::text = ANY ((ARRAY['ae'::character varying, 'signature'::character varying, 'hash'::character varying, 'kem'::character varying, 'key-agree'::character varying, 'pke'::character varying, 'key-wrap'::character varying, 'combiner'::character varying, 'mac'::character varying, 'block-cipher'::character varying, 'stream-cipher'::character varying, 'kdf'::character varying, 'xof'::character varying, 'drbg'::character varying, 'other'::character varying])::text[])))),
     CONSTRAINT valid_risk_score CHECK (((risk_score >= 0) AND (risk_score <= 100))),
     CONSTRAINT valid_strength CHECK (((strength)::text = ANY ((ARRAY['weak'::character varying, 'acceptable'::character varying, 'strong'::character varying, 'recommended'::character varying])::text[])))
-);
-
-
--- TABLE: api_format_preferences
-CREATE TABLE IF NOT EXISTS public.api_format_preferences (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    tenant_id uuid NOT NULL,
-    endpoint_formats jsonb DEFAULT '{}'::jsonb,
-    global_preferences jsonb DEFAULT '{}'::jsonb,
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now()
-);
-
-
--- TABLE: api_security_monitoring
-CREATE TABLE IF NOT EXISTS public.api_security_monitoring (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    request_id character varying(255) NOT NULL,
-    correlation_id character varying(255),
-    endpoint character varying(500) NOT NULL,
-    method character varying(10) NOT NULL,
-    service_name character varying(100) NOT NULL,
-    source_ip inet NOT NULL,
-    user_agent text,
-    user_id uuid,
-    tenant_id uuid,
-    request_size integer,
-    response_size integer,
-    response_status integer NOT NULL,
-    latency_ms integer,
-    is_rate_limited boolean DEFAULT false,
-    rate_limit_reason character varying(100),
-    is_suspicious boolean DEFAULT false,
-    suspicious_reasons text[],
-    abuse_score numeric(5,2) DEFAULT 0.0,
-    abuse_patterns text[],
-    "timestamp" timestamp with time zone NOT NULL,
-    metadata jsonb DEFAULT '{}'::jsonb,
-    tags text[],
-    created_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT valid_abuse_score CHECK (((abuse_score >= 0.0) AND (abuse_score <= 100.0))),
-    CONSTRAINT valid_method CHECK (((method)::text = ANY ((ARRAY['GET'::character varying, 'POST'::character varying, 'PUT'::character varying, 'PATCH'::character varying, 'DELETE'::character varying, 'HEAD'::character varying, 'OPTIONS'::character varying])::text[])))
 );
 
 
@@ -2160,29 +1907,6 @@ CREATE TABLE IF NOT EXISTS public.certificates (
 );
 
 
--- TABLE: ci_relationships
-CREATE TABLE IF NOT EXISTS public.ci_relationships (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    tenant_id uuid NOT NULL,
-    source_ci_type character varying(50) NOT NULL,
-    source_ci_id uuid NOT NULL,
-    relationship_type character varying(50) NOT NULL,
-    target_ci_type character varying(50) NOT NULL,
-    target_ci_id uuid NOT NULL,
-    confidence_score numeric(3,2) DEFAULT 1.0,
-    discovered_at timestamp with time zone DEFAULT now(),
-    last_verified_at timestamp with time zone DEFAULT now(),
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    deleted_at timestamp with time zone,
-    CONSTRAINT no_self_relationship CHECK ((NOT (((source_ci_type)::text = (target_ci_type)::text) AND (source_ci_id = target_ci_id)))),
-    CONSTRAINT valid_ci_confidence CHECK (((confidence_score >= 0.0) AND (confidence_score <= 1.0))),
-    CONSTRAINT valid_ci_relationship_type CHECK (((relationship_type)::text = ANY ((ARRAY['uses'::character varying, 'installed_on'::character varying, 'contains'::character varying, 'issued_by'::character varying, 'depends_on'::character varying, 'protects'::character varying, 'associated_with'::character varying, 'configured_with'::character varying, 'runs_on'::character varying, 'hosts'::character varying])::text[]))),
-    CONSTRAINT valid_ci_source_type CHECK (((source_ci_type)::text = ANY ((ARRAY['infrastructure_asset'::character varying, 'certificate'::character varying, 'key'::character varying, 'crypto_library'::character varying, 'crypto_configuration'::character varying])::text[]))),
-    CONSTRAINT valid_ci_target_type CHECK (((target_ci_type)::text = ANY ((ARRAY['infrastructure_asset'::character varying, 'certificate'::character varying, 'key'::character varying, 'crypto_library'::character varying, 'crypto_configuration'::character varying])::text[])))
-);
-
-
 -- TABLE: cmdb_entity_mappings
 CREATE TABLE IF NOT EXISTS public.cmdb_entity_mappings (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -2255,20 +1979,6 @@ CREATE TABLE IF NOT EXISTS public.cmdb_sync_profiles (
 );
 
 
--- TABLE: compliance_checks
-CREATE TABLE IF NOT EXISTS public.compliance_checks (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    report_id uuid NOT NULL,
-    rule_id uuid NOT NULL,
-    tenant_id uuid NOT NULL,
-    status character varying(20) NOT NULL,
-    message text,
-    details jsonb,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT compliance_checks_status_check CHECK (((status)::text = ANY ((ARRAY['pass'::character varying, 'fail'::character varying, 'warning'::character varying, 'error'::character varying])::text[])))
-);
-
-
 -- TABLE: compliance_finding_history
 CREATE TABLE IF NOT EXISTS public.compliance_finding_history (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
@@ -2316,35 +2026,6 @@ CREATE TABLE IF NOT EXISTS public.compliance_findings (
 );
 
 
--- TABLE: compliance_framework_status
-CREATE TABLE IF NOT EXISTS public.compliance_framework_status (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    framework_name character varying(50) NOT NULL,
-    framework_version character varying(20),
-    overall_status character varying(20) NOT NULL,
-    compliance_score numeric(5,2) DEFAULT 0.0,
-    last_assessed_at timestamp with time zone,
-    next_assessment_due timestamp with time zone,
-    assessment_frequency_days integer,
-    total_requirements integer DEFAULT 0,
-    compliant_requirements integer DEFAULT 0,
-    non_compliant_requirements integer DEFAULT 0,
-    pending_requirements integer DEFAULT 0,
-    status_details jsonb DEFAULT '{}'::jsonb,
-    findings text[],
-    recommendations text[],
-    evidence_urls text[],
-    audit_trail_urls text[],
-    assessed_by uuid,
-    notes text,
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT valid_compliance_score CHECK (((compliance_score >= 0.0) AND (compliance_score <= 100.0))),
-    CONSTRAINT valid_framework CHECK (((framework_name)::text = ANY ((ARRAY['soc2'::character varying, 'iso27001'::character varying, 'gdpr'::character varying, 'hipaa'::character varying, 'pci_dss'::character varying, 'nist'::character varying, 'custom'::character varying])::text[]))),
-    CONSTRAINT valid_status CHECK (((overall_status)::text = ANY ((ARRAY['compliant'::character varying, 'non_compliant'::character varying, 'partial'::character varying, 'not_assessed'::character varying, 'under_review'::character varying])::text[])))
-);
-
-
 -- TABLE: compliance_overrides
 CREATE TABLE IF NOT EXISTS public.compliance_overrides (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
@@ -2363,47 +2044,6 @@ CREATE TABLE IF NOT EXISTS public.compliance_overrides (
     CONSTRAINT compliance_overrides_override_type_check CHECK (((override_type)::text = ANY ((ARRAY['disregard'::character varying, 'severity'::character varying])::text[]))),
     CONSTRAINT compliance_overrides_severity_from_check CHECK (((severity_from)::text = ANY ((ARRAY['Low'::character varying, 'Med'::character varying, 'High'::character varying, 'Critical'::character varying])::text[]))),
     CONSTRAINT compliance_overrides_severity_to_check CHECK (((severity_to)::text = ANY ((ARRAY['Low'::character varying, 'Med'::character varying, 'High'::character varying, 'Critical'::character varying])::text[])))
-);
-
-
--- TABLE: compliance_reports
-CREATE TABLE IF NOT EXISTS public.compliance_reports (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    tenant_id uuid NOT NULL,
-    title character varying(255) NOT NULL,
-    description text,
-    status character varying(20) NOT NULL,
-    summary jsonb,
-    checks jsonb,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    completed_at timestamp with time zone,
-    CONSTRAINT compliance_reports_status_check CHECK (((status)::text = ANY ((ARRAY['running'::character varying, 'completed'::character varying, 'failed'::character varying])::text[])))
-);
-
-
--- TABLE: compliance_requirements
-CREATE TABLE IF NOT EXISTS public.compliance_requirements (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    framework_id uuid NOT NULL,
-    requirement_code character varying(100) NOT NULL,
-    requirement_name character varying(255) NOT NULL,
-    requirement_description text,
-    category character varying(100),
-    status character varying(20) NOT NULL,
-    compliance_score numeric(5,2) DEFAULT 0.0,
-    evidence_urls text[],
-    evidence_notes text,
-    last_assessed_at timestamp with time zone,
-    assessed_by uuid,
-    assessment_notes text,
-    priority character varying(20) DEFAULT 'medium'::character varying,
-    tags text[],
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT valid_compliance_score CHECK (((compliance_score >= 0.0) AND (compliance_score <= 100.0))),
-    CONSTRAINT valid_priority CHECK (((priority)::text = ANY ((ARRAY['low'::character varying, 'medium'::character varying, 'high'::character varying, 'critical'::character varying])::text[]))),
-    CONSTRAINT valid_status CHECK (((status)::text = ANY ((ARRAY['compliant'::character varying, 'non_compliant'::character varying, 'partial'::character varying, 'pending'::character varying, 'not_applicable'::character varying])::text[])))
 );
 
 
@@ -2940,29 +2580,6 @@ CREATE OR REPLACE VIEW public.current_resource_usage_summary AS
           GROUP BY tenant_resource_usage.tenant_id) ru ON ((t.id = ru.tenant_id)));
 
 
--- TABLE: dashboard_cache
-CREATE TABLE IF NOT EXISTS public.dashboard_cache (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    cache_key character varying(255) NOT NULL,
-    cache_data jsonb NOT NULL,
-    expires_at timestamp with time zone NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
--- TABLE: dashboard_metrics
-CREATE TABLE IF NOT EXISTS public.dashboard_metrics (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    metric_type character varying(50) NOT NULL,
-    metric_name character varying(100) NOT NULL,
-    metric_value numeric(15,4) NOT NULL,
-    metric_unit character varying(20),
-    metadata jsonb,
-    "timestamp" timestamp with time zone DEFAULT now() NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
 -- TABLE: database_encryption_states
 CREATE TABLE IF NOT EXISTS public.database_encryption_states (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -3110,22 +2727,6 @@ CREATE TABLE IF NOT EXISTS public.discovery_alert_history (
     sent_at timestamp with time zone DEFAULT now(),
     status character varying(20) DEFAULT 'sent'::character varying NOT NULL,
     CONSTRAINT discovery_alert_history_status_check CHECK (((status)::text = ANY ((ARRAY['sent'::character varying, 'failed'::character varying, 'pending'::character varying])::text[])))
-);
-
-
--- TABLE: discovery_approval_queue
-CREATE TABLE IF NOT EXISTS public.discovery_approval_queue (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    tenant_id uuid NOT NULL,
-    job_id uuid NOT NULL,
-    finding_id uuid NOT NULL,
-    status character varying(20) DEFAULT 'pending'::character varying NOT NULL,
-    reviewed_by uuid,
-    reviewed_at timestamp with time zone,
-    auto_approval_rule_id uuid,
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT discovery_approval_queue_status_check CHECK (((status)::text = ANY ((ARRAY['pending'::character varying, 'approved'::character varying, 'rejected'::character varying, 'auto_approved'::character varying])::text[])))
 );
 
 
@@ -3307,31 +2908,6 @@ CREATE TABLE IF NOT EXISTS public.external_connections (
 );
 
 
--- TABLE: feature_adoption_metrics
-CREATE TABLE IF NOT EXISTS public.feature_adoption_metrics (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    feature_name character varying(100) NOT NULL,
-    tenant_id uuid,
-    user_id uuid,
-    action character varying(50) NOT NULL,
-    session_id character varying(100),
-    metadata jsonb,
-    "timestamp" timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
--- TABLE: feature_usage_events
-CREATE TABLE IF NOT EXISTS public.feature_usage_events (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    tenant_id uuid NOT NULL,
-    user_id uuid,
-    feature_name character varying(100) NOT NULL,
-    event_type character varying(50) NOT NULL,
-    event_data jsonb DEFAULT '{}'::jsonb,
-    occurred_at timestamp with time zone DEFAULT now()
-);
-
-
 -- TABLE: health_alerts
 CREATE TABLE IF NOT EXISTS public.health_alerts (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -3358,17 +2934,6 @@ CREATE TABLE IF NOT EXISTS public.health_benchmarks (
     source character varying(255) NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
--- TABLE: health_insights
-CREATE TABLE IF NOT EXISTS public.health_insights (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    tenant_id uuid NOT NULL,
-    insights jsonb DEFAULT '[]'::jsonb NOT NULL,
-    confidence numeric(3,2) DEFAULT 0 NOT NULL,
-    generated_at timestamp with time zone DEFAULT now() NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -3424,25 +2989,6 @@ CREATE OR REPLACE VIEW public.health_metrics_aggregated_view AS
    FROM public.health_metrics
   GROUP BY health_metrics.tenant_id, (date_trunc('hour'::text, health_metrics."timestamp"))
   ORDER BY health_metrics.tenant_id, (date_trunc('hour'::text, health_metrics."timestamp"));
-
-
--- TABLE: identity_link_requests
-CREATE TABLE IF NOT EXISTS public.identity_link_requests (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    primary_user_id uuid NOT NULL,
-    secondary_user_id uuid NOT NULL,
-    auth_method_id uuid NOT NULL,
-    status character varying(50) DEFAULT 'pending'::character varying,
-    requested_by_user_id uuid,
-    confirmation_token character varying(255) NOT NULL,
-    expires_at timestamp with time zone DEFAULT (now() + '24:00:00'::interval),
-    resolved_at timestamp with time zone,
-    resolved_by_user_id uuid,
-    rejection_reason text,
-    created_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT different_users CHECK ((primary_user_id <> secondary_user_id)),
-    CONSTRAINT valid_status CHECK (((status)::text = ANY ((ARRAY['pending'::character varying, 'approved'::character varying, 'rejected'::character varying, 'expired'::character varying])::text[])))
-);
 
 
 -- TABLE: implementation_keys
@@ -4492,25 +4038,6 @@ CREATE TABLE IF NOT EXISTS public.pending_sensor_registrations (
 );
 
 
--- TABLE: pending_sensors
-CREATE TABLE IF NOT EXISTS public.pending_sensors (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    tenant_id uuid NOT NULL,
-    registration_key character varying(255) NOT NULL,
-    name character varying(255) NOT NULL,
-    ip_address inet NOT NULL,
-    profile character varying(50) NOT NULL,
-    network_interfaces text[],
-    tags text[],
-    description text,
-    status character varying(20) DEFAULT 'pending'::character varying NOT NULL,
-    created_at timestamp with time zone DEFAULT now(),
-    expires_at timestamp with time zone NOT NULL,
-    used_at timestamp with time zone,
-    CONSTRAINT pending_sensors_status_check CHECK (((status)::text = ANY ((ARRAY['pending'::character varying, 'used'::character varying, 'expired'::character varying, 'cancelled'::character varying])::text[])))
-);
-
-
 -- TABLE: permission_audit_logs
 CREATE TABLE IF NOT EXISTS public.permission_audit_logs (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
@@ -4687,23 +4214,6 @@ CREATE TABLE IF NOT EXISTS public.platform_integration_audit_log (
     user_agent text,
     created_at timestamp with time zone DEFAULT now(),
     CONSTRAINT valid_action CHECK (((action)::text = ANY ((ARRAY['created'::character varying, 'updated'::character varying, 'deleted'::character varying, 'enabled'::character varying, 'disabled'::character varying, 'tested'::character varying, 'credential_rotated'::character varying, 'status_changed'::character varying])::text[])))
-);
-
-
--- TABLE: platform_integration_secrets
-CREATE TABLE IF NOT EXISTS public.platform_integration_secrets (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    integration_id uuid NOT NULL,
-    secret_key character varying(100) NOT NULL,
-    encrypted_value text NOT NULL,
-    encryption_key_id character varying(255),
-    version integer DEFAULT 1,
-    is_current boolean DEFAULT true,
-    expires_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    rotated_at timestamp with time zone,
-    CONSTRAINT valid_secret_key CHECK (((secret_key)::text = ANY ((ARRAY['access_key_id'::character varying, 'secret_access_key'::character varying, 'session_token'::character varying, 'api_token'::character varying, 'api_key'::character varying, 'webhook_url'::character varying, 'client_id'::character varying, 'client_secret'::character varying, 'custom'::character varying])::text[])))
 );
 
 
@@ -5106,30 +4616,6 @@ CREATE TABLE IF NOT EXISTS public.remediation_plans (
 );
 
 
--- TABLE: resource_permissions
-CREATE TABLE IF NOT EXISTS public.resource_permissions (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    resource_type character varying(50) NOT NULL,
-    resource_id uuid NOT NULL,
-    tenant_id uuid NOT NULL,
-    owner_id uuid NOT NULL,
-    permissions jsonb DEFAULT '{}'::jsonb,
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now()
-);
-
-
--- TABLE: resource_tracking_config
-CREATE TABLE IF NOT EXISTS public.resource_tracking_config (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    config_key character varying(100) NOT NULL,
-    config_value jsonb NOT NULL,
-    description text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
 -- TABLE: rule_vulnerability_mappings
 CREATE TABLE IF NOT EXISTS public.rule_vulnerability_mappings (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
@@ -5156,53 +4642,6 @@ CREATE TABLE IF NOT EXISTS public.schedule_history (
     error_message text,
     assets_found integer DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
--- TABLE: security_events
-CREATE TABLE IF NOT EXISTS public.security_events (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    event_id character varying(255) NOT NULL,
-    correlation_id character varying(255),
-    trace_id character varying(255),
-    event_type character varying(100) NOT NULL,
-    severity character varying(20) NOT NULL,
-    category character varying(50) NOT NULL,
-    title character varying(255) NOT NULL,
-    description text,
-    message text,
-    service_name character varying(100) NOT NULL,
-    source_ip inet,
-    user_agent text,
-    user_id uuid,
-    user_type character varying(20),
-    tenant_id uuid,
-    request_id character varying(255),
-    request_method character varying(10),
-    request_path text,
-    response_status integer,
-    threat_score numeric(5,2) DEFAULT 0.0,
-    is_anomaly boolean DEFAULT false,
-    anomaly_type character varying(50),
-    risk_level character varying(20) DEFAULT 'low'::character varying,
-    status character varying(20) DEFAULT 'open'::character varying,
-    assigned_to uuid,
-    resolved_at timestamp with time zone,
-    resolution_notes text,
-    related_events uuid[],
-    metadata jsonb DEFAULT '{}'::jsonb,
-    tags text[],
-    compliance_tags text[],
-    requires_attention boolean DEFAULT false,
-    "timestamp" timestamp with time zone NOT NULL,
-    detected_at timestamp with time zone DEFAULT now(),
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT valid_category CHECK (((category)::text = ANY ((ARRAY['authentication'::character varying, 'authorization'::character varying, 'api'::character varying, 'data_access'::character varying, 'system'::character varying, 'network'::character varying, 'compliance'::character varying])::text[]))),
-    CONSTRAINT valid_risk_level CHECK (((risk_level)::text = ANY ((ARRAY['low'::character varying, 'medium'::character varying, 'high'::character varying, 'critical'::character varying])::text[]))),
-    CONSTRAINT valid_severity CHECK (((severity)::text = ANY ((ARRAY['low'::character varying, 'medium'::character varying, 'high'::character varying, 'critical'::character varying])::text[]))),
-    CONSTRAINT valid_status CHECK (((status)::text = ANY ((ARRAY['open'::character varying, 'investigating'::character varying, 'resolved'::character varying, 'false_positive'::character varying, 'acknowledged'::character varying])::text[]))),
-    CONSTRAINT valid_threat_score CHECK (((threat_score >= 0.0) AND (threat_score <= 100.0)))
 );
 
 
@@ -5914,38 +5353,6 @@ CREATE TABLE IF NOT EXISTS public.support_tickets (
 );
 
 
--- TABLE: sync_outbox
-CREATE TABLE IF NOT EXISTS public.sync_outbox (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    tenant_id uuid NOT NULL,
-    entity_type text NOT NULL,
-    entity_id uuid NOT NULL,
-    event_type text NOT NULL,
-    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
-    status text DEFAULT 'pending'::text NOT NULL,
-    attempts integer DEFAULT 0 NOT NULL,
-    next_attempt_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now()
-);
-
-
--- TABLE: system_health_metrics
-CREATE TABLE IF NOT EXISTS public.system_health_metrics (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    service_name character varying(100) NOT NULL,
-    health_status character varying(20) NOT NULL,
-    response_time_ms integer,
-    error_count integer DEFAULT 0,
-    memory_usage_mb integer,
-    cpu_usage_percent numeric(5,2),
-    disk_usage_percent numeric(5,2),
-    active_connections integer,
-    metadata jsonb,
-    "timestamp" timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
 -- TABLE: tenant_admin_settings
 CREATE TABLE IF NOT EXISTS public.tenant_admin_settings (
     tenant_id uuid NOT NULL,
@@ -5967,19 +5374,6 @@ CREATE TABLE IF NOT EXISTS public.tenant_admin_settings_audit (
     version_after integer NOT NULL,
     changed_by uuid,
     change_reason text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
--- TABLE: tenant_cost_analysis
-CREATE TABLE IF NOT EXISTS public.tenant_cost_analysis (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    tenant_id uuid NOT NULL,
-    period_start timestamp with time zone NOT NULL,
-    period_end timestamp with time zone NOT NULL,
-    total_cost_usd numeric(10,4) NOT NULL,
-    resource_breakdown jsonb NOT NULL,
-    optimization_suggestions jsonb,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
@@ -6228,43 +5622,6 @@ CREATE TABLE IF NOT EXISTS public.tenant_usage (
     last_calculated_at timestamp with time zone DEFAULT now(),
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now()
-);
-
-
--- TABLE: tenant_usage_tracking
-CREATE TABLE IF NOT EXISTS public.tenant_usage_tracking (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    tenant_id uuid NOT NULL,
-    metric_type character varying(50) NOT NULL,
-    current_count integer DEFAULT 0 NOT NULL,
-    last_updated timestamp with time zone DEFAULT now(),
-    CONSTRAINT tenant_usage_tracking_metric_type_check CHECK (((metric_type)::text = ANY ((ARRAY['sensors'::character varying, 'assets'::character varying, 'users'::character varying, 'compliance_frameworks'::character varying, 'integrations'::character varying, 'reports_generated'::character varying])::text[])))
-);
-
-
--- TABLE: threat_detection_rules
-CREATE TABLE IF NOT EXISTS public.threat_detection_rules (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    rule_name character varying(100) NOT NULL,
-    rule_type character varying(50) NOT NULL,
-    description text,
-    pattern jsonb NOT NULL,
-    threshold numeric(10,2),
-    time_window_seconds integer,
-    severity character varying(20) NOT NULL,
-    action character varying(50) DEFAULT 'alert'::character varying,
-    notification_channels text[],
-    applies_to_services text[],
-    applies_to_tenants uuid[],
-    applies_to_event_types text[],
-    is_active boolean DEFAULT true,
-    priority integer DEFAULT 0,
-    created_by uuid,
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT valid_action CHECK (((action)::text = ANY ((ARRAY['alert'::character varying, 'block'::character varying, 'rate_limit'::character varying, 'notify'::character varying, 'escalate'::character varying])::text[]))),
-    CONSTRAINT valid_rule_type CHECK (((rule_type)::text = ANY ((ARRAY['pattern'::character varying, 'frequency'::character varying, 'threshold'::character varying, 'geographic'::character varying, 'behavioral'::character varying])::text[]))),
-    CONSTRAINT valid_severity CHECK (((severity)::text = ANY ((ARRAY['low'::character varying, 'medium'::character varying, 'high'::character varying, 'critical'::character varying])::text[])))
 );
 
 
@@ -7081,19 +6438,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: alert_instances alert_instances_pkey
-DO $$ BEGIN
-  IF to_regclass('audit.alert_instances') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'alert_instances_pkey' AND conrelid = to_regclass('audit.alert_instances')
-     ) THEN
-    ALTER TABLE ONLY audit.alert_instances
-        ADD CONSTRAINT alert_instances_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: alert_rules alert_rules_pkey
 DO $$ BEGIN
   IF to_regclass('audit.alert_rules') IS NOT NULL
@@ -7107,19 +6451,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: audit_logs audit_logs_pkey
-DO $$ BEGIN
-  IF to_regclass('audit.audit_logs') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'audit_logs_pkey' AND conrelid = to_regclass('audit.audit_logs')
-     ) THEN
-    ALTER TABLE ONLY audit.audit_logs
-        ADD CONSTRAINT audit_logs_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: job_execution_logs job_execution_logs_pkey
 DO $$ BEGIN
   IF to_regclass('audit.job_execution_logs') IS NOT NULL
@@ -7129,19 +6460,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY audit.job_execution_logs
         ADD CONSTRAINT job_execution_logs_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: retention_jobs retention_jobs_pkey
-DO $$ BEGIN
-  IF to_regclass('audit.retention_jobs') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'retention_jobs_pkey' AND conrelid = to_regclass('audit.retention_jobs')
-     ) THEN
-    ALTER TABLE ONLY audit.retention_jobs
-        ADD CONSTRAINT retention_jobs_pkey PRIMARY KEY (id);
   END IF;
 END $$;
 
@@ -7224,32 +6542,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: access_pattern_analysis access_pattern_analysis_pkey
-DO $$ BEGIN
-  IF to_regclass('public.access_pattern_analysis') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'access_pattern_analysis_pkey' AND conrelid = to_regclass('public.access_pattern_analysis')
-     ) THEN
-    ALTER TABLE ONLY public.access_pattern_analysis
-        ADD CONSTRAINT access_pattern_analysis_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: agent_ca_certificates agent_ca_certificates_pkey
-DO $$ BEGIN
-  IF to_regclass('public.agent_ca_certificates') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'agent_ca_certificates_pkey' AND conrelid = to_regclass('public.agent_ca_certificates')
-     ) THEN
-    ALTER TABLE ONLY public.agent_ca_certificates
-        ADD CONSTRAINT agent_ca_certificates_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: agent_certificates agent_certificates_pkey
 DO $$ BEGIN
   IF to_regclass('public.agent_certificates') IS NOT NULL
@@ -7259,32 +6551,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.agent_certificates
         ADD CONSTRAINT agent_certificates_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: ai_analysis_results ai_analysis_results_pkey
-DO $$ BEGIN
-  IF to_regclass('public.ai_analysis_results') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'ai_analysis_results_pkey' AND conrelid = to_regclass('public.ai_analysis_results')
-     ) THEN
-    ALTER TABLE ONLY public.ai_analysis_results
-        ADD CONSTRAINT ai_analysis_results_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: ai_models ai_models_pkey
-DO $$ BEGIN
-  IF to_regclass('public.ai_models') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'ai_models_pkey' AND conrelid = to_regclass('public.ai_models')
-     ) THEN
-    ALTER TABLE ONLY public.ai_models
-        ADD CONSTRAINT ai_models_pkey PRIMARY KEY (id);
   END IF;
 END $$;
 
@@ -7311,45 +6577,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.algorithms
         ADD CONSTRAINT algorithms_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: api_format_preferences api_format_preferences_pkey
-DO $$ BEGIN
-  IF to_regclass('public.api_format_preferences') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'api_format_preferences_pkey' AND conrelid = to_regclass('public.api_format_preferences')
-     ) THEN
-    ALTER TABLE ONLY public.api_format_preferences
-        ADD CONSTRAINT api_format_preferences_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: api_security_monitoring api_security_monitoring_pkey
-DO $$ BEGIN
-  IF to_regclass('public.api_security_monitoring') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'api_security_monitoring_pkey' AND conrelid = to_regclass('public.api_security_monitoring')
-     ) THEN
-    ALTER TABLE ONLY public.api_security_monitoring
-        ADD CONSTRAINT api_security_monitoring_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: api_security_monitoring api_security_monitoring_request_id_key
-DO $$ BEGIN
-  IF to_regclass('public.api_security_monitoring') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'api_security_monitoring_request_id_key' AND conrelid = to_regclass('public.api_security_monitoring')
-     ) THEN
-    ALTER TABLE ONLY public.api_security_monitoring
-        ADD CONSTRAINT api_security_monitoring_request_id_key UNIQUE (request_id);
   END IF;
 END $$;
 
@@ -7692,19 +6919,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: ci_relationships ci_relationships_pkey
-DO $$ BEGIN
-  IF to_regclass('public.ci_relationships') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'ci_relationships_pkey' AND conrelid = to_regclass('public.ci_relationships')
-     ) THEN
-    ALTER TABLE ONLY public.ci_relationships
-        ADD CONSTRAINT ci_relationships_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: cmdb_entity_mappings cmdb_entity_mappings_pkey
 DO $$ BEGIN
   IF to_regclass('public.cmdb_entity_mappings') IS NOT NULL
@@ -7744,19 +6958,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: compliance_checks compliance_checks_pkey
-DO $$ BEGIN
-  IF to_regclass('public.compliance_checks') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'compliance_checks_pkey' AND conrelid = to_regclass('public.compliance_checks')
-     ) THEN
-    ALTER TABLE ONLY public.compliance_checks
-        ADD CONSTRAINT compliance_checks_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: compliance_finding_history compliance_finding_history_pkey
 DO $$ BEGIN
   IF to_regclass('public.compliance_finding_history') IS NOT NULL
@@ -7783,19 +6984,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: compliance_framework_status compliance_framework_status_pkey
-DO $$ BEGIN
-  IF to_regclass('public.compliance_framework_status') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'compliance_framework_status_pkey' AND conrelid = to_regclass('public.compliance_framework_status')
-     ) THEN
-    ALTER TABLE ONLY public.compliance_framework_status
-        ADD CONSTRAINT compliance_framework_status_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: compliance_overrides compliance_overrides_pkey
 DO $$ BEGIN
   IF to_regclass('public.compliance_overrides') IS NOT NULL
@@ -7805,32 +6993,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.compliance_overrides
         ADD CONSTRAINT compliance_overrides_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: compliance_reports compliance_reports_pkey
-DO $$ BEGIN
-  IF to_regclass('public.compliance_reports') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'compliance_reports_pkey' AND conrelid = to_regclass('public.compliance_reports')
-     ) THEN
-    ALTER TABLE ONLY public.compliance_reports
-        ADD CONSTRAINT compliance_reports_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: compliance_requirements compliance_requirements_pkey
-DO $$ BEGIN
-  IF to_regclass('public.compliance_requirements') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'compliance_requirements_pkey' AND conrelid = to_regclass('public.compliance_requirements')
-     ) THEN
-    ALTER TABLE ONLY public.compliance_requirements
-        ADD CONSTRAINT compliance_requirements_pkey PRIMARY KEY (id);
   END IF;
 END $$;
 
@@ -7928,45 +7090,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: dashboard_cache dashboard_cache_cache_key_key
-DO $$ BEGIN
-  IF to_regclass('public.dashboard_cache') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'dashboard_cache_cache_key_key' AND conrelid = to_regclass('public.dashboard_cache')
-     ) THEN
-    ALTER TABLE ONLY public.dashboard_cache
-        ADD CONSTRAINT dashboard_cache_cache_key_key UNIQUE (cache_key);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: dashboard_cache dashboard_cache_pkey
-DO $$ BEGIN
-  IF to_regclass('public.dashboard_cache') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'dashboard_cache_pkey' AND conrelid = to_regclass('public.dashboard_cache')
-     ) THEN
-    ALTER TABLE ONLY public.dashboard_cache
-        ADD CONSTRAINT dashboard_cache_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: dashboard_metrics dashboard_metrics_pkey
-DO $$ BEGIN
-  IF to_regclass('public.dashboard_metrics') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'dashboard_metrics_pkey' AND conrelid = to_regclass('public.dashboard_metrics')
-     ) THEN
-    ALTER TABLE ONLY public.dashboard_metrics
-        ADD CONSTRAINT dashboard_metrics_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: database_encryption_states database_encryption_states_pkey
 DO $$ BEGIN
   IF to_regclass('public.database_encryption_states') IS NOT NULL
@@ -8054,19 +7177,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.discovery_alert_history
         ADD CONSTRAINT discovery_alert_history_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: discovery_approval_queue discovery_approval_queue_pkey
-DO $$ BEGIN
-  IF to_regclass('public.discovery_approval_queue') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'discovery_approval_queue_pkey' AND conrelid = to_regclass('public.discovery_approval_queue')
-     ) THEN
-    ALTER TABLE ONLY public.discovery_approval_queue
-        ADD CONSTRAINT discovery_approval_queue_pkey PRIMARY KEY (id);
   END IF;
 END $$;
 
@@ -8201,32 +7311,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: feature_adoption_metrics feature_adoption_metrics_pkey
-DO $$ BEGIN
-  IF to_regclass('public.feature_adoption_metrics') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'feature_adoption_metrics_pkey' AND conrelid = to_regclass('public.feature_adoption_metrics')
-     ) THEN
-    ALTER TABLE ONLY public.feature_adoption_metrics
-        ADD CONSTRAINT feature_adoption_metrics_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: feature_usage_events feature_usage_events_pkey
-DO $$ BEGIN
-  IF to_regclass('public.feature_usage_events') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'feature_usage_events_pkey' AND conrelid = to_regclass('public.feature_usage_events')
-     ) THEN
-    ALTER TABLE ONLY public.feature_usage_events
-        ADD CONSTRAINT feature_usage_events_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: health_alerts health_alerts_pkey
 DO $$ BEGIN
   IF to_regclass('public.health_alerts') IS NOT NULL
@@ -8266,19 +7350,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: health_insights health_insights_pkey
-DO $$ BEGIN
-  IF to_regclass('public.health_insights') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'health_insights_pkey' AND conrelid = to_regclass('public.health_insights')
-     ) THEN
-    ALTER TABLE ONLY public.health_insights
-        ADD CONSTRAINT health_insights_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: health_metrics health_metrics_pkey
 DO $$ BEGIN
   IF to_regclass('public.health_metrics') IS NOT NULL
@@ -8288,19 +7359,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.health_metrics
         ADD CONSTRAINT health_metrics_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: identity_link_requests identity_link_requests_pkey
-DO $$ BEGIN
-  IF to_regclass('public.identity_link_requests') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'identity_link_requests_pkey' AND conrelid = to_regclass('public.identity_link_requests')
-     ) THEN
-    ALTER TABLE ONLY public.identity_link_requests
-        ADD CONSTRAINT identity_link_requests_pkey PRIMARY KEY (id);
   END IF;
 END $$;
 
@@ -8727,32 +7785,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: pending_sensors pending_sensors_pkey
-DO $$ BEGIN
-  IF to_regclass('public.pending_sensors') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'pending_sensors_pkey' AND conrelid = to_regclass('public.pending_sensors')
-     ) THEN
-    ALTER TABLE ONLY public.pending_sensors
-        ADD CONSTRAINT pending_sensors_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: pending_sensors pending_sensors_registration_key_key
-DO $$ BEGIN
-  IF to_regclass('public.pending_sensors') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'pending_sensors_registration_key_key' AND conrelid = to_regclass('public.pending_sensors')
-     ) THEN
-    ALTER TABLE ONLY public.pending_sensors
-        ADD CONSTRAINT pending_sensors_registration_key_key UNIQUE (registration_key);
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: permission_audit_logs permission_audit_logs_pkey
 DO $$ BEGIN
   IF to_regclass('public.permission_audit_logs') IS NOT NULL
@@ -8853,19 +7885,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.platform_integration_audit_log
         ADD CONSTRAINT platform_integration_audit_log_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: platform_integration_secrets platform_integration_secrets_pkey
-DO $$ BEGIN
-  IF to_regclass('public.platform_integration_secrets') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'platform_integration_secrets_pkey' AND conrelid = to_regclass('public.platform_integration_secrets')
-     ) THEN
-    ALTER TABLE ONLY public.platform_integration_secrets
-        ADD CONSTRAINT platform_integration_secrets_pkey PRIMARY KEY (id);
   END IF;
 END $$;
 
@@ -9247,45 +8266,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: resource_permissions resource_permissions_pkey
-DO $$ BEGIN
-  IF to_regclass('public.resource_permissions') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'resource_permissions_pkey' AND conrelid = to_regclass('public.resource_permissions')
-     ) THEN
-    ALTER TABLE ONLY public.resource_permissions
-        ADD CONSTRAINT resource_permissions_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: resource_tracking_config resource_tracking_config_config_key_key
-DO $$ BEGIN
-  IF to_regclass('public.resource_tracking_config') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'resource_tracking_config_config_key_key' AND conrelid = to_regclass('public.resource_tracking_config')
-     ) THEN
-    ALTER TABLE ONLY public.resource_tracking_config
-        ADD CONSTRAINT resource_tracking_config_config_key_key UNIQUE (config_key);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: resource_tracking_config resource_tracking_config_pkey
-DO $$ BEGIN
-  IF to_regclass('public.resource_tracking_config') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'resource_tracking_config_pkey' AND conrelid = to_regclass('public.resource_tracking_config')
-     ) THEN
-    ALTER TABLE ONLY public.resource_tracking_config
-        ADD CONSTRAINT resource_tracking_config_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: rule_vulnerability_mappings rule_vulnerability_mappings_pkey
 DO $$ BEGIN
   IF to_regclass('public.rule_vulnerability_mappings') IS NOT NULL
@@ -9308,32 +8288,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.schedule_history
         ADD CONSTRAINT schedule_history_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: security_events security_events_event_id_key
-DO $$ BEGIN
-  IF to_regclass('public.security_events') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'security_events_event_id_key' AND conrelid = to_regclass('public.security_events')
-     ) THEN
-    ALTER TABLE ONLY public.security_events
-        ADD CONSTRAINT security_events_event_id_key UNIQUE (event_id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: security_events security_events_pkey
-DO $$ BEGIN
-  IF to_regclass('public.security_events') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'security_events_pkey' AND conrelid = to_regclass('public.security_events')
-     ) THEN
-    ALTER TABLE ONLY public.security_events
-        ADD CONSTRAINT security_events_pkey PRIMARY KEY (id);
   END IF;
 END $$;
 
@@ -9624,32 +8578,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: sync_outbox sync_outbox_pkey
-DO $$ BEGIN
-  IF to_regclass('public.sync_outbox') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'sync_outbox_pkey' AND conrelid = to_regclass('public.sync_outbox')
-     ) THEN
-    ALTER TABLE ONLY public.sync_outbox
-        ADD CONSTRAINT sync_outbox_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: system_health_metrics system_health_metrics_pkey
-DO $$ BEGIN
-  IF to_regclass('public.system_health_metrics') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'system_health_metrics_pkey' AND conrelid = to_regclass('public.system_health_metrics')
-     ) THEN
-    ALTER TABLE ONLY public.system_health_metrics
-        ADD CONSTRAINT system_health_metrics_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: tenant_admin_settings_audit tenant_admin_settings_audit_pkey
 DO $$ BEGIN
   IF to_regclass('public.tenant_admin_settings_audit') IS NOT NULL
@@ -9659,19 +8587,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.tenant_admin_settings_audit
         ADD CONSTRAINT tenant_admin_settings_audit_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: tenant_cost_analysis tenant_cost_analysis_pkey
-DO $$ BEGIN
-  IF to_regclass('public.tenant_cost_analysis') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'tenant_cost_analysis_pkey' AND conrelid = to_regclass('public.tenant_cost_analysis')
-     ) THEN
-    ALTER TABLE ONLY public.tenant_cost_analysis
-        ADD CONSTRAINT tenant_cost_analysis_pkey PRIMARY KEY (id);
   END IF;
 END $$;
 
@@ -9936,32 +8851,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: tenant_usage_tracking tenant_usage_tracking_pkey
-DO $$ BEGIN
-  IF to_regclass('public.tenant_usage_tracking') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'tenant_usage_tracking_pkey' AND conrelid = to_regclass('public.tenant_usage_tracking')
-     ) THEN
-    ALTER TABLE ONLY public.tenant_usage_tracking
-        ADD CONSTRAINT tenant_usage_tracking_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: tenant_usage_tracking tenant_usage_tracking_tenant_id_metric_type_key
-DO $$ BEGIN
-  IF to_regclass('public.tenant_usage_tracking') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'tenant_usage_tracking_tenant_id_metric_type_key' AND conrelid = to_regclass('public.tenant_usage_tracking')
-     ) THEN
-    ALTER TABLE ONLY public.tenant_usage_tracking
-        ADD CONSTRAINT tenant_usage_tracking_tenant_id_metric_type_key UNIQUE (tenant_id, metric_type);
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: tenants tenants_pkey
 DO $$ BEGIN
   IF to_regclass('public.tenants') IS NOT NULL
@@ -9984,32 +8873,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.tenants
         ADD CONSTRAINT tenants_slug_key UNIQUE (slug);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: threat_detection_rules threat_detection_rules_pkey
-DO $$ BEGIN
-  IF to_regclass('public.threat_detection_rules') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'threat_detection_rules_pkey' AND conrelid = to_regclass('public.threat_detection_rules')
-     ) THEN
-    ALTER TABLE ONLY public.threat_detection_rules
-        ADD CONSTRAINT threat_detection_rules_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: threat_detection_rules threat_detection_rules_rule_name_key
-DO $$ BEGIN
-  IF to_regclass('public.threat_detection_rules') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'threat_detection_rules_rule_name_key' AND conrelid = to_regclass('public.threat_detection_rules')
-     ) THEN
-    ALTER TABLE ONLY public.threat_detection_rules
-        ADD CONSTRAINT threat_detection_rules_rule_name_key UNIQUE (rule_name);
   END IF;
 END $$;
 
@@ -10066,19 +8929,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: ai_models unique_active_model_type
-DO $$ BEGIN
-  IF to_regclass('public.ai_models') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'unique_active_model_type' AND conrelid = to_regclass('public.ai_models')
-     ) THEN
-    ALTER TABLE ONLY public.ai_models
-        ADD CONSTRAINT unique_active_model_type UNIQUE (model_type, active) DEFERRABLE INITIALLY DEFERRED;
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: agent_certificates unique_agent_serial
 DO $$ BEGIN
   IF to_regclass('public.agent_certificates') IS NOT NULL
@@ -10118,32 +8968,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: compliance_framework_status unique_compliance_framework_status_version
-DO $$ BEGIN
-  IF to_regclass('public.compliance_framework_status') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'unique_compliance_framework_status_version' AND conrelid = to_regclass('public.compliance_framework_status')
-     ) THEN
-    ALTER TABLE ONLY public.compliance_framework_status
-        ADD CONSTRAINT unique_compliance_framework_status_version UNIQUE (framework_name, framework_version);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: platform_integration_secrets unique_current_secret
-DO $$ BEGIN
-  IF to_regclass('public.platform_integration_secrets') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'unique_current_secret' AND conrelid = to_regclass('public.platform_integration_secrets')
-     ) THEN
-    ALTER TABLE ONLY public.platform_integration_secrets
-        ADD CONSTRAINT unique_current_secret UNIQUE (integration_id, secret_key, is_current) DEFERRABLE INITIALLY DEFERRED;
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: certificates unique_fingerprint_per_tenant
 DO $$ BEGIN
   IF to_regclass('public.certificates') IS NOT NULL
@@ -10153,19 +8977,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.certificates
         ADD CONSTRAINT unique_fingerprint_per_tenant UNIQUE (tenant_id, fingerprint_sha256);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: compliance_requirements unique_framework_requirement
-DO $$ BEGIN
-  IF to_regclass('public.compliance_requirements') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'unique_framework_requirement' AND conrelid = to_regclass('public.compliance_requirements')
-     ) THEN
-    ALTER TABLE ONLY public.compliance_requirements
-        ADD CONSTRAINT unique_framework_requirement UNIQUE (framework_id, requirement_code);
   END IF;
 END $$;
 
@@ -10192,19 +9003,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.crypto_implementation_certificates
         ADD CONSTRAINT unique_impl_cert UNIQUE (crypto_implementation_id, certificate_id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: access_pattern_analysis unique_pattern_key
-DO $$ BEGIN
-  IF to_regclass('public.access_pattern_analysis') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'unique_pattern_key' AND conrelid = to_regclass('public.access_pattern_analysis')
-     ) THEN
-    ALTER TABLE ONLY public.access_pattern_analysis
-        ADD CONSTRAINT unique_pattern_key UNIQUE (pattern_type, pattern_key, analysis_period_start);
   END IF;
 END $$;
 
@@ -10400,19 +9198,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.tenant_usage
         ADD CONSTRAINT unique_tenant_period UNIQUE (tenant_id, billing_period_start);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: api_format_preferences unique_tenant_preferences
-DO $$ BEGIN
-  IF to_regclass('public.api_format_preferences') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'unique_tenant_preferences' AND conrelid = to_regclass('public.api_format_preferences')
-     ) THEN
-    ALTER TABLE ONLY public.api_format_preferences
-        ADD CONSTRAINT unique_tenant_preferences UNIQUE (tenant_id);
   END IF;
 END $$;
 
@@ -10900,26 +9685,6 @@ CREATE INDEX IF NOT EXISTS activity_logs_y2026m08_user_id_occurred_at_idx ON aud
 CREATE INDEX IF NOT EXISTS activity_logs_y2026m08_user_type_occurred_at_idx ON audit.activity_logs_y2026m08 USING btree (user_type, occurred_at DESC);
 
 
--- INDEX: idx_alert_instances_created
-CREATE INDEX IF NOT EXISTS idx_alert_instances_created ON audit.alert_instances USING btree (created_at DESC);
-
-
--- INDEX: idx_alert_instances_rule
-CREATE INDEX IF NOT EXISTS idx_alert_instances_rule ON audit.alert_instances USING btree (rule_id);
-
-
--- INDEX: idx_alert_instances_severity
-CREATE INDEX IF NOT EXISTS idx_alert_instances_severity ON audit.alert_instances USING btree (severity);
-
-
--- INDEX: idx_alert_instances_status
-CREATE INDEX IF NOT EXISTS idx_alert_instances_status ON audit.alert_instances USING btree (status);
-
-
--- INDEX: idx_alert_instances_tenant
-CREATE INDEX IF NOT EXISTS idx_alert_instances_tenant ON audit.alert_instances USING btree (tenant_id) WHERE (tenant_id IS NOT NULL);
-
-
 -- INDEX: idx_alert_rules_enabled
 CREATE INDEX IF NOT EXISTS idx_alert_rules_enabled ON audit.alert_rules USING btree (is_enabled) WHERE (is_enabled = true);
 
@@ -10934,10 +9699,6 @@ CREATE INDEX IF NOT EXISTS idx_alert_rules_tenant ON audit.alert_rules USING btr
 
 -- INDEX: idx_alert_rules_type
 CREATE INDEX IF NOT EXISTS idx_alert_rules_type ON audit.alert_rules USING btree (rule_type);
-
-
--- INDEX: idx_audit_logs_created_at
-CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit.audit_logs USING btree (created_at);
 
 
 -- INDEX: idx_job_execution_logs_initiated_by
@@ -10978,18 +9739,6 @@ CREATE INDEX IF NOT EXISTS idx_report_executions_status ON audit.scheduled_repor
 
 -- INDEX: idx_report_executions_tenant
 CREATE INDEX IF NOT EXISTS idx_report_executions_tenant ON audit.scheduled_report_executions USING btree (tenant_id);
-
-
--- INDEX: idx_retention_jobs_policy
-CREATE INDEX IF NOT EXISTS idx_retention_jobs_policy ON audit.retention_jobs USING btree (policy_id, started_at DESC);
-
-
--- INDEX: idx_retention_jobs_started_at
-CREATE INDEX IF NOT EXISTS idx_retention_jobs_started_at ON audit.retention_jobs USING btree (started_at DESC);
-
-
--- INDEX: idx_retention_jobs_type
-CREATE INDEX IF NOT EXISTS idx_retention_jobs_type ON audit.retention_jobs USING btree (job_type, started_at DESC);
 
 
 -- INDEX: idx_scheduled_reports_enabled
@@ -11168,30 +9917,6 @@ CREATE INDEX IF NOT EXISTS crypto_implementations_part_7_risk_score_idx ON publi
 CREATE INDEX IF NOT EXISTS crypto_implementations_part_7_tenant_id_idx ON public.crypto_implementations_part_7 USING btree (tenant_id);
 
 
--- INDEX: idx_access_pattern_anomaly
-CREATE INDEX IF NOT EXISTS idx_access_pattern_anomaly ON public.access_pattern_analysis USING btree (is_anomaly, anomaly_score DESC) WHERE (is_anomaly = true);
-
-
--- INDEX: idx_access_pattern_tenant
-CREATE INDEX IF NOT EXISTS idx_access_pattern_tenant ON public.access_pattern_analysis USING btree (tenant_id, analyzed_at DESC) WHERE (tenant_id IS NOT NULL);
-
-
--- INDEX: idx_access_pattern_type
-CREATE INDEX IF NOT EXISTS idx_access_pattern_type ON public.access_pattern_analysis USING btree (pattern_type, analyzed_at DESC);
-
-
--- INDEX: idx_agent_ca_certificates_active
-CREATE INDEX IF NOT EXISTS idx_agent_ca_certificates_active ON public.agent_ca_certificates USING btree (tenant_id, is_active) WHERE (is_active = true);
-
-
--- INDEX: idx_agent_ca_certificates_expires_at
-CREATE INDEX IF NOT EXISTS idx_agent_ca_certificates_expires_at ON public.agent_ca_certificates USING btree (expires_at);
-
-
--- INDEX: idx_agent_ca_certificates_tenant_id
-CREATE INDEX IF NOT EXISTS idx_agent_ca_certificates_tenant_id ON public.agent_ca_certificates USING btree (tenant_id);
-
-
 -- INDEX: idx_agent_certificates_agent_id
 CREATE INDEX IF NOT EXISTS idx_agent_certificates_agent_id ON public.agent_certificates USING btree (agent_id);
 
@@ -11206,14 +9931,6 @@ CREATE INDEX IF NOT EXISTS idx_agent_certificates_revoked ON public.agent_certif
 
 -- INDEX: idx_agent_certificates_tenant_id
 CREATE INDEX IF NOT EXISTS idx_agent_certificates_tenant_id ON public.agent_certificates USING btree (tenant_id);
-
-
--- INDEX: idx_ai_analysis_results_created_at
-CREATE INDEX IF NOT EXISTS idx_ai_analysis_results_created_at ON public.ai_analysis_results USING btree (created_at);
-
-
--- INDEX: idx_ai_analysis_results_tenant_type
-CREATE INDEX IF NOT EXISTS idx_ai_analysis_results_tenant_type ON public.ai_analysis_results USING btree (tenant_id, target_type, analysis_type);
 
 
 -- INDEX: idx_alert_history_service_name
@@ -11286,34 +10003,6 @@ CREATE INDEX IF NOT EXISTS idx_algorithms_risk_score ON public.algorithms USING 
 
 -- INDEX: idx_algorithms_strength
 CREATE INDEX IF NOT EXISTS idx_algorithms_strength ON public.algorithms USING btree (strength, deprecation_status);
-
-
--- INDEX: idx_api_security_endpoint
-CREATE INDEX IF NOT EXISTS idx_api_security_endpoint ON public.api_security_monitoring USING btree (endpoint, "timestamp" DESC);
-
-
--- INDEX: idx_api_security_ip
-CREATE INDEX IF NOT EXISTS idx_api_security_ip ON public.api_security_monitoring USING btree (source_ip, "timestamp" DESC);
-
-
--- INDEX: idx_api_security_rate_limited
-CREATE INDEX IF NOT EXISTS idx_api_security_rate_limited ON public.api_security_monitoring USING btree (is_rate_limited, "timestamp" DESC) WHERE (is_rate_limited = true);
-
-
--- INDEX: idx_api_security_suspicious
-CREATE INDEX IF NOT EXISTS idx_api_security_suspicious ON public.api_security_monitoring USING btree (is_suspicious, "timestamp" DESC) WHERE (is_suspicious = true);
-
-
--- INDEX: idx_api_security_tenant
-CREATE INDEX IF NOT EXISTS idx_api_security_tenant ON public.api_security_monitoring USING btree (tenant_id, "timestamp" DESC) WHERE (tenant_id IS NOT NULL);
-
-
--- INDEX: idx_api_security_timestamp
-CREATE INDEX IF NOT EXISTS idx_api_security_timestamp ON public.api_security_monitoring USING btree ("timestamp" DESC);
-
-
--- INDEX: idx_api_security_user
-CREATE INDEX IF NOT EXISTS idx_api_security_user ON public.api_security_monitoring USING btree (user_id, "timestamp" DESC) WHERE (user_id IS NOT NULL);
 
 
 -- INDEX: idx_api_usage_endpoint_time
@@ -11522,26 +10211,6 @@ CREATE INDEX IF NOT EXISTS idx_certificates_tenant_expiry ON public.certificates
 CREATE INDEX IF NOT EXISTS idx_certificates_tenant_id ON public.certificates USING btree (tenant_id);
 
 
--- INDEX: idx_ci_relationships_source
-CREATE INDEX IF NOT EXISTS idx_ci_relationships_source ON public.ci_relationships USING btree (tenant_id, source_ci_type, source_ci_id) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_ci_relationships_target
-CREATE INDEX IF NOT EXISTS idx_ci_relationships_target ON public.ci_relationships USING btree (tenant_id, target_ci_type, target_ci_id) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_ci_relationships_tenant
-CREATE INDEX IF NOT EXISTS idx_ci_relationships_tenant ON public.ci_relationships USING btree (tenant_id);
-
-
--- INDEX: idx_ci_relationships_type
-CREATE INDEX IF NOT EXISTS idx_ci_relationships_type ON public.ci_relationships USING btree (tenant_id, relationship_type) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_ci_relationships_unique
-CREATE UNIQUE INDEX IF NOT EXISTS idx_ci_relationships_unique ON public.ci_relationships USING btree (tenant_id, source_ci_type, source_ci_id, relationship_type, target_ci_type, target_ci_id) WHERE (deleted_at IS NULL);
-
-
 -- INDEX: idx_cmdb_entity_mappings_external
 CREATE INDEX IF NOT EXISTS idx_cmdb_entity_mappings_external ON public.cmdb_entity_mappings USING btree (cmdb_platform, cmdb_ci_id) WHERE (cmdb_ci_id IS NOT NULL);
 
@@ -11578,22 +10247,6 @@ CREATE INDEX IF NOT EXISTS idx_cmdb_sync_profiles_platform ON public.cmdb_sync_p
 CREATE INDEX IF NOT EXISTS idx_cmdb_sync_profiles_tenant ON public.cmdb_sync_profiles USING btree (tenant_id) WHERE (deleted_at IS NULL);
 
 
--- INDEX: idx_compliance_checks_report_id
-CREATE INDEX IF NOT EXISTS idx_compliance_checks_report_id ON public.compliance_checks USING btree (report_id);
-
-
--- INDEX: idx_compliance_checks_rule_id
-CREATE INDEX IF NOT EXISTS idx_compliance_checks_rule_id ON public.compliance_checks USING btree (rule_id);
-
-
--- INDEX: idx_compliance_checks_status
-CREATE INDEX IF NOT EXISTS idx_compliance_checks_status ON public.compliance_checks USING btree (status);
-
-
--- INDEX: idx_compliance_checks_tenant_id
-CREATE INDEX IF NOT EXISTS idx_compliance_checks_tenant_id ON public.compliance_checks USING btree (tenant_id);
-
-
 -- INDEX: idx_compliance_findings_asset_id
 CREATE INDEX IF NOT EXISTS idx_compliance_findings_asset_id ON public.compliance_findings USING btree (asset_id);
 
@@ -11622,14 +10275,6 @@ CREATE INDEX IF NOT EXISTS idx_compliance_findings_severity ON public.compliance
 CREATE INDEX IF NOT EXISTS idx_compliance_findings_tenant_id ON public.compliance_findings USING btree (tenant_id);
 
 
--- INDEX: idx_compliance_framework_name
-CREATE INDEX IF NOT EXISTS idx_compliance_framework_name ON public.compliance_framework_status USING btree (framework_name, updated_at DESC);
-
-
--- INDEX: idx_compliance_framework_status
-CREATE INDEX IF NOT EXISTS idx_compliance_framework_status ON public.compliance_framework_status USING btree (overall_status, updated_at DESC);
-
-
 -- INDEX: idx_compliance_overrides_control_id
 CREATE INDEX IF NOT EXISTS idx_compliance_overrides_control_id ON public.compliance_overrides USING btree (control_id);
 
@@ -11644,26 +10289,6 @@ CREATE INDEX IF NOT EXISTS idx_compliance_overrides_tenant_id ON public.complian
 
 -- INDEX: idx_compliance_overrides_type
 CREATE INDEX IF NOT EXISTS idx_compliance_overrides_type ON public.compliance_overrides USING btree (override_type);
-
-
--- INDEX: idx_compliance_reports_created_at
-CREATE INDEX IF NOT EXISTS idx_compliance_reports_created_at ON public.compliance_reports USING btree (created_at);
-
-
--- INDEX: idx_compliance_reports_status
-CREATE INDEX IF NOT EXISTS idx_compliance_reports_status ON public.compliance_reports USING btree (status);
-
-
--- INDEX: idx_compliance_reports_tenant_id
-CREATE INDEX IF NOT EXISTS idx_compliance_reports_tenant_id ON public.compliance_reports USING btree (tenant_id);
-
-
--- INDEX: idx_compliance_requirements_framework
-CREATE INDEX IF NOT EXISTS idx_compliance_requirements_framework ON public.compliance_requirements USING btree (framework_id, status);
-
-
--- INDEX: idx_compliance_requirements_status
-CREATE INDEX IF NOT EXISTS idx_compliance_requirements_status ON public.compliance_requirements USING btree (status, priority);
 
 
 -- INDEX: idx_compliance_rules_active
@@ -11796,18 +10421,6 @@ CREATE INDEX IF NOT EXISTS idx_crypto_libs_purl ON public.crypto_libraries USING
 CREATE INDEX IF NOT EXISTS idx_crypto_libs_tenant ON public.crypto_libraries USING btree (tenant_id);
 
 
--- INDEX: idx_dashboard_cache_expires
-CREATE INDEX IF NOT EXISTS idx_dashboard_cache_expires ON public.dashboard_cache USING btree (expires_at);
-
-
--- INDEX: idx_dashboard_metrics_name_time
-CREATE INDEX IF NOT EXISTS idx_dashboard_metrics_name_time ON public.dashboard_metrics USING btree (metric_name, "timestamp" DESC);
-
-
--- INDEX: idx_dashboard_metrics_type_time
-CREATE INDEX IF NOT EXISTS idx_dashboard_metrics_type_time ON public.dashboard_metrics USING btree (metric_type, "timestamp" DESC);
-
-
 -- INDEX: idx_db_encryption_states_at_rest
 CREATE INDEX IF NOT EXISTS idx_db_encryption_states_at_rest ON public.database_encryption_states USING btree (encryption_at_rest_enabled) WHERE (deleted_at IS NULL);
 
@@ -11916,18 +10529,6 @@ CREATE INDEX IF NOT EXISTS idx_devices_username ON public.devices USING btree (u
 CREATE INDEX IF NOT EXISTS idx_devices_vendor ON public.devices USING btree (vendor);
 
 
--- INDEX: idx_discovery_approval_queue_created_at
-CREATE INDEX IF NOT EXISTS idx_discovery_approval_queue_created_at ON public.discovery_approval_queue USING btree (created_at);
-
-
--- INDEX: idx_discovery_approval_queue_status
-CREATE INDEX IF NOT EXISTS idx_discovery_approval_queue_status ON public.discovery_approval_queue USING btree (status);
-
-
--- INDEX: idx_discovery_approval_queue_tenant_id
-CREATE INDEX IF NOT EXISTS idx_discovery_approval_queue_tenant_id ON public.discovery_approval_queue USING btree (tenant_id);
-
-
 -- INDEX: idx_discovery_findings_confidence_score
 CREATE INDEX IF NOT EXISTS idx_discovery_findings_confidence_score ON public.discovery_findings USING btree (confidence_score);
 
@@ -12032,22 +10633,6 @@ CREATE INDEX IF NOT EXISTS idx_ext_conn_tenant ON public.external_connections US
 CREATE INDEX IF NOT EXISTS idx_external_map_lookup ON public.external_asset_mappings USING btree (tenant_id, local_type, local_id);
 
 
--- INDEX: idx_feature_adoption_feature_time
-CREATE INDEX IF NOT EXISTS idx_feature_adoption_feature_time ON public.feature_adoption_metrics USING btree (feature_name, "timestamp" DESC);
-
-
--- INDEX: idx_feature_adoption_tenant_time
-CREATE INDEX IF NOT EXISTS idx_feature_adoption_tenant_time ON public.feature_adoption_metrics USING btree (tenant_id, "timestamp" DESC);
-
-
--- INDEX: idx_feature_usage_occurred_at
-CREATE INDEX IF NOT EXISTS idx_feature_usage_occurred_at ON public.feature_usage_events USING btree (occurred_at);
-
-
--- INDEX: idx_feature_usage_tenant_feature
-CREATE INDEX IF NOT EXISTS idx_feature_usage_tenant_feature ON public.feature_usage_events USING btree (tenant_id, feature_name);
-
-
 -- INDEX: idx_finding_history_changed_by
 CREATE INDEX IF NOT EXISTS idx_finding_history_changed_by ON public.compliance_finding_history USING btree (changed_by, changed_at DESC) WHERE (changed_by IS NOT NULL);
 
@@ -12112,14 +10697,6 @@ CREATE INDEX IF NOT EXISTS idx_health_events_status ON public.service_health_eve
 CREATE INDEX IF NOT EXISTS idx_health_events_type ON public.service_health_events USING btree (event_type, "timestamp" DESC);
 
 
--- INDEX: idx_health_insights_generated_at
-CREATE INDEX IF NOT EXISTS idx_health_insights_generated_at ON public.health_insights USING btree (generated_at);
-
-
--- INDEX: idx_health_insights_tenant_id
-CREATE INDEX IF NOT EXISTS idx_health_insights_tenant_id ON public.health_insights USING btree (tenant_id);
-
-
 -- INDEX: idx_health_metrics_tenant_id
 CREATE INDEX IF NOT EXISTS idx_health_metrics_tenant_id ON public.health_metrics USING btree (tenant_id);
 
@@ -12130,14 +10707,6 @@ CREATE INDEX IF NOT EXISTS idx_health_metrics_tenant_id_timestamp ON public.heal
 
 -- INDEX: idx_health_metrics_timestamp
 CREATE INDEX IF NOT EXISTS idx_health_metrics_timestamp ON public.health_metrics USING btree ("timestamp");
-
-
--- INDEX: idx_identity_link_requests_primary_user
-CREATE INDEX IF NOT EXISTS idx_identity_link_requests_primary_user ON public.identity_link_requests USING btree (primary_user_id);
-
-
--- INDEX: idx_identity_link_requests_token
-CREATE INDEX IF NOT EXISTS idx_identity_link_requests_token ON public.identity_link_requests USING btree (confirmation_token);
 
 
 -- INDEX: idx_in_app_notifications_created_at
@@ -12186,18 +10755,6 @@ CREATE INDEX IF NOT EXISTS idx_integration_audit_integration_id ON public.platfo
 
 -- INDEX: idx_integration_audit_performed_by
 CREATE INDEX IF NOT EXISTS idx_integration_audit_performed_by ON public.platform_integration_audit_log USING btree (performed_by);
-
-
--- INDEX: idx_integration_secrets_current
-CREATE INDEX IF NOT EXISTS idx_integration_secrets_current ON public.platform_integration_secrets USING btree (integration_id, secret_key) WHERE (is_current = true);
-
-
--- INDEX: idx_integration_secrets_expires
-CREATE INDEX IF NOT EXISTS idx_integration_secrets_expires ON public.platform_integration_secrets USING btree (expires_at) WHERE (expires_at IS NOT NULL);
-
-
--- INDEX: idx_integration_secrets_integration_id
-CREATE INDEX IF NOT EXISTS idx_integration_secrets_integration_id ON public.platform_integration_secrets USING btree (integration_id);
 
 
 -- INDEX: idx_integrations_tenant
@@ -12446,22 +11003,6 @@ CREATE INDEX IF NOT EXISTS idx_pcap_upload_jobs_status ON public.pcap_upload_job
 
 -- INDEX: idx_pcap_upload_jobs_tenant
 CREATE INDEX IF NOT EXISTS idx_pcap_upload_jobs_tenant ON public.pcap_upload_jobs USING btree (tenant_id, created_at DESC);
-
-
--- INDEX: idx_pending_sensors_expires_at
-CREATE INDEX IF NOT EXISTS idx_pending_sensors_expires_at ON public.pending_sensors USING btree (expires_at);
-
-
--- INDEX: idx_pending_sensors_registration_key
-CREATE INDEX IF NOT EXISTS idx_pending_sensors_registration_key ON public.pending_sensors USING btree (registration_key);
-
-
--- INDEX: idx_pending_sensors_status
-CREATE INDEX IF NOT EXISTS idx_pending_sensors_status ON public.pending_sensors USING btree (status);
-
-
--- INDEX: idx_pending_sensors_tenant_id
-CREATE INDEX IF NOT EXISTS idx_pending_sensors_tenant_id ON public.pending_sensors USING btree (tenant_id);
 
 
 -- INDEX: idx_pending_sensors_tenant_status
@@ -12767,18 +11308,6 @@ CREATE INDEX IF NOT EXISTS idx_resource_alerts_severity ON public.resource_alert
 CREATE INDEX IF NOT EXISTS idx_resource_alerts_tenant_id ON public.resource_alerts USING btree (tenant_id);
 
 
--- INDEX: idx_resource_permissions_owner
-CREATE INDEX IF NOT EXISTS idx_resource_permissions_owner ON public.resource_permissions USING btree (owner_id);
-
-
--- INDEX: idx_resource_permissions_tenant
-CREATE INDEX IF NOT EXISTS idx_resource_permissions_tenant ON public.resource_permissions USING btree (tenant_id);
-
-
--- INDEX: idx_resource_permissions_type_id
-CREATE INDEX IF NOT EXISTS idx_resource_permissions_type_id ON public.resource_permissions USING btree (resource_type, resource_id);
-
-
 -- INDEX: idx_rule_vulnerability_mappings_finding_type
 CREATE INDEX IF NOT EXISTS idx_rule_vulnerability_mappings_finding_type ON public.rule_vulnerability_mappings USING btree (finding_type);
 
@@ -12805,50 +11334,6 @@ CREATE INDEX IF NOT EXISTS idx_schedule_history_schedule_id ON public.schedule_h
 
 -- INDEX: idx_schedule_history_started_at
 CREATE INDEX IF NOT EXISTS idx_schedule_history_started_at ON public.schedule_history USING btree (started_at DESC);
-
-
--- INDEX: idx_security_events_anomaly
-CREATE INDEX IF NOT EXISTS idx_security_events_anomaly ON public.security_events USING btree (is_anomaly, "timestamp" DESC) WHERE (is_anomaly = true);
-
-
--- INDEX: idx_security_events_compliance
-CREATE INDEX IF NOT EXISTS idx_security_events_compliance ON public.security_events USING gin (compliance_tags);
-
-
--- INDEX: idx_security_events_correlation
-CREATE INDEX IF NOT EXISTS idx_security_events_correlation ON public.security_events USING btree (correlation_id, "timestamp" DESC) WHERE (correlation_id IS NOT NULL);
-
-
--- INDEX: idx_security_events_requires_attention
-CREATE INDEX IF NOT EXISTS idx_security_events_requires_attention ON public.security_events USING btree (requires_attention, "timestamp" DESC) WHERE (requires_attention = true);
-
-
--- INDEX: idx_security_events_risk
-CREATE INDEX IF NOT EXISTS idx_security_events_risk ON public.security_events USING btree (risk_level, "timestamp" DESC);
-
-
--- INDEX: idx_security_events_severity
-CREATE INDEX IF NOT EXISTS idx_security_events_severity ON public.security_events USING btree (severity, "timestamp" DESC);
-
-
--- INDEX: idx_security_events_status
-CREATE INDEX IF NOT EXISTS idx_security_events_status ON public.security_events USING btree (status, "timestamp" DESC);
-
-
--- INDEX: idx_security_events_tenant
-CREATE INDEX IF NOT EXISTS idx_security_events_tenant ON public.security_events USING btree (tenant_id, "timestamp" DESC) WHERE (tenant_id IS NOT NULL);
-
-
--- INDEX: idx_security_events_timestamp
-CREATE INDEX IF NOT EXISTS idx_security_events_timestamp ON public.security_events USING btree ("timestamp" DESC);
-
-
--- INDEX: idx_security_events_type
-CREATE INDEX IF NOT EXISTS idx_security_events_type ON public.security_events USING btree (event_type, "timestamp" DESC);
-
-
--- INDEX: idx_security_events_user
-CREATE INDEX IF NOT EXISTS idx_security_events_user ON public.security_events USING btree (user_id, "timestamp" DESC) WHERE (user_id IS NOT NULL);
 
 
 -- INDEX: idx_security_incidents_assigned
@@ -13078,18 +11563,6 @@ CREATE INDEX IF NOT EXISTS idx_support_tickets_status ON public.support_tickets 
 CREATE INDEX IF NOT EXISTS idx_support_tickets_tenant ON public.support_tickets USING btree (tenant_id);
 
 
--- INDEX: idx_sync_outbox_pending
-CREATE INDEX IF NOT EXISTS idx_sync_outbox_pending ON public.sync_outbox USING btree (status, next_attempt_at);
-
-
--- INDEX: idx_sync_outbox_tenant
-CREATE INDEX IF NOT EXISTS idx_sync_outbox_tenant ON public.sync_outbox USING btree (tenant_id);
-
-
--- INDEX: idx_system_health_service_time
-CREATE INDEX IF NOT EXISTS idx_system_health_service_time ON public.system_health_metrics USING btree (service_name, "timestamp" DESC);
-
-
 -- INDEX: idx_tenant_admin_settings_audit_tenant_time
 CREATE INDEX IF NOT EXISTS idx_tenant_admin_settings_audit_tenant_time ON public.tenant_admin_settings_audit USING btree (tenant_id, created_at DESC);
 
@@ -13104,14 +11577,6 @@ CREATE INDEX IF NOT EXISTS idx_tenant_admin_settings_tenant_id ON public.tenant_
 
 -- INDEX: idx_tenant_admin_settings_version
 CREATE INDEX IF NOT EXISTS idx_tenant_admin_settings_version ON public.tenant_admin_settings USING btree (tenant_id, version);
-
-
--- INDEX: idx_tenant_cost_analysis_period
-CREATE INDEX IF NOT EXISTS idx_tenant_cost_analysis_period ON public.tenant_cost_analysis USING btree (period_start, period_end);
-
-
--- INDEX: idx_tenant_cost_analysis_tenant_id
-CREATE INDEX IF NOT EXISTS idx_tenant_cost_analysis_tenant_id ON public.tenant_cost_analysis USING btree (tenant_id);
 
 
 -- INDEX: idx_tenant_cost_summary_unique
@@ -13268,14 +11733,6 @@ CREATE INDEX IF NOT EXISTS idx_tenant_usage_period ON public.tenant_usage USING 
 
 -- INDEX: idx_tenant_usage_tenant_id
 CREATE INDEX IF NOT EXISTS idx_tenant_usage_tenant_id ON public.tenant_usage USING btree (tenant_id);
-
-
--- INDEX: idx_tenant_usage_tracking_metric_type
-CREATE INDEX IF NOT EXISTS idx_tenant_usage_tracking_metric_type ON public.tenant_usage_tracking USING btree (metric_type);
-
-
--- INDEX: idx_tenant_usage_tracking_tenant_id
-CREATE INDEX IF NOT EXISTS idx_tenant_usage_tracking_tenant_id ON public.tenant_usage_tracking USING btree (tenant_id);
 
 
 -- INDEX: idx_tenants_deleted_at
@@ -14490,16 +12947,8 @@ CREATE OR REPLACE TRIGGER trigger_device_jobs_updated_at BEFORE UPDATE ON public
 CREATE OR REPLACE TRIGGER update_algorithms_updated_at BEFORE UPDATE ON public.algorithms FOR EACH ROW EXECUTE FUNCTION public.update_algorithms_updated_at();
 
 
--- TRIGGER: api_format_preferences update_api_format_preferences_updated_at
-CREATE OR REPLACE TRIGGER update_api_format_preferences_updated_at BEFORE UPDATE ON public.api_format_preferences FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
-
-
 -- TRIGGER: certificates update_certificates_updated_at
 CREATE OR REPLACE TRIGGER update_certificates_updated_at BEFORE UPDATE ON public.certificates FOR EACH ROW EXECUTE FUNCTION public.update_certificates_updated_at();
-
-
--- TRIGGER: ci_relationships update_ci_relationships_updated_at
-CREATE OR REPLACE TRIGGER update_ci_relationships_updated_at BEFORE UPDATE ON public.ci_relationships FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
 
 -- TRIGGER: cmdb_entity_mappings update_cmdb_entity_mappings_updated_at
@@ -14522,10 +12971,6 @@ CREATE OR REPLACE TRIGGER update_compliance_findings_updated_at BEFORE UPDATE ON
 CREATE OR REPLACE TRIGGER update_compliance_overrides_updated_at BEFORE UPDATE ON public.compliance_overrides FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
 
--- TRIGGER: compliance_reports update_compliance_reports_updated_at
-CREATE OR REPLACE TRIGGER update_compliance_reports_updated_at BEFORE UPDATE ON public.compliance_reports FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
-
-
 -- TRIGGER: compliance_rules update_compliance_rules_updated_at
 CREATE OR REPLACE TRIGGER update_compliance_rules_updated_at BEFORE UPDATE ON public.compliance_rules FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
@@ -14544,10 +12989,6 @@ CREATE OR REPLACE TRIGGER update_crypto_applications_updated_at BEFORE UPDATE ON
 
 -- TRIGGER: discovery_alert_configs update_discovery_alert_configs_updated_at
 CREATE OR REPLACE TRIGGER update_discovery_alert_configs_updated_at BEFORE UPDATE ON public.discovery_alert_configs FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
-
-
--- TRIGGER: discovery_approval_queue update_discovery_approval_queue_updated_at
-CREATE OR REPLACE TRIGGER update_discovery_approval_queue_updated_at BEFORE UPDATE ON public.discovery_approval_queue FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
 
 -- TRIGGER: discovery_auto_approval_rules update_discovery_auto_approval_rules_updated_at
@@ -14604,10 +13045,6 @@ CREATE OR REPLACE TRIGGER update_platform_roles_updated_at BEFORE UPDATE ON publ
 
 -- TRIGGER: platform_settings update_platform_settings_updated_at
 CREATE OR REPLACE TRIGGER update_platform_settings_updated_at BEFORE UPDATE ON public.platform_settings FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
-
-
--- TRIGGER: resource_permissions update_resource_permissions_updated_at
-CREATE OR REPLACE TRIGGER update_resource_permissions_updated_at BEFORE UPDATE ON public.resource_permissions FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
 
 -- TRIGGER: rule_vulnerability_mappings update_rule_vulnerability_mappings_updated_at
@@ -14723,32 +13160,6 @@ DO $$ BEGIN
 END $$;
 
 
--- FK CONSTRAINT: alert_instances alert_instances_rule_id_fkey
-DO $$ BEGIN
-  IF to_regclass('audit.alert_instances') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'alert_instances_rule_id_fkey' AND conrelid = to_regclass('audit.alert_instances')
-     ) THEN
-    ALTER TABLE ONLY audit.alert_instances
-        ADD CONSTRAINT alert_instances_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES audit.alert_rules(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: alert_instances alert_instances_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('audit.alert_instances') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'alert_instances_tenant_id_fkey' AND conrelid = to_regclass('audit.alert_instances')
-     ) THEN
-    ALTER TABLE ONLY audit.alert_instances
-        ADD CONSTRAINT alert_instances_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
 -- FK CONSTRAINT: alert_rules alert_rules_tenant_id_fkey
 DO $$ BEGIN
   IF to_regclass('audit.alert_rules') IS NOT NULL
@@ -14762,32 +13173,6 @@ DO $$ BEGIN
 END $$;
 
 
--- FK CONSTRAINT: audit_logs audit_logs_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('audit.audit_logs') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'audit_logs_tenant_id_fkey' AND conrelid = to_regclass('audit.audit_logs')
-     ) THEN
-    ALTER TABLE ONLY audit.audit_logs
-        ADD CONSTRAINT audit_logs_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: audit_logs audit_logs_user_id_fkey
-DO $$ BEGIN
-  IF to_regclass('audit.audit_logs') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'audit_logs_user_id_fkey' AND conrelid = to_regclass('audit.audit_logs')
-     ) THEN
-    ALTER TABLE ONLY audit.audit_logs
-        ADD CONSTRAINT audit_logs_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
 -- FK CONSTRAINT: job_execution_logs job_execution_logs_tenant_id_fkey
 DO $$ BEGIN
   IF to_regclass('audit.job_execution_logs') IS NOT NULL
@@ -14797,19 +13182,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY audit.job_execution_logs
         ADD CONSTRAINT job_execution_logs_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: retention_jobs retention_jobs_policy_id_fkey
-DO $$ BEGIN
-  IF to_regclass('audit.retention_jobs') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'retention_jobs_policy_id_fkey' AND conrelid = to_regclass('audit.retention_jobs')
-     ) THEN
-    ALTER TABLE ONLY audit.retention_jobs
-        ADD CONSTRAINT retention_jobs_policy_id_fkey FOREIGN KEY (policy_id) REFERENCES audit.retention_policies(id);
   END IF;
 END $$;
 
@@ -14879,32 +13251,6 @@ DO $$ BEGIN
 END $$;
 
 
--- FK CONSTRAINT: access_pattern_analysis access_pattern_analysis_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.access_pattern_analysis') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'access_pattern_analysis_tenant_id_fkey' AND conrelid = to_regclass('public.access_pattern_analysis')
-     ) THEN
-    ALTER TABLE ONLY public.access_pattern_analysis
-        ADD CONSTRAINT access_pattern_analysis_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: agent_ca_certificates agent_ca_certificates_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.agent_ca_certificates') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'agent_ca_certificates_tenant_id_fkey' AND conrelid = to_regclass('public.agent_ca_certificates')
-     ) THEN
-    ALTER TABLE ONLY public.agent_ca_certificates
-        ADD CONSTRAINT agent_ca_certificates_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
 -- FK CONSTRAINT: agent_certificates agent_certificates_agent_id_fkey
 DO $$ BEGIN
   IF to_regclass('public.agent_certificates') IS NOT NULL
@@ -14927,58 +13273,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.agent_certificates
         ADD CONSTRAINT agent_certificates_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: ai_analysis_results ai_analysis_results_model_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.ai_analysis_results') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'ai_analysis_results_model_id_fkey' AND conrelid = to_regclass('public.ai_analysis_results')
-     ) THEN
-    ALTER TABLE ONLY public.ai_analysis_results
-        ADD CONSTRAINT ai_analysis_results_model_id_fkey FOREIGN KEY (model_id) REFERENCES public.ai_models(id);
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: ai_analysis_results ai_analysis_results_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.ai_analysis_results') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'ai_analysis_results_tenant_id_fkey' AND conrelid = to_regclass('public.ai_analysis_results')
-     ) THEN
-    ALTER TABLE ONLY public.ai_analysis_results
-        ADD CONSTRAINT ai_analysis_results_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: api_format_preferences api_format_preferences_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.api_format_preferences') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'api_format_preferences_tenant_id_fkey' AND conrelid = to_regclass('public.api_format_preferences')
-     ) THEN
-    ALTER TABLE ONLY public.api_format_preferences
-        ADD CONSTRAINT api_format_preferences_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: api_security_monitoring api_security_monitoring_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.api_security_monitoring') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'api_security_monitoring_tenant_id_fkey' AND conrelid = to_regclass('public.api_security_monitoring')
-     ) THEN
-    ALTER TABLE ONLY public.api_security_monitoring
-        ADD CONSTRAINT api_security_monitoring_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE SET NULL;
   END IF;
 END $$;
 
@@ -15373,19 +13667,6 @@ DO $$ BEGIN
 END $$;
 
 
--- FK CONSTRAINT: ci_relationships ci_relationships_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.ci_relationships') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'ci_relationships_tenant_id_fkey' AND conrelid = to_regclass('public.ci_relationships')
-     ) THEN
-    ALTER TABLE ONLY public.ci_relationships
-        ADD CONSTRAINT ci_relationships_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
 -- FK CONSTRAINT: cmdb_entity_mappings cmdb_entity_mappings_profile_id_fkey
 DO $$ BEGIN
   IF to_regclass('public.cmdb_entity_mappings') IS NOT NULL
@@ -15447,45 +13728,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.cmdb_sync_profiles
         ADD CONSTRAINT cmdb_sync_profiles_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: compliance_checks compliance_checks_report_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.compliance_checks') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'compliance_checks_report_id_fkey' AND conrelid = to_regclass('public.compliance_checks')
-     ) THEN
-    ALTER TABLE ONLY public.compliance_checks
-        ADD CONSTRAINT compliance_checks_report_id_fkey FOREIGN KEY (report_id) REFERENCES public.compliance_reports(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: compliance_checks compliance_checks_rule_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.compliance_checks') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'compliance_checks_rule_id_fkey' AND conrelid = to_regclass('public.compliance_checks')
-     ) THEN
-    ALTER TABLE ONLY public.compliance_checks
-        ADD CONSTRAINT compliance_checks_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.compliance_rules(id);
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: compliance_checks compliance_checks_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.compliance_checks') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'compliance_checks_tenant_id_fkey' AND conrelid = to_regclass('public.compliance_checks')
-     ) THEN
-    ALTER TABLE ONLY public.compliance_checks
-        ADD CONSTRAINT compliance_checks_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
   END IF;
 END $$;
 
@@ -15590,32 +13832,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.compliance_overrides
         ADD CONSTRAINT compliance_overrides_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: compliance_reports compliance_reports_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.compliance_reports') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'compliance_reports_tenant_id_fkey' AND conrelid = to_regclass('public.compliance_reports')
-     ) THEN
-    ALTER TABLE ONLY public.compliance_reports
-        ADD CONSTRAINT compliance_reports_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: compliance_requirements compliance_requirements_framework_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.compliance_requirements') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'compliance_requirements_framework_id_fkey' AND conrelid = to_regclass('public.compliance_requirements')
-     ) THEN
-    ALTER TABLE ONLY public.compliance_requirements
-        ADD CONSTRAINT compliance_requirements_framework_id_fkey FOREIGN KEY (framework_id) REFERENCES public.compliance_framework_status(id) ON DELETE CASCADE;
   END IF;
 END $$;
 
@@ -16006,58 +14222,6 @@ DO $$ BEGIN
 END $$;
 
 
--- FK CONSTRAINT: discovery_approval_queue discovery_approval_queue_finding_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.discovery_approval_queue') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'discovery_approval_queue_finding_id_fkey' AND conrelid = to_regclass('public.discovery_approval_queue')
-     ) THEN
-    ALTER TABLE ONLY public.discovery_approval_queue
-        ADD CONSTRAINT discovery_approval_queue_finding_id_fkey FOREIGN KEY (finding_id) REFERENCES public.discovery_findings(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: discovery_approval_queue discovery_approval_queue_job_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.discovery_approval_queue') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'discovery_approval_queue_job_id_fkey' AND conrelid = to_regclass('public.discovery_approval_queue')
-     ) THEN
-    ALTER TABLE ONLY public.discovery_approval_queue
-        ADD CONSTRAINT discovery_approval_queue_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.discovery_jobs(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: discovery_approval_queue discovery_approval_queue_reviewed_by_fkey
-DO $$ BEGIN
-  IF to_regclass('public.discovery_approval_queue') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'discovery_approval_queue_reviewed_by_fkey' AND conrelid = to_regclass('public.discovery_approval_queue')
-     ) THEN
-    ALTER TABLE ONLY public.discovery_approval_queue
-        ADD CONSTRAINT discovery_approval_queue_reviewed_by_fkey FOREIGN KEY (reviewed_by) REFERENCES public.users(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: discovery_approval_queue discovery_approval_queue_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.discovery_approval_queue') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'discovery_approval_queue_tenant_id_fkey' AND conrelid = to_regclass('public.discovery_approval_queue')
-     ) THEN
-    ALTER TABLE ONLY public.discovery_approval_queue
-        ADD CONSTRAINT discovery_approval_queue_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
 -- FK CONSTRAINT: discovery_auto_approval_rules discovery_auto_approval_rules_created_by_fkey
 DO $$ BEGIN
   IF to_regclass('public.discovery_auto_approval_rules') IS NOT NULL
@@ -16249,97 +14413,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.external_connections
         ADD CONSTRAINT external_connections_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: feature_usage_events feature_usage_events_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.feature_usage_events') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'feature_usage_events_tenant_id_fkey' AND conrelid = to_regclass('public.feature_usage_events')
-     ) THEN
-    ALTER TABLE ONLY public.feature_usage_events
-        ADD CONSTRAINT feature_usage_events_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: feature_usage_events feature_usage_events_user_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.feature_usage_events') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'feature_usage_events_user_id_fkey' AND conrelid = to_regclass('public.feature_usage_events')
-     ) THEN
-    ALTER TABLE ONLY public.feature_usage_events
-        ADD CONSTRAINT feature_usage_events_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: identity_link_requests identity_link_requests_auth_method_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.identity_link_requests') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'identity_link_requests_auth_method_id_fkey' AND conrelid = to_regclass('public.identity_link_requests')
-     ) THEN
-    ALTER TABLE ONLY public.identity_link_requests
-        ADD CONSTRAINT identity_link_requests_auth_method_id_fkey FOREIGN KEY (auth_method_id) REFERENCES public.user_auth_methods(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: identity_link_requests identity_link_requests_primary_user_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.identity_link_requests') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'identity_link_requests_primary_user_id_fkey' AND conrelid = to_regclass('public.identity_link_requests')
-     ) THEN
-    ALTER TABLE ONLY public.identity_link_requests
-        ADD CONSTRAINT identity_link_requests_primary_user_id_fkey FOREIGN KEY (primary_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: identity_link_requests identity_link_requests_requested_by_user_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.identity_link_requests') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'identity_link_requests_requested_by_user_id_fkey' AND conrelid = to_regclass('public.identity_link_requests')
-     ) THEN
-    ALTER TABLE ONLY public.identity_link_requests
-        ADD CONSTRAINT identity_link_requests_requested_by_user_id_fkey FOREIGN KEY (requested_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: identity_link_requests identity_link_requests_resolved_by_user_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.identity_link_requests') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'identity_link_requests_resolved_by_user_id_fkey' AND conrelid = to_regclass('public.identity_link_requests')
-     ) THEN
-    ALTER TABLE ONLY public.identity_link_requests
-        ADD CONSTRAINT identity_link_requests_resolved_by_user_id_fkey FOREIGN KEY (resolved_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: identity_link_requests identity_link_requests_secondary_user_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.identity_link_requests') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'identity_link_requests_secondary_user_id_fkey' AND conrelid = to_regclass('public.identity_link_requests')
-     ) THEN
-    ALTER TABLE ONLY public.identity_link_requests
-        ADD CONSTRAINT identity_link_requests_secondary_user_id_fkey FOREIGN KEY (secondary_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
   END IF;
 END $$;
 
@@ -16685,19 +14758,6 @@ DO $$ BEGIN
 END $$;
 
 
--- FK CONSTRAINT: pending_sensors pending_sensors_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.pending_sensors') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'pending_sensors_tenant_id_fkey' AND conrelid = to_regclass('public.pending_sensors')
-     ) THEN
-    ALTER TABLE ONLY public.pending_sensors
-        ADD CONSTRAINT pending_sensors_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
 -- FK CONSTRAINT: permission_audit_logs permission_audit_logs_tenant_id_fkey
 DO $$ BEGIN
   IF to_regclass('public.permission_audit_logs') IS NOT NULL
@@ -16811,19 +14871,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.platform_integration_audit_log
         ADD CONSTRAINT platform_integration_audit_log_performed_by_fkey FOREIGN KEY (performed_by) REFERENCES public.platform_users(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: platform_integration_secrets platform_integration_secrets_integration_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.platform_integration_secrets') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'platform_integration_secrets_integration_id_fkey' AND conrelid = to_regclass('public.platform_integration_secrets')
-     ) THEN
-    ALTER TABLE ONLY public.platform_integration_secrets
-        ADD CONSTRAINT platform_integration_secrets_integration_id_fkey FOREIGN KEY (integration_id) REFERENCES public.platform_integrations(id) ON DELETE CASCADE;
   END IF;
 END $$;
 
@@ -17114,32 +15161,6 @@ DO $$ BEGIN
 END $$;
 
 
--- FK CONSTRAINT: resource_permissions resource_permissions_owner_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.resource_permissions') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'resource_permissions_owner_id_fkey' AND conrelid = to_regclass('public.resource_permissions')
-     ) THEN
-    ALTER TABLE ONLY public.resource_permissions
-        ADD CONSTRAINT resource_permissions_owner_id_fkey FOREIGN KEY (owner_id) REFERENCES public.users(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: resource_permissions resource_permissions_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.resource_permissions') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'resource_permissions_tenant_id_fkey' AND conrelid = to_regclass('public.resource_permissions')
-     ) THEN
-    ALTER TABLE ONLY public.resource_permissions
-        ADD CONSTRAINT resource_permissions_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
 -- FK CONSTRAINT: rule_vulnerability_mappings rule_vulnerability_mappings_rule_id_fkey
 DO $$ BEGIN
   IF to_regclass('public.rule_vulnerability_mappings') IS NOT NULL
@@ -17162,19 +15183,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.schedule_history
         ADD CONSTRAINT schedule_history_schedule_id_fkey FOREIGN KEY (schedule_id) REFERENCES public.interrogation_schedules(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: security_events security_events_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.security_events') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'security_events_tenant_id_fkey' AND conrelid = to_regclass('public.security_events')
-     ) THEN
-    ALTER TABLE ONLY public.security_events
-        ADD CONSTRAINT security_events_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE SET NULL;
   END IF;
 END $$;
 
@@ -17439,19 +15447,6 @@ DO $$ BEGIN
 END $$;
 
 
--- FK CONSTRAINT: sync_outbox sync_outbox_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.sync_outbox') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'sync_outbox_tenant_id_fkey' AND conrelid = to_regclass('public.sync_outbox')
-     ) THEN
-    ALTER TABLE ONLY public.sync_outbox
-        ADD CONSTRAINT sync_outbox_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
 -- FK CONSTRAINT: tenant_admin_settings_audit tenant_admin_settings_audit_changed_by_fkey
 DO $$ BEGIN
   IF to_regclass('public.tenant_admin_settings_audit') IS NOT NULL
@@ -17500,19 +15495,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.tenant_admin_settings
         ADD CONSTRAINT tenant_admin_settings_updated_by_fkey FOREIGN KEY (updated_by) REFERENCES public.users(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: tenant_cost_analysis tenant_cost_analysis_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.tenant_cost_analysis') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'tenant_cost_analysis_tenant_id_fkey' AND conrelid = to_regclass('public.tenant_cost_analysis')
-     ) THEN
-    ALTER TABLE ONLY public.tenant_cost_analysis
-        ADD CONSTRAINT tenant_cost_analysis_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
   END IF;
 END $$;
 
@@ -17760,19 +15742,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.tenant_usage
         ADD CONSTRAINT tenant_usage_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: tenant_usage_tracking tenant_usage_tracking_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.tenant_usage_tracking') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'tenant_usage_tracking_tenant_id_fkey' AND conrelid = to_regclass('public.tenant_usage_tracking')
-     ) THEN
-    ALTER TABLE ONLY public.tenant_usage_tracking
-        ADD CONSTRAINT tenant_usage_tracking_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
   END IF;
 END $$;
 
@@ -18906,19 +16875,9 @@ DROP POLICY IF EXISTS activity_logs_tenant_isolation ON audit.activity_logs;
 CREATE POLICY activity_logs_tenant_isolation ON audit.activity_logs
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE audit.alert_instances ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS alert_instances_tenant_isolation ON audit.alert_instances;
-CREATE POLICY alert_instances_tenant_isolation ON audit.alert_instances
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE audit.alert_rules ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS alert_rules_tenant_isolation ON audit.alert_rules;
 CREATE POLICY alert_rules_tenant_isolation ON audit.alert_rules
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE audit.audit_logs ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS audit_logs_tenant_isolation ON audit.audit_logs;
-CREATE POLICY audit_logs_tenant_isolation ON audit.audit_logs
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE audit.job_execution_logs ENABLE ROW LEVEL SECURITY;
@@ -18941,34 +16900,9 @@ DROP POLICY IF EXISTS siem_integrations_tenant_isolation ON audit.siem_integrati
 CREATE POLICY siem_integrations_tenant_isolation ON audit.siem_integrations
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.access_pattern_analysis ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS access_pattern_analysis_tenant_isolation ON public.access_pattern_analysis;
-CREATE POLICY access_pattern_analysis_tenant_isolation ON public.access_pattern_analysis
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.agent_ca_certificates ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS agent_ca_certificates_tenant_isolation ON public.agent_ca_certificates;
-CREATE POLICY agent_ca_certificates_tenant_isolation ON public.agent_ca_certificates
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.agent_certificates ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS agent_certificates_tenant_isolation ON public.agent_certificates;
 CREATE POLICY agent_certificates_tenant_isolation ON public.agent_certificates
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.ai_analysis_results ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS ai_analysis_results_tenant_isolation ON public.ai_analysis_results;
-CREATE POLICY ai_analysis_results_tenant_isolation ON public.ai_analysis_results
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.api_format_preferences ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS api_format_preferences_tenant_isolation ON public.api_format_preferences;
-CREATE POLICY api_format_preferences_tenant_isolation ON public.api_format_preferences
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.api_security_monitoring ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS api_security_monitoring_tenant_isolation ON public.api_security_monitoring;
-CREATE POLICY api_security_monitoring_tenant_isolation ON public.api_security_monitoring
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.api_tokens ENABLE ROW LEVEL SECURITY;
@@ -19056,11 +16990,6 @@ DROP POLICY IF EXISTS certificates_tenant_isolation ON public.certificates;
 CREATE POLICY certificates_tenant_isolation ON public.certificates
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.ci_relationships ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS ci_relationships_tenant_isolation ON public.ci_relationships;
-CREATE POLICY ci_relationships_tenant_isolation ON public.ci_relationships
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.cmdb_entity_mappings ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS cmdb_entity_mappings_tenant_isolation ON public.cmdb_entity_mappings;
 CREATE POLICY cmdb_entity_mappings_tenant_isolation ON public.cmdb_entity_mappings
@@ -19076,11 +17005,6 @@ DROP POLICY IF EXISTS cmdb_sync_profiles_tenant_isolation ON public.cmdb_sync_pr
 CREATE POLICY cmdb_sync_profiles_tenant_isolation ON public.cmdb_sync_profiles
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.compliance_checks ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS compliance_checks_tenant_isolation ON public.compliance_checks;
-CREATE POLICY compliance_checks_tenant_isolation ON public.compliance_checks
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.compliance_findings ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS compliance_findings_tenant_isolation ON public.compliance_findings;
 CREATE POLICY compliance_findings_tenant_isolation ON public.compliance_findings
@@ -19089,11 +17013,6 @@ CREATE POLICY compliance_findings_tenant_isolation ON public.compliance_findings
 ALTER TABLE public.compliance_overrides ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS compliance_overrides_tenant_isolation ON public.compliance_overrides;
 CREATE POLICY compliance_overrides_tenant_isolation ON public.compliance_overrides
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.compliance_reports ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS compliance_reports_tenant_isolation ON public.compliance_reports;
-CREATE POLICY compliance_reports_tenant_isolation ON public.compliance_reports
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.compliance_scenarios ENABLE ROW LEVEL SECURITY;
@@ -19146,11 +17065,6 @@ DROP POLICY IF EXISTS discovery_alert_history_tenant_isolation ON public.discove
 CREATE POLICY discovery_alert_history_tenant_isolation ON public.discovery_alert_history
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.discovery_approval_queue ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS discovery_approval_queue_tenant_isolation ON public.discovery_approval_queue;
-CREATE POLICY discovery_approval_queue_tenant_isolation ON public.discovery_approval_queue
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.discovery_auto_approval_rules ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS discovery_auto_approval_rules_tenant_isolation ON public.discovery_auto_approval_rules;
 CREATE POLICY discovery_auto_approval_rules_tenant_isolation ON public.discovery_auto_approval_rules
@@ -19191,24 +17105,9 @@ DROP POLICY IF EXISTS external_connections_tenant_isolation ON public.external_c
 CREATE POLICY external_connections_tenant_isolation ON public.external_connections
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.feature_adoption_metrics ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS feature_adoption_metrics_tenant_isolation ON public.feature_adoption_metrics;
-CREATE POLICY feature_adoption_metrics_tenant_isolation ON public.feature_adoption_metrics
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.feature_usage_events ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS feature_usage_events_tenant_isolation ON public.feature_usage_events;
-CREATE POLICY feature_usage_events_tenant_isolation ON public.feature_usage_events
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.health_alerts ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS health_alerts_tenant_isolation ON public.health_alerts;
 CREATE POLICY health_alerts_tenant_isolation ON public.health_alerts
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.health_insights ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS health_insights_tenant_isolation ON public.health_insights;
-CREATE POLICY health_insights_tenant_isolation ON public.health_insights
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.health_metrics ENABLE ROW LEVEL SECURITY;
@@ -19287,11 +17186,6 @@ DROP POLICY IF EXISTS pending_sensor_registrations_tenant_isolation ON public.pe
 CREATE POLICY pending_sensor_registrations_tenant_isolation ON public.pending_sensor_registrations
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.pending_sensors ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS pending_sensors_tenant_isolation ON public.pending_sensors;
-CREATE POLICY pending_sensors_tenant_isolation ON public.pending_sensors
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.permission_audit_logs ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS permission_audit_logs_tenant_isolation ON public.permission_audit_logs;
 CREATE POLICY permission_audit_logs_tenant_isolation ON public.permission_audit_logs
@@ -19322,11 +17216,6 @@ DROP POLICY IF EXISTS resource_alerts_tenant_isolation ON public.resource_alerts
 CREATE POLICY resource_alerts_tenant_isolation ON public.resource_alerts
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.resource_permissions ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS resource_permissions_tenant_isolation ON public.resource_permissions;
-CREATE POLICY resource_permissions_tenant_isolation ON public.resource_permissions
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.scopes ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS scopes_tenant_isolation ON public.scopes;
 CREATE POLICY scopes_tenant_isolation ON public.scopes
@@ -19335,11 +17224,6 @@ CREATE POLICY scopes_tenant_isolation ON public.scopes
 ALTER TABLE public.scopes_audit ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS scopes_audit_tenant_isolation ON public.scopes_audit;
 CREATE POLICY scopes_audit_tenant_isolation ON public.scopes_audit
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.security_events ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS security_events_tenant_isolation ON public.security_events;
-CREATE POLICY security_events_tenant_isolation ON public.security_events
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.sensor_ca_certificates ENABLE ROW LEVEL SECURITY;
@@ -19387,11 +17271,6 @@ DROP POLICY IF EXISTS support_tickets_tenant_isolation ON public.support_tickets
 CREATE POLICY support_tickets_tenant_isolation ON public.support_tickets
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.sync_outbox ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS sync_outbox_tenant_isolation ON public.sync_outbox;
-CREATE POLICY sync_outbox_tenant_isolation ON public.sync_outbox
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.tenant_admin_settings ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS tenant_admin_settings_tenant_isolation ON public.tenant_admin_settings;
 CREATE POLICY tenant_admin_settings_tenant_isolation ON public.tenant_admin_settings
@@ -19400,11 +17279,6 @@ CREATE POLICY tenant_admin_settings_tenant_isolation ON public.tenant_admin_sett
 ALTER TABLE public.tenant_admin_settings_audit ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS tenant_admin_settings_audit_tenant_isolation ON public.tenant_admin_settings_audit;
 CREATE POLICY tenant_admin_settings_audit_tenant_isolation ON public.tenant_admin_settings_audit
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.tenant_cost_analysis ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS tenant_cost_analysis_tenant_isolation ON public.tenant_cost_analysis;
-CREATE POLICY tenant_cost_analysis_tenant_isolation ON public.tenant_cost_analysis
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.tenant_entitlements ENABLE ROW LEVEL SECURITY;
@@ -19470,11 +17344,6 @@ CREATE POLICY tenant_roles_tenant_isolation ON public.tenant_roles
 ALTER TABLE public.tenant_usage ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS tenant_usage_tenant_isolation ON public.tenant_usage;
 CREATE POLICY tenant_usage_tenant_isolation ON public.tenant_usage
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.tenant_usage_tracking ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS tenant_usage_tracking_tenant_isolation ON public.tenant_usage_tracking;
-CREATE POLICY tenant_usage_tracking_tenant_isolation ON public.tenant_usage_tracking
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.tickets ENABLE ROW LEVEL SECURITY;
@@ -19563,16 +17432,6 @@ CREATE POLICY remediation_plan_items_tenant_isolation ON public.remediation_plan
 -- pattern: one asset's history, newest first.
 CREATE INDEX IF NOT EXISTS idx_asset_history_tenant_asset_created
     ON public.asset_history USING btree (tenant_id, asset_id, created_at DESC);
-
-
--- audit.audit_logs had only idx_audit_logs_created_at (global, not
--- tenant-scoped), so a tenant's audit view scanned every tenant's rows and
--- filtered afterwards. Both of these are nullable columns (platform-level
--- events carry no tenant/user), which btree indexes fine.
-CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_created
-    ON audit.audit_logs USING btree (tenant_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id
-    ON audit.audit_logs USING btree (user_id);
 
 
 -- discovery_findings is indexed on job_id/target_id/hostname/protocol but not
@@ -19712,7 +17571,7 @@ DECLARE t text;
 BEGIN
   FOR t IN
     SELECT unnest(ARRAY[
-      'audit.alert_rules','audit.alert_instances','audit.siem_integrations',
+      'audit.alert_rules','audit.siem_integrations',
       'public.service_identification_rules','public.workflow_configurations',
       'public.aws_cost_data','public.aws_cost_sync_jobs','public.platform_log_metadata'
     ])
@@ -20393,6 +18252,58 @@ CREATE POLICY asset_suppressions_tenant_isolation ON public.asset_suppressions
 -- while the dedup must precede the CREATE it exists to make succeed.
 DROP INDEX IF EXISTS public.idx_aws_cost_data_unique;
 
+
+
+-- ============================================================================
+-- POST-MIGRATIONS: retire tables with neither reader nor writer
+-- ============================================================================
+-- Each was verified to have zero Go/TypeScript references, or to be superseded
+-- by a table that carries the data instead. Their CREATE statements were removed
+-- from the pg_dump body above, so a fresh install never creates them; these DROPs
+-- remove them from installs that already have them. Both halves are required.
+--
+-- CASCADE: an unused table may still be the target of an FK from another table
+-- in this batch, and this list is alphabetical rather than topological.
+
+DROP TABLE IF EXISTS audit.audit_logs CASCADE;
+DROP TABLE IF EXISTS audit.alert_instances CASCADE;
+DROP TABLE IF EXISTS audit.retention_jobs CASCADE;
+DROP TABLE IF EXISTS public.compliance_checks CASCADE;
+DROP TABLE IF EXISTS public.compliance_reports CASCADE;
+DROP TABLE IF EXISTS public.compliance_framework_status CASCADE;
+DROP TABLE IF EXISTS public.compliance_requirements CASCADE;
+DROP TABLE IF EXISTS public.dashboard_metrics CASCADE;
+DROP TABLE IF EXISTS public.dashboard_cache CASCADE;
+DROP TABLE IF EXISTS public.tenant_usage_tracking CASCADE;
+DROP TABLE IF EXISTS public.pending_sensors CASCADE;
+DROP TABLE IF EXISTS public.system_health_metrics CASCADE;
+DROP TABLE IF EXISTS public.ai_models CASCADE;
+DROP TABLE IF EXISTS public.ai_analysis_results CASCADE;
+DROP TABLE IF EXISTS public.access_pattern_analysis CASCADE;
+DROP TABLE IF EXISTS public.threat_detection_rules CASCADE;
+DROP TABLE IF EXISTS public.api_security_monitoring CASCADE;
+DROP TABLE IF EXISTS public.feature_adoption_metrics CASCADE;
+DROP TABLE IF EXISTS public.feature_usage_events CASCADE;
+DROP TABLE IF EXISTS public.health_insights CASCADE;
+DROP TABLE IF EXISTS public.resource_permissions CASCADE;
+DROP TABLE IF EXISTS public.resource_tracking_config CASCADE;
+DROP TABLE IF EXISTS public.api_format_preferences CASCADE;
+DROP TABLE IF EXISTS public.tenant_cost_analysis CASCADE;
+DROP TABLE IF EXISTS public.sync_outbox CASCADE;
+DROP TABLE IF EXISTS public.agent_ca_certificates CASCADE;
+DROP TABLE IF EXISTS public.security_events CASCADE;
+DROP TABLE IF EXISTS public.discovery_approval_queue CASCADE;
+DROP TABLE IF EXISTS public.identity_link_requests CASCADE;
+DROP TABLE IF EXISTS public.ci_relationships CASCADE;
+DROP TABLE IF EXISTS public.platform_integration_secrets CASCADE;
+
+-- Functions that existed only to query the tables above. No Go/TS caller, no
+-- seed reference, no trigger. Dropped so nothing is left pointing at a table
+-- this file no longer creates.
+DROP FUNCTION IF EXISTS public.calculate_tenant_cost CASCADE;
+DROP FUNCTION IF EXISTS public.cleanup_expired_dashboard_cache CASCADE;
+DROP FUNCTION IF EXISTS public.get_system_health_summary CASCADE;
+DROP FUNCTION IF EXISTS public.update_tenant_usage CASCADE;
 
 -- ============================================================================
 -- ROLE GRANTS — THIS BLOCK MUST BE THE LAST THING IN THIS FILE

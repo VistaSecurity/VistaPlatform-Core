@@ -47,7 +47,7 @@ func (s *Server) proxyTraefikJSON(c *gin.Context, path string) {
 		sharedapi.ErrorResponse(c, http.StatusServiceUnavailable, "gateway unavailable", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

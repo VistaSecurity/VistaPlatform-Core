@@ -416,7 +416,7 @@ func (s *SensorService) StoreDiscoveries(batch *models.DiscoveryBatch) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// sensor_discoveries is RLS-scoped (its own tenant_id), so set app.tenant_id on
 	// THIS transaction before the inserts so they satisfy the policy WITH CHECK.
@@ -514,9 +514,9 @@ func (s *SensorService) StoreDiscoveries(batch *models.DiscoveryBatch) error {
 				sb.WriteString(", ")
 			}
 			base := j * colCount
-			sb.WriteString(fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+			fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
 				base+1, base+2, base+3, base+4, base+5, base+6, base+7,
-				base+8, base+9, base+10, base+11, base+12, base+13))
+				base+8, base+9, base+10, base+11, base+12, base+13)
 			allArgs = append(allArgs, r.args...)
 		}
 
@@ -768,7 +768,7 @@ func (s *SensorService) GetPendingSensors(tenantID uuid.UUID) ([]models.PendingS
 		}
 		return nil, fmt.Errorf("failed to query pending sensors: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	// Initialize with empty slice to ensure JSON serialization works correctly
 	sensors := make([]models.PendingSensorRegistration, 0)
@@ -860,7 +860,7 @@ func (s *SensorService) RegisterSensor(registration *models.SensorRegistration) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Verify registration key and retrieve tenant_id
 	// SECURITY: The tenant_id comes from the registration key lookup, not from the request.

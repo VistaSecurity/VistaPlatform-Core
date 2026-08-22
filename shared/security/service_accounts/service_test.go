@@ -33,7 +33,7 @@ func TestValidateToken_LookupFastPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	token := "fast-path-token"
 	lookup := hashLookup(token)
@@ -74,7 +74,7 @@ func TestValidateToken_WrongToken_NoLookupMatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	wrongToken := "not-the-right-token"
 	wrongLookup := hashLookup(wrongToken)
@@ -101,7 +101,7 @@ func TestValidateToken_LegacyFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	token := "legacy-token-issued-before-sec3"
 	lookup := hashLookup(token)
@@ -144,7 +144,7 @@ func TestValidateToken_EmptyToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	svc := NewService(db)
 	if _, err := svc.ValidateToken(""); err != ErrInvalidToken {

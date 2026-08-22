@@ -130,7 +130,7 @@ func (r *integrationRepository) List(ctx context.Context, tenantID uuid.UUID, pr
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	integrations := make([]CloudIntegration, 0)
 	for rows.Next() {

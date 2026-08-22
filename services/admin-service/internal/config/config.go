@@ -84,7 +84,7 @@ func Load() *Config {
 		EncryptionMasterKey:         sharedconfig.GetEnv("ENCRYPTION_MASTER_KEY", "change-this-master-key-in-production"), // Should use AWS KMS or similar in production
 		InternalAuthSecret:          sharedconfig.GetEnv("INTERNAL_AUTH_SECRET", "dev-internal-auth-secret-change-in-production"),
 		CookieDomain:                sharedconfig.GetEnv("COOKIE_DOMAIN", ""),
-		EnforceSecureCookies:        sharedconfig.GetEnvAsBool("ENFORCE_SECURE_COOKIES", false),
+		EnforceSecureCookies:        resolveEnforceSecureCookies(sharedconfig.GetEnv("ENV", "development")),
 		BillingWebhookWorkerEnabled: sharedconfig.GetEnvAsBool("BILLING_WEBHOOK_WORKER_ENABLED", true),
 		BillingDunningWorkerEnabled: sharedconfig.GetEnvAsBool("BILLING_DUNNING_WORKER_ENABLED", true),
 		BillingDunningCronSchedule:  sharedconfig.GetEnv("BILLING_DUNNING_CRON_SCHEDULE", "0 */6 * * *"),

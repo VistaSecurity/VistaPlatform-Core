@@ -52,6 +52,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'yaml';
+import { escapeTableCell } from './lib/markdown-table.mjs';
 
 const repoRoot = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 const CHECK = process.argv.includes('--check');
@@ -348,7 +349,7 @@ function render() {
   for (const key of rows) {
     const item = items.get(key);
     const name = item?.displayName ?? key;
-    const desc = (item?.description ?? '').replace(/\|/g, '\\|');
+    const desc = escapeTableCell(item?.description ?? '');
     const docPath = meta.docs[key];
     // The matrix ships in the core/ layer. Linking into enterprise/ or msp/
     // would be a dead link for a Core reader, who does not have that layer —
@@ -393,7 +394,7 @@ function render() {
   L.push('| Area | What it covers |');
   L.push('|---|---|');
   for (const entry of meta.msp_surface) {
-    const summary = String(entry.summary ?? '').trim().replace(/\s+/g, ' ').replace(/\|/g, '\\|');
+    const summary = escapeTableCell(String(entry.summary ?? '').trim().replace(/\s+/g, ' '));
     L.push(`| **${entry.name}** | ${summary} |`);
   }
   L.push('');

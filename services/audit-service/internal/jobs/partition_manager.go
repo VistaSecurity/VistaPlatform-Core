@@ -134,7 +134,7 @@ func (pm *PartitionManager) GetPartitionInfo(ctx context.Context) ([]PartitionIn
 	if err != nil {
 		return nil, fmt.Errorf("failed to query partition info: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var partitions []PartitionInfo
 	for rows.Next() {
@@ -178,7 +178,7 @@ func (pm *PartitionManager) DropOldPartitions(ctx context.Context, retentionDays
 	if err != nil {
 		return nil, fmt.Errorf("failed to query old partitions: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var droppedPartitions []string
 	for rows.Next() {

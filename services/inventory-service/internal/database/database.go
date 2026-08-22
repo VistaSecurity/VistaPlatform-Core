@@ -18,9 +18,10 @@ func NewConnection(cfg *config.Config) (*DB, error) {
 	var dsn string
 
 	// Use DATABASE_URL if available, otherwise construct from individual components
+	var source string
 	if cfg.DatabaseURL != "" {
 		dsn = cfg.DatabaseURL
-		fmt.Printf("Using DATABASE_URL: %s\n", dsn)
+		source = "DATABASE_URL"
 	} else {
 		dsn = fmt.Sprintf(
 			"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
@@ -31,10 +32,15 @@ func NewConnection(cfg *config.Config) (*DB, error) {
 			cfg.Database.Name,
 			cfg.Database.SSLMode,
 		)
-		fmt.Printf("Using individual config: %s\n", dsn)
+		source = "individual config"
 	}
 
-	fmt.Printf("Final DSN: %s\n", dsn)
+	// The DSN carries the database password in both spellings, so it is logged
+	// only through redactDSN. This line previously printed the DSN verbatim
+	// (three times), putting the credential into stdout — and therefore into
+	// container logs and any log aggregator downstream of them.
+	fmt.Printf("Connecting to database (%s): %s\n", source, redactDSN(dsn))
+
 	db, err := sqlx.Connect("postgres", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)

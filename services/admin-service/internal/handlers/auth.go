@@ -50,16 +50,17 @@ func Login(db *sql.DB, jwtSecret string, refreshTokenService *auth.PlatformRefre
 		query := `
 			SELECT pu.id, pu.email, pu.first_name, pu.last_name, pu.role_id, pr.name as role_name,
 			       pu.is_active, pu.email_verified, pu.force_password_change,
-			       pu.last_login_at, pu.created_at, pu.updated_at, pu.password_hash
+			       pu.last_login_at, pu.created_at, pu.updated_at, pu.password_hash, pu.locked_until
 			FROM platform_users pu
 			JOIN platform_roles pr ON pu.role_id = pr.id
 			WHERE pu.email = $1 AND pu.is_active = true AND pu.deleted_at IS NULL
 		`
+		var lockedUntil sql.NullTime
 
 		err := db.QueryRow(query, req.Email).Scan(
 			&user.ID, &user.Email, &user.FirstName, &user.LastName, &user.RoleID, &roleName,
 			&user.IsActive, &user.EmailVerified, &user.ForcePasswordChange,
-			&user.LastLoginAt, &user.CreatedAt, &user.UpdatedAt, &passwordHash,
+			&user.LastLoginAt, &user.CreatedAt, &user.UpdatedAt, &passwordHash, &lockedUntil,
 		)
 
 		if err == sql.ErrNoRows {
@@ -91,16 +92,25 @@ func Login(db *sql.DB, jwtSecret string, refreshTokenService *auth.PlatformRefre
 			return
 		}
 
+		if lockedUntil.Valid && lockedUntil.Time.After(time.Now()) {
+			c.JSON(http.StatusLocked, gin.H{"error": "Account is locked. Please try again later."})
+			return
+		}
+
 		// Verify password
 		valid, err := platformPasswordService.VerifyPassword(req.Password, passwordHash)
 		if err != nil || !valid {
+			recordPlatformFailedLogin(db, user.ID)
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
 			return
 		}
 
-		// Update last login
+		// Update last login and clear any expired failed-login state on success.
 		now := time.Now()
-		_, _ = db.Exec("UPDATE platform_users SET last_login_at = $1 WHERE id = $2", now, user.ID)
+		_, _ = db.Exec(
+			"UPDATE platform_users SET last_login_at = $1, failed_login_attempts = 0, locked_until = NULL, updated_at = $1 WHERE id = $2",
+			now, user.ID,
+		)
 		user.LastLoginAt = &now
 
 		// The operator-configured session length (admin-ui Security > Policy ->
@@ -140,6 +150,25 @@ func Login(db *sql.DB, jwtSecret string, refreshTokenService *auth.PlatformRefre
 			ExpiresIn:           3600,
 			ForcePasswordChange: user.ForcePasswordChange,
 		})
+	}
+}
+
+func recordPlatformFailedLogin(db *sql.DB, userID uuid.UUID) {
+	policy := authpolicy.Lockout(db)
+	now := time.Now()
+	_, err := db.Exec(
+		`UPDATE platform_users
+		 SET failed_login_attempts = failed_login_attempts + 1,
+		     locked_until = CASE
+		         WHEN failed_login_attempts + 1 >= $1 THEN $2
+		         ELSE locked_until
+		     END,
+		     updated_at = $3
+		 WHERE id = $4`,
+		policy.MaxAttempts, now.Add(policy.Duration), now, userID,
+	)
+	if err != nil {
+		fmt.Printf("[ADMIN] WARN: Failed to record platform failed login attempt for user %s: %v\n", userID, err)
 	}
 }
 

@@ -102,7 +102,9 @@ func (s *LifecycleSubscriber) Start() error {
 // Stop drains all subscriptions gracefully and cancels any pending recalcs.
 func (s *LifecycleSubscriber) Stop() {
 	if s.subscriber != nil {
-		s.subscriber.Drain()
+		if err := s.subscriber.Drain(); err != nil {
+			log.Printf("[LifecycleSubscriber] Failed to drain subscriptions: %v", err)
+		}
 	}
 	s.mu.Lock()
 	for id, t := range s.pending {

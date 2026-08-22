@@ -225,6 +225,20 @@ func (s *ResourceService) calculateCost(usage *models.ResourceUsage) float64 {
 	}, costing.DefaultRates()).TotalUSD
 }
 
+// createAlert persists a threshold alert.
+//
+// A persist failure is logged rather than discarded: an alert that was never
+// written is indistinguishable, downstream, from a threshold that was never
+// crossed. The caller has no return path, so logging is the handling.
+func (s *ResourceService) createAlert(alert *models.ResourceAlert) {
+	if err := s.repo.CreateResourceAlert(alert); err != nil {
+		s.log.WithError(err).WithFields(logrus.Fields{
+			"tenant_id": alert.TenantID,
+			"metric":    alert.Metric,
+		}).Error("Failed to create resource alert")
+	}
+}
+
 // Helper function to check and create alerts.
 //
 // Every threshold reads through a nil check: an unmeasured metric must not
@@ -244,7 +258,7 @@ func (s *ResourceService) checkAndCreateAlerts(usage *models.ResourceUsage) {
 			IsActive:     true,
 			CreatedAt:    time.Now(),
 		}
-		s.repo.CreateResourceAlert(alert)
+		s.createAlert(alert)
 	}
 
 	// Check for high memory usage
@@ -261,7 +275,7 @@ func (s *ResourceService) checkAndCreateAlerts(usage *models.ResourceUsage) {
 			IsActive:     true,
 			CreatedAt:    time.Now(),
 		}
-		s.repo.CreateResourceAlert(alert)
+		s.createAlert(alert)
 	}
 
 	// Check for high CPU usage
@@ -278,7 +292,7 @@ func (s *ResourceService) checkAndCreateAlerts(usage *models.ResourceUsage) {
 			IsActive:     true,
 			CreatedAt:    time.Now(),
 		}
-		s.repo.CreateResourceAlert(alert)
+		s.createAlert(alert)
 	}
 
 	// Check for high cost
@@ -295,7 +309,7 @@ func (s *ResourceService) checkAndCreateAlerts(usage *models.ResourceUsage) {
 			IsActive:     true,
 			CreatedAt:    time.Now(),
 		}
-		s.repo.CreateResourceAlert(alert)
+		s.createAlert(alert)
 	}
 }
 

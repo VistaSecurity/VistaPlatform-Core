@@ -254,7 +254,7 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 		//
 		// systemSensorID cannot be uuid.Nil here — a missing platform sensor
 		// fails the job before this loop runs.
-		if err := s.writeSensorDiscovery(ctx, systemSensorID, deviceJob.TenantID, deviceJob.DeviceID, batchID, asset, certFlags, ocspStatus, ocspDetail); err != nil {
+		if err := s.writeSensorDiscovery(ctx, systemSensorID, deviceJob.TenantID, deviceJob.DeviceID, deviceJob.IntegrationID, batchID, asset, certFlags, ocspStatus, ocspDetail); err != nil {
 			fmt.Printf("Warning: failed to write sensor discovery for %s: %v\n", targetInput, err)
 			steps.fail(targetInput, StageSensorDiscovery, err)
 		} else {
@@ -570,6 +570,7 @@ func (s *ResultProcessor) writeSensorDiscovery(
 	sensorID uuid.UUID,
 	tenantID uuid.UUID,
 	deviceID *uuid.UUID,
+	integrationID *uuid.UUID,
 	batchID string,
 	asset models.DiscoveredAsset,
 	certFlags map[string]interface{},
@@ -595,7 +596,7 @@ func (s *ResultProcessor) writeSensorDiscovery(
 		port = asset.Port
 	}
 
-	metadata := buildSensorDiscoveryMetadata(deviceID, asset)
+	metadata := buildSensorDiscoveryMetadata(deviceID, integrationID, asset)
 	mergeCertFlags(metadata, certFlags, ocspStatus, ocspDetail)
 
 	metadataJSON, err := json.Marshal(metadata)
@@ -628,15 +629,23 @@ func (s *ResultProcessor) writeSensorDiscovery(
 // buildSensorDiscoveryMetadata builds the sensor_discoveries metadata blob for an
 // interrogated asset using the key names discovery-processor's extractCryptoDetails
 // expects (note: "version" for the protocol version, not "protocol_version").
-func buildSensorDiscoveryMetadata(deviceID *uuid.UUID, asset models.DiscoveredAsset) map[string]interface{} {
+func buildSensorDiscoveryMetadata(deviceID *uuid.UUID, integrationID *uuid.UUID, asset models.DiscoveredAsset) map[string]interface{} {
+	discoveryMethod := "device_interrogation"
+	if integrationID != nil {
+		discoveryMethod = "cloud_api"
+	}
 	meta := map[string]interface{}{
-		"discovery_method": "device_interrogation",
+		"discovery_method": discoveryMethod,
 		"version":          asset.ProtocolVersion,
 		"cipher_suite":     asset.CipherSuite,
 	}
 	if deviceID != nil {
 		meta["device_id"] = deviceID.String()
 		meta["source_device_id"] = deviceID.String()
+	}
+	if integrationID != nil {
+		meta["integration_id"] = integrationID.String()
+		meta["source_integration_id"] = integrationID.String()
 	}
 	if asset.HashAlgorithm != "" {
 		meta["hash_algorithm"] = asset.HashAlgorithm
@@ -658,6 +667,13 @@ func buildSensorDiscoveryMetadata(deviceID *uuid.UUID, asset models.DiscoveredAs
 	}
 	if asset.CertValidationStatus != "" {
 		meta["cert_validation_status"] = asset.CertValidationStatus
+	}
+	if asset.Metadata != nil {
+		for _, key := range []string{"cloud_provider", "cloud_region", "cloud_account_id", "vpc_id"} {
+			if value, ok := asset.Metadata[key]; ok && value != "" {
+				meta[key] = value
+			}
+		}
 	}
 	if len(asset.Certificates) > 0 {
 		certs := make([]map[string]interface{}, 0, len(asset.Certificates))

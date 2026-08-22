@@ -159,6 +159,22 @@ constraint that's trivially satisfiable on an empty table can still fail
 against existing rows on the second apply. A double-apply against an empty
 database proves very little.
 
+**And a double-apply is not an upgrade.** Both of its passes build today's
+table shape, so it cannot see a statement that works against today's shape but
+fails against the one an earlier release left behind — a `SET NOT NULL` on a
+column whose existing rows hold NULL, a `CHECK` that older-format data
+violates. That is the class that wedges a real `helm upgrade`.
+`TestIntegration_Schema_UpgradesFromPriorReleases` covers it: for each recent
+release tag it builds a scratch database from *that* release's schema and seed,
+puts rows in it, then applies the current schema — the same sequence your
+upgrade performs. Run it with `make test-integration-db`.
+
+**Back up before upgrading.** There is no down migration: if a schema statement
+fails against your data, the migration Job stops partway and the way back is a
+restore. After upgrading, `SELECT app_version, chart_version, applied_at FROM
+schema_migration_status` reports which release last wrote the schema — include
+it in any upgrade bug report.
+
 `scripts/database/seed.sql` provides starter data (platform users, roles,
 tenants, the free framework catalog).
 

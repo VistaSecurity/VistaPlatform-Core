@@ -619,7 +619,7 @@ func (s *AWSInterrogationService) getCertificateDetails(ctx context.Context, cer
 		details["domain_name"] = *cert.DomainName
 	}
 
-	if cert.SubjectAlternativeNames != nil && len(cert.SubjectAlternativeNames) > 0 {
+	if len(cert.SubjectAlternativeNames) > 0 {
 		details["subject_alternative_names"] = cert.SubjectAlternativeNames
 	}
 
@@ -654,12 +654,12 @@ func (s *AWSInterrogationService) getCertificateDetails(ctx context.Context, cer
 	// RenewalEligibility is an enum (value type, not pointer)
 	details["renewal_eligibility"] = string(cert.RenewalEligibility)
 
-	if cert.InUseBy != nil && len(cert.InUseBy) > 0 {
+	if len(cert.InUseBy) > 0 {
 		details["in_use_by"] = cert.InUseBy
 	}
 
 	// Extract domain validation options
-	if cert.DomainValidationOptions != nil && len(cert.DomainValidationOptions) > 0 {
+	if len(cert.DomainValidationOptions) > 0 {
 		validationOptions := make([]map[string]interface{}, 0)
 		for _, opt := range cert.DomainValidationOptions {
 			optMap := make(map[string]interface{})

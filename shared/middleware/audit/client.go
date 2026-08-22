@@ -161,7 +161,7 @@ func (c *Client) LogActivity(ctx context.Context, logEntry *ActivityLogRequest) 
 			return fmt.Errorf("failed to send activity log after %d retries: %w", c.retries, err)
 		}
 
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return nil

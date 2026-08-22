@@ -117,7 +117,7 @@ func ListLegalDocuments(db *sql.DB) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load legal documents"})
 			return
 		}
-		defer curRows.Close()
+		defer func() { _ = curRows.Close() }()
 		current := []legalDocumentDTO{}
 		for curRows.Next() {
 			var d legalDocumentDTO
@@ -139,7 +139,7 @@ func ListLegalDocuments(db *sql.DB) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load legal documents"})
 			return
 		}
-		defer histRows.Close()
+		defer func() { _ = histRows.Close() }()
 		history := []legalVersionDTO{}
 		for histRows.Next() {
 			var v legalVersionDTO

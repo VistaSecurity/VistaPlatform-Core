@@ -72,7 +72,9 @@ func TestCreatePendingSensor_Validation(t *testing.T) {
 			assert.Equal(t, tt.expectedStatus, w.Code)
 			if tt.expectedError != "" {
 				var response map[string]interface{}
-				json.Unmarshal(w.Body.Bytes(), &response)
+				if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+					t.Fatalf("decoding error response failed: %v (body: %s)", err, w.Body.String())
+				}
 				assert.Contains(t, response["error"], tt.expectedError)
 			}
 		})
@@ -128,7 +130,9 @@ func TestRegisterSensor_Validation(t *testing.T) {
 			assert.Equal(t, tt.expectedStatus, w.Code)
 			if tt.expectedError != "" {
 				var response map[string]interface{}
-				json.Unmarshal(w.Body.Bytes(), &response)
+				if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+					t.Fatalf("decoding error response failed: %v (body: %s)", err, w.Body.String())
+				}
 				assert.Contains(t, response["error"], tt.expectedError)
 			}
 		})

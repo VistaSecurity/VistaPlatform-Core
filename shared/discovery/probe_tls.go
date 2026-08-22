@@ -26,9 +26,11 @@ func probeTLS(p *Prober, conn net.Conn, hostname string, port int) (*ProbeResult
 	}
 
 	tlsConn := tls.Client(conn, tlsConfig)
-	defer tlsConn.Close()
+	defer func() { _ = tlsConn.Close() }()
 
-	tlsConn.SetDeadline(time.Now().Add(p.timeout))
+	if err := tlsConn.SetDeadline(time.Now().Add(p.timeout)); err != nil {
+		return nil, fmt.Errorf("failed to set TLS probe deadline: %w", err)
+	}
 
 	if err := tlsConn.Handshake(); err != nil {
 		return nil, err

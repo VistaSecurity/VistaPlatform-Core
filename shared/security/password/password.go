@@ -225,7 +225,7 @@ func ValidatePasswordStrengthWithMinLength(password string, minLength int) error
 	}
 
 	if len(password) > 72 {
-		return errors.New("Password must not exceed 72 characters")
+		return errors.New("password must not exceed 72 characters")
 	}
 
 	for _, common := range commonPasswords {

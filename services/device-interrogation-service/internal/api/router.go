@@ -669,11 +669,15 @@ func discoverCloudResourcesHandler(db, bypassDB *sql.DB, discoveryIntegrationSer
 			defer func() {
 				if r := recover(); r != nil {
 					if !statusUpdated {
-						discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(fmt.Sprintf("Panic: %v", r)))
+						if updateErr := discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(fmt.Sprintf("Panic: %v", r))); updateErr != nil {
+							log.Printf("Warning: failed to mark discovery job %s failed after panic — job may stay 'running': %v", jobID, updateErr)
+						}
 					}
 					if deviceJob != nil && !deviceJobStatusUpdated {
 						errMsg := fmt.Sprintf("Panic: %v", r)
-						jobQueue.UpdateJobStatus(ctx, deviceJob.ID, models.JobStatusFailed, nil, &errMsg)
+						if updateErr := jobQueue.UpdateJobStatus(ctx, deviceJob.ID, models.JobStatusFailed, nil, &errMsg); updateErr != nil {
+							log.Printf("Warning: failed to mark device_job %s failed after panic: %v", deviceJob.ID, updateErr)
+						}
 					}
 				}
 			}()
@@ -687,10 +691,14 @@ func discoverCloudResourcesHandler(db, bypassDB *sql.DB, discoveryIntegrationSer
 				detectedProvider, err := cloudService.GetIntegrationCloudProvider(ctx, tenantID, req.IntegrationID)
 				if err != nil {
 					failMsg := fmt.Sprintf("Failed to detect cloud provider: %v", err)
-					discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(failMsg))
+					if updateErr := discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(failMsg)); updateErr != nil {
+						log.Printf("Warning: failed to mark discovery job %s failed — job may stay 'running': %v", jobID, updateErr)
+					}
 					statusUpdated = true
 					if deviceJob != nil {
-						jobQueue.UpdateJobStatus(ctx, deviceJob.ID, models.JobStatusFailed, nil, &failMsg)
+						if updateErr := jobQueue.UpdateJobStatus(ctx, deviceJob.ID, models.JobStatusFailed, nil, &failMsg); updateErr != nil {
+							log.Printf("Warning: failed to mark device_job %s failed: %v", deviceJob.ID, updateErr)
+						}
 						deviceJobStatusUpdated = true
 					}
 					discoveryIntegration.SendDiscoveryNotification(ctx, tenantID,
@@ -711,22 +719,30 @@ func discoverCloudResourcesHandler(db, bypassDB *sql.DB, discoveryIntegrationSer
 			case "gcp":
 				devices, err = cloudService.DiscoverGCPResources(ctx, tenantID, req.IntegrationID, req.ResourceTypes)
 			default:
-				discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(fmt.Sprintf("Unknown cloud provider: %s", cloudProvider)))
+				errMsg := fmt.Sprintf("Unknown cloud provider: %s", cloudProvider)
+				if updateErr := discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(errMsg)); updateErr != nil {
+					log.Printf("Warning: failed to mark discovery job %s failed — job may stay 'running': %v", jobID, updateErr)
+				}
 				statusUpdated = true
 				if deviceJob != nil {
-					errMsg := fmt.Sprintf("Unknown cloud provider: %s", cloudProvider)
-					jobQueue.UpdateJobStatus(ctx, deviceJob.ID, models.JobStatusFailed, nil, &errMsg)
+					if updateErr := jobQueue.UpdateJobStatus(ctx, deviceJob.ID, models.JobStatusFailed, nil, &errMsg); updateErr != nil {
+						log.Printf("Warning: failed to mark device_job %s failed: %v", deviceJob.ID, updateErr)
+					}
 					deviceJobStatusUpdated = true
 				}
 				return
 			}
 
 			if err != nil {
-				discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(err.Error()))
+				if updateErr := discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(err.Error())); updateErr != nil {
+					log.Printf("Warning: failed to mark discovery job %s failed — job may stay 'running': %v", jobID, updateErr)
+				}
 				statusUpdated = true
 				if deviceJob != nil {
 					errMsg := err.Error()
-					jobQueue.UpdateJobStatus(ctx, deviceJob.ID, models.JobStatusFailed, nil, &errMsg)
+					if updateErr := jobQueue.UpdateJobStatus(ctx, deviceJob.ID, models.JobStatusFailed, nil, &errMsg); updateErr != nil {
+						log.Printf("Warning: failed to mark device_job %s failed: %v", deviceJob.ID, updateErr)
+					}
 					deviceJobStatusUpdated = true
 				}
 				// Send failure notification to notification service (Slack, etc.)
@@ -761,7 +777,9 @@ func discoverCloudResourcesHandler(db, bypassDB *sql.DB, discoveryIntegrationSer
 			// Mark job as completed; on failure set to failed so job does not stay "running"
 			if err := discoveryIntegration.MarkJobCompleted(ctx, jobID); err != nil {
 				log.Printf("Failed to mark discovery job as completed: %v", err)
-				discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(fmt.Sprintf("Could not update status: %v", err)))
+				if updateErr := discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(fmt.Sprintf("Could not update status: %v", err))); updateErr != nil {
+					log.Printf("Warning: failed to mark discovery job %s failed either — job may stay 'running': %v", jobID, updateErr)
+				}
 			}
 			statusUpdated = true
 

@@ -37,7 +37,7 @@ var starttlsProtocols = []starttlsProtocol{
 		Detect: func(buf []byte) (bool, int) {
 			// IMAP: client sends "STARTTLS" command, server responds with tagged "OK"
 			upper := bytes.ToUpper(buf)
-			if bytes.Index(upper, []byte("STARTTLS")) < 0 {
+			if !bytes.Contains(upper, []byte("STARTTLS")) {
 				return false, 0
 			}
 			return findTLSRecord(buf, 0)
@@ -49,7 +49,7 @@ var starttlsProtocols = []starttlsProtocol{
 		Detect: func(buf []byte) (bool, int) {
 			// POP3: client sends "STLS\r\n", server responds "+OK"
 			upper := bytes.ToUpper(buf)
-			if bytes.Index(upper, []byte("STLS")) < 0 {
+			if !bytes.Contains(upper, []byte("STLS")) {
 				return false, 0
 			}
 			return findTLSRecord(buf, 0)
@@ -86,7 +86,7 @@ var starttlsProtocols = []starttlsProtocol{
 		Detect: func(buf []byte) (bool, int) {
 			// FTP: client sends "AUTH TLS\r\n", server responds "234 "
 			upper := bytes.ToUpper(buf)
-			if bytes.Index(upper, []byte("AUTH TLS")) < 0 {
+			if !bytes.Contains(upper, []byte("AUTH TLS")) {
 				return false, 0
 			}
 			return findTLSRecord(buf, 0)
@@ -111,7 +111,7 @@ var starttlsProtocols = []starttlsProtocol{
 			// LDAP: Extended operation OID 1.3.6.1.4.1.1466.20037
 			// The OID is BER-encoded as 2b 06 01 04 01 8b 3a 82 f5 25 (or similar)
 			oid := []byte{0x2b, 0x06, 0x01, 0x04, 0x01, 0x8b, 0x3a, 0x65}
-			if bytes.Index(buf, oid) < 0 {
+			if !bytes.Contains(buf, oid) {
 				return false, 0
 			}
 			return findTLSRecord(buf, 0)
@@ -123,8 +123,11 @@ var starttlsProtocols = []starttlsProtocol{
 // Returns true and the offset of the TLS record if found.
 func findTLSRecord(buf []byte, fromOffset int) (bool, int) {
 	for i := fromOffset; i+5 <= len(buf); i++ {
-		// TLS record: ContentType 0x16 (Handshake), followed by version 0x0301-0x0304
-		if buf[i] == 0x16 && buf[i+1] == 0x03 && buf[i+2] >= 0x00 && buf[i+2] <= 0x04 {
+		// TLS record: ContentType 0x16 (Handshake), followed by version
+		// 0x0300-0x0304 — i.e. SSL 3.0 through TLS 1.3. The minor byte only
+		// needs an upper bound: it is a byte, so `>= 0x00` was always true and
+		// has been dropped. The accepted range is unchanged.
+		if buf[i] == 0x16 && buf[i+1] == 0x03 && buf[i+2] <= 0x04 {
 			return true, i
 		}
 	}

@@ -94,7 +94,7 @@ func (h *Handler) UploadPcap(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read uploaded file"})
 		return
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 
 	// Read first 4 bytes for magic byte validation
 	magic := make([]byte, 4)
@@ -131,11 +131,30 @@ func (h *Handler) UploadPcap(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save uploaded file"})
 		return
 	}
-	defer dst.Close()
+	// Safety net for the early-return paths below; the success path closes
+	// explicitly so the close error can be acted on.
+	dstClosed := false
+	defer func() {
+		if !dstClosed {
+			_ = dst.Close()
+		}
+	}()
 
 	if _, err := io.Copy(dst, src); err != nil {
 		h.log.WithError(err).Error("Failed to write uploaded file")
 		// Clean up partial file
+		_ = os.Remove(destPath)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save uploaded file"})
+		return
+	}
+
+	// Close explicitly rather than relying on the deferred close: this file is
+	// being WRITTEN, and a failed Close can mean buffered data never reached
+	// disk. Discarding it would let the job record below point at a truncated
+	// capture that pcap-processor would then parse as if it were complete.
+	dstClosed = true
+	if err := dst.Close(); err != nil {
+		h.log.WithError(err).Error("Failed to finalize uploaded file")
 		_ = os.Remove(destPath)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save uploaded file"})
 		return

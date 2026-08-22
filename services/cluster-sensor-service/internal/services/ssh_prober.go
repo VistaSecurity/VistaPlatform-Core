@@ -2,6 +2,7 @@ package services
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"strings"
 	"time"
@@ -31,8 +32,10 @@ func (sp *SSHProber) ProbeSSH(hostname string, port int) (map[string]interface{}
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect: %w", err)
 	}
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(sp.timeout))
+	defer func() { _ = conn.Close() }()
+	if err := conn.SetDeadline(time.Now().Add(sp.timeout)); err != nil {
+		log.Printf("SSH probe %s: could not set connection deadline, probe may block until the SSH client timeout: %v", address, err)
+	}
 
 	var hostKeyType, hostKeyFingerprint string
 
@@ -92,7 +95,7 @@ func (sp *SSHProber) ProbeSSH(hostname string, port int) (map[string]interface{}
 			}
 		}()
 		banner = strings.TrimSpace(string(sshConn.ServerVersion()))
-		sshConn.Close()
+		_ = sshConn.Close()
 	}
 
 	result := map[string]interface{}{
@@ -112,8 +115,10 @@ func (sp *SSHProber) probeBannerOnly(hostname string, port int) (map[string]inte
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect for SSH banner: %w", err)
 	}
-	defer bannerConn.Close()
-	bannerConn.SetDeadline(time.Now().Add(sp.timeout))
+	defer func() { _ = bannerConn.Close() }()
+	if err := bannerConn.SetDeadline(time.Now().Add(sp.timeout)); err != nil {
+		log.Printf("SSH banner probe %s: could not set connection deadline, read may block indefinitely: %v", address, err)
+	}
 	buf := make([]byte, 1024)
 	n, err := bannerConn.Read(buf)
 	if err != nil {

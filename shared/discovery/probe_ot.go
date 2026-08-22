@@ -265,7 +265,7 @@ func probeEtherNetIP(p *Prober, _ string, ip string, port int) (*ProbeResult, er
 	if err != nil {
 		return nil, fmt.Errorf("ethernet/ip dial: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	req := make([]byte, 24)
 	binary.LittleEndian.PutUint16(req[0:2], enipCmdListIdentity)
@@ -371,7 +371,7 @@ func probeBACnet(p *Prober, _ string, ip string, port int) (*ProbeResult, error)
 	if err != nil {
 		return nil, fmt.Errorf("bacnet dial: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	req := []byte{
 		bacnetBVLCTypeBACnetIP,  // BVLC Type

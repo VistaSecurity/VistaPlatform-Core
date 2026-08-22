@@ -170,7 +170,9 @@ func TestContract_Gateway_200(t *testing.T) {
 // Not configured (env unset) → 503.
 func TestContract_Gateway_503_unconfigured(t *testing.T) {
 	sv := statusLoadSpec(t)
-	os.Unsetenv("TRAEFIK_DASHBOARD_URL")
+	if err := os.Unsetenv("TRAEFIK_DASHBOARD_URL"); err != nil {
+		t.Fatalf("unset TRAEFIK_DASHBOARD_URL: %v", err)
+	}
 	eng := newGatewayEngine()
 	w := statusDo(eng, http.MethodGet, statusBase+"/gateway/overview")
 	if w.Code != http.StatusServiceUnavailable {

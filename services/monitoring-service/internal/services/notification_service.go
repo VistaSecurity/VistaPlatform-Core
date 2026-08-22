@@ -184,7 +184,7 @@ func (s *NotificationService) sendSlackNotification(channel *NotificationChannel
 	if err != nil {
 		return fmt.Errorf("failed to send slack notification: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
@@ -239,7 +239,7 @@ func (s *NotificationService) sendWebhookNotification(channel *NotificationChann
 	if err != nil {
 		return fmt.Errorf("failed to send webhook notification: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
@@ -370,7 +370,7 @@ func (s *NotificationService) sendPagerDutyNotification(channel *NotificationCha
 	if err != nil {
 		return fmt.Errorf("failed to send pagerduty notification: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
@@ -394,7 +394,7 @@ func (s *NotificationService) GetNotificationChannels() ([]NotificationChannel, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to query notification channels: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var channels []NotificationChannel
 	for rows.Next() {

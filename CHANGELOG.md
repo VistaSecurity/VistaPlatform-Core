@@ -7,6 +7,231 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-21
+
+Housekeeping release with real teeth. Three things an operator should read
+before upgrading: the sensor no longer writes discoveries to encrypted local
+disk (that store had no reader and never did, so nothing recoverable is lost —
+but findings buffered during a control-plane outage now die with a sensor
+restart); 31 unused tables are dropped from the schema on upgrade; and the two
+frontend images cleared all 8 HIGH CVEs each. Alongside those, a first pass over
+CodeQL's findings on the newly public repo fixed four real defects — a Postgres
+password printed to logs on every inventory-service start, SMTP header injection
+reachable from a tenant org name, an upload that could store PNG bytes under a
+`.svg` name, and admin-service's `Secure` cookie flag resting on a variable
+nothing set.
+
+### Added
+
+- **Nightly container scans, published.** The weekly image scan had failed every
+  run since at least 2026-06-14 — it targeted `docker.io/.../<svc>:latest`, a ref
+  that does not exist, so nothing was scanned for ten weeks while the job
+  reported honestly to nobody. It now scans the Core line on `ghcr.io`
+  anonymously (the same path a customer takes, which regression-tests public
+  pullability as a side effect), derives its image list from the release workflow
+  rather than restating it, and publishes `security-scans/{README.md,latest.json}`
+  to the public repo, linked from the README and SECURITY.md. An image with no
+  report renders as **NOT SCANNED**, never as clean, and suppresses the
+  clean-bill-of-health headline for the whole run.
+- **A security posture page** (`docsv4/core/security-posture.md`) covering tenant
+  isolation, service-to-service auth, the collect-posture-never-key-material
+  rule, supply-chain signing, and which CI scanners gate a merge versus which are
+  advisory.
+- **An upgrade-path test for the schema.** Every prior schema guard applied the
+  *current* schema twice, so both passes built the current table shape and none
+  could see a statement that is fine today and fatal against the shape an earlier
+  release left behind. The new test builds a database from each recent `core-v*`
+  release, populates it, then applies the current schema — the exact sequence
+  `helm upgrade` performs.
+- **`schema_migration_status` now records `app_version` and `chart_version`**
+  beside the content hash, so an upgrade bug report can say which release built
+  the database. The chart's `NOTES.txt` now tells upgraders to `pg_dump` first —
+  there is no down migration and the chart ships no backup tooling.
+
+### Changed
+
+- **The sensor no longer writes discoveries to encrypted local disk.** The store
+  encrypted (and optionally gzipped) every discovery to `discoveries_*.enc`, and
+  nothing in the tree could read those files back — in any commit, on any branch.
+  It was not merely inert: its `Cleanup()` had no caller so `RetentionDays` never
+  applied and the files grew without bound on customer hosts, its in-memory
+  buffer was never trimmed, and on shutdown the sensor told operators
+  "Discoveries saved to encrypted storage" for findings it could not submit and
+  could not recover. Discoveries are now held in memory and retried until
+  submitted, which is what the sensor already did. **The tradeoff, stated
+  plainly: findings buffered during a control-plane outage do not survive a
+  sensor restart.**
+
+  The config keys that existed only to feed it are gone (`encryptionKey`,
+  `keyPath`, `rotationSize`, `retentionDays`, `maxStorageSize`, `minFreeSpaceMB`,
+  `enableCompression`). **No action needed on upgrade** — config loading is
+  non-strict, so an existing `sensor-config.yaml` still loads and those keys
+  become inert. Docs that claimed encrypted local storage and air-gapped
+  export/import were corrected; none of the three were ever true.
+- **`docsv4/core/operate/`'s deployment surface is the Helm chart, only.** The
+  raw Kubernetes manifests (`k8s/rke2/`, `k8s/eks/`, `k8s/production-balanced/`)
+  are retired. The RKE2 set described itself as untested, deployed into a retired
+  namespace and was missing 2 of 16 services; the EKS set pointed at a
+  decommissioned cluster. Node-bootstrap scripts (`install-rke2-server.sh`) stay.
+
+### Removed
+
+- **31 database tables and 4 functions with neither a reader nor a writer.**
+  Each was verified to have zero Go/TypeScript references or to be superseded by
+  a table that carries the data instead — and the supersession claims are
+  row-count-backed on a live database, not inferred (`audit.audit_logs` 0 rows vs
+  `audit.activity_logs` 46,370; `dashboard_metrics` 0 vs
+  `platform_metrics_snapshots` 22,374; `tenant_usage_tracking` 0 vs
+  `tenant_resource_usage` 10,314). The `DROP`s run on upgrade; fresh installs
+  never create them. Verified on a real Postgres 17: fresh apply, seed, and
+  re-apply over a populated database all exit 0 with zero errors, 210 live tables
+  intact.
+
+  Deliberately kept: `api_usage_logs` (that is the API-key feature's table, not
+  residue), `compliance_rules` (a live route still queries it — removing the
+  table without the route turns a wrong answer into a SQL error), and
+  `cbom_subscriptions` / `external_asset_mappings`, both named by live roadmap
+  work.
+- **Dead CI and build paths**: three workflows that had never run successfully
+  (`deploy-eks.yml`, `images.yml`, `snyk-security.yml`), the AWS CodeBuild path,
+  `services/integration-sync/` (a directory that had held one README and no code
+  at any point, while accumulating workarounds in seven places), a placeholder
+  integration suite whose broken `make test-integration` target also broke
+  `make test`, and the `gen-gateway` Makefile target — a footgun one word from
+  the live `generate-gateway` that would have rewritten every backend hop to
+  plaintext.
+
+### Security
+
+- **inventory-service printed the Postgres DSN verbatim on every startup**,
+  three times, including the password in both DSN spellings — into stdout,
+  container logs, and any aggregator downstream. Now redacted through a
+  parser that understands both spellings and redacts an unparseable DSN
+  wholesale rather than guessing where the secret ends.
+- **SMTP header injection via attacker-influenced display text.** The shared
+  email builder interpolated `To`, `Subject` and the `From` display name into RFC
+  5322 headers with no CR/LF handling, and all three carry text a user controls —
+  the tenant org name, the white-label platform name, and a user-authored alert
+  threshold name. `Acme\r\nBcc: attacker@evil` on an invitation silently BCCs the
+  accept link; a smuggled `\r\n.\r\n` could end the message early and send a
+  second one. Headers are now sanitized and addresses rejected outright before
+  the SMTP dial, since they also reach `MAIL`/`RCPT` where a CRLF is command
+  injection independent of the headers.
+- **Platform-branding upload stored files under a caller-chosen extension.**
+  Magic bytes constrained the file's *content* while the extension came from
+  `filepath.Ext(file.Filename)` — so PNG bytes uploaded as `evil.svg` persisted a
+  `.svg` asset, and SVG is excluded from that allowlist precisely because it can
+  carry script. The extension is now derived from the sniffed type and fails
+  closed. This is the same defect fixed on the tenant-branding twin.
+- **admin-service's `Secure` cookie flag rested on a variable nothing sets.** It
+  read only `ENFORCE_SECURE_COOKIES`, which appears in no chart template and no
+  compose file — false in every deployment that has ever existed — while ignoring
+  `COOKIE_SECURE`, which the chart derives from `tls.mode` and which auth-service
+  honours. Two services setting cookies on one domain silently disagreed, and the
+  flag rested entirely on the upstream proxy's `X-Forwarded-Proto`, the exact
+  dependency it was added to remove. admin-service now resolves `COOKIE_SECURE`
+  with auth-service's production floor. **No chart change needed** — the variable
+  was already being shipped.
+- **8 HIGH CVEs cleared from each of the web-ui and admin-ui images** (16 of 16
+  reported by the first honest nightly scan; all 16 backends were already clean).
+  Five came from Alpine packages in a base that has not been rebuilt since
+  2026-06-24, fixed by a patch-level `apk upgrade` bounded to the base's own
+  branch plus removing `curl`, which nothing in the image can use — that cascades
+  away libcurl/c-ares/nghttp2/brotli/zstd and retires the class rather than
+  today's findings. Three were in the Caddy binary's own Go dependencies, fixed
+  by building it through a generated wrapper module that pins the fixed versions
+  as floors. Measured 8 → 0 per image; both containers verified serving.
+- **The sensor's capture snaplen wrapped on operator misconfiguration.** A
+  configured `bufferSize` of 2147483648 became −2147483648 and `1<<32` became 0,
+  truncating every captured packet to a single byte — after which libpcap either
+  rejects the handle or captures nothing, with an error that never names the
+  configured number. Values that work today are unchanged; only unrepresentable
+  ones now fall back to the 1 MB default instead of wrapping. (The scanner's
+  premise that this is wire-reachable is wrong — it comes from the sensor's own
+  config.)
+- **Platform admin login had no lockout.** Repeated failures on the
+  platform-admin path are now rate-limited the way the tenant path already was.
+- **Invitation emails survived an erasure request.** A data-subject erasure left
+  the address behind on any outstanding invitation row; it is now purged.
+
+### Fixed
+
+- **Scheduled cloud discoveries lost their metadata** on the way through the
+  result processor, so a scheduled run recorded less than the same discovery run
+  by hand.
+- **A silently truncated SIEM export read downstream as "no events."** The
+  jsonl/cef/leef export loops in monitoring-service discarded every write error;
+  they now log and stop on the first one.
+- **A scheduled audit report with an unparseable cron expression never ran and
+  said nothing** — `cron.AddFunc`'s error was dropped, so the schedule registered
+  nothing. Found during the lint burn-down below, along with 13 unchecked writes
+  of a job's *terminal* state: when one failed, the job row stayed "running"
+  forever with nothing anywhere saying so.
+- **Threshold alerts that failed to persist were indistinguishable from
+  thresholds never crossed** in resource-tracker-service. Now logged with tenant
+  and metric.
+- **A failed integration-count query was reported as "zero integrations"** in
+  device-interrogation-service's health summary. The summary still degrades to
+  zeros, but the failure is now visible.
+- **Roughly 20 more of the same shape** across audit-service, monitoring-service
+  and the sensor, where a dropped decode or scan error rendered "could not read
+  this" as "there was nothing to read": unparseable recipient lists read as
+  empty, failed-event counts stuck at 0, decode failures recorded as empty maps.
+- **The CVE badges on the public README could report "critical CVEs 0" while the
+  zero covered 16 images out of 18.** They read only the critical/high totals and
+  never surfaced `images_not_scanned`. Not hypothetical — 4 of 18 pulls failed
+  during development, which is also why image pulls now retry.
+- **mcp-service shipped with no pre-release CI at all** — 16 Go files, its own
+  tests, in `go.work`, in the chart, built by both release workflows, and in
+  neither CI matrix. Nothing built, linted or tested it until a release, where
+  the image build would fail and block the release; its three test files had
+  never run anywhere. It is clean today, so this closes a verification gap rather
+  than a latent break — but the gap is why nobody knew that either way. A new
+  audit derives the module list from `services/*/go.mod` and fails if any is
+  missing from either matrix, or if a matrix names a module that is not on disk
+  (which makes that leg self-skip and report success — the same silent pass).
+- **The commercial release's "Regenerate Traefik gateway config" step
+  regenerated nothing.** It called a wrapper that writes to a temp dir by design,
+  so the release shipped whatever happened to be committed. It now calls the real
+  generator — and since no PR gate reads `config/traefik/`, the release was the
+  only regenerator in the system; `git diff --exit-code` now fails the release on
+  drift rather than shipping unreviewed production routing.
+- **`generate-edition-matrix.mjs` escaped table-cell pipes without first escaping
+  backslashes**, so a cell containing `SMB\|CIFS` grew a column and mis-rendered
+  the rest of the table — in a file `make audit` would still call byte-for-byte
+  in sync, since nothing renders the Markdown. Behaviour-preserving on today's
+  inputs.
+- **429 pre-existing lint findings cleared across 19 modules** (429 → 3, the
+  remaining 3 deliberately deferred as a security-behaviour decision on an
+  untrusted-input path, not lint debt). Most were mechanical, but the real
+  defects listed above were hiding in them. Worth knowing why they were
+  invisible: the PR gate runs with `only-new-issues`, and `golangci-lint`
+  silently truncates repeated findings at `max-same-issues=3` — the sensor
+  reported 49 issues and actually had 72.
+
+### Documentation
+
+- **The over-collection disclosure on the posture page is now scoped.** It cited
+  a real incident — a vendor response object assigned straight into a metadata
+  field, persisting a mesh PSK, per-device auth keys, an SMTP relay password and
+  an operator's email on every run — with no versions and no statement of who was
+  affected. On a page that is now world-readable, that reads as ongoing. It is
+  not: **affected v0.5.0–v0.5.6, fixed in v0.5.7, UniFi collector only.** It also
+  now says what an affected operator needs — this was over-collection into
+  *their own* Postgres, never transmitted off-box and never held by us; upgrading
+  does not remove rows already written; and anyone who ran those versions against
+  a UniFi controller should consider purging that window and rotating the
+  credentials that were on the controller at the time.
+- The posture page no longer claims all services build on Docker Hardened
+  Images. The two frontends pin an upstream `caddy:2-alpine` — which is where
+  every current finding is — and the backends' DHI substitution is conditional on
+  credentials being present, so a fork can rebuild a tag without a subscription.
+- **Air-gapped sensor export/import is documented as the roadmap item it is**,
+  not the three artefacts that made it look shipped. Note for anyone who finds
+  it: sensor-manager still registers `POST /sensors/:id/exports`, whose handler
+  inserts into a table defined in no schema file, so that route fails on every
+  call and always has. PCAP upload remains the supported answer today.
+
 ## [0.11.1] - 2026-08-21
 
 Small operator-facing cleanup — the admin-ui login screen carried leftover

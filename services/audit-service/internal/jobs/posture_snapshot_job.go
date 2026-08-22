@@ -173,7 +173,7 @@ func (j *PostureSnapshotJob) activeTenantIDs(ctx context.Context) ([]uuid.UUID, 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var ids []uuid.UUID
 	for rows.Next() {
@@ -203,7 +203,7 @@ func (j *PostureSnapshotJob) fetchRiskSummary(ctx context.Context, tenantID uuid
 	if err != nil {
 		return nil, fmt.Errorf("send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))

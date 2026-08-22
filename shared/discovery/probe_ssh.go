@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"fmt"
 	"net"
 	"strings"
 	"time"
@@ -21,7 +22,9 @@ func init() {
 // attempted. Ported from the sensor's active prober; returns the neutral
 // ProbeResult. The hostname argument is unused for SSH.
 func probeSSH(p *Prober, conn net.Conn, _ string, port int) (*ProbeResult, error) {
-	conn.SetDeadline(time.Now().Add(p.timeout))
+	if err := conn.SetDeadline(time.Now().Add(p.timeout)); err != nil {
+		return nil, fmt.Errorf("failed to set SSH probe deadline: %w", err)
+	}
 
 	result := &ProbeResult{
 		Protocol: "SSH",
@@ -93,7 +96,7 @@ func probeSSH(p *Prober, conn net.Conn, _ string, port int) (*ProbeResult, error
 			for range chans {
 			}
 		}()
-		sshConn.Close()
+		_ = sshConn.Close()
 
 		// The ServerVersion field contains the banner
 		result.SSHBanner = strings.TrimSpace(string(sshConn.ServerVersion()))

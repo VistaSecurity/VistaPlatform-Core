@@ -259,7 +259,7 @@ func (c *panClient) getAPIKey(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("API key request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
@@ -378,7 +378,7 @@ func (c *panClient) apiRequest(ctx context.Context, method, apiURL string) (stri
 	if err != nil {
 		return "", fmt.Errorf("API request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)

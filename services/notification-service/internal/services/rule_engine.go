@@ -126,7 +126,7 @@ func (re *RuleEngine) GetPlatformRulesForAlert(alertSource, alertType, severity 
 	if err != nil {
 		return nil, fmt.Errorf("failed to query platform rules: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var rules []models.PlatformNotificationRule
 	for rows.Next() {
@@ -441,7 +441,7 @@ func (re *RuleEngine) GetPlatformRules() ([]models.PlatformNotificationRule, err
 	if err != nil {
 		return nil, fmt.Errorf("failed to query platform rules: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var rules []models.PlatformNotificationRule
 	for rows.Next() {

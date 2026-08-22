@@ -231,7 +231,11 @@ func (s *ModbusStream) processBuffer() {
 	}
 
 	buf := s.state.buffer
-	for len(buf) >= modbusMBAPHeaderLen+1 { // header + at least the function-code byte
+	// One frame per call: the first complete MBAP frame emits the discovery and
+	// we stop. Written as an `if` rather than a `for` because every path out of
+	// this block exits on the first pass anyway — the loop form implied a second
+	// iteration that could never happen.
+	if len(buf) >= modbusMBAPHeaderLen+1 { // header + at least the function-code byte
 		// Protocol ID must be 0x0000 for Modbus/TCP. If it's not, this isn't
 		// a Modbus stream — drop the whole buffer to avoid burning CPU on
 		// non-Modbus traffic that happened to land on port 502.
@@ -249,17 +253,15 @@ func (s *ModbusStream) processBuffer() {
 			return
 		}
 		totalLen := modbusMBAPHeaderLen + length
-		if len(buf) < totalLen {
-			break // wait for more bytes
+		// Short of a full frame we leave buf untouched and wait for more bytes.
+		if len(buf) >= totalLen {
+			txID := binary.BigEndian.Uint16(buf[0:2])
+			unitID := buf[6]
+			funcCode := buf[7]
+
+			s.emitDiscovery(txID, unitID, funcCode)
+			buf = buf[totalLen:]
 		}
-
-		txID := binary.BigEndian.Uint16(buf[0:2])
-		unitID := buf[6]
-		funcCode := buf[7]
-
-		s.emitDiscovery(txID, unitID, funcCode)
-		buf = buf[totalLen:]
-		break // one emission per session is enough
 	}
 	s.state.buffer = buf
 }

@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log"
+	"math"
 	"runtime"
 	"strconv"
 	"strings"
@@ -257,7 +258,7 @@ func (pc *PacketCapture) Start() error {
 			"   - Ensure network interfaces are active\n\n" +
 			"4. Permission issues (Linux/macOS):\n" +
 			"   - Run with sudo: sudo ./crypto-sensor\n\n" +
-			"See WINDOWS_SETUP.md for detailed Windows setup instructions.")
+			"See WINDOWS_SETUP.md for detailed Windows setup instructions")
 	}
 
 	// Start bounded worker goroutines — these consume from the workers channel
@@ -395,6 +396,30 @@ func (pc *PacketCapture) GetInterfaceStats() []models.InterfaceStatEntry {
 	}
 }
 
+// defaultSnapLen mirrors the BufferSize default in internal/config (1 MB). It
+// is the fallback whenever the configured value cannot be expressed as a
+// positive int32 snaplen.
+const defaultSnapLen int32 = 1024 * 1024
+
+// snapLenFromConfig narrows the operator-configured capture buffer size to the
+// int32 snaplen pcap.OpenLive takes.
+//
+// Capture.BufferSize is a plain int (config `bufferSize` / env `BUFFER_SIZE`),
+// so on a 64-bit build a bare int32() conversion of a value above MaxInt32
+// wraps to a NEGATIVE snaplen. libpcap then either rejects the handle or
+// captures nothing, and the resulting error says nothing about the configured
+// number that caused it — the sensor just silently stops seeing traffic.
+//
+// Values already representable pass through unchanged, so every configuration
+// that works today keeps its exact behaviour; only the ones that cannot be
+// represented fall back to the default instead of wrapping.
+func snapLenFromConfig(bufferSize int) int32 {
+	if bufferSize <= 0 || bufferSize > math.MaxInt32 {
+		return defaultSnapLen
+	}
+	return int32(bufferSize)
+}
+
 // startInterfaceCapture starts packet capture on a specific interface
 func (pc *PacketCapture) startInterfaceCapture(iface string) error {
 	// Check if interface exists
@@ -417,7 +442,7 @@ func (pc *PacketCapture) startInterfaceCapture(iface string) error {
 				"3. Run as Administrator:\n"+
 				"   - Right-click Command Prompt → 'Run as administrator'\n"+
 				"   - Navigate to sensor directory and run again\n\n"+
-				"See WINDOWS_SETUP.md for detailed instructions.", err)
+				"See WINDOWS_SETUP.md for detailed instructions", err)
 		}
 		return fmt.Errorf("failed to find network interfaces: %v", err)
 	}
@@ -456,7 +481,7 @@ func (pc *PacketCapture) startInterfaceCapture(iface string) error {
 	iface = deviceName
 
 	// Open interface for capture
-	handle, err := pcap.OpenLive(iface, int32(pc.config.Capture.BufferSize), true, pcap.BlockForever)
+	handle, err := pcap.OpenLive(iface, snapLenFromConfig(pc.config.Capture.BufferSize), true, pcap.BlockForever)
 	if err != nil {
 		return fmt.Errorf("failed to open interface %s: %v", iface, err)
 	}

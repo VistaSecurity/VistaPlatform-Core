@@ -86,13 +86,13 @@ func (r *AWSCostRepository) StoreCostData(ctx context.Context, costs []aws.AWSCo
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.PrepareContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	syncedAt := time.Now()
 	for _, cost := range costs {
@@ -167,7 +167,7 @@ func (r *AWSCostRepository) GetCostsForPeriod(ctx context.Context, tenantID *uui
 	if err != nil {
 		return nil, fmt.Errorf("failed to query AWS cost data: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var costs []aws.AWSCostData
 	for rows.Next() {

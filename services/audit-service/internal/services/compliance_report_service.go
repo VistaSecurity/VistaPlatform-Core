@@ -297,10 +297,12 @@ func (s *ComplianceReportService) getEventsByCategory(ctx context.Context, tenan
 		argIndex++
 	}
 
+	// NB: argIndex is deliberately not advanced past the last clause — this is
+	// the final placeholder in the query. Add the increment back if another
+	// clause is appended below.
 	if len(actions) > 0 {
 		whereClause += fmt.Sprintf(" AND action = ANY($%d)", argIndex)
 		args = append(args, actions)
-		argIndex++
 	}
 
 	//nolint:gosec // intentional — placeholder concatenation only; values are parameterized via args slice

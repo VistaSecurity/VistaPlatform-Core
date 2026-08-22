@@ -920,7 +920,13 @@ func InviteTenantMember(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, authSe
 		}
 
 		var tenantName string
-		db.QueryRow(`SELECT name FROM tenants WHERE id = $1`, tenantID).Scan(&tenantName)
+		if err := db.QueryRow(`SELECT name FROM tenants WHERE id = $1`, tenantID).Scan(&tenantName); err != nil {
+			// Non-fatal: the invitation already exists and is still worth
+			// emailing. The tenant name is display-only in that email, so a
+			// lookup failure degrades the message rather than the operation.
+			logrus.WithError(err).WithField("tenant_id", tenantID).
+				Warn("Failed to load tenant name for invitation email; sending without it")
+		}
 		sendInvitationEmail(db, cfg, emailNorm, rawToken, tenantName)
 
 		if rawMW, exists := c.Get("audit_middleware"); exists {

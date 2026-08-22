@@ -108,11 +108,8 @@ func (s *HealthService) startHealthChecking() {
 	// Run initial health check
 	s.performHealthChecks()
 
-	for {
-		select {
-		case <-ticker.C:
-			s.performHealthChecks()
-		}
+	for range ticker.C {
+		s.performHealthChecks()
 	}
 }
 
@@ -237,7 +234,7 @@ func (s *HealthService) checkHTTPHealth(ctx context.Context, serviceName string,
 			Timestamp:    time.Now(),
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Determine status based on response
 	status := "healthy"
@@ -271,7 +268,7 @@ func (s *HealthService) checkPostgresHealth(ctx context.Context, serviceName str
 			Timestamp:    time.Now(),
 		}
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Test connection with ping
 	err = db.PingContext(ctx)
@@ -318,7 +315,7 @@ func (s *HealthService) checkRedisHealth(ctx context.Context, serviceName string
 	}
 
 	client := redis.NewClient(opt)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Test connection with PING
 	_, err = client.Ping(ctx).Result()
@@ -392,7 +389,7 @@ func (s *HealthService) checkNatsHealth(ctx context.Context, serviceName string,
 			Timestamp:    time.Now(),
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	status := "healthy"
 	if resp.StatusCode != 200 {
@@ -440,7 +437,7 @@ func (s *HealthService) checkInfluxDBHealth(ctx context.Context, serviceName str
 			Timestamp:    time.Now(),
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	status := "healthy"
 	if resp.StatusCode >= 500 {
@@ -503,7 +500,7 @@ func (s *HealthService) checkGrafanaHealth(ctx context.Context, serviceName stri
 			Timestamp:    time.Now(),
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	status := "healthy"
 	if resp.StatusCode >= 500 {
@@ -592,7 +589,7 @@ func (s *HealthService) checkSyntheticHealth(check config.SyntheticCheck) models
 			Timestamp:    time.Now(),
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	status := "healthy"
 	var errPtr *string
@@ -721,7 +718,7 @@ func (s *HealthService) GetTenantStatuses() ([]models.TenantStatus, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to query tenants: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var tenants []models.TenantStatus
 	for rows.Next() {

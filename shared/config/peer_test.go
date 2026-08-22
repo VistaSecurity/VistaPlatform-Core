@@ -22,7 +22,9 @@ func TestPeerServiceURL_EnvOverrideWins(t *testing.T) {
 }
 
 func TestPeerServiceURLAuto_DerivesFromUseMTLS(t *testing.T) {
-	os.Unsetenv("CBOM_SERVICE_URL")
+	if err := os.Unsetenv("CBOM_SERVICE_URL"); err != nil {
+		t.Fatalf("failed to unset CBOM_SERVICE_URL: %v", err)
+	}
 	t.Setenv("USE_MTLS", "true")
 	if got := PeerServiceURLAuto("CBOM_SERVICE_URL", "cbom-service"); got != "https://cbom-service:8443" {
 		t.Errorf("USE_MTLS=true: got %q", got)

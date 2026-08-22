@@ -102,7 +102,7 @@ func startTestTLSServer(t *testing.T) int {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 
 	go func() {
 		for {
@@ -115,7 +115,7 @@ func startTestTLSServer(t *testing.T) int {
 					_ = tc.Handshake()
 				}
 				time.Sleep(50 * time.Millisecond)
-				c.Close()
+				_ = c.Close()
 			}(conn)
 		}
 	}()

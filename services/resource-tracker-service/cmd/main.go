@@ -76,7 +76,7 @@ func main() {
 	if err != nil {
 		logger.WithError(err).Fatal("Failed to connect to database")
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Test database connection
 	if err := db.Ping(); err != nil {
@@ -273,7 +273,9 @@ func main() {
 		metricsSubscriber.Stop()
 	}
 	if natsClient != nil {
-		natsClient.GracefulShutdown(shutdownCtx)
+		if err := natsClient.GracefulShutdown(shutdownCtx); err != nil {
+			logger.WithError(err).Error("NATS client failed to shut down gracefully")
+		}
 	}
 
 	// Shutdown both servers

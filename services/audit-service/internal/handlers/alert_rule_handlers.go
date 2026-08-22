@@ -45,7 +45,8 @@ func (h *AlertRuleHandler) CreateAlertRule(c *gin.Context) {
 	userType := middleware.GetUserType(c)
 	userID := middleware.GetUserID(c)
 
-	if userType == middleware.UserTypeTenant {
+	switch userType {
+	case middleware.UserTypeTenant:
 		// Tenant users can only create tenant-scoped rules
 		tenantID := middleware.GetTenantID(c)
 		if tenantID == nil {
@@ -53,10 +54,10 @@ func (h *AlertRuleHandler) CreateAlertRule(c *gin.Context) {
 			return
 		}
 		rule.TenantID = tenantID
-	} else if userType == middleware.UserTypePlatform {
+	case middleware.UserTypePlatform:
 		// Platform users can create platform or tenant-scoped rules
 		// Use whatever was provided in the request
-	} else {
+	default:
 		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions"})
 		return
 	}

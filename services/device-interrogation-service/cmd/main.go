@@ -33,7 +33,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Bypass connection for the deliberately cross-tenant paths (agent
 	// bootstrap/auth resolution, agent outbound jobs/results/heartbeat,
@@ -52,7 +52,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
-	defer redis.Close()
+	defer func() { _ = redis.Close() }()
 
 	// Set Gin mode
 	if cfg.Environment == "production" {

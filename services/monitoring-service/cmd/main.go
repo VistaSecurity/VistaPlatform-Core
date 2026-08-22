@@ -38,7 +38,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Initialize the BYPASSRLS (crypto_bypass) connection used by the deliberately
 	// cross-tenant paths annotated `// RLS: cross-tenant — runs on the bypass role
@@ -148,15 +148,21 @@ func main() {
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
 
+		cleanup := func() {
+			if err := metricsAggregator.CleanupOldMetrics(); err != nil {
+				log.Printf("Old-metrics cleanup failed: %v", err)
+			}
+		}
+
 		// Run immediately, then daily
-		metricsAggregator.CleanupOldMetrics()
+		cleanup()
 
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				metricsAggregator.CleanupOldMetrics()
+				cleanup()
 			}
 		}
 	}()

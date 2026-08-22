@@ -164,7 +164,9 @@ func (jp *JobProcessor) Stop() {
 	log.Println("Stopping job processor...")
 	jp.cancel()
 	if jp.subscriber != nil {
-		jp.subscriber.Drain()
+		if err := jp.subscriber.Drain(); err != nil {
+			log.Printf("Job processor: draining NATS subscriber failed: %v", err)
+		}
 	}
 }
 
@@ -191,9 +193,13 @@ func (jp *JobProcessor) processDiscoveryJobByID(jobID string) error {
 	err = jp.rateLimiter.CheckRateLimit(job.TenantID)
 	if err != nil {
 		log.Printf("Rate limit exceeded for tenant %s: %v", job.TenantID, err)
-		jp.alertService.SendRateLimitExceededAlert(job.TenantID)
+		if alertErr := jp.alertService.SendRateLimitExceededAlert(job.TenantID); alertErr != nil {
+			log.Printf("Failed to send rate-limit alert for tenant %s: %v", job.TenantID, alertErr)
+		}
 		errorMsg := err.Error()
-		jp.discoveryService.UpdateJobStatus(jobID, "failed", &errorMsg)
+		if statusErr := jp.discoveryService.UpdateJobStatus(jobID, "failed", &errorMsg); statusErr != nil {
+			log.Printf("Failed to mark job %s failed after rate limit — job may be stuck in its previous state: %v", jobID, statusErr)
+		}
 		return nil // Permanent failure, don't redeliver
 	}
 
@@ -207,9 +213,13 @@ func (jp *JobProcessor) processDiscoveryJobByID(jobID string) error {
 	err = jp.processDiscoveryJob(job)
 	if err != nil {
 		log.Printf("Failed to process job %s: %v", jobID, err)
-		jp.alertService.SendJobFailedAlert(job.TenantID, jobID, err.Error())
+		if alertErr := jp.alertService.SendJobFailedAlert(job.TenantID, jobID, err.Error()); alertErr != nil {
+			log.Printf("Failed to send job-failed alert for job %s: %v", jobID, alertErr)
+		}
 		errorMsg := err.Error()
-		jp.discoveryService.UpdateJobStatus(jobID, "failed", &errorMsg)
+		if statusErr := jp.discoveryService.UpdateJobStatus(jobID, "failed", &errorMsg); statusErr != nil {
+			log.Printf("Failed to mark job %s failed — job may be stuck in 'running': %v", jobID, statusErr)
+		}
 		return nil // Job marked as failed, don't redeliver
 	}
 
@@ -219,7 +229,9 @@ func (jp *JobProcessor) processDiscoveryJobByID(jobID string) error {
 		return fmt.Errorf("failed to update job status: %w", err)
 	}
 
-	jp.alertService.SendJobCompletedAlert(job.TenantID, jobID)
+	if alertErr := jp.alertService.SendJobCompletedAlert(job.TenantID, jobID); alertErr != nil {
+		log.Printf("Failed to send job-completed alert for job %s: %v", jobID, alertErr)
+	}
 	log.Printf("Discovery job %s completed successfully", jobID)
 	return nil
 }
@@ -338,7 +350,9 @@ func (jp *JobProcessor) processDiscoveryJob(job *models.DiscoveryJob) error {
 	}
 
 	if findingCount > 0 {
-		jp.alertService.SendNewFindingsAlert(job.TenantID, job.ID, findingCount)
+		if alertErr := jp.alertService.SendNewFindingsAlert(job.TenantID, job.ID, findingCount); alertErr != nil {
+			log.Printf("Failed to send new-findings alert for job %s: %v", job.ID, alertErr)
+		}
 	}
 
 	return nil
@@ -530,45 +544,10 @@ func (jp *JobProcessor) processTarget(job *models.DiscoveryJob, target *models.D
 	return nil
 }
 
-func (jp *JobProcessor) resolveHostname(hostname string) *string {
-	// If it's already an IP address, return it
-	if net.ParseIP(hostname) != nil {
-		return &hostname
-	}
-
-	// Try to resolve the hostname to an IP address
-	ips, err := net.LookupIP(hostname)
-	if err != nil || len(ips) == 0 {
-		// If resolution fails, return nil (will be stored as NULL in database)
-		return nil
-	}
-
-	// Return the first IPv4 address found
-	for _, ip := range ips {
-		if ip.To4() != nil {
-			ipStr := ip.String()
-			return &ipStr
-		}
-	}
-
-	// If no IPv4 found, return the first IP (IPv6)
-	if len(ips) > 0 {
-		ipStr := ips[0].String()
-		return &ipStr
-	}
-
-	return nil
-}
-
-func (jp *JobProcessor) isInternalTarget(input string) bool {
-	// Simple heuristic: if it contains internal IP patterns, consider it internal
-	return len(input) > 0 && (input[0] == '1' || input[0] == '2')
-}
-
 func (jp *JobProcessor) storeFinding(finding *models.DiscoveryFinding) error {
 	// Serialize Data field to JSON for storage in details column
 	var detailsJSON *string
-	if finding.Data != nil && len(finding.Data) > 0 {
+	if len(finding.Data) > 0 {
 		jsonBytes, err := json.Marshal(finding.Data)
 		if err != nil {
 			log.Printf("Warning: Failed to marshal finding data to JSON: %v", err)

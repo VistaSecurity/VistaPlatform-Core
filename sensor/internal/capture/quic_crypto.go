@@ -181,10 +181,10 @@ func decryptQUICInitial(data []byte) (*QUICClientHelloInfo, error) {
 
 // quicSaltForVersion returns the HKDF salt for the given QUIC version.
 func quicSaltForVersion(version uint32) []byte {
-	switch {
-	case version == 0x00000001:
+	switch version {
+	case 0x00000001:
 		return quicV1Salt
-	case version == 0x6b3343cf:
+	case 0x6b3343cf:
 		return quicV2Salt
 	default:
 		return nil
@@ -278,14 +278,14 @@ func extractCRYPTOFrames(payload []byte) []byte {
 	for offset < len(payload) {
 		frameType := payload[offset]
 
-		switch {
-		case frameType == 0x00: // PADDING
+		switch frameType {
+		case 0x00: // PADDING
 			offset++
 			continue
-		case frameType == 0x01: // PING
+		case 0x01: // PING
 			offset++
 			continue
-		case frameType == 0x06: // CRYPTO
+		case 0x06: // CRYPTO
 			offset++
 			// Offset field (variable-length integer)
 			if offset >= len(payload) {
@@ -306,7 +306,7 @@ func extractCRYPTOFrames(payload []byte) []byte {
 			}
 			result = append(result, payload[offset:offset+int(dataLen)]...)
 			offset += int(dataLen)
-		case frameType == 0x02 || frameType == 0x03: // ACK (RFC 9000 §19.3) or ACK with ECN (§19.3.1)
+		case 0x02, 0x03: // ACK (RFC 9000 §19.3) or ACK with ECN (§19.3.1)
 			offset++
 			// Fixed prefix: largest_acknowledged, ack_delay, ack_range_count, first_ack_range
 			var ackRangeCount uint64

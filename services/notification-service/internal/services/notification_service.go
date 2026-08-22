@@ -382,16 +382,3 @@ func (s *NotificationService) saveNotificationHistory(ctx context.Context, histo
 
 	return nil
 }
-
-// removeDuplicateUUIDs removes duplicate UUIDs from a slice
-func removeDuplicateUUIDs(uuids []uuid.UUID) []uuid.UUID {
-	seen := make(map[uuid.UUID]bool)
-	result := []uuid.UUID{}
-	for _, id := range uuids {
-		if !seen[id] {
-			seen[id] = true
-			result = append(result, id)
-		}
-	}
-	return result
-}

@@ -344,6 +344,11 @@ const erasureProfileUpdate = `
 					updated_at = now()
 				WHERE id = $1 AND tenant_id = $2`
 
+const erasureInvitationDelete = `
+				DELETE FROM invitations
+				WHERE tenant_id = $1
+				  AND (accepted_user_id = $2 OR lower(email) = lower($3))`
+
 // erasureVerify re-reads the rows that must no longer identify anyone. A
 // non-zero result rolls the whole erasure back: reporting success for an
 // erasure that did nothing would have an operator tell a data subject their
@@ -354,6 +359,8 @@ const erasureVerify = `
 					  WHERE id = $1 AND tenant_id = $2
 					    AND (email <> $3 OR first_name IS NOT NULL OR last_name IS NOT NULL))
 				  + (SELECT count(*) FROM api_tokens WHERE user_id = $1 AND tenant_id = $2)
+				  + (SELECT count(*) FROM invitations
+					  WHERE tenant_id = $2 AND (accepted_user_id = $1 OR lower(email) = lower($4)))
 				  + (SELECT count(*) FROM audit.activity_logs
 					  WHERE user_id = $1 AND tenant_id = $2 AND user_email IS DISTINCT FROM $3)`
 
@@ -455,10 +462,10 @@ func EraseUser(db *sql.DB) gin.HandlerFunc {
 		}
 
 		err = shareddatabase.WithTenantTx(ctx, db, tenantID, func(tx *sql.Tx) error {
-			var exists bool
+			var originalEmail string
 			if err := tx.QueryRowContext(ctx,
-				`SELECT true FROM users WHERE id = $1 AND tenant_id = $2`, userID, tenantID).
-				Scan(&exists); err != nil {
+				`SELECT email FROM users WHERE id = $1 AND tenant_id = $2`, userID, tenantID).
+				Scan(&originalEmail); err != nil {
 				return err
 			}
 
@@ -481,8 +488,7 @@ func EraseUser(db *sql.DB) gin.HandlerFunc {
 
 			// 3. Invitations → delete. The row is an email address and nothing else
 			//    of value once the account exists.
-			if res, err := tx.ExecContext(ctx,
-				`DELETE FROM invitations WHERE tenant_id = $1 AND accepted_user_id = $2`, tenantID, userID); err != nil {
+			if res, err := tx.ExecContext(ctx, erasureInvitationDelete, tenantID, userID, originalEmail); err != nil {
 				return fmt.Errorf("delete invitations: %w", err)
 			} else {
 				result.InvitationsPurged, _ = res.RowsAffected()
@@ -507,7 +513,7 @@ func EraseUser(db *sql.DB) gin.HandlerFunc {
 			//    survives.
 			var leaked int
 			if err := tx.QueryRowContext(ctx, erasureVerify,
-				userID, tenantID, result.TombstoneEmail).Scan(&leaked); err != nil {
+				userID, tenantID, result.TombstoneEmail, originalEmail).Scan(&leaked); err != nil {
 				return fmt.Errorf("verify erasure: %w", err)
 			}
 			if leaked > 0 {

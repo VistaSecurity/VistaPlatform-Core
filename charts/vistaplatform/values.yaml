@@ -55,8 +55,8 @@ verification:
 #   database-url            — required when datastores.postgres.enabled: false (external RDS)
 #   redis-url               — required when datastores.redis.enabled: false (external ElastiCache)
 #
-# See k8s/eks/11-external-secrets.yaml for the ExternalSecret definition and
-# k8s/eks/secrets-manager-bootstrap.sh for the one-time Secrets Manager setup.
+# Populate this Secret however your cluster does secrets — sealed-secrets,
+# External Secrets Operator against your own vault, or kubectl create secret.
 platform:
   # -- Existing Secret in the release namespace holding platform secrets. If set,
   # values below are ignored. Required keys: jwt-secret, internal-auth-secret,
@@ -342,7 +342,7 @@ appConfig:
 #     each opts the service into mounting that key from the platform/generated
 #     Secrets as an env var. database-url is mounted on every backend by default.
 #
-# Resources are taken from k8s/rke2/04-deployments-backend.yaml; tune as needed.
+# Resources below are the chart's own defaults; tune as needed.
 backends:
   auth-service:
     needs: {postgres: true, redis: true, nats: false}

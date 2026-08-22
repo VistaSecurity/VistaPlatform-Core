@@ -147,7 +147,7 @@ func (c *InventoryClient) UpsertExternalConnection(tenantID uuid.UUID, req Exter
 	if err != nil {
 		return fmt.Errorf("send external connection upsert: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
 		return &HTTPStatusError{
@@ -218,7 +218,7 @@ func (c *InventoryClient) ClassifyAsset(tenantID uuid.UUID, ipAddress string, ho
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
@@ -269,7 +269,7 @@ func (c *InventoryClient) ImportFindings(tenantID, jobID uuid.UUID, findings []c
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

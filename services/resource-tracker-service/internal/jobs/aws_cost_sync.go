@@ -146,39 +146,6 @@ func (j *AWSCostSyncJob) syncPlatformCosts(ctx context.Context, startDate, endDa
 	return nil
 }
 
-// syncTenantCosts syncs costs for a specific tenant
-func (j *AWSCostSyncJob) syncTenantCosts(ctx context.Context, tenantID uuid.UUID, startDate, endDate time.Time) error {
-	j.log.WithFields(logrus.Fields{
-		"tenant_id":    tenantID,
-		"period_start": startDate.Format("2006-01-02"),
-		"period_end":   endDate.Format("2006-01-02"),
-	}).Info("Syncing tenant AWS costs")
-
-	// Get costs from AWS Cost Explorer
-	costs, err := j.costService.GetCostsByTenant(ctx, tenantID, startDate, endDate)
-	if err != nil {
-		return fmt.Errorf("failed to retrieve tenant costs from AWS: %w", err)
-	}
-
-	if len(costs) == 0 {
-		j.log.WithField("tenant_id", tenantID).Warn("No costs retrieved for tenant")
-		return nil
-	}
-
-	// Store costs in database
-	err = j.costRepo.StoreCostData(ctx, costs)
-	if err != nil {
-		return fmt.Errorf("failed to store tenant cost data: %w", err)
-	}
-
-	j.log.WithFields(logrus.Fields{
-		"tenant_id":      tenantID,
-		"records_synced": len(costs),
-	}).Info("Successfully synced tenant AWS costs")
-
-	return nil
-}
-
 // parseInterval parses a duration string (e.g., "1h", "30m", "24h")
 func parseInterval(s string) time.Duration {
 	d, err := time.ParseDuration(s)

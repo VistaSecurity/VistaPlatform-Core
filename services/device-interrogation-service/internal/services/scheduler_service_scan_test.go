@@ -39,7 +39,7 @@ func TestCreateSchedule_ToleratesNullColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	id, tenantID, targetID := uuid.New(), uuid.New(), uuid.New()
 	now := time.Now()
@@ -74,7 +74,7 @@ func TestListSchedules_ToleratesNullColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	tenantID := uuid.New()
 	now := time.Now()

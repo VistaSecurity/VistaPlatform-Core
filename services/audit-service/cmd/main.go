@@ -36,7 +36,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Test database connection
 	if err := db.Ping(); err != nil {
@@ -88,9 +88,13 @@ func main() {
 	// NATS client will be wired to alertService after initialization below
 
 	// Load alert rules and SIEM integrations
-	alertService.LoadRules(context.Background())
+	if err := alertService.LoadRules(context.Background()); err != nil {
+		log.Printf("WARNING: Failed to load alert rules: %v", err)
+	}
 	if siemExport != nil {
-		siemExport.LoadIntegrations(context.Background())
+		if err := siemExport.LoadIntegrations(context.Background()); err != nil {
+			log.Printf("WARNING: Failed to load SIEM integrations: %v", err)
+		}
 	}
 
 	// Start scheduled report scheduler
@@ -298,7 +302,9 @@ func main() {
 		auditSubscriber.Stop()
 	}
 	if natsClient != nil {
-		natsClient.GracefulShutdown(ctx)
+		if err := natsClient.GracefulShutdown(ctx); err != nil {
+			log.Printf("NATS client forced to shutdown: %v", err)
+		}
 	}
 
 	// Shutdown both servers
