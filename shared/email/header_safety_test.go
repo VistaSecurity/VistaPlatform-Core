@@ -1,6 +1,8 @@
 package email
 
 import (
+	"bytes"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -62,7 +64,7 @@ func TestBuildMessage_SubjectCannotInjectHeader(t *testing.T) {
 
 	for _, tc := range injections {
 		t.Run(tc.name, func(t *testing.T) {
-			msg := es.buildMessage(Email{
+			msg := mustBuild(t, es, Email{
 				To:      []string{"victim@example.com"},
 				Subject: tc.subject,
 				Body:    "hello",
@@ -93,7 +95,7 @@ func TestBuildMessage_SubjectCannotInjectHeader(t *testing.T) {
 // A recipient address reaches the To header as well as the SMTP envelope.
 func TestBuildMessage_RecipientCannotInjectHeader(t *testing.T) {
 	es := testService()
-	msg := es.buildMessage(Email{
+	msg := mustBuild(t, es, Email{
 		To:      []string{"victim@example.com\r\nBcc: attacker@evil.example"},
 		Subject: "Password Reset Request",
 		Body:    "hello",
@@ -116,7 +118,7 @@ func TestBuildMessage_FromNameCannotInjectHeader(t *testing.T) {
 		FromEmail: "noreply@example.com",
 		FromName:  "Acme\r\nBcc: attacker@evil.example",
 	})
-	headers := headerBlock(es.buildMessage(Email{
+	headers := headerBlock(mustBuild(t, es, Email{
 		To:      []string{"victim@example.com"},
 		Subject: "hi",
 		Body:    "hello",
@@ -191,5 +193,89 @@ func TestValidateAddresses(t *testing.T) {
 	}
 	if err := validateAddresses(good, []string{good, "a@b.com\x00"}); err == nil {
 		t.Error("expected an error for a NUL-bearing recipient")
+	}
+}
+
+// mustBuild builds a message and fails the test if the CSPRNG could not supply
+// a MIME boundary. buildMessage's error path exists so that failure can never
+// silently fall back to a fixed delimiter; it is not expected in tests.
+func mustBuild(t *testing.T, es *EmailService, e Email) []byte {
+	t.Helper()
+	msg, err := es.buildMessage(e)
+	if err != nil {
+		t.Fatalf("buildMessage: %v", err)
+	}
+	return msg
+}
+
+// The MIME boundary must not be predictable.
+//
+// Body and HTML carry attacker-influenced names interpolated without escaping
+// (inviter name, tenant organisation name, white-label platform name). With the
+// old fixed "boundary123456789" — published, since this repo is public — any of
+// them could close the current part and open one of the attacker's choosing
+// inside a mail the platform sends on its own authority.
+func TestBuildMessage_BoundaryIsNotPredictable(t *testing.T) {
+	es := testService()
+
+	build := func() string {
+		msg := mustBuild(t, es, Email{
+			To:      []string{"victim@example.com"},
+			Subject: "hi",
+			Body:    "text part",
+			HTML:    "<p>html part</p>",
+		})
+		m := regexp.MustCompile(`boundary=([0-9a-zA-Z]+)`).FindSubmatch(msg)
+		if m == nil {
+			t.Fatalf("no boundary in message:\n%s", msg)
+		}
+		return string(m[1])
+	}
+
+	first := build()
+
+	// The specific literal that shipped, and any short/guessable delimiter.
+	if first == "boundary123456789" {
+		t.Fatal("boundary is still the published literal")
+	}
+	if len(first) < 32 {
+		t.Fatalf("boundary %q is only %d chars — too short to be unguessable", first, len(first))
+	}
+
+	// Fresh per message, so capturing one does not compromise the next.
+	seen := map[string]bool{first: true}
+	for i := 0; i < 20; i++ {
+		b := build()
+		if seen[b] {
+			t.Fatalf("boundary %q repeated across messages", b)
+		}
+		seen[b] = true
+	}
+}
+
+// The end-to-end property: a name carrying a forged part delimiter must not
+// produce an extra MIME part.
+func TestBuildMessage_BodyCannotForgeMimePart(t *testing.T) {
+	es := testService()
+	msg := mustBuild(t, es, Email{
+		To:      []string{"victim@example.com"},
+		Subject: "You're invited",
+		Body: "Acme\r\n--boundary123456789\r\n" +
+			"Content-Type: text/html; charset=UTF-8\r\n\r\n" +
+			"<p>Your account is suspended, click here</p>\r\n",
+		HTML: "<p>legitimate</p>",
+	})
+
+	boundary := regexp.MustCompile(`boundary=([0-9a-zA-Z]+)`).FindSubmatch(msg)
+	if boundary == nil {
+		t.Fatalf("no boundary in message:\n%s", msg)
+	}
+	// A multipart/alternative with two parts has exactly two opening delimiters
+	// plus one closing delimiter. Any forged part shows up as a third opener.
+	openers := bytes.Count(msg, append([]byte("--"), boundary[1]...))
+	const wantDelims = 3 // text part, html part, closing "--<b>--"
+	if openers != wantDelims {
+		t.Fatalf("expected %d real delimiters, found %d — body forged a part:\n%s",
+			wantDelims, openers, msg)
 	}
 }

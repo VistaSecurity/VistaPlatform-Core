@@ -83,7 +83,10 @@ func (es *EmailService) SendEmail(email Email) error {
 		return err
 	}
 
-	msg := es.buildMessage(email)
+	msg, err := es.buildMessage(email)
+	if err != nil {
+		return err
+	}
 	addr := fmt.Sprintf("%s:%s", es.smtpHost, es.smtpPort)
 
 	c, err := smtp.Dial(addr)
@@ -147,8 +150,11 @@ func (es *EmailService) heloName() string {
 	return "localhost"
 }
 
-// buildMessage builds the email message in RFC 2822 format
-func (es *EmailService) buildMessage(email Email) []byte {
+// buildMessage builds the email message in RFC 2822 format.
+//
+// Returns an error only when the CSPRNG cannot supply a MIME boundary. That
+// path deliberately has no fallback — see randomBoundary in header_safety.go.
+func (es *EmailService) buildMessage(email Email) ([]byte, error) {
 	var msg bytes.Buffer
 
 	// Headers. Every interpolated value is sanitized: Subject and the From
@@ -172,8 +178,13 @@ func (es *EmailService) buildMessage(email Email) []byte {
 	msg.WriteString("MIME-Version: 1.0\r\n")
 
 	if email.HTML != "" {
-		// Multipart message with HTML and text
-		boundary := "boundary123456789"
+		// Multipart message with HTML and text. The boundary is random per
+		// message: Body and HTML carry unescaped attacker-influenced names, so a
+		// guessable delimiter lets them forge a MIME part. See randomBoundary.
+		boundary, err := randomBoundary()
+		if err != nil {
+			return nil, err
+		}
 		fmt.Fprintf(&msg, "Content-Type: multipart/alternative; boundary=%s\r\n\r\n", boundary)
 
 		// Text part
@@ -193,7 +204,7 @@ func (es *EmailService) buildMessage(email Email) []byte {
 		msg.WriteString(email.Body)
 	}
 
-	return msg.Bytes()
+	return msg.Bytes(), nil
 }
 
 // SendPasswordResetEmail sends a password reset email

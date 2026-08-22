@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-08-22
+
+One security fix, found by taking a CodeQL alert seriously rather than
+closing it as already-handled. The header sanitization in 0.12.0 was
+correct, but it left a second injection route open in the same function.
+
+### Security
+
+- **The MIME boundary in multipart emails was a fixed, published literal.**
+  `buildMessage` assembles `multipart/alternative` by hand and used the
+  constant `boundary123456789` — which, since this repository went public,
+  anyone can read. The same attacker-influenced names that reach the headers
+  reach the message body with no escaping: the inviter's name, the tenant
+  organisation name, and the white-label platform name are interpolated into
+  both the text and HTML parts. A value carrying
+  `Acme\r\n--boundary123456789\r\nContent-Type: text/html` closes the current
+  part and opens one of the attacker's choosing — inside a mail the platform
+  sends on its own authority, which is exactly the trust the attack spends.
+
+  The boundary is now 30 bytes of `crypto/rand`, hex-encoded, fresh per
+  message, which is what `mime/multipart` itself does. Sanitizing the body
+  was rejected as the wrong lever: a mail body legitimately contains any
+  text, including a line beginning with two hyphens. If the CSPRNG fails the
+  send now returns an error rather than falling back to a fixed delimiter —
+  a silent fallback would restore the exact bug being removed.
+
+  **No operator action required**, and nothing already sent can be
+  retrospectively affected. Upgrading is sufficient.
+
+### Known issues
+
+- Those same names are interpolated into the **HTML part unescaped**, so
+  they can still inject markup — a link or formatting, not a forged MIME
+  part. The fix is escaping at the four sender call sites, which is a
+  different change from this one and is deliberately not folded in here.
+  Tracked as follow-up.
+- CodeQL alert `go/path-injection` on `platform_branding.go` is a **false
+  positive** and is dismissed rather than patched: `assetType` is checked
+  against a three-value allowlist with an early return before it reaches the
+  filename, the UUID is server-generated, the extension is derived from the
+  sniffed content type, and the upload directory is a constant. CodeQL does
+  not model equality guards as sanitizers.
+
 ## [0.12.0] - 2026-08-21
 
 Housekeeping release with real teeth. Three things an operator should read

@@ -1,6 +1,8 @@
 package email
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
 )
@@ -84,4 +86,37 @@ func validateAddresses(from string, to []string) error {
 		}
 	}
 	return nil
+}
+
+// MIME boundary safety.
+//
+// buildMessage assembles the multipart/alternative body by hand rather than
+// through mime/multipart, so it also has to supply the boundary. That boundary
+// used to be the literal "boundary123456789" — fixed, and, since this repository
+// went public, published.
+//
+// The body is not a safe place for a known boundary. The same attacker-influenced
+// names that reach the headers also reach Body and HTML unescaped: the inviter's
+// name, the tenant organisation name and the white-label platform name are all
+// interpolated straight into both parts. A value containing
+//
+//	--boundary123456789
+//	Content-Type: text/html; charset=UTF-8
+//
+// closes the current part and opens one of the attacker's choosing inside a mail
+// the platform itself sends and signs for — which is the part that matters, since
+// the recipient has every reason to trust it.
+//
+// Sanitizing the body is the wrong lever (a mail body legitimately contains any
+// text, including a line that starts with two hyphens). Making the delimiter
+// unguessable is the right one, and it is what mime/multipart does: 30 bytes of
+// crypto/rand, hex-encoded, fresh per message.
+func randomBoundary() (string, error) {
+	var buf [30]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		// Never fall back to a fixed boundary: that is precisely the bug this
+		// function exists to remove, and it would fail open silently.
+		return "", fmt.Errorf("generating MIME boundary: %w", err)
+	}
+	return hex.EncodeToString(buf[:]), nil
 }
