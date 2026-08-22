@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-08-22
+
+Completes the email-injection work. 0.12.0 sanitized the headers and 0.12.1
+made the MIME boundary unguessable; this closes the last route, which was
+the message body itself.
+
+### Security
+
+- **HTML email bodies were assembled with `fmt.Sprintf`, which escapes
+  nothing.** Every attacker-influenced value the platform puts in a mail went
+  in raw: the white-label brand, the tenant organisation name, the inviter's
+  name, a user-authored alert threshold name, and the arbitrary keys *and*
+  values of an alert's details map. A name containing markup became markup in
+  a mail the platform sends on its own authority.
+
+  All seven HTML bodies now render through `html/template`, which escapes
+  according to context. That choice matters more than it looks: two of these
+  mails put a link inside `href="..."`, and entity-escaping is no defence
+  there at all — `javascript:` contains no HTML metacharacters, so a
+  hand-rolled escaper applied at each call site would have shipped a working
+  XSS while appearing correct. `html/template` knows `href` is a URL context
+  and filters the scheme, knows `<title>` and `<strong>` are text contexts,
+  and does not need to be told which is which.
+
+  The plain-text parts are deliberately left alone. Escaping there would be
+  actively wrong — a `text/plain` part is not markup, and `&amp;` in a
+  password-reset mail is a defect, not a defence.
+
+  **No operator action required.** Rendered output is byte-for-byte identical
+  for ordinary input, verified by diffing the new template's output against
+  the old `Sprintf` result; only hostile input renders differently.
+
+### Fixed
+
+- **Alert emails rendered their details in a random order**, and the text and
+  HTML parts of the same message could disagree, because the details map was
+  iterated directly. Now sorted by key.
+
 ## [0.12.1] - 2026-08-22
 
 One security fix, found by taking a CodeQL alert seriously rather than

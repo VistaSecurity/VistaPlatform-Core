@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/smtp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -229,41 +230,10 @@ The %s Team
 `, es.brand(), resetLink, es.brand())
 
 	// HTML version
-	htmlBody := fmt.Sprintf(`
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Password Reset Request</title>
-    <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-        .header { background-color: #f8f9fa; padding: 20px; text-align: center; border-radius: 5px; }
-        .content { padding: 20px; }
-        .button { display: inline-block; background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 20px 0; }
-        .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; font-size: 14px; color: #666; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>Password Reset Request</h1>
-        </div>
-        <div class="content">
-            <p>Hello,</p>
-            <p>You have requested to reset your password for your %s account.</p>
-            <p>To reset your password, please click the button below:</p>
-            <p><a href="%s" class="button">Reset Password</a></p>
-            <p>This link will expire in 1 hour for security reasons.</p>
-            <p>If you did not request this password reset, please ignore this email.</p>
-        </div>
-        <div class="footer">
-            <p>Best regards,<br>The %s Team</p>
-        </div>
-    </div>
-</body>
-</html>
-`, es.brand(), resetLink, es.brand())
+	htmlBody, err := renderHTML(passwordResetHTML, struct{ Brand, Link string }{es.brand(), resetLink})
+	if err != nil {
+		return err
+	}
 
 	email := Email{
 		To:      []string{to},
@@ -297,41 +267,10 @@ The %s Team
 `, es.brand(), verificationLink, es.brand())
 
 	// HTML version
-	htmlBody := fmt.Sprintf(`
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Verify Your Email Address</title>
-    <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-        .header { background-color: #f8f9fa; padding: 20px; text-align: center; border-radius: 5px; }
-        .content { padding: 20px; }
-        .button { display: inline-block; background-color: #28a745; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 20px 0; }
-        .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; font-size: 14px; color: #666; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>Welcome to %s</h1>
-        </div>
-        <div class="content">
-            <p>Hello,</p>
-            <p>Thank you for signing up for %s!</p>
-            <p>To complete your registration, please verify your email address by clicking the button below:</p>
-            <p><a href="%s" class="button">Verify Email Address</a></p>
-            <p>This link will expire in 24 hours.</p>
-            <p>If you did not create an account, please ignore this email.</p>
-        </div>
-        <div class="footer">
-            <p>Best regards,<br>The %s Team</p>
-        </div>
-    </div>
-</body>
-</html>
-`, es.brand(), es.brand(), verificationLink, es.brand())
+	htmlBody, err := renderHTML(emailVerificationHTML, struct{ Brand, Link string }{es.brand(), verificationLink})
+	if err != nil {
+		return err
+	}
 
 	email := Email{
 		To:      []string{to},
@@ -347,10 +286,21 @@ The %s Team
 func (es *EmailService) SendAlertEmail(to, alertType, message string, details map[string]interface{}) error {
 	subject := fmt.Sprintf("%s Alert: %s", es.brand(), alertType)
 
-	// Build details text
+	// Build details once, in a stable order. Map iteration order is random in
+	// Go, so without the sort the same alert renders its details differently
+	// each send -- which also made the text and HTML parts of one message
+	// disagree.
+	keys := make([]string, 0, len(details))
+	for key := range details {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
 	var detailsText strings.Builder
-	for key, value := range details {
-		fmt.Fprintf(&detailsText, "%s: %v\n", key, value)
+	detailRows := make([]detailRow, 0, len(keys))
+	for _, key := range keys {
+		fmt.Fprintf(&detailsText, "%s: %v\n", key, details[key])
+		detailRows = append(detailRows, detailRow{Key: key, Value: fmt.Sprint(details[key])})
 	}
 
 	// Text version
@@ -371,43 +321,13 @@ The %s Team
 `, es.brand(), alertType, message, detailsText.String(), es.brand())
 
 	// HTML version
-	htmlBody := fmt.Sprintf(`
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>%s Alert</title>
-    <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-        .header { background-color: #dc3545; color: white; padding: 20px; text-align: center; border-radius: 5px; }
-        .content { padding: 20px; }
-        .alert-type { font-size: 18px; font-weight: bold; color: #dc3545; }
-        .details { background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 15px 0; }
-        .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; font-size: 14px; color: #666; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>%s Alert</h1>
-        </div>
-        <div class="content">
-            <p class="alert-type">%s</p>
-            <p><strong>Message:</strong> %s</p>
-            <div class="details">
-                <h3>Details:</h3>
-                <pre>%s</pre>
-            </div>
-            <p>Please review this alert in your dashboard for more information.</p>
-        </div>
-        <div class="footer">
-            <p>Best regards,<br>The %s Team</p>
-        </div>
-    </div>
-</body>
-</html>
-`, es.brand(), es.brand(), alertType, message, detailsText.String(), es.brand())
+	htmlBody, err := renderHTML(alertHTML, struct {
+		Brand, AlertType, Message string
+		Details                   []detailRow
+	}{es.brand(), alertType, message, detailRows})
+	if err != nil {
+		return err
+	}
 
 	email := Email{
 		To:      []string{to},
@@ -428,14 +348,16 @@ The %s Team
 func (es *EmailService) SendPlatformInviteEmail(to, platformName, inviterName, resetLink string, ssoProviders []string) error {
 	subject := fmt.Sprintf("You've been invited to %s", platformName)
 
+	// ssoNames feeds both parts. The HTML half used to be assembled here as a
+	// pre-escaped fragment and pasted in raw; the template owns that block now,
+	// so the provider names are escaped in their own text context.
 	ssoText := ""
-	ssoHTML := ""
+	ssoNames := ""
 	if len(ssoProviders) > 0 {
-		names := strings.Join(ssoProviders, " or ")
+		ssoNames = strings.Join(ssoProviders, " or ")
 		ssoText = fmt.Sprintf(`
 Prefer single sign-on? You can skip setting a password: open the sign-in page and choose "Continue with %s" using this email address.
-`, names)
-		ssoHTML = fmt.Sprintf(`<p>Prefer single sign-on? You can skip setting a password: open the sign-in page and choose <strong>&ldquo;Continue with %s&rdquo;</strong> using this email address.</p>`, names)
+`, ssoNames)
 	}
 
 	textBody := fmt.Sprintf(`Hello,
@@ -453,37 +375,10 @@ Best regards,
 The %s Team
 `, inviterName, platformName, resetLink, ssoText, platformName)
 
-	htmlBody := fmt.Sprintf(`<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>You've been invited to %s</title>
-    <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-        .header { background-color: #4f46e5; color: white; padding: 24px; text-align: center; border-radius: 8px 8px 0 0; }
-        .header h1 { margin: 0; font-size: 22px; }
-        .content { background: #fff; padding: 28px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px; }
-        .button { display: inline-block; background-color: #4f46e5; color: white !important; padding: 13px 28px; text-decoration: none; border-radius: 6px; margin: 20px 0; font-weight: 600; }
-        .footer { margin-top: 24px; padding-top: 16px; border-top: 1px solid #e5e7eb; font-size: 13px; color: #6b7280; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header"><h1>%s</h1></div>
-        <div class="content">
-            <p>Hello,</p>
-            <p><strong>%s</strong> has invited you to join <strong>%s</strong> as a platform administrator.</p>
-            <p>Click the button below to accept your invitation and set your password:</p>
-            <p><a href="%s" class="button">Accept Invitation &amp; Set Password</a></p>
-            <p style="font-size:13px;color:#6b7280;">This link expires in 24 hours. If the button above doesn't work, copy and paste this URL into your browser:<br><a href="%s">%s</a></p>
-            %s
-            <p>If you were not expecting this invitation, you can safely ignore this email.</p>
-        </div>
-        <div class="footer"><p>Best regards,<br>The %s Team</p></div>
-    </div>
-</body>
-</html>`, platformName, platformName, inviterName, platformName, resetLink, resetLink, resetLink, ssoHTML, platformName)
+	htmlBody, err := renderHTML(platformInviteHTML, struct{ Platform, Inviter, Link, SSONames string }{platformName, inviterName, resetLink, ssoNames})
+	if err != nil {
+		return err
+	}
 
 	return es.SendEmail(Email{
 		To:      []string{to},
@@ -513,36 +408,10 @@ Best regards,
 The %s Team
 `, platformName, resetLink, platformName)
 
-	htmlBody := fmt.Sprintf(`<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Reset your %s password</title>
-    <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-        .header { background-color: #4f46e5; color: white; padding: 24px; text-align: center; border-radius: 8px 8px 0 0; }
-        .header h1 { margin: 0; font-size: 22px; }
-        .content { background: #fff; padding: 28px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px; }
-        .button { display: inline-block; background-color: #4f46e5; color: white !important; padding: 13px 28px; text-decoration: none; border-radius: 6px; margin: 20px 0; font-weight: 600; }
-        .footer { margin-top: 24px; padding-top: 16px; border-top: 1px solid #e5e7eb; font-size: 13px; color: #6b7280; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header"><h1>%s</h1></div>
-        <div class="content">
-            <p>Hello,</p>
-            <p>A password reset was requested for your <strong>%s</strong> administrator account.</p>
-            <p>Click the button below to reset your password:</p>
-            <p><a href="%s" class="button">Reset Password</a></p>
-            <p style="font-size:13px;color:#6b7280;">This link expires in 1 hour. If the button above doesn't work, copy and paste this URL into your browser:<br><a href="%s">%s</a></p>
-            <p>If you did not request a password reset, you can safely ignore this email.</p>
-        </div>
-        <div class="footer"><p>Best regards,<br>The %s Team</p></div>
-    </div>
-</body>
-</html>`, platformName, platformName, platformName, resetLink, resetLink, resetLink, platformName)
+	htmlBody, err := renderHTML(platformPasswordResetHTML, struct{ Platform, Link string }{platformName, resetLink})
+	if err != nil {
+		return err
+	}
 
 	return es.SendEmail(Email{
 		To:      []string{to},
@@ -578,36 +447,10 @@ Best regards,
 The %s Team
 `, orgName, es.brand(), acceptLink, es.brand())
 
-	htmlBody := fmt.Sprintf(`<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>You're invited to %s</title>
-    <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-        .header { background-color: #4f46e5; color: white; padding: 24px; text-align: center; border-radius: 8px 8px 0 0; }
-        .header h1 { margin: 0; font-size: 22px; }
-        .content { background: #fff; padding: 28px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px; }
-        .button { display: inline-block; background-color: #4f46e5; color: white !important; padding: 13px 28px; text-decoration: none; border-radius: 6px; margin: 20px 0; font-weight: 600; }
-        .footer { margin-top: 24px; padding-top: 16px; border-top: 1px solid #e5e7eb; font-size: 13px; color: #6b7280; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header"><h1>%s</h1></div>
-        <div class="content">
-            <p>Hello,</p>
-            <p>You've been invited to join <strong>%s</strong> on <strong>%s</strong>.</p>
-            <p>Click the button below to accept your invitation and choose how you'd like to sign in:</p>
-            <p><a href="%s" class="button">Accept Invitation</a></p>
-            <p style="font-size:13px;color:#6b7280;">This link expires in 7 days. If the button above doesn't work, copy and paste this URL into your browser:<br><a href="%s">%s</a></p>
-            <p>If you were not expecting this invitation, you can safely ignore this email.</p>
-        </div>
-        <div class="footer"><p>Best regards,<br>The %s Team</p></div>
-    </div>
-</body>
-</html>`, es.brand(), es.brand(), orgName, es.brand(), acceptLink, acceptLink, acceptLink, es.brand())
+	htmlBody, err := renderHTML(tenantInviteHTML, struct{ Brand, Org, Link string }{es.brand(), orgName, acceptLink})
+	if err != nil {
+		return err
+	}
 
 	return es.SendEmail(Email{
 		To:      []string{to},
@@ -636,44 +479,13 @@ The %s Team
 `, jobID, findingsCount, es.brand())
 
 	// HTML version
-	htmlBody := fmt.Sprintf(`
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Discovery Job Completed</title>
-    <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-        .header { background-color: #28a745; color: white; padding: 20px; text-align: center; border-radius: 5px; }
-        .content { padding: 20px; }
-        .stats { background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 15px 0; text-align: center; }
-        .button { display: inline-block; background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 20px 0; }
-        .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; font-size: 14px; color: #666; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>Discovery Job Completed</h1>
-        </div>
-        <div class="content">
-            <p>Hello,</p>
-            <p>Your discovery job has completed successfully!</p>
-            <div class="stats">
-                <h2>Job ID: %s</h2>
-                <h3>Findings: %d potential crypto implementations</h3>
-            </div>
-            <p>You can view the detailed results and approve findings in your dashboard.</p>
-            <p><a href="#" class="button">View Results</a></p>
-        </div>
-        <div class="footer">
-            <p>Best regards,<br>The %s Team</p>
-        </div>
-    </div>
-</body>
-</html>
-`, jobID, findingsCount, es.brand())
+	htmlBody, err := renderHTML(discoveryJobCompleteHTML, struct {
+		JobID, Brand string
+		Findings     int
+	}{jobID, es.brand(), findingsCount})
+	if err != nil {
+		return err
+	}
 
 	email := Email{
 		To:      []string{to},
