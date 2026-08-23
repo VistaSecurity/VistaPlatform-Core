@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-08-22T05:19:48Z",
-  "generated_date": "2026-08-22",
+  "generated_at": "2026-08-23T05:22:06Z",
+  "generated_date": "2026-08-23",
   "registry": "ghcr.io/vistasecurity",
   "tag": "latest",
-  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/32553973962",
+  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/32620117538",
   "scanner": "trivy",
   "scope": {
     "severities": [
@@ -14,14 +14,12 @@
   },
   "totals": {
     "images_expected": 18,
-    "images_scanned": 17,
-    "images_not_scanned": 1,
+    "images_scanned": 18,
+    "images_not_scanned": 0,
     "critical": 0,
     "high": 0
   },
-  "not_scanned": [
-    "cluster-sensor-service"
-  ],
+  "not_scanned": [],
   "images": [
     {
       "image": "admin-service",
@@ -54,6 +52,13 @@
     {
       "image": "cbom-service",
       "ref": "ghcr.io/vistasecurity/cbom-service:latest",
+      "critical": 0,
+      "high": 0,
+      "findings": []
+    },
+    {
+      "image": "cluster-sensor-service",
+      "ref": "ghcr.io/vistasecurity/cluster-sensor-service:latest",
       "critical": 0,
       "high": 0,
       "findings": []
