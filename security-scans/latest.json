@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-08-25T05:25:22Z",
-  "generated_date": "2026-08-25",
+  "generated_at": "2026-08-26T05:25:37Z",
+  "generated_date": "2026-08-26",
   "registry": "ghcr.io/vistasecurity",
   "tag": "latest",
-  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/32812641510",
+  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/32933913767",
   "scanner": "trivy",
   "scope": {
     "severities": [
@@ -14,12 +14,14 @@
   },
   "totals": {
     "images_expected": 18,
-    "images_scanned": 18,
-    "images_not_scanned": 0,
+    "images_scanned": 17,
+    "images_not_scanned": 1,
     "critical": 0,
     "high": 0
   },
-  "not_scanned": [],
+  "not_scanned": [
+    "inventory-service"
+  ],
   "images": [
     {
       "image": "admin-service",
@@ -80,13 +82,6 @@
     {
       "image": "discovery-processor-service",
       "ref": "ghcr.io/vistasecurity/discovery-processor-service:latest",
-      "critical": 0,
-      "high": 0,
-      "findings": []
-    },
-    {
-      "image": "inventory-service",
-      "ref": "ghcr.io/vistasecurity/inventory-service:latest",
       "critical": 0,
       "high": 0,
       "findings": []

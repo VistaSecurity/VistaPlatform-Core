@@ -3,11 +3,14 @@
 Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 - **Scanned**: `ghcr.io/vistasecurity/*:latest` (18 images)
-- **Generated**: 2026-08-25T05:25:22Z
+- **Generated**: 2026-08-26T05:25:37Z
 - **Scanner**: [Trivy](https://github.com/aquasecurity/trivy)
 - **Scope**: fixable `CRITICAL` and `HIGH` findings (`--ignore-unfixed`) in OS packages and application dependencies
 
-## No fixable CRITICAL or HIGH findings across 18 images
+> [!WARNING]
+> **1 of 18 images could not be scanned on this run.** The counts below therefore describe only the images that were: they are not a clean bill of health for the release. Unscanned images are listed at the bottom.
+
+## 0 CRITICAL · 0 HIGH (fixable, across 17 scanned images)
 
 | Image | CRITICAL | HIGH |
 |---|---:|---:|
@@ -20,7 +23,6 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 | `compliance-engine` | 0 | 0 ✅ |
 | `device-interrogation-service` | 0 | 0 ✅ |
 | `discovery-processor-service` | 0 | 0 ✅ |
-| `inventory-service` | 0 | 0 ✅ |
 | `mcp-service` | 0 | 0 ✅ |
 | `monitoring-service` | 0 | 0 ✅ |
 | `notification-service` | 0 | 0 ✅ |
@@ -29,6 +31,13 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 | `sensor-manager` | 0 | 0 ✅ |
 | `tenant-health-service` | 0 | 0 ✅ |
 | `web-ui` | 0 | 0 ✅ |
+| `inventory-service` | ❌ not scanned | ❌ not scanned |
+
+## Not scanned on this run
+
+Trivy did not produce a usable report for these images. An image that was not scanned is reported as unscanned rather than as clean.
+
+- `ghcr.io/vistasecurity/inventory-service:latest`
 
 ## How to read this
 
@@ -44,4 +53,4 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 To report a vulnerability, see [SECURITY.md](../SECURITY.md). Please do not open a public issue.
 
-<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/32812641510).</sub>
+<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/32933913767).</sub>
