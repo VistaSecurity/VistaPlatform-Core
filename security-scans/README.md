@@ -3,160 +3,41 @@
 Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 - **Scanned**: `ghcr.io/vistasecurity/*:latest` (18 images)
-- **Generated**: 2026-08-27T16:00:52Z
+- **Generated**: 2026-08-28T17:01:20Z
 - **Scanner**: [Trivy](https://github.com/aquasecurity/trivy)
 - **Scope**: fixable `CRITICAL` and `HIGH` findings (`--ignore-unfixed`) in OS packages and application dependencies
 
-## 0 CRITICAL · 36 HIGH (fixable, across 18 scanned images)
+> [!WARNING]
+> **1 of 18 images could not be scanned on this run.** The counts below therefore describe only the images that were: they are not a clean bill of health for the release. Unscanned images are listed at the bottom.
+
+## 0 CRITICAL · 0 HIGH (fixable, across 17 scanned images)
 
 | Image | CRITICAL | HIGH |
 |---|---:|---:|
-| `admin-service` | 0 | 2 |
-| `admin-ui` | 0 | 2 |
-| `audit-service` | 0 | 2 |
-| `auth-service` | 0 | 2 |
-| `cbom-service` | 0 | 2 |
-| `cluster-sensor-service` | 0 | 2 |
-| `compliance-engine` | 0 | 2 |
-| `device-interrogation-service` | 0 | 2 |
-| `discovery-processor-service` | 0 | 2 |
-| `inventory-service` | 0 | 2 |
-| `mcp-service` | 0 | 2 |
-| `monitoring-service` | 0 | 2 |
-| `notification-service` | 0 | 2 |
-| `pcap-processor` | 0 | 2 |
-| `resource-tracker-service` | 0 | 2 |
-| `sensor-manager` | 0 | 2 |
-| `tenant-health-service` | 0 | 2 |
-| `web-ui` | 0 | 2 |
+| `admin-service` | 0 | 0 ✅ |
+| `admin-ui` | 0 | 0 ✅ |
+| `audit-service` | 0 | 0 ✅ |
+| `auth-service` | 0 | 0 ✅ |
+| `cbom-service` | 0 | 0 ✅ |
+| `cluster-sensor-service` | 0 | 0 ✅ |
+| `compliance-engine` | 0 | 0 ✅ |
+| `device-interrogation-service` | 0 | 0 ✅ |
+| `discovery-processor-service` | 0 | 0 ✅ |
+| `inventory-service` | 0 | 0 ✅ |
+| `mcp-service` | 0 | 0 ✅ |
+| `monitoring-service` | 0 | 0 ✅ |
+| `pcap-processor` | 0 | 0 ✅ |
+| `resource-tracker-service` | 0 | 0 ✅ |
+| `sensor-manager` | 0 | 0 ✅ |
+| `tenant-health-service` | 0 | 0 ✅ |
+| `web-ui` | 0 | 0 ✅ |
+| `notification-service` | ❌ not scanned | ❌ not scanned |
 
-## Findings
+## Not scanned on this run
 
-### `admin-service`
+Trivy did not produce a usable report for these images. An image that was not scanned is reported as unscanned rather than as clean.
 
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libcrypto3` | `3.5.7-r1` | `3.5.8-r0` |
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libssl3` | `3.5.7-r1` | `3.5.8-r0` |
-
-### `admin-ui`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libcrypto3` | `3.5.7-r0` | `3.5.8-r0` |
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libssl3` | `3.5.7-r0` | `3.5.8-r0` |
-
-### `audit-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libcrypto3` | `3.5.7-r1` | `3.5.8-r0` |
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libssl3` | `3.5.7-r1` | `3.5.8-r0` |
-
-### `auth-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libcrypto3` | `3.5.7-r1` | `3.5.8-r0` |
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libssl3` | `3.5.7-r1` | `3.5.8-r0` |
-
-### `cbom-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libcrypto3` | `3.5.7-r1` | `3.5.8-r0` |
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libssl3` | `3.5.7-r1` | `3.5.8-r0` |
-
-### `cluster-sensor-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libcrypto3` | `3.5.7-r1` | `3.5.8-r0` |
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libssl3` | `3.5.7-r1` | `3.5.8-r0` |
-
-### `compliance-engine`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libcrypto3` | `3.5.7-r1` | `3.5.8-r0` |
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libssl3` | `3.5.7-r1` | `3.5.8-r0` |
-
-### `device-interrogation-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libcrypto3` | `3.5.7-r1` | `3.5.8-r0` |
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libssl3` | `3.5.7-r1` | `3.5.8-r0` |
-
-### `discovery-processor-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libcrypto3` | `3.5.7-r1` | `3.5.8-r0` |
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libssl3` | `3.5.7-r1` | `3.5.8-r0` |
-
-### `inventory-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libcrypto3` | `3.5.7-r1` | `3.5.8-r0` |
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libssl3` | `3.5.7-r1` | `3.5.8-r0` |
-
-### `mcp-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libcrypto3` | `3.5.7-r1` | `3.5.8-r0` |
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libssl3` | `3.5.7-r1` | `3.5.8-r0` |
-
-### `monitoring-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libcrypto3` | `3.5.7-r1` | `3.5.8-r0` |
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libssl3` | `3.5.7-r1` | `3.5.8-r0` |
-
-### `notification-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libcrypto3` | `3.5.7-r1` | `3.5.8-r0` |
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libssl3` | `3.5.7-r1` | `3.5.8-r0` |
-
-### `pcap-processor`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libcrypto3` | `3.5.7-r1` | `3.5.8-r0` |
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libssl3` | `3.5.7-r1` | `3.5.8-r0` |
-
-### `resource-tracker-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libcrypto3` | `3.5.7-r1` | `3.5.8-r0` |
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libssl3` | `3.5.7-r1` | `3.5.8-r0` |
-
-### `sensor-manager`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libcrypto3` | `3.5.7-r1` | `3.5.8-r0` |
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libssl3` | `3.5.7-r1` | `3.5.8-r0` |
-
-### `tenant-health-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libcrypto3` | `3.5.7-r1` | `3.5.8-r0` |
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libssl3` | `3.5.7-r1` | `3.5.8-r0` |
-
-### `web-ui`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libcrypto3` | `3.5.7-r0` | `3.5.8-r0` |
-| HIGH | [CVE-2026-14456](https://nvd.nist.gov/vuln/detail/CVE-2026-14456) | `libssl3` | `3.5.7-r0` | `3.5.8-r0` |
+- `ghcr.io/vistasecurity/notification-service:latest`
 
 ## How to read this
 
@@ -172,4 +53,4 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 To report a vulnerability, see [SECURITY.md](../SECURITY.md). Please do not open a public issue.
 
-<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/33090854781).</sub>
+<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/33192553973).</sub>
