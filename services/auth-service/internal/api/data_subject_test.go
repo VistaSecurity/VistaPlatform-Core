@@ -162,7 +162,7 @@ func TestErasureLimitations_AreStated(t *testing.T) {
 // turns "we ran some UPDATEs" into "we confirmed nothing identifying survived".
 // If a table is anonymized but not verified, a silent failure ships as success.
 func TestErasureVerify_CoversEveryAnonymizedTable(t *testing.T) {
-	for _, table := range []string{"users", "api_tokens", "invitations", "audit.activity_logs"} {
+	for _, table := range []string{"users", "api_tokens", "refresh_tokens", "invitations", "audit.activity_logs"} {
 		if !strings.Contains(erasureVerify, table) {
 			t.Errorf("the erasure verification query does not re-check %s", table)
 		}

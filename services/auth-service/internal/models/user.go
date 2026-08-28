@@ -82,10 +82,11 @@ type ResetPasswordRequest struct {
 
 // AuthResponse represents an authentication response
 type AuthResponse struct {
-	User         *User  `json:"user"`
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	ExpiresIn    int64  `json:"expires_in"`
+	User             *User  `json:"user"`
+	AccessToken      string `json:"access_token"`
+	RefreshToken     string `json:"refresh_token"`
+	ExpiresIn        int64  `json:"expires_in"`
+	RefreshExpiresIn int64  `json:"-"`
 }
 
 // RefreshTokenRequest represents a token refresh request

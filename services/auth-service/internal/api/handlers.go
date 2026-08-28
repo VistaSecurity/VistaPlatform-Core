@@ -109,14 +109,16 @@ func NewAuthHandlers(authService *auth.AuthService, cfg *config.Config, rateLimi
 	}
 }
 
-// refreshCookieMaxAge is the lifetime of the refresh-token cookie, and hence of
-// the whole session. The JS-readable csrf_token cookie shares it — see
-// setAuthCookies.
-const refreshCookieMaxAge = 7 * 24 * 60 * 60
+// defaultRefreshCookieMaxAge is the historical fallback when a test/stubbed
+// AuthResponse predates policy-controlled refresh lifetimes.
+const defaultRefreshCookieMaxAge = 7 * 24 * 60 * 60
 
 // setAuthCookies sets httpOnly cookies for access and refresh tokens, plus a
 // non-httpOnly CSRF token cookie that the frontend can read and echo back.
-func (h *AuthHandlers) setAuthCookies(c *gin.Context, accessToken, refreshToken string) {
+func (h *AuthHandlers) setAuthCookies(c *gin.Context, accessToken, refreshToken string, refreshMaxAgeSeconds int) {
+	if refreshMaxAgeSeconds <= 0 {
+		refreshMaxAgeSeconds = defaultRefreshCookieMaxAge
+	}
 	secure := h.config.CookieSecure
 	domain := h.config.CookieDomain
 
@@ -132,14 +134,14 @@ func (h *AuthHandlers) setAuthCookies(c *gin.Context, accessToken, refreshToken 
 		SameSite: http.SameSiteStrictMode,
 	})
 
-	// Refresh token — httpOnly, 7 days
+	// Refresh token — httpOnly, policy-controlled session lifetime
 	// Path must be "/" so the cookie is sent to both v1 and v2 refresh endpoints
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     "refresh_token",
 		Value:    refreshToken,
 		Path:     "/",
 		Domain:   domain,
-		MaxAge:   refreshCookieMaxAge,
+		MaxAge:   refreshMaxAgeSeconds,
 		HttpOnly: true,
 		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
@@ -164,7 +166,7 @@ func (h *AuthHandlers) setAuthCookies(c *gin.Context, accessToken, refreshToken 
 			Value:    csrfValue,
 			Path:     "/",
 			Domain:   domain,
-			MaxAge:   refreshCookieMaxAge,
+			MaxAge:   refreshMaxAgeSeconds,
 			HttpOnly: false,
 			Secure:   secure,
 			SameSite: http.SameSiteStrictMode,
@@ -204,7 +206,10 @@ func (h *AuthHandlers) clearAuthCookies(c *gin.Context) {
 // setAuthCookiesResponseWriter is a standalone helper that sets httpOnly auth
 // cookies directly on an http.ResponseWriter. Used by platform SSO flows that
 // operate outside of AuthHandlers (e.g. PlatformSSOCallback, CompletePlatformSSORegistration).
-func setAuthCookiesResponseWriter(w http.ResponseWriter, cfg *config.Config, accessExpirySeconds int, accessToken, refreshToken string) {
+func setAuthCookiesResponseWriter(w http.ResponseWriter, cfg *config.Config, accessExpirySeconds, refreshMaxAgeSeconds int, accessToken, refreshToken string) {
+	if refreshMaxAgeSeconds <= 0 {
+		refreshMaxAgeSeconds = defaultRefreshCookieMaxAge
+	}
 	secure := cfg.CookieSecure
 	domain := cfg.CookieDomain
 
@@ -224,7 +229,7 @@ func setAuthCookiesResponseWriter(w http.ResponseWriter, cfg *config.Config, acc
 		Value:    refreshToken,
 		Path:     "/",
 		Domain:   domain,
-		MaxAge:   refreshCookieMaxAge,
+		MaxAge:   refreshMaxAgeSeconds,
 		HttpOnly: true,
 		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
@@ -238,7 +243,7 @@ func setAuthCookiesResponseWriter(w http.ResponseWriter, cfg *config.Config, acc
 			Value:    csrfValue,
 			Path:     "/",
 			Domain:   domain,
-			MaxAge:   refreshCookieMaxAge,
+			MaxAge:   refreshMaxAgeSeconds,
 			HttpOnly: false,
 			Secure:   secure,
 			SameSite: http.SameSiteStrictMode,
@@ -464,7 +469,7 @@ func (h *AuthHandlers) Login(c *gin.Context) {
 	authResponse.User.PasswordHash = ""
 
 	// Set httpOnly cookies so frontends don't need localStorage
-	h.setAuthCookies(c, authResponse.AccessToken, authResponse.RefreshToken)
+	h.setAuthCookies(c, authResponse.AccessToken, authResponse.RefreshToken, int(authResponse.RefreshExpiresIn))
 
 	c.JSON(http.StatusOK, authResponse)
 }
@@ -591,7 +596,7 @@ func (h *AuthHandlers) RefreshToken(c *gin.Context) {
 	authResponse.User.PasswordHash = ""
 
 	// Rotate auth cookies
-	h.setAuthCookies(c, authResponse.AccessToken, authResponse.RefreshToken)
+	h.setAuthCookies(c, authResponse.AccessToken, authResponse.RefreshToken, int(authResponse.RefreshExpiresIn))
 
 	c.JSON(http.StatusOK, authResponse)
 }

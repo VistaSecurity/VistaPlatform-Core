@@ -157,8 +157,8 @@ type CoreSSOSupport struct {
 	// post-callback landing redirect.
 	WebUIBaseURL func(cfg *config.Config) string
 	// SetAuthCookies writes the httpOnly access/refresh cookie pair with the
-	// same flags the password login path uses.
-	SetAuthCookies func(w http.ResponseWriter, cfg *config.Config, accessExpirySeconds int, accessToken, refreshToken string)
+	// same flags and policy-controlled refresh lifetime the password login path uses.
+	SetAuthCookies func(w http.ResponseWriter, cfg *config.Config, accessExpirySeconds, refreshMaxAgeSeconds int, accessToken, refreshToken string)
 
 	// InvitationTenantID resolves the tenant a still-pending invitation token
 	// belongs to, so an SSO authorize can start without an explicit tenant_id

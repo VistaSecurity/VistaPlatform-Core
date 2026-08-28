@@ -27,12 +27,26 @@ const RevokedTokenKeyPrefix = "revoked_token:"
 // RevokedTokenKey builds the denylist Redis key for a token's jti.
 func RevokedTokenKey(jti string) string { return RevokedTokenKeyPrefix + jti }
 
+// RevokedUserKeyPrefix is the Redis key prefix for users whose live access
+// tokens must all be rejected (for example, after data-subject erasure).
+const RevokedUserKeyPrefix = "revoked_user:"
+
+// RevokedUserKey builds the denylist Redis key for every token belonging to a user.
+func RevokedUserKey(userID uuid.UUID) string { return RevokedUserKeyPrefix + userID.String() }
+
 // RevocationChecker reports whether a token (identified by its jti) is on the
 // revocation denylist. Implementations must fail OPEN (return false) on backend
 // errors so a Redis outage degrades to "not revoked" rather than locking
 // everyone out.
 type RevocationChecker interface {
 	IsRevoked(ctx context.Context, jti string) bool
+}
+
+// UserRevocationChecker extends RevocationChecker with a per-user denylist.
+// Existing tests and bespoke callers can implement only RevocationChecker; the
+// production Redis checker implements both.
+type UserRevocationChecker interface {
+	IsUserRevoked(ctx context.Context, userID uuid.UUID) bool
 }
 
 // AuthConfig configures the shared JWT authentication middleware.
@@ -272,6 +286,13 @@ func RequireJWTAuth(cfg AuthConfig) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+		if userRevocation, ok := revocation.(UserRevocationChecker); ok &&
+			claims.UserID != uuid.Nil &&
+			userRevocation.IsUserRevoked(c.Request.Context(), claims.UserID) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token revoked"})
+			c.Abort()
+			return
+		}
 
 		// Enforce the force_password_change gate server-side. A token
 		// carrying pwd_change_required is a LIMITED session: the holder proved
@@ -447,6 +468,15 @@ func (c redisRevocationChecker) IsRevoked(ctx context.Context, jti string) bool 
 	if err != nil {
 		// Fail open: a Redis outage must not lock every request out.
 		logrus.WithError(err).Warn("JWT revocation denylist check failed; allowing request (fail-open)")
+		return false
+	}
+	return n > 0
+}
+
+func (c redisRevocationChecker) IsUserRevoked(ctx context.Context, userID uuid.UUID) bool {
+	n, err := c.rdb.Exists(ctx, RevokedUserKey(userID)).Result()
+	if err != nil {
+		logrus.WithError(err).Warn("JWT user revocation denylist check failed; allowing request (fail-open)")
 		return false
 	}
 	return n > 0

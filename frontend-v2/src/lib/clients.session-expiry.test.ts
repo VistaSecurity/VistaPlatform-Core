@@ -129,6 +129,35 @@ describe('session-expiry middleware (401 → handler → replay)', () => {
     expect(handler).toHaveBeenCalled();
   });
 
+  it('a 401 on the replayed request fires onRecoveryFailed (the un-latchable loop)', async () => {
+    // The regression this guards: refresh 200s but the data plane rejects the
+    // token it minted. The replay 401s, the error surfaces, and — before the
+    // two-phase handler — NOTHING ever latched, so the user was stranded on
+    // dead panels with a live-looking cookie and no redirect to sign-in.
+    const fetchStub = fetchQueue(401, 401);
+    const onAuthFailure = vi.fn(async () => true);
+    const onRecoveryFailed = vi.fn(async () => {});
+    contract.setSessionExpiredHandler({ onAuthFailure, onRecoveryFailed });
+    const client = contract.createInventoryServiceClient({ baseUrl: 'http://api.test', fetch: fetchStub });
+
+    const { response } = await fire(client, 'GET', '/__expiry_probe__');
+    expect(onAuthFailure).toHaveBeenCalledTimes(1);
+    expect(onRecoveryFailed).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(401); // the caller still sees the failure
+  });
+
+  it('a replay that succeeds does not fire onRecoveryFailed', async () => {
+    const fetchStub = fetchQueue(401, 200);
+    const onAuthFailure = vi.fn(async () => true);
+    const onRecoveryFailed = vi.fn(async () => {});
+    contract.setSessionExpiredHandler({ onAuthFailure, onRecoveryFailed });
+    const client = contract.createInventoryServiceClient({ baseUrl: 'http://api.test', fetch: fetchStub });
+
+    const { response } = await fire(client, 'GET', '/__expiry_probe__');
+    expect(onRecoveryFailed).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+  });
+
   it('with no handler registered the 401 passes through untouched', async () => {
     const fetchStub = fetchQueue(401);
     const client = contract.createAuthServiceClient({ baseUrl: 'http://api.test', fetch: fetchStub });
@@ -159,7 +188,7 @@ describe('createSessionExpiryHandler', () => {
     const onSessionExpired = vi.fn();
     const handler = createSessionExpiryHandler({ hasSession: () => true, refresh, onSessionExpired });
 
-    await expect(handler()).resolves.toBe(true);
+    await expect(handler.onAuthFailure()).resolves.toBe(true);
     expect(refresh).toHaveBeenCalledTimes(1);
     expect(onSessionExpired).not.toHaveBeenCalled();
   });
@@ -169,7 +198,7 @@ describe('createSessionExpiryHandler', () => {
     const refresh = vi.fn(() => new Promise<void>((r) => { release = r; }));
     const handler = createSessionExpiryHandler({ hasSession: () => true, refresh, onSessionExpired: vi.fn() });
 
-    const results = Promise.all([handler(), handler(), handler()]);
+    const results = Promise.all([handler.onAuthFailure(), handler.onAuthFailure(), handler.onAuthFailure()]);
     release();
     await expect(results).resolves.toEqual([true, true, true]);
     expect(refresh).toHaveBeenCalledTimes(1);
@@ -180,8 +209,8 @@ describe('createSessionExpiryHandler', () => {
     const onSessionExpired = vi.fn();
     const handler = createSessionExpiryHandler({ hasSession: () => true, refresh, onSessionExpired });
 
-    await expect(handler()).resolves.toBe(false);
-    await expect(handler()).resolves.toBe(false); // latched: no second refresh, no second callback
+    await expect(handler.onAuthFailure()).resolves.toBe(false);
+    await expect(handler.onAuthFailure()).resolves.toBe(false); // latched: no second refresh, no second callback
     expect(refresh).toHaveBeenCalledTimes(1);
     expect(onSessionExpired).toHaveBeenCalledTimes(1);
     expect(onSessionExpired).toHaveBeenCalledWith('expired');
@@ -197,10 +226,65 @@ describe('createSessionExpiryHandler', () => {
     const onSessionExpired = vi.fn();
     const handler = createSessionExpiryHandler({ hasSession: () => false, refresh, onSessionExpired });
 
-    await expect(handler()).resolves.toBe(false);
-    await expect(handler()).resolves.toBe(false); // latched
+    await expect(handler.onAuthFailure()).resolves.toBe(false);
+    await expect(handler.onAuthFailure()).resolves.toBe(false); // latched
     expect(refresh).not.toHaveBeenCalled();
     expect(onSessionExpired).toHaveBeenCalledTimes(1);
     expect(onSessionExpired).toHaveBeenCalledWith('no-session');
   });
+  // onRecoveryFailed: the refresh "succeeded" but the replayed request still
+  // 401'd — the session auth minted does not work. checkSession (a bare whoami
+  // fetch) decides between eviction and a one-endpoint bug.
+  it('onRecoveryFailed with a dead whoami latches and fires onSessionExpired(expired) once', async () => {
+    const onSessionExpired = vi.fn();
+    const checkSession = vi.fn(async () => false); // whoami 401'd too
+    const handler = createSessionExpiryHandler({ hasSession: () => true, refresh: vi.fn(async () => ({})), onSessionExpired, checkSession });
+
+    await handler.onRecoveryFailed();
+    await handler.onRecoveryFailed(); // latched
+    expect(checkSession).toHaveBeenCalledTimes(1);
+    expect(onSessionExpired).toHaveBeenCalledTimes(1);
+    expect(onSessionExpired).toHaveBeenCalledWith('expired');
+    await expect(handler.onAuthFailure()).resolves.toBe(false); // shared latch
+  });
+
+  it('onRecoveryFailed with a live whoami does NOT evict (one buggy endpoint is not a dead session)', async () => {
+    const onSessionExpired = vi.fn();
+    const handler = createSessionExpiryHandler({ hasSession: () => true, refresh: vi.fn(async () => ({})), onSessionExpired, checkSession: async () => true });
+
+    await handler.onRecoveryFailed();
+    expect(onSessionExpired).not.toHaveBeenCalled();
+    await expect(handler.onAuthFailure()).resolves.toBe(true); // session still usable
+  });
+
+  it('onRecoveryFailed with a rejecting whoami probe does not evict on uncertainty', async () => {
+    const onSessionExpired = vi.fn();
+    const handler = createSessionExpiryHandler({ hasSession: () => true, refresh: vi.fn(async () => ({})), onSessionExpired, checkSession: async () => { throw new Error('network down'); } });
+
+    await handler.onRecoveryFailed();
+    expect(onSessionExpired).not.toHaveBeenCalled();
+  });
+
+  it('onRecoveryFailed without a checkSession probe latches directly', async () => {
+    const onSessionExpired = vi.fn();
+    const handler = createSessionExpiryHandler({ hasSession: () => true, refresh: vi.fn(async () => ({})), onSessionExpired });
+
+    await handler.onRecoveryFailed();
+    expect(onSessionExpired).toHaveBeenCalledTimes(1);
+    expect(onSessionExpired).toHaveBeenCalledWith('expired');
+  });
+
+  it('concurrent onRecoveryFailed calls share a single whoami probe', async () => {
+    let release!: (alive: boolean) => void;
+    const checkSession = vi.fn(() => new Promise<boolean>((r) => { release = r; }));
+    const onSessionExpired = vi.fn();
+    const handler = createSessionExpiryHandler({ hasSession: () => true, refresh: vi.fn(async () => ({})), onSessionExpired, checkSession });
+
+    const results = Promise.all([handler.onRecoveryFailed(), handler.onRecoveryFailed(), handler.onRecoveryFailed()]);
+    release(false);
+    await results;
+    expect(checkSession).toHaveBeenCalledTimes(1);
+    expect(onSessionExpired).toHaveBeenCalledTimes(1);
+  });
+
 });

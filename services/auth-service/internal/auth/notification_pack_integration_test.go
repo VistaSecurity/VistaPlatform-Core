@@ -2,10 +2,12 @@ package auth
 
 import (
 	"database/sql"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/google/uuid"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -117,4 +119,91 @@ func TestIntegration_SeedDefaultNotificationPack_ChannelsAreReferenced(t *testin
 	if seen == 0 {
 		t.Fatal("seeded pack produced no rule→channel references at all")
 	}
+}
+
+// TestIntegration_SchemaBackfill_DefaultNotificationPackInfoSeverity covers the
+// upgrade path for tenants that were created before seedDefaultNotificationPack
+// included "info" in the Default activity feed rule. A fresh-tenant test cannot
+// catch this: existing rows keep their old severity_filter until schema.sql's
+// backfill repairs exactly the shipped default shape.
+func TestIntegration_SchemaBackfill_DefaultNotificationPackInfoSeverity(t *testing.T) {
+	db := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, db)
+
+	legacyTenant := testdb.NewTenant(t, db)
+	customTenant := testdb.NewTenant(t, db)
+	renamedTenant := testdb.NewTenant(t, db)
+
+	legacyChannel := insertInAppChannel(t, db, legacyTenant, "Legacy in-app")
+	customChannel := insertInAppChannel(t, db, customTenant, "Custom in-app")
+	renamedChannel := insertInAppChannel(t, db, renamedTenant, "Renamed in-app")
+
+	insertNotificationRule(t, db, legacyTenant, legacyChannel, "Default activity feed", []string{"medium", "low"})
+	insertNotificationRule(t, db, customTenant, customChannel, "Default activity feed", []string{"low"})
+	insertNotificationRule(t, db, renamedTenant, renamedChannel, "My activity feed", []string{"medium", "low"})
+
+	applySchemaOnly(t, db)
+	applySchemaOnly(t, db) // idempotency: the repaired row must not keep changing.
+
+	assertRuleSeverities(t, db, legacyTenant, "Default activity feed", []string{"medium", "low", "info"})
+	assertRuleSeverities(t, db, customTenant, "Default activity feed", []string{"low"})
+	assertRuleSeverities(t, db, renamedTenant, "My activity feed", []string{"medium", "low"})
+}
+
+func applySchemaOnly(t *testing.T, db *sql.DB) {
+	t.Helper()
+	schemaPath := filepath.Join(testdb.RepoRoot(t), "scripts", "database", "schema.sql")
+	body, err := os.ReadFile(schemaPath)
+	if err != nil {
+		t.Fatalf("read schema.sql: %v", err)
+	}
+	if _, err := db.Exec(string(body)); err != nil {
+		t.Fatalf("schema.sql failed to re-apply over tenant_notification_rules data: %v", err)
+	}
+}
+
+func insertInAppChannel(t *testing.T, db *sql.DB, tenantID uuid.UUID, name string) uuid.UUID {
+	t.Helper()
+	channelID := uuid.New()
+	if _, err := db.Exec(`
+		INSERT INTO tenant_notification_channels (id, tenant_id, channel_name, channel_type, config, enabled)
+		VALUES ($1, $2, $3, 'in_app', '{}'::jsonb, true)`,
+		channelID, tenantID, name); err != nil {
+		t.Fatalf("insert notification channel: %v", err)
+	}
+	return channelID
+}
+
+func insertNotificationRule(t *testing.T, db *sql.DB, tenantID, channelID uuid.UUID, name string, severities []string) {
+	t.Helper()
+	if _, err := db.Exec(`
+		INSERT INTO tenant_notification_rules
+			(tenant_id, rule_name, alert_source, channel_ids, severity_filter, frequency, enabled, priority)
+		VALUES ($1, $2, 'all', ARRAY[$3::uuid], $4::varchar[], 'immediate', true, 50)`,
+		tenantID, name, channelID, pqStringArray(severities)); err != nil {
+		t.Fatalf("insert notification rule %q: %v", name, err)
+	}
+}
+
+func assertRuleSeverities(t *testing.T, db *sql.DB, tenantID uuid.UUID, ruleName string, want []string) {
+	t.Helper()
+	var got pq.StringArray
+	if err := db.QueryRow(`
+		SELECT severity_filter FROM tenant_notification_rules
+		WHERE tenant_id = $1 AND rule_name = $2`,
+		tenantID, ruleName).Scan(&got); err != nil {
+		t.Fatalf("read severity_filter for %q: %v", ruleName, err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("%s severity_filter = %v, want %v", ruleName, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("%s severity_filter = %v, want %v", ruleName, got, want)
+		}
+	}
+}
+
+func pqStringArray(vals []string) pq.StringArray {
+	return pq.StringArray(vals)
 }

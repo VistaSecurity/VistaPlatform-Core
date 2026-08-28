@@ -230,13 +230,34 @@ export const csrfMiddleware: Middleware = makeCsrfMiddleware();
  */
 export type SessionExpiredHandler = (request: Request) => Promise<boolean>;
 
-let sessionExpiredHandler: SessionExpiredHandler | null = null;
+/**
+ * Two-phase form of the session-expiry hook. `onAuthFailure` is the
+ * `SessionExpiredHandler` above. `onRecoveryFailed` is called when a request
+ * replayed AFTER a successful recovery is rejected again — the refresh
+ * exchange "succeeded" but produced a session the data plane does not accept.
+ * Without this phase that state never reaches the app: refresh 200s, the
+ * replay 401s, the error surfaces, and nothing ever redirects to sign-in —
+ * the user is stranded on a page of dead panels with a live-looking cookie.
+ */
+export interface SessionExpiryHandlers {
+  onAuthFailure: SessionExpiredHandler;
+  onRecoveryFailed(request: Request): Promise<void>;
+}
 
-/** Register (or clear, with `null`) the app's session-expiry handler. */
+let sessionExpiredHandler: SessionExpiryHandlers | null = null;
+
+/** Register (or clear, with `null`) the app's session-expiry handler. The
+ * bare-function form is the legacy single-phase handler; it simply never
+ * hears about failed recoveries. */
 export function setSessionExpiredHandler(
-  handler: SessionExpiredHandler | null,
+  handler: SessionExpiredHandler | SessionExpiryHandlers | null,
 ): void {
-  sessionExpiredHandler = handler;
+  sessionExpiredHandler =
+    handler === null
+      ? null
+      : typeof handler === "function"
+        ? { onAuthFailure: handler, onRecoveryFailed: async () => {} }
+        : handler;
 }
 
 /** Suffixes of endpoints that run BEFORE a session exists — no RequireAuth
@@ -300,10 +321,22 @@ export function makeSessionExpiryMiddleware(
     async onResponse({ request, response }) {
       if (response.status !== 401 || !sessionExpiredHandler) return undefined;
       if (isAuthFlowPath(new URL(request.url).pathname)) return undefined;
-      const recovered = await sessionExpiredHandler(request);
+      const handler = sessionExpiredHandler;
+      const recovered = await handler.onAuthFailure(request);
       if (recovered && (request.method === "GET" || request.method === "HEAD")) {
         const doFetch = fetchImpl ?? globalThis.fetch;
-        return doFetch(new Request(request));
+        const retry = await doFetch(new Request(request));
+        if (retry.status === 401) {
+          // The replay carried the token the refresh just minted and was
+          // rejected anyway. Left alone this repeats forever — refresh 200,
+          // replay 401, error card — and the redirect-to-login latch never
+          // fires, because the latch only trips when the refresh REJECTS.
+          // Hand it to the app to confirm and, if the session really is
+          // unusable, end it. The 401 still returns to the caller so the
+          // page renders its error state while the navigation happens.
+          await handler.onRecoveryFailed(request);
+        }
+        return retry;
       }
       return undefined;
     },

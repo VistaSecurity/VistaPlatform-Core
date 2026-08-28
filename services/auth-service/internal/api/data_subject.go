@@ -359,6 +359,7 @@ const erasureVerify = `
 					  WHERE id = $1 AND tenant_id = $2
 					    AND (email <> $3 OR first_name IS NOT NULL OR last_name IS NOT NULL))
 				  + (SELECT count(*) FROM api_tokens WHERE user_id = $1 AND tenant_id = $2)
+				  + (SELECT count(*) FROM refresh_tokens WHERE user_id = $1 AND is_revoked = false)
 				  + (SELECT count(*) FROM invitations
 					  WHERE tenant_id = $2 AND (accepted_user_id = $1 OR lower(email) = lower($4)))
 				  + (SELECT count(*) FROM audit.activity_logs
@@ -384,6 +385,10 @@ type erasureResult struct {
 	AuditEventsPseudo int64     `json:"audit_events_pseudonymized"`
 	Retained          []string  `json:"retained"`
 	Limitations       []string  `json:"limitations"`
+}
+
+type userAccessRevoker interface {
+	RevokeUserAccess(ctx context.Context, userID uuid.UUID) error
 }
 
 // retainedCategories is the half of the policy that says NO. Each entry is a
@@ -429,7 +434,7 @@ func erasureLimitations() []string {
 // Anonymize-in-place, not DELETE: the user row is referenced by tickets,
 // comments and audit events, so removing it would either cascade into unrelated
 // operational history or leave dangling references.
-func EraseUser(db *sql.DB) gin.HandlerFunc {
+func EraseUser(db *sql.DB, accessRevoker userAccessRevoker) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tenantID, ok := tenantFromSession(c)
 		if !ok {
@@ -469,6 +474,15 @@ func EraseUser(db *sql.DB) gin.HandlerFunc {
 				return err
 			}
 
+			// Revoke already-issued access tokens before committing erasure. If
+			// Redis is unavailable, rolling back here is safer than tombstoning the
+			// user while their current JWT can still call data-plane services.
+			if accessRevoker != nil {
+				if err := accessRevoker.RevokeUserAccess(ctx, userID); err != nil {
+					return fmt.Errorf("revoke active access tokens: %w", err)
+				}
+			}
+
 			// 1. Profile → tombstone. Every free-text and secret column is cleared
 			//    in the same statement, so there is no window in which the account
 			//    is half-erased.
@@ -486,7 +500,16 @@ func EraseUser(db *sql.DB) gin.HandlerFunc {
 				result.APITokensDeleted, _ = res.RowsAffected()
 			}
 
-			// 3. Invitations → delete. The row is an email address and nothing else
+			// 3. Refresh-token sessions → revoke. Access tokens are killed after
+			// the transaction commits via the shared Redis user denylist.
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE refresh_tokens
+				SET is_revoked = true, revoked_at = NOW()
+				WHERE user_id = $1 AND is_revoked = false`, userID); err != nil {
+				return fmt.Errorf("revoke refresh tokens: %w", err)
+			}
+
+			// 4. Invitations → delete. The row is an email address and nothing else
 			//    of value once the account exists.
 			if res, err := tx.ExecContext(ctx, erasureInvitationDelete, tenantID, userID, originalEmail); err != nil {
 				return fmt.Errorf("delete invitations: %w", err)
@@ -494,7 +517,7 @@ func EraseUser(db *sql.DB) gin.HandlerFunc {
 				result.InvitationsPurged, _ = res.RowsAffected()
 			}
 
-			// 4. Audit trail → keep the events, remove the identity. user_email is a
+			// 5. Audit trail → keep the events, remove the identity. user_email is a
 			//    DENORMALIZED copy of the address: tombstoning the users row alone
 			//    would leave it sitting in every event this person generated.
 			if res, err := tx.ExecContext(ctx, `
@@ -506,7 +529,7 @@ func EraseUser(db *sql.DB) gin.HandlerFunc {
 				result.AuditEventsPseudo, _ = res.RowsAffected()
 			}
 
-			// 5. Prove it. A guard that cannot fail is worse than no guard, and an
+			// 6. Prove it. A guard that cannot fail is worse than no guard, and an
 			//    erasure that silently did nothing is the worst outcome here: the
 			//    operator would tell a data subject their data was removed when it
 			//    was not. Re-read and refuse to commit if anything identifying

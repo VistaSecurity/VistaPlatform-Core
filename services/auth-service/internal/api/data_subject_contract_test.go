@@ -8,7 +8,9 @@ package api
 // runs under RLS rather than on a plain connection.
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -26,7 +28,23 @@ var (
 	dsrActor   = uuid.MustParse("33333333-3333-3333-3333-333333333333")
 )
 
+type stubUserAccessRevoker struct {
+	called bool
+	userID uuid.UUID
+	err    error
+}
+
+func (s *stubUserAccessRevoker) RevokeUserAccess(_ context.Context, userID uuid.UUID) error {
+	s.called = true
+	s.userID = userID
+	return s.err
+}
+
 func newDSREngine(t *testing.T, actor uuid.UUID) (*gin.Engine, sqlmock.Sqlmock) {
+	return newDSREngineWithRevoker(t, actor, nil)
+}
+
+func newDSREngineWithRevoker(t *testing.T, actor uuid.UUID, revoker userAccessRevoker) (*gin.Engine, sqlmock.Sqlmock) {
 	t.Helper()
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -43,7 +61,7 @@ func newDSREngine(t *testing.T, actor uuid.UUID) (*gin.Engine, sqlmock.Sqlmock) 
 		c.Next()
 	})
 	grp.GET("/users/:id/data-export", ExportUserData(db))
-	grp.POST("/users/:id/erase", EraseUser(db))
+	grp.POST("/users/:id/erase", EraseUser(db, revoker))
 	grp.GET("/me/data-export", ExportMyData(db))
 	return r, mock
 }
@@ -141,13 +159,15 @@ func TestContract_ExportMyData_TakesSubjectFromSession(t *testing.T) {
 
 func TestContract_EraseUserData(t *testing.T) {
 	sv := loadSpec(t)
-	r, mock := newDSREngine(t, dsrActor)
+	revoker := &stubUserAccessRevoker{}
+	r, mock := newDSREngineWithRevoker(t, dsrActor, revoker)
 
 	expectTenantScope(mock)
 	mock.ExpectQuery("SELECT email FROM users").
 		WillReturnRows(sqlmock.NewRows([]string{"email"}).AddRow("person@example.com"))
 	mock.ExpectExec("UPDATE users SET").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("DELETE FROM api_tokens").WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec("UPDATE refresh_tokens").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("DELETE FROM invitations").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("UPDATE audit.activity_logs").WillReturnResult(sqlmock.NewResult(0, 17))
 	// The verification re-read: nothing identifying survived.
@@ -167,6 +187,10 @@ func TestContract_EraseUserData(t *testing.T) {
 	if !containsFold(body, "legal acceptance") {
 		t.Error("result does not declare that legal acceptances were retained")
 	}
+	if !revoker.called || revoker.userID != dsrSubject {
+		t.Fatalf("erasure did not revoke active access tokens for %s; got called=%v user=%s",
+			dsrSubject, revoker.called, revoker.userID)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations: %v", err)
 	}
@@ -184,6 +208,7 @@ func TestContract_EraseUserData_RollsBackWhenVerificationFails(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"email"}).AddRow("person@example.com"))
 	mock.ExpectExec("UPDATE users SET").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("DELETE FROM api_tokens").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("UPDATE refresh_tokens").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("DELETE FROM invitations").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("UPDATE audit.activity_logs").WillReturnResult(sqlmock.NewResult(0, 0))
 	// Three identifying rows survived.
@@ -194,6 +219,29 @@ func TestContract_EraseUserData_RollsBackWhenVerificationFails(t *testing.T) {
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500 — an unverified erasure must not report success\nbody: %s",
 			w.Code, w.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+func TestContract_EraseUserData_RollsBackWhenActiveSessionRevocationFails(t *testing.T) {
+	revoker := &stubUserAccessRevoker{err: errors.New("redis unavailable")}
+	r, mock := newDSREngineWithRevoker(t, dsrActor, revoker)
+
+	expectTenantScope(mock)
+	mock.ExpectQuery("SELECT email FROM users").
+		WillReturnRows(sqlmock.NewRows([]string{"email"}).AddRow("person@example.com"))
+	mock.ExpectRollback()
+
+	w := do(r, http.MethodPost, dsrBase+"/users/"+dsrSubject.String()+"/erase", nil)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 — erasure must not commit while live access tokens remain valid\nbody: %s",
+			w.Code, w.Body.String())
+	}
+	if !revoker.called || revoker.userID != dsrSubject {
+		t.Fatalf("erasure did not attempt active access-token revocation before mutation; called=%v user=%s",
+			revoker.called, revoker.userID)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations: %v", err)

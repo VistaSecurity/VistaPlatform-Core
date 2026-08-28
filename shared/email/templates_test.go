@@ -30,9 +30,19 @@ func TestTemplates_MarkupInNamesIsEscaped(t *testing.T) {
 		name string
 		got  string
 	}{
+		{"password reset brand", renderOrFail(t, passwordResetHTML, struct{ Brand, Link string }{payload, "https://example.com/a"})},
+		{"email verification brand", renderOrFail(t, emailVerificationHTML, struct{ Brand, Link string }{payload, "https://example.com/a"})},
 		{"tenant invite org", renderOrFail(t, tenantInviteHTML, struct{ Brand, Org, Link string }{"Vista", payload, "https://example.com/a"})},
 		{"platform invite inviter", renderOrFail(t, platformInviteHTML, struct{ Platform, Inviter, Link, SSONames string }{"Vista", payload, "https://example.com/a", ""})},
 		{"platform invite brand", renderOrFail(t, platformPasswordResetHTML, struct{ Platform, Link string }{payload, "https://example.com/a"})},
+		{"discovery job id", renderOrFail(t, discoveryJobCompleteHTML, struct {
+			JobID, Brand string
+			Findings     int
+		}{payload, "Vista", 3})},
+		{"discovery job brand", renderOrFail(t, discoveryJobCompleteHTML, struct {
+			JobID, Brand string
+			Findings     int
+		}{"job-123", payload, 3})},
 		{"alert type", renderOrFail(t, alertHTML, struct {
 			Brand, AlertType, Message string
 			Details                   []detailRow
@@ -66,14 +76,7 @@ func TestTemplates_MarkupInNamesIsEscaped(t *testing.T) {
 func TestTemplates_JavascriptURLIsNeutralised(t *testing.T) {
 	const bad = "javascript:alert(document.cookie)"
 
-	for _, tc := range []struct {
-		name string
-		got  string
-	}{
-		{"password reset", renderOrFail(t, passwordResetHTML, struct{ Brand, Link string }{"Vista", bad})},
-		{"email verification", renderOrFail(t, emailVerificationHTML, struct{ Brand, Link string }{"Vista", bad})},
-		{"tenant invite", renderOrFail(t, tenantInviteHTML, struct{ Brand, Org, Link string }{"Vista", "Acme", bad})},
-	} {
+	for _, tc := range linkTemplateCases(t, bad) {
 		t.Run(tc.name, func(t *testing.T) {
 			if strings.Contains(tc.got, `href="javascript:`) {
 				t.Fatalf("javascript: URL reached an href:\n%s", excerpt(tc.got, "javascript"))
@@ -104,6 +107,30 @@ func TestTemplates_AlertDetailsAreEscaped(t *testing.T) {
 	}
 }
 
+// The discovery-complete template was converted with the rest of the email
+// bodies and carries two values worth pinning: white-label brand text and the
+// job identifier shown in the message body.
+func TestTemplates_DiscoveryJobCompleteEscapesBrandAndJobID(t *testing.T) {
+	got := renderOrFail(t, discoveryJobCompleteHTML, struct {
+		JobID, Brand string
+		Findings     int
+	}{
+		JobID:    `job-123<img src=x onerror=alert(1)>`,
+		Brand:    `Vista<script>alert(2)</script>`,
+		Findings: 7,
+	})
+
+	if strings.Contains(got, "<script>") || strings.Contains(got, "<img") {
+		t.Fatalf("discovery job template rendered attacker markup:\n%s", excerpt(got, "job-123"))
+	}
+	if !strings.Contains(got, "job-123&lt;img") {
+		t.Fatalf("job id was not escaped in the HTML body:\n%s", excerpt(got, "job-123"))
+	}
+	if !strings.Contains(got, "Vista&lt;script&gt;") {
+		t.Fatalf("brand was not escaped in the HTML body:\n%s", excerpt(got, "Vista"))
+	}
+}
+
 // The SSO block used to be assembled as a pre-built HTML fragment and pasted in
 // raw. The template owns it now, so provider names are escaped like any other
 // text -- and the block still disappears entirely when there are no providers.
@@ -128,14 +155,35 @@ func TestTemplates_SSOBlockIsConditionalAndEscaped(t *testing.T) {
 // real link would break every invitation while passing the tests above.
 func TestTemplates_LegitimateURLSurvives(t *testing.T) {
 	const good = "https://vista.example.com/accept?token=abc123&x=1"
-	got := renderOrFail(t, tenantInviteHTML, struct{ Brand, Org, Link string }{"Vista", "Acme", good})
 
-	if strings.Contains(got, "#ZgotmplZ") {
-		t.Fatalf("the URL filter rejected a legitimate https link:\n%s", excerpt(got, "href="))
+	for _, tc := range linkTemplateCases(t, good) {
+		t.Run(tc.name, func(t *testing.T) {
+			if strings.Contains(tc.got, "#ZgotmplZ") {
+				t.Fatalf("the URL filter rejected a legitimate https link:\n%s", excerpt(tc.got, "href="))
+			}
+			// The ampersand is entity-encoded in HTML; the link is still intact.
+			if !strings.Contains(tc.got, "token=abc123&amp;x=1") {
+				t.Fatalf("legitimate link was altered:\n%s", excerpt(tc.got, "token="))
+			}
+		})
 	}
-	// The ampersand is entity-encoded in HTML; the link is still intact.
-	if !strings.Contains(got, "token=abc123&amp;x=1") {
-		t.Fatalf("legitimate link was altered:\n%s", excerpt(got, "token="))
+}
+
+func linkTemplateCases(t *testing.T, link string) []struct {
+	name string
+	got  string
+} {
+	t.Helper()
+
+	return []struct {
+		name string
+		got  string
+	}{
+		{"password reset", renderOrFail(t, passwordResetHTML, struct{ Brand, Link string }{"Vista", link})},
+		{"email verification", renderOrFail(t, emailVerificationHTML, struct{ Brand, Link string }{"Vista", link})},
+		{"platform invite", renderOrFail(t, platformInviteHTML, struct{ Platform, Inviter, Link, SSONames string }{"Vista", "Bob", link, ""})},
+		{"platform password reset", renderOrFail(t, platformPasswordResetHTML, struct{ Platform, Link string }{"Vista", link})},
+		{"tenant invite", renderOrFail(t, tenantInviteHTML, struct{ Brand, Org, Link string }{"Vista", "Acme", link})},
 	}
 }
 

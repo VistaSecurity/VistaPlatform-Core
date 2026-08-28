@@ -211,7 +211,7 @@ func StaffSsoCallback(db *sql.DB, jwtSecret string, refreshTokenService *auth.Pl
 		expiresAt := time.Now().Add(sessionTTL)
 		_, _ = refreshTokenService.StoreRefreshToken(userID, refreshToken, nil, expiresAt, c.ClientIP(), c.Request.UserAgent())
 		_, _ = db.Exec(`UPDATE platform_users SET last_login_at = now() WHERE id = $1`, userID)
-		setPlatformAuthCookies(c, accessToken, 3600, refreshToken, jwtSecret)
+		setPlatformAuthCookies(c, accessToken, 3600, int(sessionTTL.Seconds()), refreshToken, jwtSecret)
 		c.Redirect(http.StatusFound, "/")
 	}
 }

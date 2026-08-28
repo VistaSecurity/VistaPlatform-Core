@@ -24,13 +24,20 @@ import (
 // backend failure, which must fail OPEN (report not-revoked) exactly like the
 // Redis-backed checker does.
 type stubRevocation struct {
-	revoked map[string]bool
-	calls   int
+	revoked      map[string]bool
+	revokedUsers map[uuid.UUID]bool
+	calls        int
+	userCalls    int
 }
 
 func (s *stubRevocation) IsRevoked(_ context.Context, jti string) bool {
 	s.calls++
 	return s.revoked[jti]
+}
+
+func (s *stubRevocation) IsUserRevoked(_ context.Context, userID uuid.UUID) bool {
+	s.userCalls++
+	return s.revokedUsers[userID]
 }
 
 // echoIdentityRouter returns a router whose single route reports the identity
@@ -78,6 +85,32 @@ func TestRequireAuth_RejectsRevokedToken(t *testing.T) {
 	}
 	if rc.calls == 0 {
 		t.Fatal("RequireAuth never consulted the revocation denylist")
+	}
+}
+
+func TestRequireAuth_RejectsRevokedUser(t *testing.T) {
+	cfg := newTestConfig()
+	jwtSvc := newTestJWTService()
+	userID := uuid.New()
+
+	access, _, err := jwtSvc.GenerateTokens(userID, uuid.New(), "erased@example.com", "viewer")
+	if err != nil {
+		t.Fatalf("generate tokens: %v", err)
+	}
+
+	rc := &stubRevocation{revokedUsers: map[uuid.UUID]bool{userID: true}}
+	router := echoIdentityRouter(RequireAuth(cfg, jwtSvc, WithRevocationChecker(rc)))
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer "+access)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 for an erased user; body = %s", w.Code, w.Body.String())
+	}
+	if rc.userCalls == 0 {
+		t.Fatal("RequireAuth never consulted the user revocation denylist")
 	}
 }
 

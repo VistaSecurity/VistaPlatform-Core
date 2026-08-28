@@ -139,6 +139,12 @@ func newCSRF() string {
 
 // GenerateTokens generates both access and refresh tokens
 func (j *JWTService) GenerateTokens(userID, tenantID uuid.UUID, email, role string) (string, string, error) {
+	return j.GenerateTokensWithRefreshExpiry(userID, tenantID, email, role, j.refreshExpiry)
+}
+
+// GenerateTokensWithRefreshExpiry generates both access and refresh tokens,
+// using a caller-resolved refresh lifetime for policy-controlled sessions.
+func (j *JWTService) GenerateTokensWithRefreshExpiry(userID, tenantID uuid.UUID, email, role string, refreshExpiry time.Duration) (string, string, error) {
 	// Generate access token
 	accessToken, err := j.generateToken(userID, tenantID, email, role, "access", j.accessExpiry)
 	if err != nil {
@@ -146,7 +152,7 @@ func (j *JWTService) GenerateTokens(userID, tenantID uuid.UUID, email, role stri
 	}
 
 	// Generate refresh token
-	refreshToken, err := j.generateToken(userID, tenantID, email, role, "refresh", j.refreshExpiry)
+	refreshToken, err := j.generateToken(userID, tenantID, email, role, "refresh", refreshExpiry)
 	if err != nil {
 		return "", "", err
 	}

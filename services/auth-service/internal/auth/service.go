@@ -683,9 +683,11 @@ func (a *AuthService) Login(req *models.LoginRequest, clientIP, userAgent string
 			// Reset the failed-login counter on a successful authentication.
 			a.resetPlatformFailedLoginAttempts(platformUser.ID)
 
+			sessionTTL := authpolicy.SessionLifetime(a.db, a.jwt.GetRefreshExpiry())
+
 			// Generate tokens for platform user (no tenant_id for platform users)
-			accessToken, refreshToken, err := a.jwt.GenerateTokens(
-				platformUser.ID, uuid.Nil, platformUser.Email, platformRoleName)
+			accessToken, refreshToken, err := a.jwt.GenerateTokensWithRefreshExpiry(
+				platformUser.ID, uuid.Nil, platformUser.Email, platformRoleName, sessionTTL)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate tokens: %w", err)
 			}
@@ -699,7 +701,7 @@ func (a *AuthService) Login(req *models.LoginRequest, clientIP, userAgent string
 			)
 
 			// Store refresh token
-			expiresAt := time.Now().Add(authpolicy.SessionLifetime(a.db, a.jwt.GetRefreshExpiry()))
+			expiresAt := time.Now().Add(sessionTTL)
 			_, err = a.refreshTokenService.StoreRefreshToken(
 				platformUser.ID,
 				refreshToken,
@@ -713,8 +715,9 @@ func (a *AuthService) Login(req *models.LoginRequest, clientIP, userAgent string
 			}
 
 			return &models.AuthResponse{
-				AccessToken:  accessToken,
-				RefreshToken: refreshToken,
+				AccessToken:      accessToken,
+				RefreshToken:     refreshToken,
+				RefreshExpiresIn: int64(sessionTTL.Seconds()),
 				User: &models.User{
 					ID:        platformUser.ID,
 					Email:     platformUser.Email,
@@ -762,9 +765,11 @@ func (a *AuthService) Login(req *models.LoginRequest, clientIP, userAgent string
 		return nil, ErrEmailNotVerified
 	}
 
+	sessionTTL := authpolicy.SessionLifetime(a.db, a.jwt.GetRefreshExpiry())
+
 	// Generate tokens
-	accessToken, refreshToken, err := a.jwt.GenerateTokens(
-		user.ID, user.TenantID, user.Email, user.Role)
+	accessToken, refreshToken, err := a.jwt.GenerateTokensWithRefreshExpiry(
+		user.ID, user.TenantID, user.Email, user.Role, sessionTTL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate tokens: %w", err)
 	}
@@ -778,7 +783,7 @@ func (a *AuthService) Login(req *models.LoginRequest, clientIP, userAgent string
 	}
 
 	// Store refresh token in database with device fingerprint
-	expiresAt := time.Now().Add(authpolicy.SessionLifetime(a.db, a.jwt.GetRefreshExpiry()))
+	expiresAt := time.Now().Add(sessionTTL)
 	familyID, err := a.refreshTokenService.StoreRefreshToken(
 		user.ID,
 		refreshToken,
@@ -794,10 +799,11 @@ func (a *AuthService) Login(req *models.LoginRequest, clientIP, userAgent string
 	}
 
 	return &models.AuthResponse{
-		User:         user,
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-		ExpiresIn:    int64(a.jwt.GetAccessExpiry().Seconds()),
+		User:             user,
+		AccessToken:      accessToken,
+		RefreshToken:     refreshToken,
+		ExpiresIn:        int64(a.jwt.GetAccessExpiry().Seconds()),
+		RefreshExpiresIn: int64(sessionTTL.Seconds()),
 	}, nil
 }
 
@@ -827,12 +833,13 @@ func (a *AuthService) RefreshToken(refreshToken string, clientIP, userAgent stri
 		if !platformUser.IsActive {
 			return nil, ErrUserInactive
 		}
-		accessToken, newRefreshToken, err := a.jwt.GenerateTokens(
-			platformUser.ID, uuid.Nil, platformUser.Email, roleName)
+		sessionTTL := authpolicy.SessionLifetime(a.db, a.jwt.GetRefreshExpiry())
+		accessToken, newRefreshToken, err := a.jwt.GenerateTokensWithRefreshExpiry(
+			platformUser.ID, uuid.Nil, platformUser.Email, roleName, sessionTTL)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate tokens: %w", err)
 		}
-		expiresAt := time.Now().Add(authpolicy.SessionLifetime(a.db, a.jwt.GetRefreshExpiry()))
+		expiresAt := time.Now().Add(sessionTTL)
 		_, err = a.refreshTokenService.ValidateAndRotateToken(
 			refreshToken,
 			platformUser.ID,
@@ -852,9 +859,10 @@ func (a *AuthService) RefreshToken(refreshToken string, clientIP, userAgent stri
 			return nil, err
 		}
 		return &models.AuthResponse{
-			AccessToken:  accessToken,
-			RefreshToken: newRefreshToken,
-			ExpiresIn:    int64(a.jwt.GetAccessExpiry().Seconds()),
+			AccessToken:      accessToken,
+			RefreshToken:     newRefreshToken,
+			ExpiresIn:        int64(a.jwt.GetAccessExpiry().Seconds()),
+			RefreshExpiresIn: int64(sessionTTL.Seconds()),
 		}, nil
 	}
 
@@ -866,15 +874,17 @@ func (a *AuthService) RefreshToken(refreshToken string, clientIP, userAgent stri
 		return nil, ErrUserInactive
 	}
 
+	sessionTTL := authpolicy.SessionLifetime(a.db, a.jwt.GetRefreshExpiry())
+
 	// Generate new tokens
-	accessToken, newRefreshToken, err := a.jwt.GenerateTokens(
-		user.ID, user.TenantID, user.Email, user.Role)
+	accessToken, newRefreshToken, err := a.jwt.GenerateTokensWithRefreshExpiry(
+		user.ID, user.TenantID, user.Email, user.Role, sessionTTL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate tokens: %w", err)
 	}
 
 	// Validate old token, rotate it, and store new token (with reuse detection)
-	expiresAt := time.Now().Add(authpolicy.SessionLifetime(a.db, a.jwt.GetRefreshExpiry()))
+	expiresAt := time.Now().Add(sessionTTL)
 	_, err = a.refreshTokenService.ValidateAndRotateToken(
 		refreshToken,
 		user.ID,
@@ -895,10 +905,11 @@ func (a *AuthService) RefreshToken(refreshToken string, clientIP, userAgent stri
 	}
 
 	return &models.AuthResponse{
-		User:         user,
-		AccessToken:  accessToken,
-		RefreshToken: newRefreshToken,
-		ExpiresIn:    int64(a.jwt.GetAccessExpiry().Seconds()),
+		User:             user,
+		AccessToken:      accessToken,
+		RefreshToken:     newRefreshToken,
+		ExpiresIn:        int64(a.jwt.GetAccessExpiry().Seconds()),
+		RefreshExpiresIn: int64(sessionTTL.Seconds()),
 	}, nil
 }
 

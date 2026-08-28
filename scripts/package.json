@@ -6,7 +6,7 @@
   "description": "Build and audit scripts for Vista Platform",
   "license": "SEE LICENSE IN LICENSE.md",
   "dependencies": {
-    "fs-extra": "^11.2.0",
-    "yaml": "^2.8.3"
+    "fs-extra": "^11.4.0",
+    "yaml": "^2.9.0"
   }
 }

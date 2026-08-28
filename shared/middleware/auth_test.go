@@ -131,18 +131,30 @@ func TestRequireJWTAuth_StrictCookiePair(t *testing.T) {
 }
 
 // stubRevocationChecker is a test RevocationChecker that reports a fixed set of
-// jtis as revoked.
-type stubRevocationChecker struct{ revoked map[string]bool }
+// jtis and users as revoked.
+type stubRevocationChecker struct {
+	revoked      map[string]bool
+	revokedUsers map[uuid.UUID]bool
+}
 
 func (s stubRevocationChecker) IsRevoked(_ context.Context, jti string) bool {
 	return s.revoked[jti]
 }
 
+func (s stubRevocationChecker) IsUserRevoked(_ context.Context, userID uuid.UUID) bool {
+	return s.revokedUsers[userID]
+}
+
 // signAccessTokenWithJTI mints a valid access token carrying the given jti.
 func signAccessTokenWithJTI(t *testing.T, jti string) string {
 	t.Helper()
+	return signAccessTokenForUserWithJTI(t, uuid.New(), jti)
+}
+
+func signAccessTokenForUserWithJTI(t *testing.T, userID uuid.UUID, jti string) string {
+	t.Helper()
 	claims := &models.JWTClaims{
-		UserID:   uuid.New(),
+		UserID:   userID,
 		TenantID: uuid.New(),
 		Email:    "user@example.com",
 		Role:     "viewer",
@@ -192,6 +204,35 @@ func TestRequireJWTAuth_RevokedJTIRejected(t *testing.T) {
 	newRouter().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("live jti: got %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestRequireJWTAuth_RevokedUserRejected(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	erasedUserID := uuid.New()
+	checker := stubRevocationChecker{revokedUsers: map[uuid.UUID]bool{erasedUserID: true}}
+
+	newRouter := func() *gin.Engine {
+		r := gin.New()
+		r.Use(RequireJWTAuth(AuthConfig{JWTSecret: testJWTSecret, RevocationChecker: checker}))
+		r.GET("/protected", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+		return r
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer "+signAccessTokenForUserWithJTI(t, erasedUserID, "still-valid-jti"))
+	w := httptest.NewRecorder()
+	newRouter().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked user: got %d, want 401 (body: %s)", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer "+signAccessTokenForUserWithJTI(t, uuid.New(), "other-jti"))
+	w = httptest.NewRecorder()
+	newRouter().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("different user: got %d, want 200 (body: %s)", w.Code, w.Body.String())
 	}
 }
 

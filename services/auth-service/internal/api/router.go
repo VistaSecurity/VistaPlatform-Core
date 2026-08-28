@@ -296,7 +296,7 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 			// one named person's data, so they sit on users.manage rather than
 			// the users.read the roster uses.
 			users.GET("/:id/data-export", middleware.RequirePermission(rbacService, "users.manage"), ExportUserData(db))
-			users.POST("/:id/erase", middleware.RequirePermission(rbacService, "users.manage"), EraseUser(db))
+			users.POST("/:id/erase", middleware.RequirePermission(rbacService, "users.manage"), EraseUser(db, authService))
 		}
 
 		// Self-service data export. Its own group rather than /users/me/... —

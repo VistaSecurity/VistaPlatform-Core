@@ -22,7 +22,7 @@
     "@vistasecurity/api-contract": "*"
   },
   "peerDependencies": {
-    "@tanstack/react-query": ">=5",
+    "@tanstack/react-query": "^5.101.4",
     "react": ">=18",
     "react-dom": ">=18"
   },

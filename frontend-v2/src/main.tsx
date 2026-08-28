@@ -24,11 +24,19 @@ const notifier = {
 // dead too, clear the session signal and land on /login, which explains the
 // expiry via ?reason=. Auth-flow endpoints are exempt inside the middleware, so
 // a wrong password never triggers this.
+//
+// checkSession is the recovered-then-401 confirmation probe: when a refresh
+// "succeeds" but the replayed request still 401s, this decides between "the
+// session is dead, redirect to /login" (whoami 401s too) and "one endpoint is
+// buggy, don't evict" (whoami is fine). Deliberately a bare fetch — an
+// api-contract client here would re-enter the 401 middleware and recurse.
 const sessionAuthClient = createAuthClient();
 setSessionExpiredHandler(
   createSessionExpiryHandler({
     hasSession: () => tokenManager.hasToken(),
     refresh: () => sessionAuthClient.refresh(),
+    checkSession: () =>
+      fetch('/api/v1/auth-service/auth/me', { credentials: 'include' }).then((r) => r.status !== 401),
     onSessionExpired: (reason) => {
       tokenManager.clearTokens();
       // Only bounce off APP routes. Public routes (signup / invite / reset /

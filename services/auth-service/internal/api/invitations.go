@@ -247,15 +247,17 @@ func AcceptInvitation(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, jwtServi
 			return
 		}
 
+		sessionTTL := authpolicy.SessionLifetime(db, jwtService.GetRefreshExpiry())
+
 		// Log the new member in.
-		accessToken, refreshToken, tErr := jwtService.GenerateTokens(userID, inv.tenantID, inv.email, role)
+		accessToken, refreshToken, tErr := jwtService.GenerateTokensWithRefreshExpiry(userID, inv.tenantID, inv.email, role, sessionTTL)
 		if tErr != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Account created but sign-in failed; please sign in."})
 			return
 		}
 		rts := auth.NewRefreshTokenService(db)
-		_, _ = rts.StoreRefreshToken(userID, refreshToken, nil, time.Now().Add(authpolicy.SessionLifetime(db, jwtService.GetRefreshExpiry())), c.ClientIP(), c.Request.UserAgent())
-		setAuthCookiesResponseWriter(c.Writer, cfg, int(jwtService.GetAccessExpiry().Seconds()), accessToken, refreshToken)
+		_, _ = rts.StoreRefreshToken(userID, refreshToken, nil, time.Now().Add(sessionTTL), c.ClientIP(), c.Request.UserAgent())
+		setAuthCookiesResponseWriter(c.Writer, cfg, int(jwtService.GetAccessExpiry().Seconds()), int(sessionTTL.Seconds()), accessToken, refreshToken)
 
 		c.JSON(http.StatusOK, gin.H{"message": "Invitation accepted", "redirect": "/dashboard"})
 	}

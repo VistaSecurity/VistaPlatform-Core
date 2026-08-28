@@ -63,7 +63,9 @@ type Sensor struct {
 	// registered reports whether registration has completed. An unregistered
 	// sensor captures packets it can never submit, so the run loop reads this to
 	// keep saying so rather than logging as if all were well.
-	registered bool
+	registered   bool
+	restartChan  chan struct{}
+	restartDelay time.Duration
 }
 
 // isRegisteredNow reports whether registration has completed.
@@ -327,6 +329,7 @@ func main() {
 		config:      cfg,
 		configPath:  *configFile, // Store the config file path for saving updates
 		discoveries: make([]*models.CryptoDiscovery, 0),
+		restartChan: make(chan struct{}, 1),
 		startTime:   time.Now(), // Track start time for uptime
 	}
 
@@ -458,6 +461,9 @@ func main() {
 			log.Printf("🛑 Received signal %v, shutting down gracefully...", sig)
 			sensor.cleanup()
 			log.Println("👋 Sensor shutdown complete")
+			return
+		case <-sensor.restartChan:
+			sensor.shutdownForRestart()
 			return
 		}
 	}
@@ -854,6 +860,20 @@ func (s *Sensor) processDiscoveries() {
 	s.retryCount = 0
 }
 
+func (s *Sensor) pendingDiscoveriesSnapshot() []*models.CryptoDiscovery {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if len(s.pendingRetry) == 0 && len(s.discoveries) == 0 {
+		return nil
+	}
+
+	remaining := make([]*models.CryptoDiscovery, 0, len(s.pendingRetry)+len(s.discoveries))
+	remaining = append(remaining, s.pendingRetry...)
+	remaining = append(remaining, s.discoveries...)
+	return remaining
+}
+
 // sendHeartbeat builds sensor health metrics and sends a heartbeat to the control plane.
 // It runs independently of discovery submission so the control plane always receives
 // regular health signals even when there are no new discoveries.
@@ -1029,19 +1049,20 @@ func (s *Sensor) cleanup() {
 		s.packetCapture.Stop()
 	}
 
-	// Submit remaining discoveries
-	if len(s.discoveries) > 0 {
+	// Submit remaining discoveries, including batches already queued for retry.
+	remainingDiscoveries := s.pendingDiscoveriesSnapshot()
+	if len(remainingDiscoveries) > 0 {
 		// Validate sensor ID before submitting (must be valid UUID)
 		if s.config.SensorID == "" {
-			log.Printf("⚠️  Discarding %d unsubmitted discoveries: no sensor ID. They are not persisted anywhere.", len(s.discoveries))
+			log.Printf("⚠️  Discarding %d unsubmitted discoveries: no sensor ID. They are not persisted anywhere.", len(remainingDiscoveries))
 		} else if _, err := uuid.Parse(s.config.SensorID); err != nil {
-			log.Printf("⚠️  Discarding %d unsubmitted discoveries: invalid sensor ID format '%s' (must be UUID). They are not persisted anywhere.", len(s.discoveries), s.config.SensorID)
+			log.Printf("⚠️  Discarding %d unsubmitted discoveries: invalid sensor ID format '%s' (must be UUID). They are not persisted anywhere.", len(remainingDiscoveries), s.config.SensorID)
 		} else {
-			log.Printf("📤 Submitting %d remaining discoveries...", len(s.discoveries))
-			if err := s.apiClient.SubmitDiscoveries(s.discoveries); err != nil {
+			log.Printf("📤 Submitting %d remaining discoveries...", len(remainingDiscoveries))
+			if err := s.apiClient.SubmitDiscoveries(remainingDiscoveries); err != nil {
 				log.Printf("❌ Failed to submit remaining discoveries: %v", err)
 			} else {
-				log.Printf("✅ Successfully submitted %d remaining discoveries", len(s.discoveries))
+				log.Printf("✅ Successfully submitted %d remaining discoveries", len(remainingDiscoveries))
 			}
 		}
 	}
@@ -1056,6 +1077,31 @@ func (s *Sensor) cleanup() {
 	}
 
 	log.Println("✅ Cleanup completed")
+}
+
+func (s *Sensor) requestRestart() {
+	delay := s.restartDelay
+	if delay <= 0 {
+		delay = 2 * time.Second
+	}
+	go func() {
+		time.Sleep(delay)
+		log.Printf("🔄 Restart delay elapsed; shutting down gracefully for supervisor relaunch")
+		if s.restartChan == nil {
+			s.cleanup()
+			os.Exit(0)
+		}
+		select {
+		case s.restartChan <- struct{}{}:
+		default:
+			log.Printf("⚠️ Restart already requested; ignoring duplicate restart signal")
+		}
+	}()
+}
+
+func (s *Sensor) shutdownForRestart() {
+	s.cleanup()
+	log.Println("👋 Sensor restart cleanup complete")
 }
 
 // processCommands processes commands received from control plane
@@ -1122,13 +1168,9 @@ func (s *Sensor) handleRestart(command models.Command) *models.CommandResponse {
 	log.Printf("🔄 Restart command received; exiting in 2s for supervisor relaunch")
 
 	// Exit shortly after the acknowledgement is sent so the console records the
-	// restart. The sensor relies on its process supervisor (systemd / docker /
-	// kubernetes) to relaunch it.
-	go func() {
-		time.Sleep(2 * time.Second)
-		log.Printf("🔄 Exiting now for restart")
-		os.Exit(0)
-	}()
+	// restart. The main run loop performs the shutdown so packet-capture channels
+	// are not closed underneath its select while buffered discoveries are flushed.
+	s.requestRestart()
 
 	return &models.CommandResponse{
 		ID:        uuid.New(),
@@ -2362,6 +2404,7 @@ func startSensorWithConfig(verbose bool) {
 		config:      cfg,
 		configPath:  configPath, // Store the config file path for saving updates
 		discoveries: make([]*models.CryptoDiscovery, 0),
+		restartChan: make(chan struct{}, 1),
 		startTime:   time.Now(), // Track start time for uptime
 	}
 
@@ -2489,6 +2532,9 @@ func startSensorWithConfig(verbose bool) {
 			log.Printf("🛑 Received signal %v, shutting down gracefully...", sig)
 			sensor.cleanup()
 			log.Println("👋 Sensor shutdown complete")
+			return
+		case <-sensor.restartChan:
+			sensor.shutdownForRestart()
 			return
 		}
 	}

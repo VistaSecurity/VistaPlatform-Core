@@ -63,6 +63,33 @@ func TestGenerateAndValidateAccessToken(t *testing.T) {
 	}
 }
 
+func TestGenerateTokensWithRefreshExpiryUsesPolicyTTL(t *testing.T) {
+	svc := newTestJWTService()
+	userID := uuid.New()
+	tenantID := uuid.New()
+	refreshTTL := 14 * 24 * time.Hour
+
+	_, refresh, err := svc.GenerateTokensWithRefreshExpiry(userID, tenantID, "user@example.com", "tenant_admin", refreshTTL)
+	if err != nil {
+		t.Fatalf("GenerateTokensWithRefreshExpiry failed: %v", err)
+	}
+
+	claims, err := svc.ValidateToken(refresh)
+	if err != nil {
+		t.Fatalf("ValidateToken(refresh) failed: %v", err)
+	}
+	if claims.Type != "refresh" {
+		t.Fatalf("refresh Type = %q, want refresh", claims.Type)
+	}
+	if claims.ExpiresAt == nil {
+		t.Fatal("refresh token missing exp")
+	}
+	remaining := time.Until(claims.ExpiresAt.Time)
+	if remaining < refreshTTL-time.Minute || remaining > refreshTTL+time.Minute {
+		t.Fatalf("refresh token TTL = %v, want approximately %v", remaining, refreshTTL)
+	}
+}
+
 func TestValidateExpiredToken(t *testing.T) {
 	svc := NewJWTService("test-secret-key-32-chars-minimum!", -1*time.Second, -1*time.Second)
 	userID := uuid.New()

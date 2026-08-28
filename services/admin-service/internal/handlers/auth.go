@@ -141,7 +141,7 @@ func Login(db *sql.DB, jwtSecret string, refreshTokenService *auth.PlatformRefre
 			fmt.Printf("[ADMIN] INFO: Stored refresh token for user %s, family_id: %s\n", user.ID, familyID)
 		}
 
-		setPlatformAuthCookies(c, accessToken, 3600, refreshToken, jwtSecret)
+		setPlatformAuthCookies(c, accessToken, 3600, int(sessionTTL.Seconds()), refreshToken, jwtSecret)
 
 		c.JSON(http.StatusOK, LoginResponse{
 			User:                user,
@@ -172,17 +172,19 @@ func recordPlatformFailedLogin(db *sql.DB, userID uuid.UUID) {
 	}
 }
 
-// platformRefreshCookieMaxAge is the lifetime of the platform refresh-token
-// cookie, and hence of the whole platform-admin session. platform_csrf_token
-// shares it — see setPlatformAuthCookies.
-const platformRefreshCookieMaxAge = 7 * 24 * 3600
+// defaultPlatformRefreshCookieMaxAge is the historical fallback for tests or
+// legacy call sites that do not pass a policy-controlled session lifetime.
+const defaultPlatformRefreshCookieMaxAge = 7 * 24 * 3600
 
 // setPlatformAuthCookies sets platform_access_token (httpOnly), optional platform_refresh_token
 // (httpOnly), and platform_csrf_token. Using the "platform_" prefix keeps these cookies distinct
 // from the tenant auth-service cookies (access_token / refresh_token / csrf_token) which share
 // the same domain. Without distinct names, whichever service sets a cookie last overwrites the
 // other service's session, causing cascading 401 loops for the other service.
-func setPlatformAuthCookies(c *gin.Context, accessToken string, maxAgeSeconds int, refreshToken, jwtSecret string) {
+func setPlatformAuthCookies(c *gin.Context, accessToken string, maxAgeSeconds, refreshMaxAgeSeconds int, refreshToken, jwtSecret string) {
+	if refreshMaxAgeSeconds <= 0 {
+		refreshMaxAgeSeconds = defaultPlatformRefreshCookieMaxAge
+	}
 	// Secure flag is set when either:
 	//   1. ENFORCE_SECURE_COOKIES=true is set (production hardening — never trust
 	//      a misconfigured upstream proxy to drop the X-Forwarded-Proto header), or
@@ -211,7 +213,7 @@ func setPlatformAuthCookies(c *gin.Context, accessToken string, maxAgeSeconds in
 			Value:    refreshToken,
 			Domain:   cookieDomain,
 			Path:     "/",
-			MaxAge:   platformRefreshCookieMaxAge,
+			MaxAge:   refreshMaxAgeSeconds,
 			HttpOnly: true,
 			Secure:   secure,
 			SameSite: http.SameSiteStrictMode,
@@ -233,7 +235,7 @@ func setPlatformAuthCookies(c *gin.Context, accessToken string, maxAgeSeconds in
 			Value:    csrfValue,
 			Domain:   cookieDomain,
 			Path:     "/",
-			MaxAge:   platformRefreshCookieMaxAge,
+			MaxAge:   refreshMaxAgeSeconds,
 			HttpOnly: false,
 			Secure:   secure,
 			SameSite: http.SameSiteStrictMode,
@@ -361,7 +363,7 @@ func RefreshToken(db *sql.DB, jwtSecret string, refreshTokenService *auth.Platfo
 			return
 		}
 
-		setPlatformAuthCookies(c, accessToken, 3600, newRefreshToken, jwtSecret)
+		setPlatformAuthCookies(c, accessToken, 3600, int(sessionTTL.Seconds()), newRefreshToken, jwtSecret)
 
 		c.JSON(http.StatusOK, LoginResponse{
 			User:                user,
@@ -478,7 +480,7 @@ func ChangePassword(db *sql.DB, jwtSecret string, refreshTokenService *auth.Plat
 				); storeErr != nil {
 					fmt.Printf("[ADMIN] ERROR: Failed to store refresh token after password change for user %s: %v\n", userIDStr, storeErr)
 				}
-				setPlatformAuthCookies(c, accessToken, 3600, refreshToken, jwtSecret)
+				setPlatformAuthCookies(c, accessToken, 3600, int(sessionTTL.Seconds()), refreshToken, jwtSecret)
 			} else {
 				fmt.Printf("[ADMIN] ERROR: Failed to re-issue session after password change for user %s: %v\n", userIDStr, tokErr)
 			}

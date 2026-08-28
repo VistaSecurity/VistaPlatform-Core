@@ -1,13 +1,20 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/vistasecurity/vistaplatform/sensor/internal/api"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/config"
+	"github.com/vistasecurity/vistaplatform/sensor/internal/models"
 	"gopkg.in/yaml.v3"
 )
 
@@ -191,6 +198,124 @@ func TestVerboseConfigOverride(t *testing.T) {
 	off := mustLoadConfig(t, write("off.yaml", base+"verbose: false\n"))
 	if off.Verbose == nil || *off.Verbose {
 		t.Errorf("verbose: false parsed as %v; want an explicit false", off.Verbose)
+	}
+}
+
+func TestRestartCommandFlushesBufferedDiscoveriesAfterAck(t *testing.T) {
+	const sensorID = "11111111-1111-1111-1111-111111111111"
+
+	var acked atomic.Bool
+	submitted := make(chan models.DiscoveryBatch, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/commands/cmd-1/ack"):
+			acked.Store(true)
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/discoveries"):
+			var batch models.DiscoveryBatch
+			if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			submitted <- batch
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{SensorID: sensorID, ControlPlaneURL: server.URL}
+	s := &Sensor{
+		config:       cfg,
+		apiClient:    api.NewOutboundClient(cfg),
+		discoveries:  []*models.CryptoDiscovery{{ID: "disc-1", SensorID: sensorID, Protocol: "TLS", DestIP: "203.0.113.10", Port: 443}},
+		restartChan:  make(chan struct{}, 1),
+		restartDelay: time.Nanosecond,
+	}
+
+	s.processCommand(models.Command{ID: "cmd-1", Type: "restart", Payload: map[string]interface{}{}})
+
+	if !acked.Load() {
+		t.Fatal("restart command was not acknowledged before shutdown")
+	}
+	select {
+	case <-s.restartChan:
+	case <-time.After(time.Second):
+		t.Fatal("restart command did not signal the main loop to shut down")
+	}
+
+	s.shutdownForRestart()
+
+	select {
+	case batch := <-submitted:
+		if batch.SensorID != sensorID {
+			t.Fatalf("submitted sensor ID = %q, want %q", batch.SensorID, sensorID)
+		}
+		if batch.Count != 1 || len(batch.Discoveries) != 1 || batch.Discoveries[0].ID != "disc-1" {
+			t.Fatalf("submitted batch = %+v, want the buffered discovery", batch)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("restart cleanup did not submit buffered discoveries")
+	}
+}
+
+func TestCleanupSubmitsPendingRetryQueue(t *testing.T) {
+	const sensorID = "00000000-0000-0000-0000-000000000001"
+
+	received := make(chan models.DiscoveryBatch, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		wantPath := fmt.Sprintf("/api/v1/sensor-manager/sensors/%s/discoveries", sensorID)
+		if r.URL.Path != wantPath {
+			t.Errorf("path = %s, want %s", r.URL.Path, wantPath)
+		}
+
+		var batch models.DiscoveryBatch
+		if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
+			t.Errorf("decode request body: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		received <- batch
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		SensorID:        sensorID,
+		ControlPlaneURL: server.URL,
+	}
+	s := &Sensor{
+		config:    cfg,
+		apiClient: api.NewOutboundClient(cfg),
+		pendingRetry: []*models.CryptoDiscovery{
+			{ID: "retry-1", SensorID: sensorID, Protocol: "TLS", DestIP: "192.0.2.10", Port: 443},
+			{ID: "retry-2", SensorID: sensorID, Protocol: "SSH", DestIP: "192.0.2.11", Port: 22},
+		},
+		discoveries: make([]*models.CryptoDiscovery, 0),
+	}
+
+	s.cleanup()
+
+	select {
+	case batch := <-received:
+		if batch.SensorID != sensorID {
+			t.Fatalf("batch.SensorID = %q, want %q", batch.SensorID, sensorID)
+		}
+		if batch.Count != 2 {
+			t.Fatalf("batch.Count = %d, want 2", batch.Count)
+		}
+		if len(batch.Discoveries) != 2 {
+			t.Fatalf("len(batch.Discoveries) = %d, want 2", len(batch.Discoveries))
+		}
+		if got := []string{batch.Discoveries[0].ID, batch.Discoveries[1].ID}; got[0] != "retry-1" || got[1] != "retry-2" {
+			t.Fatalf("submitted discovery IDs = %v, want [retry-1 retry-2]", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cleanup did not submit the pending retry queue")
 	}
 }
 

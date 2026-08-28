@@ -23,11 +23,16 @@ const notifier = {
 // family): a mid-session 401 tries one silent refresh; if the refresh token is
 // dead too, clear the session signal and land on /login with a "session
 // expired" notice. Auth-flow endpoints are exempt inside the middleware.
+// checkSession mirrors frontend-v2: the recovered-then-401 confirmation probe,
+// against the PLATFORM whoami. Bare fetch on purpose — an api-contract client
+// would re-enter the 401 middleware and recurse.
 const sessionAuthClient = createPlatformAuthClient();
 setSessionExpiredHandler(
   createSessionExpiryHandler({
     hasSession: () => platformTokenManager.hasToken(),
     refresh: () => sessionAuthClient.refresh(),
+    checkSession: () =>
+      fetch('/api/v1/admin-service/admin/auth/me', { credentials: 'include' }).then((r) => r.status !== 401),
     onSessionExpired: (reason) => {
       platformTokenManager.clearTokens();
       if (window.location.pathname !== '/login') {

@@ -320,6 +320,13 @@ func RequireAuth(cfg *config.Config, jwtService *auth.JWTService, options ...Aut
 			c.Abort()
 			return
 		}
+		if userRevocation, ok := revocation.(sharedmw.UserRevocationChecker); ok &&
+			claims.UserID != uuid.Nil &&
+			userRevocation.IsUserRevoked(c.Request.Context(), claims.UserID) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token revoked"})
+			c.Abort()
+			return
+		}
 
 		if claims.PasswordChangeRequired && !sharedmw.IsPasswordChangeAllowedPath(c.Request.URL.Path) {
 			c.JSON(http.StatusForbidden, gin.H{

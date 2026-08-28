@@ -89,6 +89,22 @@ func (a *AuthService) RevokeJTI(ctx context.Context, jti string, ttl time.Durati
 	return a.Redis().SetEx(ctx, sharedmw.RevokedTokenKey(jti), "1", ttl).Err()
 }
 
+// RevokeUserAccess rejects every still-valid access token for userID. Use this
+// when the caller cannot enumerate token JTIs (for example, data-subject erasure).
+func (a *AuthService) RevokeUserAccess(ctx context.Context, userID uuid.UUID) error {
+	if a.Redis() == nil {
+		return nil
+	}
+	ttl := time.Hour
+	if a.jwt != nil {
+		ttl = a.jwt.GetAccessExpiry()
+	}
+	if ttl <= 0 {
+		ttl = time.Hour
+	}
+	return a.Redis().SetEx(ctx, sharedmw.RevokedUserKey(userID), "1", ttl).Err()
+}
+
 // RemainingImpersonationTTL returns how much of an impersonation token's
 // lifetime is left, derived from the authoritative impersonation-start audit
 // record (occurred_at + ttl_seconds). The second return is false when no start

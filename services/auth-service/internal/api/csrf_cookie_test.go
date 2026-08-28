@@ -43,7 +43,7 @@ func TestSetAuthCookies_CSRFCookieAttributes(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
-	h.setAuthCookies(c, accessTokenWithJTI(t), "refresh-jwt")
+	h.setAuthCookies(c, accessTokenWithJTI(t), "refresh-jwt", 0)
 
 	cookies := (&http.Response{Header: w.Header()}).Cookies()
 
@@ -100,7 +100,7 @@ func TestSetAuthCookies_CSRFCookieOutlivesAccessToken(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
-	h.setAuthCookies(c, accessTokenWithJTI(t), "refresh-jwt")
+	h.setAuthCookies(c, accessTokenWithJTI(t), "refresh-jwt", 0)
 
 	got := map[string]int{}
 	for _, ck := range (&http.Response{Header: w.Header()}).Cookies() {
@@ -110,12 +110,40 @@ func TestSetAuthCookies_CSRFCookieOutlivesAccessToken(t *testing.T) {
 	if got["access_token"] != int((15 * time.Minute).Seconds()) {
 		t.Errorf("access_token MaxAge = %d, want %d", got["access_token"], int((15 * time.Minute).Seconds()))
 	}
-	if got["refresh_token"] != refreshCookieMaxAge {
-		t.Errorf("refresh_token MaxAge = %d, want %d", got["refresh_token"], refreshCookieMaxAge)
+	if got["refresh_token"] != defaultRefreshCookieMaxAge {
+		t.Errorf("refresh_token MaxAge = %d, want %d", got["refresh_token"], defaultRefreshCookieMaxAge)
 	}
-	if got["csrf_token"] != refreshCookieMaxAge {
+	if got["csrf_token"] != defaultRefreshCookieMaxAge {
 		t.Errorf("csrf_token MaxAge = %d, want %d (the refresh-token lifetime, NOT the access-token expiry)",
-			got["csrf_token"], refreshCookieMaxAge)
+			got["csrf_token"], defaultRefreshCookieMaxAge)
+	}
+}
+
+func TestSetAuthCookies_RefreshAndCSRFCookiesUseSessionLifetime(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	fourteenDays := int((14 * 24 * time.Hour).Seconds())
+	h := &AuthHandlers{
+		config: &config.Config{JWTExpiry: 15 * time.Minute},
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	h.setAuthCookies(c, accessTokenWithJTI(t), "refresh-jwt", fourteenDays)
+
+	got := map[string]int{}
+	for _, ck := range (&http.Response{Header: w.Header()}).Cookies() {
+		got[ck.Name] = ck.MaxAge
+	}
+
+	if got["access_token"] != int((15 * time.Minute).Seconds()) {
+		t.Errorf("access_token MaxAge = %d, want %d", got["access_token"], int((15 * time.Minute).Seconds()))
+	}
+	if got["refresh_token"] != fourteenDays {
+		t.Errorf("refresh_token MaxAge = %d, want %d", got["refresh_token"], fourteenDays)
+	}
+	if got["csrf_token"] != fourteenDays {
+		t.Errorf("csrf_token MaxAge = %d, want %d (the policy session lifetime)", got["csrf_token"], fourteenDays)
 	}
 }
 
@@ -123,7 +151,7 @@ func TestSetAuthCookies_CSRFCookieOutlivesAccessToken(t *testing.T) {
 // helper rather than the AuthHandlers method.
 func TestSetAuthCookiesResponseWriter_CSRFCookieOutlivesAccessToken(t *testing.T) {
 	w := httptest.NewRecorder()
-	setAuthCookiesResponseWriter(w, &config.Config{}, 900, accessTokenWithJTI(t), "refresh-jwt")
+	setAuthCookiesResponseWriter(w, &config.Config{}, 900, 0, accessTokenWithJTI(t), "refresh-jwt")
 
 	got := map[string]int{}
 	for _, ck := range (&http.Response{Header: w.Header()}).Cookies() {
@@ -133,7 +161,25 @@ func TestSetAuthCookiesResponseWriter_CSRFCookieOutlivesAccessToken(t *testing.T
 	if got["access_token"] != 900 {
 		t.Errorf("access_token MaxAge = %d, want 900", got["access_token"])
 	}
-	if got["csrf_token"] != refreshCookieMaxAge {
-		t.Errorf("csrf_token MaxAge = %d, want %d (the refresh-token lifetime)", got["csrf_token"], refreshCookieMaxAge)
+	if got["csrf_token"] != defaultRefreshCookieMaxAge {
+		t.Errorf("csrf_token MaxAge = %d, want %d (the refresh-token lifetime)", got["csrf_token"], defaultRefreshCookieMaxAge)
+	}
+}
+
+func TestSetAuthCookiesResponseWriter_UsesSessionLifetime(t *testing.T) {
+	thirtyDays := int((30 * 24 * time.Hour).Seconds())
+	w := httptest.NewRecorder()
+	setAuthCookiesResponseWriter(w, &config.Config{}, 900, thirtyDays, accessTokenWithJTI(t), "refresh-jwt")
+
+	got := map[string]int{}
+	for _, ck := range (&http.Response{Header: w.Header()}).Cookies() {
+		got[ck.Name] = ck.MaxAge
+	}
+
+	if got["refresh_token"] != thirtyDays {
+		t.Errorf("refresh_token MaxAge = %d, want %d", got["refresh_token"], thirtyDays)
+	}
+	if got["csrf_token"] != thirtyDays {
+		t.Errorf("csrf_token MaxAge = %d, want %d (the policy session lifetime)", got["csrf_token"], thirtyDays)
 	}
 }

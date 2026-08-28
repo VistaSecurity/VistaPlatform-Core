@@ -4807,12 +4807,11 @@ CREATE TABLE IF NOT EXISTS public.sensor_discoveries_partitioned (
 PARTITION BY HASH (tenant_id);
 
 
--- VIEW: sensor_discoveries
--- DROP first so re-applying the file is idempotent: this view is redefined in the
--- POST-MIGRATIONS block with one extra column (claimed_at) ALTER-added there;
--- without the DROP, the second apply tries to shrink the already-widened view
--- and fails with "cannot drop columns from view". Same pattern as network_assets
--- above.
+-- Older installs created the partitioned parent before claimed_at existed; the
+-- CREATE TABLE IF NOT EXISTS above is a no-op for them, so add the column
+-- upgrade-safely before recreating the compatibility view that reads it.
+ALTER TABLE IF EXISTS public.sensor_discoveries_partitioned
+    ADD COLUMN IF NOT EXISTS claimed_at timestamp with time zone;
 DROP VIEW IF EXISTS public.sensor_discoveries;
 CREATE OR REPLACE VIEW public.sensor_discoveries AS
  SELECT sensor_discoveries_partitioned.id,
@@ -7654,6 +7653,37 @@ DO $$ BEGIN
     ALTER TABLE public.network_assets_partitioned
         ADD CONSTRAINT network_assets_partitioned_pkey PRIMARY KEY (tenant_id, id);
   END IF;
+END $$;
+
+-- Existing installs that once ran ALTER TABLE ONLY on the partitioned parent
+-- can have an INVALID parent pkey with no attached partition indexes. Such a
+-- pkey is not a usable FK target, so attach per-partition pkeys before the
+-- tenant-scoped composite FKs below are created.
+DO $$
+DECLARE
+    i int;
+BEGIN
+    IF to_regclass('public.network_assets_partitioned_pkey') IS NOT NULL
+       AND NOT (SELECT indisvalid FROM pg_index
+                WHERE indexrelid = to_regclass('public.network_assets_partitioned_pkey')) THEN
+        FOR i IN 0..7 LOOP
+            IF to_regclass(format('public.network_assets_part_%s', i)) IS NOT NULL THEN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = format('network_assets_part_%s_pkey', i)
+                      AND conrelid = to_regclass(format('public.network_assets_part_%s', i))
+                ) THEN
+                    EXECUTE format('ALTER TABLE ONLY public.network_assets_part_%s ADD CONSTRAINT network_assets_part_%s_pkey PRIMARY KEY (tenant_id, id)', i, i);
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_inherits
+                    WHERE inhrelid = to_regclass(format('public.network_assets_part_%s_pkey', i))
+                ) THEN
+                    EXECUTE format('ALTER INDEX public.network_assets_partitioned_pkey ATTACH PARTITION public.network_assets_part_%s_pkey', i);
+                END IF;
+            END IF;
+        END LOOP;
+    END IF;
 END $$;
 
 
@@ -17886,9 +17916,29 @@ CREATE UNIQUE INDEX IF NOT EXISTS keys_tenant_public_fingerprint_uniq
 
 
 -- =========================================================================
+ALTER TABLE IF EXISTS public.service_accounts
+    ADD COLUMN IF NOT EXISTS token_lookup text;
+
 CREATE INDEX IF NOT EXISTS idx_service_accounts_token_lookup
     ON public.service_accounts USING btree (token_lookup)
     WHERE (token_lookup IS NOT NULL);
+
+-- crypto_configurations (the TABLE — distinct from the crypto-configurations
+-- API routes, which serve crypto_implementations): its only writer was the
+-- unrouted, never-constructed CryptoConfigurationService. Nothing else reads or
+-- writes it; keep existing installs from retaining the dead table indefinitely.
+DROP TABLE IF EXISTS public.crypto_configurations CASCADE;
+DROP FUNCTION IF EXISTS public.update_crypto_configurations_updated_at();
+
+-- Widen valid_certificate_role to accept the roles the code actually writes.
+-- Existing installs may still have the original CHECK, which rejected 'leaf'
+-- and made every sensor-discovered leaf certificate fail to link to its crypto
+-- configuration.
+ALTER TABLE IF EXISTS public.crypto_implementation_certificates
+  DROP CONSTRAINT IF EXISTS valid_certificate_role;
+ALTER TABLE IF EXISTS public.crypto_implementation_certificates
+  ADD CONSTRAINT valid_certificate_role
+    CHECK (certificate_role IN ('leaf', 'primary', 'additional', 'intermediate', 'root'));
 
 
 -- ============================================================================

@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-08-27
+
+A dependency and correctness pass. The headline for anyone watching the public
+repo's security tab: the two **critical** pgx/v5 alerts were never a real
+exposure — they were stale `// indirect` metadata for a driver this project has
+never imported — and they are gone.
+
+### Security
+
+- **Erasure now revokes live sessions.** Data-subject erasure revoked API
+  tokens but left already-minted access JWTs usable until they expired. It now
+  revokes the refresh-token rows and writes a per-user Redis denylist key that
+  both the shared data-plane JWT middleware and auth-service's own middleware
+  check, so an erased user's open session stops working immediately.
+- **Two critical pgx/v5 advisories retired without a version bump.**
+  `discovery-processor-service/go.mod` carried four `// indirect` entries for
+  the pgx ecosystem that nothing imports — `go mod why` reports the module does
+  not need them, and no Go source in any module references `jackc/pgx`. This
+  project talks to Postgres through `lib/pq` + `sqlx`. Because GitHub's alert
+  scanner reads `go.mod` rather than the resolved build list, that dead metadata
+  raised two criticals and a low at runtime scope against a shipped service.
+  `govulncheck` stayed green throughout, being a *called*-vulnerability gate —
+  which is precisely why deleting the entries is the correct fix rather than a
+  bump. Nothing about the running code changes.
+- **js-yaml 4.1.1 → 4.3.1** and **nanoid 3.3.17 → 3.3.18**, closing three high
+  and one medium advisory. Both are build-time dependencies; neither is bundled
+  into a shipped image.
+- **`cosign-installer` is now guarded, not merely commented.** `release-core.yml`
+  signs the release checksums with `--output-signature`/`--output-certificate`,
+  and cosign v4 defaults `--new-bundle-format` on, which turns both flags into
+  no-ops and then fails on the empty `--bundle` path — the failure that burned
+  0.10.0 and 0.10.1. A Dependabot PR proposed exactly that bump again this
+  cycle. `make cosign-bundle-format-test` now fails the build if the installed
+  cosign major moves past 3 while a `sign-blob` still depends on the legacy
+  output shape, and passes once `--new-bundle-format=false` is explicit — so the
+  major can still move deliberately.
+
+### Fixed
+
+- **Session timeout stranded the tenant UI on error cards.** When the refresh
+  exchange answered 200 but the replayed request still 401'd — a revoked
+  session family, a key mismatch — the redirect latch never tripped, because it
+  only fired when `refresh()` itself rejected. Every load failed with no
+  navigation to sign-in.
+- **Configured session lifetime was ignored.** Security → Policy could save a
+  session timeout longer than 7 days while refresh/CSRF cookies and some tenant
+  refresh JWTs kept a hardcoded 7-day lifetime. The resolved policy value is now
+  threaded through tenant auth, invite login, tenant and platform SSO, platform
+  admin login, refresh, and password change.
+- **The sensor dropped discoveries on the way out.** Shutdown flushed only the
+  pending buffer and ignored the retry queue, while logging "Cleanup completed";
+  and a supervisor restart called `os.Exit(0)` directly instead of routing
+  through graceful shutdown. Both paths now flush.
+- **Schema upgrade repairs restored.** The collapsed schema lost several
+  upgrade-safe blocks, so existing installs could fail `schema-migration` on a
+  missing `sensor_discoveries_partitioned.claimed_at`, an invalid
+  `network_assets_partitioned` parent PK, a missing `service_accounts.token_lookup`,
+  a stale `valid_certificate_role` CHECK that rejected the `leaf` role every
+  sensor-discovered certificate uses, or retained `crypto_configurations`
+  residue. Verified by applying each of the last six releases' schemas, writing
+  rows, then applying this one.
+
+### Changed
+
+- Dependency refresh across 10 Go modules (17 updates) and 3 npm directories
+  (12 updates), plus lucide-react 0.460 → 1.33 and @types/node 25 → 26.
+- `tools/qa-platform/ui` is built by the PR gate for the first time. It is a
+  standalone Vite app with its own lockfile and was in no CI matrix, which let
+  two build-breaking Dependabot bumps report every check green. The
+  CI-coverage audit now asserts JS package coverage as well as Go module
+  coverage.
+- `gateway-cors-smoke.yml` retired after 125 runs and 125 failures without a
+  single pass. What it guarded is still covered by `standards.yml` on the same
+  path triggers and by `make gateway-smoke` against a local stack.
+
 ## [0.12.2] - 2026-08-22
 
 Completes the email-injection work. 0.12.0 sanitized the headers and 0.12.1
