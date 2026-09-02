@@ -3,22 +3,24 @@
 Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 - **Scanned**: `ghcr.io/vistasecurity/*:latest` (18 images)
-- **Generated**: 2026-09-01T09:41:06Z
+- **Generated**: 2026-09-02T09:13:16Z
 - **Scanner**: [Trivy](https://github.com/aquasecurity/trivy)
 - **Scope**: fixable `CRITICAL` and `HIGH` findings (`--ignore-unfixed`) in OS packages and application dependencies
 
-## 18 CRITICAL · 0 HIGH (fixable, across 18 scanned images)
+> [!WARNING]
+> **1 of 18 images could not be scanned on this run.** The counts below therefore describe only the images that were: they are not a clean bill of health for the release. Unscanned images are listed at the bottom.
+
+## 17 CRITICAL · 2 HIGH (fixable, across 17 scanned images)
 
 | Image | CRITICAL | HIGH |
 |---|---:|---:|
 | `admin-service` | 1 | 0 |
-| `admin-ui` | 1 | 0 |
+| `admin-ui` | 1 | 1 |
 | `audit-service` | 1 | 0 |
 | `auth-service` | 1 | 0 |
 | `cbom-service` | 1 | 0 |
 | `cluster-sensor-service` | 1 | 0 |
 | `compliance-engine` | 1 | 0 |
-| `device-interrogation-service` | 1 | 0 |
 | `discovery-processor-service` | 1 | 0 |
 | `inventory-service` | 1 | 0 |
 | `mcp-service` | 1 | 0 |
@@ -28,7 +30,8 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 | `resource-tracker-service` | 1 | 0 |
 | `sensor-manager` | 1 | 0 |
 | `tenant-health-service` | 1 | 0 |
-| `web-ui` | 1 | 0 |
+| `web-ui` | 1 | 1 |
+| `device-interrogation-service` | ❌ not scanned | ❌ not scanned |
 
 ## Findings
 
@@ -43,6 +46,7 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 | Severity | CVE | Package | Installed | Fixed in |
 |---|---|---|---|---|
 | CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
+| HIGH | [CVE-2026-84304](https://nvd.nist.gov/vuln/detail/CVE-2026-84304) | `google.golang.org/grpc` | `v1.82.1` | `1.83.1` |
 
 ### `audit-service`
 
@@ -69,12 +73,6 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 | CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
 
 ### `compliance-engine`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
-
-### `device-interrogation-service`
 
 | Severity | CVE | Package | Installed | Fixed in |
 |---|---|---|---|---|
@@ -139,6 +137,13 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 | Severity | CVE | Package | Installed | Fixed in |
 |---|---|---|---|---|
 | CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
+| HIGH | [CVE-2026-84304](https://nvd.nist.gov/vuln/detail/CVE-2026-84304) | `google.golang.org/grpc` | `v1.82.1` | `1.83.1` |
+
+## Not scanned on this run
+
+Trivy did not produce a usable report for these images. An image that was not scanned is reported as unscanned rather than as clean.
+
+- `ghcr.io/vistasecurity/device-interrogation-service:latest`
 
 ## How to read this
 
@@ -154,4 +159,4 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 To report a vulnerability, see [SECURITY.md](../SECURITY.md). Please do not open a public issue.
 
-<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/33493391625).</sub>
+<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/33612733459).</sub>

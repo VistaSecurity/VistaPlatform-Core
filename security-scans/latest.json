@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-09-01T09:41:06Z",
-  "generated_date": "2026-09-01",
+  "generated_at": "2026-09-02T09:13:16Z",
+  "generated_date": "2026-09-02",
   "registry": "ghcr.io/vistasecurity",
   "tag": "latest",
-  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/33493391625",
+  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/33612733459",
   "scanner": "trivy",
   "scope": {
     "severities": [
@@ -14,12 +14,14 @@
   },
   "totals": {
     "images_expected": 18,
-    "images_scanned": 18,
-    "images_not_scanned": 0,
-    "critical": 18,
-    "high": 0
+    "images_scanned": 17,
+    "images_not_scanned": 1,
+    "critical": 17,
+    "high": 2
   },
-  "not_scanned": [],
+  "not_scanned": [
+    "device-interrogation-service"
+  ],
   "images": [
     {
       "image": "admin-service",
@@ -42,7 +44,7 @@
       "image": "admin-ui",
       "ref": "ghcr.io/vistasecurity/admin-ui:latest",
       "critical": 1,
-      "high": 0,
+      "high": 1,
       "findings": [
         {
           "severity": "CRITICAL",
@@ -51,6 +53,15 @@
           "installed": "v0.53.0",
           "fixed": "0.55.0",
           "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authentication bypass due to unenforced source-address restrictions",
+          "target": "usr/bin/caddy"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-84304",
+          "package": "google.golang.org/grpc",
+          "installed": "v1.82.1",
+          "fixed": "1.83.1",
+          "title": "gRPC-Go is the Go language implementation of gRPC. Prior to 1.83.1, in ...",
           "target": "usr/bin/caddy"
         }
       ]
@@ -126,23 +137,6 @@
     {
       "image": "compliance-engine",
       "ref": "ghcr.io/vistasecurity/compliance-engine:latest",
-      "critical": 1,
-      "high": 0,
-      "findings": [
-        {
-          "severity": "CRITICAL",
-          "id": "CVE-2026-56854",
-          "package": "golang.org/x/crypto",
-          "installed": "v0.53.0",
-          "fixed": "0.55.0",
-          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authentication bypass due to unenforced source-address restrictions",
-          "target": "app/main"
-        }
-      ]
-    },
-    {
-      "image": "device-interrogation-service",
-      "ref": "ghcr.io/vistasecurity/device-interrogation-service:latest",
       "critical": 1,
       "high": 0,
       "findings": [
@@ -314,7 +308,7 @@
       "image": "web-ui",
       "ref": "ghcr.io/vistasecurity/web-ui:latest",
       "critical": 1,
-      "high": 0,
+      "high": 1,
       "findings": [
         {
           "severity": "CRITICAL",
@@ -323,6 +317,15 @@
           "installed": "v0.53.0",
           "fixed": "0.55.0",
           "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authentication bypass due to unenforced source-address restrictions",
+          "target": "usr/bin/caddy"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-84304",
+          "package": "google.golang.org/grpc",
+          "installed": "v1.82.1",
+          "fixed": "1.83.1",
+          "title": "gRPC-Go is the Go language implementation of gRPC. Prior to 1.83.1, in ...",
           "target": "usr/bin/caddy"
         }
       ]
