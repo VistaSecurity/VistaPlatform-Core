@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"math/big"
 	"net/http"
@@ -257,7 +258,7 @@ func TestJWKS_RoundTripAndTampering(t *testing.T) {
 	if err := json.Unmarshal(body, &doc); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	doc.Keys[0].X = b64Fixed(big.NewInt(1), 32)
+	doc.Keys[0].X = base64.RawURLEncoding.EncodeToString(append(make([]byte, 31), 1))
 	offCurve, _ := json.Marshal(doc)
 	if _, err := ParseJWKS(offCurve); err == nil {
 		t.Error("JWKS with an off-curve point was accepted")
@@ -266,17 +267,66 @@ func TestJWKS_RoundTripAndTampering(t *testing.T) {
 
 // Coordinates must be fixed-width. A key whose X starts with a zero byte would
 // serialise short under a naive implementation and fail in strict parsers — a
-// bug that shows up on roughly 1 key in 256 and is miserable to diagnose.
+// bug that shows up on roughly 1 key in 256 and is miserable to diagnose. So
+// keep generating real keys until a leading zero turns up in each coordinate,
+// and check both: a synthetic point cannot be used here because ToJWK now
+// refuses anything that is not on the curve, and checking only one coordinate
+// would not notice the other being trimmed.
 func TestToJWK_PadsShortCoordinates(t *testing.T) {
+	var foundX, foundY bool
+	for i := 0; i < 50000 && (!foundX || !foundY); i++ {
+		kp, err := Generate()
+		if err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		pub := &kp.Private.PublicKey
+		raw, err := pub.Bytes() // 0x04 || X || Y, both padded to 32 bytes
+		if err != nil {
+			t.Fatalf("Bytes: %v", err)
+		}
+		shortX, shortY := raw[1] == 0, raw[1+32] == 0
+		if !shortX && !shortY {
+			continue
+		}
+		foundX = foundX || shortX
+		foundY = foundY || shortY
+
+		j, err := ToJWK(PublicKey{KID: kp.KID, Key: pub})
+		if err != nil {
+			t.Fatalf("ToJWK: %v", err)
+		}
+		// 32 bytes → 43 base64url chars with no padding.
+		if len(j.X) != 43 || len(j.Y) != 43 {
+			t.Errorf("coordinate lengths = (%d, %d), want (43, 43) — not left-padded to the curve size (leading zero in x=%v, y=%v)", len(j.X), len(j.Y), shortX, shortY)
+		}
+		// It must still survive the round trip: a coordinate with a leading
+		// zero has to reconstruct the same key on the way in.
+		back, err := FromJWK(j)
+		if err != nil {
+			t.Fatalf("FromJWK: %v", err)
+		}
+		if !back.Key.Equal(pub) {
+			t.Error("round trip through a leading-zero coordinate lost the key")
+		}
+	}
+	if !foundX || !foundY {
+		t.Fatalf("no key with a leading zero turned up (x=%v, y=%v) — the padding path was never exercised", foundX, foundY)
+	}
+}
+
+// A JWKS must never publish a point that is not on the curve, so ToJWK refuses
+// to encode one rather than serving it and leaving the check to consumers.
+func TestToJWK_RejectsOffCurvePoint(t *testing.T) {
 	pub := &ecdsa.PublicKey{
 		Curve: elliptic.P256(),
 		X:     big.NewInt(1),
 		Y:     big.NewInt(2),
 	}
-	j := ToJWK(PublicKey{KID: "k", Key: pub})
-	// 32 bytes → 43 base64url chars with no padding.
-	if len(j.X) != 43 || len(j.Y) != 43 {
-		t.Errorf("coordinate lengths = (%d, %d), want (43, 43) — not left-padded to the curve size", len(j.X), len(j.Y))
+	if _, err := ToJWK(PublicKey{KID: "k", Key: pub}); err == nil {
+		t.Error("ToJWK encoded a point that is not on P-256")
+	}
+	if _, err := MarshalJWKS([]PublicKey{{KID: "k", Key: pub}}); err == nil {
+		t.Error("MarshalJWKS served a point that is not on P-256")
 	}
 }
 

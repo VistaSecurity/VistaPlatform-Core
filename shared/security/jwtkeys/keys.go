@@ -45,7 +45,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"math/big"
 	"sort"
 	"time"
 )
@@ -201,6 +200,10 @@ type JWK struct {
 	Y   string `json:"y"`
 }
 
+// coordLen is the P-256 field size in bytes, and so the width of each JWK
+// coordinate.
+const coordLen = 32
+
 // JWKS is the document served at /.well-known/jwks.json.
 type JWKS struct {
 	Keys []JWK `json:"keys"`
@@ -211,28 +214,53 @@ type JWKS struct {
 // The coordinates are fixed-width big-endian, left-padded to the curve size.
 // Trimming leading zeroes here is a classic interop bug: a key whose X happens
 // to start with a zero byte would serialise one byte short and fail to
-// reconstruct in strict parsers.
-func ToJWK(pk PublicKey) JWK {
-	const coordLen = 32 // P-256 field size in bytes
+// reconstruct in strict parsers. [ecdsa.PublicKey.Bytes] produces exactly that
+// encoding — SEC 1 uncompressed, 0x04 || X || Y with both coordinates padded to
+// the field size — so the width is structural rather than something this code
+// has to remember to do.
+//
+// It returns an error because Bytes rejects a point that is not on the curve,
+// and a JWKS must never publish one.
+func ToJWK(pk PublicKey) (JWK, error) {
+	if pk.Key == nil {
+		return JWK{}, fmt.Errorf("jwtkeys: public key %q has no key material", pk.KID)
+	}
+	b, err := pk.Key.Bytes()
+	if err != nil {
+		return JWK{}, fmt.Errorf("jwtkeys: encode public key %q: %w", pk.KID, err)
+	}
+	if len(b) != 1+2*coordLen {
+		return JWK{}, fmt.Errorf("jwtkeys: public key %q is not a P-256 point (%d bytes)", pk.KID, len(b))
+	}
 	return JWK{
 		Kty: "EC",
 		Crv: "P-256",
 		Kid: pk.KID,
 		Use: "sig",
 		Alg: Alg,
-		X:   b64Fixed(pk.Key.X, coordLen),
-		Y:   b64Fixed(pk.Key.Y, coordLen),
-	}
+		X:   base64.RawURLEncoding.EncodeToString(b[1 : 1+coordLen]),
+		Y:   base64.RawURLEncoding.EncodeToString(b[1+coordLen:]),
+	}, nil
 }
 
-func b64Fixed(n *big.Int, size int) string {
-	b := n.Bytes()
-	if len(b) < size {
-		padded := make([]byte, size)
-		copy(padded[size-len(b):], b)
+// decodeCoord decodes one base64url JWK coordinate into a fixed-width
+// big-endian octet string. RFC 7518 requires the encoded value to already be
+// the full field width; a shorter one is left-padded rather than rejected, so a
+// producer that trims leading zeroes still interoperates.
+func decodeCoord(s string) ([]byte, error) {
+	b, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > coordLen {
+		return nil, fmt.Errorf("coordinate is %d bytes, want at most %d", len(b), coordLen)
+	}
+	if len(b) < coordLen {
+		padded := make([]byte, coordLen)
+		copy(padded[coordLen-len(b):], b)
 		b = padded
 	}
-	return base64.RawURLEncoding.EncodeToString(b)
+	return b, nil
 }
 
 // FromJWK reconstructs a public key from a JWKS entry, rejecting anything that
@@ -254,23 +282,24 @@ func FromJWK(j JWK) (PublicKey, error) {
 	if j.Kid == "" {
 		return PublicKey{}, errors.New("jwtkeys: JWK has no kid")
 	}
-	xb, err := base64.RawURLEncoding.DecodeString(j.X)
+	xb, err := decodeCoord(j.X)
 	if err != nil {
 		return PublicKey{}, fmt.Errorf("jwtkeys: decode x: %w", err)
 	}
-	yb, err := base64.RawURLEncoding.DecodeString(j.Y)
+	yb, err := decodeCoord(j.Y)
 	if err != nil {
 		return PublicKey{}, fmt.Errorf("jwtkeys: decode y: %w", err)
 	}
-	pub := &ecdsa.PublicKey{
-		Curve: elliptic.P256(),
-		X:     new(big.Int).SetBytes(xb),
-		Y:     new(big.Int).SetBytes(yb),
-	}
-	// Reject a point that is not actually on the curve. Without this, a crafted
-	// JWKS response could hand us an invalid point and reach the ECDSA
+	// Reassemble the SEC 1 uncompressed point and let crypto/ecdsa parse it.
+	// ParseUncompressedPublicKey performs the on-curve check for us, so a
+	// crafted JWKS response cannot hand us an invalid point and reach the ECDSA
 	// verification path with it.
-	if !pub.Curve.IsOnCurve(pub.X, pub.Y) {
+	point := make([]byte, 0, 1+2*coordLen)
+	point = append(point, 4)
+	point = append(point, xb...)
+	point = append(point, yb...)
+	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), point)
+	if err != nil {
 		return PublicKey{}, errors.New("jwtkeys: JWK coordinates are not a point on P-256")
 	}
 	// A kid that does not match its own key means the document is inconsistent
@@ -294,7 +323,11 @@ func MarshalJWKS(keys []PublicKey) ([]byte, error) {
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].KID < sorted[j].KID })
 	doc := JWKS{Keys: make([]JWK, 0, len(sorted))}
 	for _, k := range sorted {
-		doc.Keys = append(doc.Keys, ToJWK(k))
+		j, err := ToJWK(k)
+		if err != nil {
+			return nil, err
+		}
+		doc.Keys = append(doc.Keys, j)
 	}
 	return json.Marshal(doc)
 }

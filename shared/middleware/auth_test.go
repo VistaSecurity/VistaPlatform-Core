@@ -130,6 +130,71 @@ func TestRequireJWTAuth_StrictCookiePair(t *testing.T) {
 	}
 }
 
+// TestRequireJWTAuth_StrictCookiePairRejectsFallbackOnMutations pins the
+// shared-domain admin-save regression for state-mutating requests: even when a
+// tenant cookie pair carries a valid session-bound CSRF token, a platform route
+// configured as strict must not fall back to it.
+func TestRequireJWTAuth_StrictCookiePairRejectsFallbackOnMutations(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	newStrictRouter := func() *gin.Engine {
+		r := gin.New()
+		r.Use(RequireJWTAuth(AuthConfig{
+			JWTSecret:         testJWTSecret,
+			AccessTokenCookie: "platform_access_token",
+			CSRFCookie:        "platform_csrf_token",
+			StrictCookiePair:  true,
+		}))
+		r.POST("/protected", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+		return r
+	}
+
+	platformToken := signAccessTokenWithJTI(t, "platform-session")
+	platformCSRF := CSRFToken(testJWTSecret, "platform-session")
+	tenantToken := signAccessTokenWithJTI(t, "tenant-session")
+	tenantCSRF := CSRFToken(testJWTSecret, "tenant-session")
+
+	cases := []struct {
+		name        string
+		accessName  string
+		accessValue string
+		csrfName    string
+		csrfValue   string
+		wantStatus  int
+	}{
+		{
+			name:        "configured platform pair accepted",
+			accessName:  "platform_access_token",
+			accessValue: platformToken,
+			csrfName:    "platform_csrf_token",
+			csrfValue:   platformCSRF,
+			wantStatus:  http.StatusOK,
+		},
+		{
+			name:        "tenant fallback pair rejected",
+			accessName:  "access_token",
+			accessValue: tenantToken,
+			csrfName:    "csrf_token",
+			csrfValue:   tenantCSRF,
+			wantStatus:  http.StatusUnauthorized,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/protected", nil)
+			req.AddCookie(&http.Cookie{Name: tc.accessName, Value: tc.accessValue})
+			req.AddCookie(&http.Cookie{Name: tc.csrfName, Value: tc.csrfValue})
+			req.Header.Set("X-CSRF-Token", tc.csrfValue)
+			w := httptest.NewRecorder()
+			newStrictRouter().ServeHTTP(w, req)
+			if w.Code != tc.wantStatus {
+				t.Fatalf("got status %d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
+			}
+		})
+	}
+}
+
 // stubRevocationChecker is a test RevocationChecker that reports a fixed set of
 // jtis and users as revoked.
 type stubRevocationChecker struct {

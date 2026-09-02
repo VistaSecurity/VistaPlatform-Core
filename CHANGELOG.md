@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-09-02
+
+A security release. Two of the fixes close gaps in code 0.12.3 itself shipped,
+found by reviewing that release's own follow-up PRs rather than by a report.
+
+### Security
+
+- **Erased users kept working sessions against two services.** 0.12.3 added a
+  per-user Redis denylist so data-subject erasure kills already-minted access
+  JWTs, and the shared JWT middleware honours it. But inventory-service and
+  audit-service carry their own JWT middleware, and both had drifted: they
+  checked the revoked-JTI denylist and never the revoked-**user** one. An erased
+  user's existing access token therefore continued to work against those two
+  services until it expired. Both now perform the same check as the shared
+  middleware.
+- **A failed erasure could lock out a live user.** Revocation is written inside
+  the erasure transaction, deliberately, so that a Redis outage rolls the whole
+  thing back rather than tombstoning an account whose token still works. The
+  rollback path had no compensating delete, so a transaction that failed *after*
+  the denylist write left a still-active user denied access. That entry is now
+  cleared on rollback.
+- **The erased-user denylist entry is now permanent.** It previously expired
+  after the *current* access-token lifetime. An operator who lowered `JWT_EXPIRY`
+  could leave tokens minted under the older, longer setting outliving the key
+  meant to revoke them. User IDs are never reused, so the entry no longer
+  expires.
+- **golang.org/x/crypto → v0.55.0** ([GO-2026-6303] / CVE-2026-56854). The
+  source-address critical option returned by `PasswordCallback`,
+  `KeyboardInteractiveCallback`, `NoClientAuthCallback` and GSSAPI was silently
+  ignored — it was enforced only on the public-key paths. Every service that
+  speaks SSH here does so as a *client* and never reaches the affected symbols;
+  the one call site govulncheck flags is an internal QA traffic generator, not a
+  shipped service. Bumped across all 21 modules regardless.
+- **picomatch → 2.3.2**, closing a high and a moderate advisory in the internal
+  QA tooling's build chain. Not shipped in any image.
+
+[GO-2026-6303]: https://pkg.go.dev/vuln/GO-2026-6303
+
+### Fixed
+
+- **The sensor still lost discoveries on the way out.** 0.12.3 fixed shutdown to
+  flush the retry queue as well as the pending buffer. It missed a third path:
+  `PacketCapture.Stop()` flushes its TCP assemblers *into* the capture channel
+  and only then closes it, so anything emitted during that final flush arrived
+  after the buffer had already been snapshotted and was dropped at exit. Cleanup
+  now drains the closed channel too.
+- **JWK encoding no longer hand-rolls elliptic-curve coordinates.** The JWKS
+  endpoint built its `x`/`y` values from `big.Int` with manual zero-padding.
+  It now uses the standard fixed-width SEC 1 encoding, which also rejects a
+  point that is not on the curve rather than publishing it. Output is unchanged
+  — verified byte-for-byte against the previous encoding over 5,000 generated
+  P-256 keys, so no JWKS consumer sees a difference.
+
+### Changed
+
+- Dependency refresh: Go modules across 3 directories, npm across 2, and the
+  internal QA UI to React 19.
+- `sbom-action` and `codeql-action` updated. `cosign-installer` deliberately
+  held at v3 — see the guard note below.
+
+### Internal
+
+- **The cosign guard added in 0.12.3 did its job.** A Dependabot PR proposed
+  `cosign-installer` v3 → v4 again, and the guard failed the PR gate rather than
+  the release. cosign v4 defaults `--new-bundle-format` on, which turns the
+  `--output-signature`/`--output-certificate` pair into no-ops and breaks the
+  verify instructions published with every release. The pin stays until the
+  signing flow and those instructions move together.
+- **The qa-platform UI build gate added in 0.12.3 also caught something real** —
+  a React 18 → 19 bump split across two Dependabot PRs, each of which left
+  `react` and `react-dom` on different majors. Neither could have been merged
+  safely alone; before that gate existed, nothing built that directory at all.
+- Call-site guards now assert that every auth-cookie helper receives a
+  policy-derived session lifetime rather than a constant, across auth-service,
+  admin-service and the SSO paths. The 0.12.3 fix for configurable session
+  timeouts was tested at the helpers, not at the call sites — which is where the
+  bug had actually been.
+
 ## [0.12.3] - 2026-08-27
 
 A dependency and correctness pass. The headline for anyone watching the public

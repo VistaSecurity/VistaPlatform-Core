@@ -389,6 +389,7 @@ type erasureResult struct {
 
 type userAccessRevoker interface {
 	RevokeUserAccess(ctx context.Context, userID uuid.UUID) error
+	ClearUserAccessRevocation(ctx context.Context, userID uuid.UUID) error
 }
 
 // retainedCategories is the half of the policy that says NO. Each entry is a
@@ -466,7 +467,20 @@ func EraseUser(db *sql.DB, accessRevoker userAccessRevoker) gin.HandlerFunc {
 			Limitations:    erasureLimitations(),
 		}
 
-		err = shareddatabase.WithTenantTx(ctx, db, tenantID, func(tx *sql.Tx) error {
+		err = shareddatabase.WithTenantTx(ctx, db, tenantID, func(tx *sql.Tx) (err error) {
+			revokedAccess := false
+			defer func() {
+				if err == nil || !revokedAccess || accessRevoker == nil {
+					return
+				}
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				if cleanupErr := accessRevoker.ClearUserAccessRevocation(cleanupCtx, userID); cleanupErr != nil {
+					logrus.WithError(cleanupErr).WithField("user_id", userID).Error(
+						"Failed to clear pre-commit user access-token revocation after erasure rollback")
+				}
+			}()
+
 			var originalEmail string
 			if err := tx.QueryRowContext(ctx,
 				`SELECT email FROM users WHERE id = $1 AND tenant_id = $2`, userID, tenantID).
@@ -481,6 +495,7 @@ func EraseUser(db *sql.DB, accessRevoker userAccessRevoker) gin.HandlerFunc {
 				if err := accessRevoker.RevokeUserAccess(ctx, userID); err != nil {
 					return fmt.Errorf("revoke active access tokens: %w", err)
 				}
+				revokedAccess = true
 			}
 
 			// 1. Profile → tombstone. Every free-text and secret column is cleared
@@ -500,8 +515,8 @@ func EraseUser(db *sql.DB, accessRevoker userAccessRevoker) gin.HandlerFunc {
 				result.APITokensDeleted, _ = res.RowsAffected()
 			}
 
-			// 3. Refresh-token sessions → revoke. Access tokens are killed after
-			// the transaction commits via the shared Redis user denylist.
+			// 3. Refresh-token sessions → revoke. Access tokens were killed above
+			// via the shared Redis user denylist before any irreversible DB change.
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE refresh_tokens
 				SET is_revoked = true, revoked_at = NOW()

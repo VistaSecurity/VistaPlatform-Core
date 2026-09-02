@@ -874,6 +874,20 @@ func (s *Sensor) pendingDiscoveriesSnapshot() []*models.CryptoDiscovery {
 	return remaining
 }
 
+func (s *Sensor) drainStoppedCaptureDiscoveries() []*models.CryptoDiscovery {
+	if s.packetCapture == nil {
+		return nil
+	}
+
+	var drained []*models.CryptoDiscovery
+	for discovery := range s.packetCapture.GetDiscoveries() {
+		if discovery != nil {
+			drained = append(drained, discovery)
+		}
+	}
+	return drained
+}
+
 // sendHeartbeat builds sensor health metrics and sends a heartbeat to the control plane.
 // It runs independently of discovery submission so the control plane always receives
 // regular health signals even when there are no new discoveries.
@@ -1051,6 +1065,10 @@ func (s *Sensor) cleanup() {
 
 	// Submit remaining discoveries, including batches already queued for retry.
 	remainingDiscoveries := s.pendingDiscoveriesSnapshot()
+	if flushedDiscoveries := s.drainStoppedCaptureDiscoveries(); len(flushedDiscoveries) > 0 {
+		log.Printf("📤 Captured %d discoveries emitted during shutdown flush", len(flushedDiscoveries))
+		remainingDiscoveries = append(remainingDiscoveries, flushedDiscoveries...)
+	}
 	if len(remainingDiscoveries) > 0 {
 		// Validate sensor ID before submitting (must be valid UUID)
 		if s.config.SensorID == "" {

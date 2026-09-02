@@ -21,7 +21,11 @@ const (
 	UserTypeTenant   = "tenant"
 )
 
+var revocationCheckerFromEnv = sharedmw.RedisRevocationCheckerFromEnv
+
 func RequireAuth(cfg *config.Config) gin.HandlerFunc {
+	revocation := revocationCheckerFromEnv()
+
 	// Signing keys are resolved once, not per request: the keyfunc picks
 	// by algorithm class — ES256 tokens resolve their `kid` against the trusted
 	// public keys, HS256 tokens get the legacy shared secret while one is
@@ -100,6 +104,14 @@ func RequireAuth(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
+		if revocation != nil {
+			if jti, _ := claims["jti"].(string); jti != "" && revocation.IsRevoked(c.Request.Context(), jti) {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "Token revoked"})
+				c.Abort()
+				return
+			}
+		}
+
 		if passwordChangeRequired, _ := claims["pwd_change_required"].(bool); passwordChangeRequired && !sharedmw.IsPasswordChangeAllowedPath(c.Request.URL.Path) {
 			c.JSON(http.StatusForbidden, gin.H{
 				"error": "Password change required before this action is allowed",
@@ -119,6 +131,12 @@ func RequireAuth(cfg *config.Config) gin.HandlerFunc {
 		userID, err := uuid.Parse(userIDStr)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token: invalid user_id"})
+			c.Abort()
+			return
+		}
+		if userRevocation, ok := revocation.(sharedmw.UserRevocationChecker); ok &&
+			userRevocation.IsUserRevoked(c.Request.Context(), userID) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token revoked"})
 			c.Abort()
 			return
 		}

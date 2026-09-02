@@ -29,15 +29,24 @@ var (
 )
 
 type stubUserAccessRevoker struct {
-	called bool
-	userID uuid.UUID
-	err    error
+	called    bool
+	cleared   bool
+	userID    uuid.UUID
+	clearedID uuid.UUID
+	err       error
+	clearErr  error
 }
 
 func (s *stubUserAccessRevoker) RevokeUserAccess(_ context.Context, userID uuid.UUID) error {
 	s.called = true
 	s.userID = userID
 	return s.err
+}
+
+func (s *stubUserAccessRevoker) ClearUserAccessRevocation(_ context.Context, userID uuid.UUID) error {
+	s.cleared = true
+	s.clearedID = userID
+	return s.clearErr
 }
 
 func newDSREngine(t *testing.T, actor uuid.UUID) (*gin.Engine, sqlmock.Sqlmock) {
@@ -191,6 +200,9 @@ func TestContract_EraseUserData(t *testing.T) {
 		t.Fatalf("erasure did not revoke active access tokens for %s; got called=%v user=%s",
 			dsrSubject, revoker.called, revoker.userID)
 	}
+	if revoker.cleared {
+		t.Fatalf("successful erasure cleared the user access-token revocation for %s", revoker.clearedID)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations: %v", err)
 	}
@@ -201,7 +213,8 @@ func TestContract_EraseUserData(t *testing.T) {
 // the UPDATE, a grant is missing — reporting success would have the operator
 // tell a data subject their data was removed when it was not.
 func TestContract_EraseUserData_RollsBackWhenVerificationFails(t *testing.T) {
-	r, mock := newDSREngine(t, dsrActor)
+	revoker := &stubUserAccessRevoker{}
+	r, mock := newDSREngineWithRevoker(t, dsrActor, revoker)
 
 	expectTenantScope(mock)
 	mock.ExpectQuery("SELECT email FROM users").
@@ -219,6 +232,14 @@ func TestContract_EraseUserData_RollsBackWhenVerificationFails(t *testing.T) {
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500 — an unverified erasure must not report success\nbody: %s",
 			w.Code, w.Body.String())
+	}
+	if !revoker.called || revoker.userID != dsrSubject {
+		t.Fatalf("erasure did not revoke active access tokens before mutation; called=%v user=%s",
+			revoker.called, revoker.userID)
+	}
+	if !revoker.cleared || revoker.clearedID != dsrSubject {
+		t.Fatalf("rolled-back erasure did not clear the pre-commit access-token revocation; cleared=%v user=%s",
+			revoker.cleared, revoker.clearedID)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations: %v", err)
@@ -242,6 +263,9 @@ func TestContract_EraseUserData_RollsBackWhenActiveSessionRevocationFails(t *tes
 	if !revoker.called || revoker.userID != dsrSubject {
 		t.Fatalf("erasure did not attempt active access-token revocation before mutation; called=%v user=%s",
 			revoker.called, revoker.userID)
+	}
+	if revoker.cleared {
+		t.Fatalf("failed revocation should not clear a denylist key that was never set; cleared user=%s", revoker.clearedID)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations: %v", err)

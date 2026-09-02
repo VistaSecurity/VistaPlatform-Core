@@ -71,4 +71,25 @@ describe('session-expiry middleware wiring (admin clients)', () => {
     await c.POST('/auth/refresh', {});
     expect(handler).not.toHaveBeenCalled();
   });
+
+  it('actual platform auth-flow paths are exempt', async () => {
+    const handler = vi.fn(async () => true);
+    contract.setSessionExpiredHandler(handler);
+    const c = clients.admin as Record<string, (p: string, init: object) => Promise<unknown>>;
+
+    await c.POST('/admin/auth/login', {});
+    await c.POST('/admin/auth/refresh', {});
+
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('session-only platform auth paths are not exempt', async () => {
+    const handler = vi.fn(async () => false);
+    contract.setSessionExpiredHandler(handler);
+    const c = clients.admin as Record<string, (p: string, init: object) => Promise<unknown>>;
+
+    await c.GET('/admin/auth/me', {});
+
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
 });

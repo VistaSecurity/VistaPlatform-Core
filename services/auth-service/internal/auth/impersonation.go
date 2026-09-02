@@ -95,14 +95,20 @@ func (a *AuthService) RevokeUserAccess(ctx context.Context, userID uuid.UUID) er
 	if a.Redis() == nil {
 		return nil
 	}
-	ttl := time.Hour
-	if a.jwt != nil {
-		ttl = a.jwt.GetAccessExpiry()
+	// User IDs are never reused, so an erased user's denylist entry should not
+	// expire with today's access-token setting. Tokens minted before an operator
+	// lowered JWT_EXPIRY could otherwise outlive the Redis key.
+	return a.Redis().Set(ctx, sharedmw.RevokedUserKey(userID), "1", 0).Err()
+}
+
+// ClearUserAccessRevocation removes a user-level access-token denylist entry.
+// It exists for callers that set the key before a non-Redis transaction commits
+// and need to compensate if that transaction rolls back.
+func (a *AuthService) ClearUserAccessRevocation(ctx context.Context, userID uuid.UUID) error {
+	if a.Redis() == nil {
+		return nil
 	}
-	if ttl <= 0 {
-		ttl = time.Hour
-	}
-	return a.Redis().SetEx(ctx, sharedmw.RevokedUserKey(userID), "1", ttl).Err()
+	return a.Redis().Del(ctx, sharedmw.RevokedUserKey(userID)).Err()
 }
 
 // RemainingImpersonationTTL returns how much of an impersonation token's

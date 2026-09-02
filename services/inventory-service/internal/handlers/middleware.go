@@ -93,6 +93,8 @@ func getInternalVerifier() *serviceauth.Verifier {
 	return internalVerifier
 }
 
+var revocationCheckerFromEnv = sharedmw.RedisRevocationCheckerFromEnv
+
 // isInternalServiceCall checks if the request is from an internal service.
 // Requires HMAC-SHA256 signature verification via INTERNAL_AUTH_SECRET.
 func isInternalServiceCall(c *gin.Context) bool {
@@ -113,7 +115,7 @@ func JWTMiddleware(cfg *config.Config, db *database.DB) gin.HandlerFunc {
 	// inventory-service has its own JWT middleware (not the shared one), so wire
 	// the SAME revocation denylist here using the shared key + Redis
 	// helper. nil when REDIS_URL is unset → check skipped (fail-open).
-	revocation := sharedmw.RedisRevocationCheckerFromEnv()
+	revocation := revocationCheckerFromEnv()
 
 	// Same reasoning for signing keys: resolved once, not per request.
 	// The keyfunc picks by algorithm class — ES256 tokens resolve their `kid`
@@ -217,6 +219,13 @@ func JWTMiddleware(cfg *config.Config, db *database.DB) gin.HandlerFunc {
 		// Reject tokens whose jti is on the revocation denylist — e.g. an
 		// impersonation token the admin has "stopped".
 		if revocation != nil && claims.ID != "" && revocation.IsRevoked(c.Request.Context(), claims.ID) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token revoked"})
+			c.Abort()
+			return
+		}
+		if userRevocation, ok := revocation.(sharedmw.UserRevocationChecker); ok &&
+			claims.UserID != uuid.Nil &&
+			userRevocation.IsUserRevoked(c.Request.Context(), claims.UserID) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token revoked"})
 			c.Abort()
 			return

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/sensor/internal/api"
+	"github.com/vistasecurity/vistaplatform/sensor/internal/capture"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/config"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/models"
 	"gopkg.in/yaml.v3"
@@ -316,6 +317,57 @@ func TestCleanupSubmitsPendingRetryQueue(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("cleanup did not submit the pending retry queue")
+	}
+}
+
+func TestCleanupSubmitsDiscoveriesLeftInCaptureChannel(t *testing.T) {
+	const sensorID = "00000000-0000-0000-0000-000000000002"
+
+	received := make(chan models.DiscoveryBatch, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var batch models.DiscoveryBatch
+		if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
+			t.Errorf("decode request body: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		received <- batch
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		SensorID:        sensorID,
+		ControlPlaneURL: server.URL,
+	}
+	packetCapture := capture.NewPacketCapture(cfg)
+	packetCapture.GetDiscoveriesWritable() <- &models.CryptoDiscovery{
+		ID:       "flushed-1",
+		SensorID: sensorID,
+		Protocol: "TLS",
+		DestIP:   "192.0.2.20",
+		Port:     443,
+	}
+
+	s := &Sensor{
+		config:        cfg,
+		apiClient:     api.NewOutboundClient(cfg),
+		packetCapture: packetCapture,
+		discoveries:   make([]*models.CryptoDiscovery, 0),
+	}
+
+	s.cleanup()
+
+	select {
+	case batch := <-received:
+		if batch.Count != 1 {
+			t.Fatalf("batch.Count = %d, want 1", batch.Count)
+		}
+		if len(batch.Discoveries) != 1 || batch.Discoveries[0].ID != "flushed-1" {
+			t.Fatalf("submitted batch = %+v, want discovery flushed from capture channel", batch)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cleanup did not submit discovery left in the capture channel")
 	}
 }
 
