@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-09-02T09:13:16Z",
-  "generated_date": "2026-09-02",
+  "generated_at": "2026-09-03T09:20:19Z",
+  "generated_date": "2026-09-03",
   "registry": "ghcr.io/vistasecurity",
   "tag": "latest",
-  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/33612733459",
+  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/33738058202",
   "scanner": "trivy",
   "scope": {
     "severities": [
@@ -14,31 +14,19 @@
   },
   "totals": {
     "images_expected": 18,
-    "images_scanned": 17,
-    "images_not_scanned": 1,
-    "critical": 17,
+    "images_scanned": 18,
+    "images_not_scanned": 0,
+    "critical": 2,
     "high": 2
   },
-  "not_scanned": [
-    "device-interrogation-service"
-  ],
+  "not_scanned": [],
   "images": [
     {
       "image": "admin-service",
       "ref": "ghcr.io/vistasecurity/admin-service:latest",
-      "critical": 1,
+      "critical": 0,
       "high": 0,
-      "findings": [
-        {
-          "severity": "CRITICAL",
-          "id": "CVE-2026-56854",
-          "package": "golang.org/x/crypto",
-          "installed": "v0.53.0",
-          "fixed": "0.55.0",
-          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authentication bypass due to unenforced source-address restrictions",
-          "target": "app/main"
-        }
-      ]
+      "findings": []
     },
     {
       "image": "admin-ui",
@@ -69,240 +57,107 @@
     {
       "image": "audit-service",
       "ref": "ghcr.io/vistasecurity/audit-service:latest",
-      "critical": 1,
+      "critical": 0,
       "high": 0,
-      "findings": [
-        {
-          "severity": "CRITICAL",
-          "id": "CVE-2026-56854",
-          "package": "golang.org/x/crypto",
-          "installed": "v0.53.0",
-          "fixed": "0.55.0",
-          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authentication bypass due to unenforced source-address restrictions",
-          "target": "app/main"
-        }
-      ]
+      "findings": []
     },
     {
       "image": "auth-service",
       "ref": "ghcr.io/vistasecurity/auth-service:latest",
-      "critical": 1,
+      "critical": 0,
       "high": 0,
-      "findings": [
-        {
-          "severity": "CRITICAL",
-          "id": "CVE-2026-56854",
-          "package": "golang.org/x/crypto",
-          "installed": "v0.53.0",
-          "fixed": "0.55.0",
-          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authentication bypass due to unenforced source-address restrictions",
-          "target": "app/main"
-        }
-      ]
+      "findings": []
     },
     {
       "image": "cbom-service",
       "ref": "ghcr.io/vistasecurity/cbom-service:latest",
-      "critical": 1,
+      "critical": 0,
       "high": 0,
-      "findings": [
-        {
-          "severity": "CRITICAL",
-          "id": "CVE-2026-56854",
-          "package": "golang.org/x/crypto",
-          "installed": "v0.53.0",
-          "fixed": "0.55.0",
-          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authentication bypass due to unenforced source-address restrictions",
-          "target": "app/main"
-        }
-      ]
+      "findings": []
     },
     {
       "image": "cluster-sensor-service",
       "ref": "ghcr.io/vistasecurity/cluster-sensor-service:latest",
-      "critical": 1,
+      "critical": 0,
       "high": 0,
-      "findings": [
-        {
-          "severity": "CRITICAL",
-          "id": "CVE-2026-56854",
-          "package": "golang.org/x/crypto",
-          "installed": "v0.53.0",
-          "fixed": "0.55.0",
-          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authentication bypass due to unenforced source-address restrictions",
-          "target": "app/main"
-        }
-      ]
+      "findings": []
     },
     {
       "image": "compliance-engine",
       "ref": "ghcr.io/vistasecurity/compliance-engine:latest",
-      "critical": 1,
+      "critical": 0,
       "high": 0,
-      "findings": [
-        {
-          "severity": "CRITICAL",
-          "id": "CVE-2026-56854",
-          "package": "golang.org/x/crypto",
-          "installed": "v0.53.0",
-          "fixed": "0.55.0",
-          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authentication bypass due to unenforced source-address restrictions",
-          "target": "app/main"
-        }
-      ]
+      "findings": []
+    },
+    {
+      "image": "device-interrogation-service",
+      "ref": "ghcr.io/vistasecurity/device-interrogation-service:latest",
+      "critical": 0,
+      "high": 0,
+      "findings": []
     },
     {
       "image": "discovery-processor-service",
       "ref": "ghcr.io/vistasecurity/discovery-processor-service:latest",
-      "critical": 1,
+      "critical": 0,
       "high": 0,
-      "findings": [
-        {
-          "severity": "CRITICAL",
-          "id": "CVE-2026-56854",
-          "package": "golang.org/x/crypto",
-          "installed": "v0.53.0",
-          "fixed": "0.55.0",
-          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authentication bypass due to unenforced source-address restrictions",
-          "target": "app/main"
-        }
-      ]
+      "findings": []
     },
     {
       "image": "inventory-service",
       "ref": "ghcr.io/vistasecurity/inventory-service:latest",
-      "critical": 1,
+      "critical": 0,
       "high": 0,
-      "findings": [
-        {
-          "severity": "CRITICAL",
-          "id": "CVE-2026-56854",
-          "package": "golang.org/x/crypto",
-          "installed": "v0.53.0",
-          "fixed": "0.55.0",
-          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authentication bypass due to unenforced source-address restrictions",
-          "target": "app/main"
-        }
-      ]
+      "findings": []
     },
     {
       "image": "mcp-service",
       "ref": "ghcr.io/vistasecurity/mcp-service:latest",
-      "critical": 1,
+      "critical": 0,
       "high": 0,
-      "findings": [
-        {
-          "severity": "CRITICAL",
-          "id": "CVE-2026-56854",
-          "package": "golang.org/x/crypto",
-          "installed": "v0.53.0",
-          "fixed": "0.55.0",
-          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authentication bypass due to unenforced source-address restrictions",
-          "target": "app/main"
-        }
-      ]
+      "findings": []
     },
     {
       "image": "monitoring-service",
       "ref": "ghcr.io/vistasecurity/monitoring-service:latest",
-      "critical": 1,
+      "critical": 0,
       "high": 0,
-      "findings": [
-        {
-          "severity": "CRITICAL",
-          "id": "CVE-2026-56854",
-          "package": "golang.org/x/crypto",
-          "installed": "v0.53.0",
-          "fixed": "0.55.0",
-          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authentication bypass due to unenforced source-address restrictions",
-          "target": "app/main"
-        }
-      ]
+      "findings": []
     },
     {
       "image": "notification-service",
       "ref": "ghcr.io/vistasecurity/notification-service:latest",
-      "critical": 1,
+      "critical": 0,
       "high": 0,
-      "findings": [
-        {
-          "severity": "CRITICAL",
-          "id": "CVE-2026-56854",
-          "package": "golang.org/x/crypto",
-          "installed": "v0.53.0",
-          "fixed": "0.55.0",
-          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authentication bypass due to unenforced source-address restrictions",
-          "target": "app/main"
-        }
-      ]
+      "findings": []
     },
     {
       "image": "pcap-processor",
       "ref": "ghcr.io/vistasecurity/pcap-processor:latest",
-      "critical": 1,
+      "critical": 0,
       "high": 0,
-      "findings": [
-        {
-          "severity": "CRITICAL",
-          "id": "CVE-2026-56854",
-          "package": "golang.org/x/crypto",
-          "installed": "v0.53.0",
-          "fixed": "0.55.0",
-          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authentication bypass due to unenforced source-address restrictions",
-          "target": "app/main"
-        }
-      ]
+      "findings": []
     },
     {
       "image": "resource-tracker-service",
       "ref": "ghcr.io/vistasecurity/resource-tracker-service:latest",
-      "critical": 1,
+      "critical": 0,
       "high": 0,
-      "findings": [
-        {
-          "severity": "CRITICAL",
-          "id": "CVE-2026-56854",
-          "package": "golang.org/x/crypto",
-          "installed": "v0.53.0",
-          "fixed": "0.55.0",
-          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authentication bypass due to unenforced source-address restrictions",
-          "target": "app/main"
-        }
-      ]
+      "findings": []
     },
     {
       "image": "sensor-manager",
       "ref": "ghcr.io/vistasecurity/sensor-manager:latest",
-      "critical": 1,
+      "critical": 0,
       "high": 0,
-      "findings": [
-        {
-          "severity": "CRITICAL",
-          "id": "CVE-2026-56854",
-          "package": "golang.org/x/crypto",
-          "installed": "v0.53.0",
-          "fixed": "0.55.0",
-          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authentication bypass due to unenforced source-address restrictions",
-          "target": "app/main"
-        }
-      ]
+      "findings": []
     },
     {
       "image": "tenant-health-service",
       "ref": "ghcr.io/vistasecurity/tenant-health-service:latest",
-      "critical": 1,
+      "critical": 0,
       "high": 0,
-      "findings": [
-        {
-          "severity": "CRITICAL",
-          "id": "CVE-2026-56854",
-          "package": "golang.org/x/crypto",
-          "installed": "v0.53.0",
-          "fixed": "0.55.0",
-          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authentication bypass due to unenforced source-address restrictions",
-          "target": "app/main"
-        }
-      ]
+      "findings": []
     },
     {
       "image": "web-ui",

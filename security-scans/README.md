@@ -3,43 +3,34 @@
 Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 - **Scanned**: `ghcr.io/vistasecurity/*:latest` (18 images)
-- **Generated**: 2026-09-02T09:13:16Z
+- **Generated**: 2026-09-03T09:20:19Z
 - **Scanner**: [Trivy](https://github.com/aquasecurity/trivy)
 - **Scope**: fixable `CRITICAL` and `HIGH` findings (`--ignore-unfixed`) in OS packages and application dependencies
 
-> [!WARNING]
-> **1 of 18 images could not be scanned on this run.** The counts below therefore describe only the images that were: they are not a clean bill of health for the release. Unscanned images are listed at the bottom.
-
-## 17 CRITICAL · 2 HIGH (fixable, across 17 scanned images)
+## 2 CRITICAL · 2 HIGH (fixable, across 18 scanned images)
 
 | Image | CRITICAL | HIGH |
 |---|---:|---:|
-| `admin-service` | 1 | 0 |
+| `admin-service` | 0 | 0 ✅ |
 | `admin-ui` | 1 | 1 |
-| `audit-service` | 1 | 0 |
-| `auth-service` | 1 | 0 |
-| `cbom-service` | 1 | 0 |
-| `cluster-sensor-service` | 1 | 0 |
-| `compliance-engine` | 1 | 0 |
-| `discovery-processor-service` | 1 | 0 |
-| `inventory-service` | 1 | 0 |
-| `mcp-service` | 1 | 0 |
-| `monitoring-service` | 1 | 0 |
-| `notification-service` | 1 | 0 |
-| `pcap-processor` | 1 | 0 |
-| `resource-tracker-service` | 1 | 0 |
-| `sensor-manager` | 1 | 0 |
-| `tenant-health-service` | 1 | 0 |
+| `audit-service` | 0 | 0 ✅ |
+| `auth-service` | 0 | 0 ✅ |
+| `cbom-service` | 0 | 0 ✅ |
+| `cluster-sensor-service` | 0 | 0 ✅ |
+| `compliance-engine` | 0 | 0 ✅ |
+| `device-interrogation-service` | 0 | 0 ✅ |
+| `discovery-processor-service` | 0 | 0 ✅ |
+| `inventory-service` | 0 | 0 ✅ |
+| `mcp-service` | 0 | 0 ✅ |
+| `monitoring-service` | 0 | 0 ✅ |
+| `notification-service` | 0 | 0 ✅ |
+| `pcap-processor` | 0 | 0 ✅ |
+| `resource-tracker-service` | 0 | 0 ✅ |
+| `sensor-manager` | 0 | 0 ✅ |
+| `tenant-health-service` | 0 | 0 ✅ |
 | `web-ui` | 1 | 1 |
-| `device-interrogation-service` | ❌ not scanned | ❌ not scanned |
 
 ## Findings
-
-### `admin-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
 
 ### `admin-ui`
 
@@ -48,102 +39,12 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 | CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
 | HIGH | [CVE-2026-84304](https://nvd.nist.gov/vuln/detail/CVE-2026-84304) | `google.golang.org/grpc` | `v1.82.1` | `1.83.1` |
 
-### `audit-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
-
-### `auth-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
-
-### `cbom-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
-
-### `cluster-sensor-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
-
-### `compliance-engine`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
-
-### `discovery-processor-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
-
-### `inventory-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
-
-### `mcp-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
-
-### `monitoring-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
-
-### `notification-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
-
-### `pcap-processor`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
-
-### `resource-tracker-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
-
-### `sensor-manager`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
-
-### `tenant-health-service`
-
-| Severity | CVE | Package | Installed | Fixed in |
-|---|---|---|---|---|
-| CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
-
 ### `web-ui`
 
 | Severity | CVE | Package | Installed | Fixed in |
 |---|---|---|---|---|
 | CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
 | HIGH | [CVE-2026-84304](https://nvd.nist.gov/vuln/detail/CVE-2026-84304) | `google.golang.org/grpc` | `v1.82.1` | `1.83.1` |
-
-## Not scanned on this run
-
-Trivy did not produce a usable report for these images. An image that was not scanned is reported as unscanned rather than as clean.
-
-- `ghcr.io/vistasecurity/device-interrogation-service:latest`
 
 ## How to read this
 
@@ -159,4 +60,4 @@ Trivy did not produce a usable report for these images. An image that was not sc
 
 To report a vulnerability, see [SECURITY.md](../SECURITY.md). Please do not open a public issue.
 
-<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/33612733459).</sub>
+<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/33738058202).</sub>
