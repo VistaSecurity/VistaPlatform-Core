@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-09-04T09:13:16Z",
-  "generated_date": "2026-09-04",
+  "generated_at": "2026-09-05T08:44:04Z",
+  "generated_date": "2026-09-05",
   "registry": "ghcr.io/vistasecurity",
   "tag": "latest",
-  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/33857114165",
+  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/33956004208",
   "scanner": "trivy",
   "scope": {
     "severities": [
@@ -14,14 +14,12 @@
   },
   "totals": {
     "images_expected": 18,
-    "images_scanned": 17,
-    "images_not_scanned": 1,
+    "images_scanned": 18,
+    "images_not_scanned": 0,
     "critical": 2,
     "high": 2
   },
-  "not_scanned": [
-    "auth-service"
-  ],
+  "not_scanned": [],
   "images": [
     {
       "image": "admin-service",
@@ -59,6 +57,13 @@
     {
       "image": "audit-service",
       "ref": "ghcr.io/vistasecurity/audit-service:latest",
+      "critical": 0,
+      "high": 0,
+      "findings": []
+    },
+    {
+      "image": "auth-service",
+      "ref": "ghcr.io/vistasecurity/auth-service:latest",
       "critical": 0,
       "high": 0,
       "findings": []
