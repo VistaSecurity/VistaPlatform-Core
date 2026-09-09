@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-09-08T09:16:47Z",
-  "generated_date": "2026-09-08",
+  "generated_at": "2026-09-09T09:19:39Z",
+  "generated_date": "2026-09-09",
   "registry": "ghcr.io/vistasecurity",
   "tag": "latest",
-  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/34208923630",
+  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/34333924623",
   "scanner": "trivy",
   "scope": {
     "severities": [
@@ -14,12 +14,14 @@
   },
   "totals": {
     "images_expected": 18,
-    "images_scanned": 18,
-    "images_not_scanned": 0,
+    "images_scanned": 17,
+    "images_not_scanned": 1,
     "critical": 2,
-    "high": 2
+    "high": 4
   },
-  "not_scanned": [],
+  "not_scanned": [
+    "pcap-processor"
+  ],
   "images": [
     {
       "image": "admin-service",
@@ -32,7 +34,7 @@
       "image": "admin-ui",
       "ref": "ghcr.io/vistasecurity/admin-ui:latest",
       "critical": 1,
-      "high": 1,
+      "high": 2,
       "findings": [
         {
           "severity": "CRITICAL",
@@ -50,6 +52,15 @@
           "installed": "v1.82.1",
           "fixed": "1.83.1",
           "title": "gRPC-Go is the Go language implementation of gRPC. Prior to 1.83.1, in ...",
+          "target": "usr/bin/caddy"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-84445",
+          "package": "google.golang.org/grpc",
+          "installed": "v1.82.1",
+          "fixed": "1.82.2, 1.83.2, 1.85.0-dev.0.20260825072537-93e31b48545e",
+          "title": "gRPC-Go xDS servers: Denial of Service (DoS) via crash due to missing `:authority` and `Host` headers",
           "target": "usr/bin/caddy"
         }
       ]
@@ -132,13 +143,6 @@
       "findings": []
     },
     {
-      "image": "pcap-processor",
-      "ref": "ghcr.io/vistasecurity/pcap-processor:latest",
-      "critical": 0,
-      "high": 0,
-      "findings": []
-    },
-    {
       "image": "resource-tracker-service",
       "ref": "ghcr.io/vistasecurity/resource-tracker-service:latest",
       "critical": 0,
@@ -163,7 +167,7 @@
       "image": "web-ui",
       "ref": "ghcr.io/vistasecurity/web-ui:latest",
       "critical": 1,
-      "high": 1,
+      "high": 2,
       "findings": [
         {
           "severity": "CRITICAL",
@@ -181,6 +185,15 @@
           "installed": "v1.82.1",
           "fixed": "1.83.1",
           "title": "gRPC-Go is the Go language implementation of gRPC. Prior to 1.83.1, in ...",
+          "target": "usr/bin/caddy"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-84445",
+          "package": "google.golang.org/grpc",
+          "installed": "v1.82.1",
+          "fixed": "1.82.2, 1.83.2, 1.85.0-dev.0.20260825072537-93e31b48545e",
+          "title": "gRPC-Go xDS servers: Denial of Service (DoS) via crash due to missing `:authority` and `Host` headers",
           "target": "usr/bin/caddy"
         }
       ]
