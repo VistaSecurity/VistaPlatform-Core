@@ -46,9 +46,10 @@ func echoIdentityRouter(handlers ...gin.HandlerFunc) *gin.Engine {
 	r := gin.New()
 	h := append(handlers, func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"user_id": c.GetString("userID"),
-			"email":   c.GetString("email"),
-			"role":    c.GetString("role"),
+			"user_id":   c.GetString("userID"),
+			"email":     c.GetString("email"),
+			"role":      c.GetString("role"),
+			"user_type": c.GetString("userType"),
 		})
 	})
 	r.GET("/protected", h...)
@@ -280,6 +281,42 @@ func TestRequireAuth_DefaultOrderPrefersTenantSession(t *testing.T) {
 	}
 	if body := w.Body.String(); !jsonHasEmail(body, tenantEmail) {
 		t.Fatalf("authenticated identity = %s, want the tenant session (%s)", body, tenantEmail)
+	}
+}
+
+func TestRequirePlatformIdentityRejectsTenantTokenWithPlatformRole(t *testing.T) {
+	cfg := newTestConfig()
+	jwtSvc := newTestJWTService()
+	tenantToken, _, err := jwtSvc.GenerateTokens(uuid.New(), uuid.New(), "tenant.platform-role@example.com", "platform_admin")
+	if err != nil {
+		t.Fatalf("generate tenant token: %v", err)
+	}
+	platformToken, _, err := jwtSvc.GenerateTokens(uuid.New(), uuid.Nil, "platform.admin@example.com", "platform_admin")
+	if err != nil {
+		t.Fatalf("generate platform token: %v", err)
+	}
+
+	router := echoIdentityRouter(RequireAuth(cfg, jwtSvc), RequirePlatformIdentity(), RequireAnyRole("platform_admin"))
+
+	cases := []struct {
+		name       string
+		token      string
+		wantStatus int
+	}{
+		{"tenant token rejected despite platform role string", tenantToken, http.StatusForbidden},
+		{"platform token accepted", platformToken, http.StatusOK},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", w.Code, tc.wantStatus, w.Body.String())
+			}
+		})
 	}
 }
 

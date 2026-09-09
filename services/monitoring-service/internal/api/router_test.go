@@ -4,11 +4,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform/monitoring-service/internal/config"
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
+	"github.com/vistasecurity/vistaplatform/shared/models"
 )
 
 // newProductionRouter builds the SAME router Start serves, via buildRouter.
@@ -67,5 +71,34 @@ func TestProductionRouter_SkipsPolledTelemetry(t *testing.T) {
 
 	if n := len(mw.PendingEntries()); n != 0 {
 		t.Fatalf("production router recorded %d audit entries for polled telemetry, want 0", n)
+	}
+}
+
+func TestProductionRouter_AdminStatusRejectsTenantPlatformRoleToken(t *testing.T) {
+	mw := newTestAuditMiddleware(t)
+	r := newProductionRouter(t, mw)
+
+	claims := &models.JWTClaims{
+		UserID:   uuid.New(),
+		TenantID: uuid.New(),
+		Email:    "tenant@example.com",
+		Role:     "platform_admin",
+		Type:     "access",
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+		},
+	}
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte("test-jwt-secret"))
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/monitoring-service/admin/status", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("tenant token with platform role string = %d, want 403; body=%s", w.Code, w.Body.String())
 	}
 }

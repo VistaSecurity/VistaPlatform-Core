@@ -467,20 +467,8 @@ func EraseUser(db *sql.DB, accessRevoker userAccessRevoker) gin.HandlerFunc {
 			Limitations:    erasureLimitations(),
 		}
 
-		err = shareddatabase.WithTenantTx(ctx, db, tenantID, func(tx *sql.Tx) (err error) {
-			revokedAccess := false
-			defer func() {
-				if err == nil || !revokedAccess || accessRevoker == nil {
-					return
-				}
-				cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
-				if cleanupErr := accessRevoker.ClearUserAccessRevocation(cleanupCtx, userID); cleanupErr != nil {
-					logrus.WithError(cleanupErr).WithField("user_id", userID).Error(
-						"Failed to clear pre-commit user access-token revocation after erasure rollback")
-				}
-			}()
-
+		revokedAccess := false
+		err = shareddatabase.WithTenantTx(ctx, db, tenantID, func(tx *sql.Tx) error {
 			var originalEmail string
 			if err := tx.QueryRowContext(ctx,
 				`SELECT email FROM users WHERE id = $1 AND tenant_id = $2`, userID, tenantID).
@@ -559,6 +547,14 @@ func EraseUser(db *sql.DB, accessRevoker userAccessRevoker) gin.HandlerFunc {
 			}
 			return nil
 		})
+		if err != nil && revokedAccess && accessRevoker != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if cleanupErr := accessRevoker.ClearUserAccessRevocation(cleanupCtx, userID); cleanupErr != nil {
+				logrus.WithError(cleanupErr).WithField("user_id", userID).Error(
+					"Failed to clear pre-commit user access-token revocation after erasure rollback")
+			}
+		}
 
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})

@@ -25,6 +25,14 @@ func RequirePlatformPermission(db *sql.DB, permission string) gin.HandlerFunc {
 			return
 		}
 
+		if middleware.GetUserType(c) != middleware.UserTypePlatform {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "Platform user required",
+			})
+			c.Abort()
+			return
+		}
+
 		// Get user ID from context (set by auth middleware)
 		userIDVal, exists := c.Get("userID")
 		if !exists {
@@ -101,6 +109,14 @@ func RequireAnyPlatformPermission(db *sql.DB, permissions ...string) gin.Handler
 		// RequirePlatformPermission for rationale).
 		if middleware.IsInternalCall(c) {
 			c.Next()
+			return
+		}
+
+		if middleware.GetUserType(c) != middleware.UserTypePlatform {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "Platform user required",
+			})
+			c.Abort()
 			return
 		}
 

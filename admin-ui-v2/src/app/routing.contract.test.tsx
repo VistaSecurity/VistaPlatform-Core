@@ -40,6 +40,7 @@ import { CatalogPage } from '../sections/catalog/catalog-page';
 import { SettingsPage } from '../sections/settings/settings-page';
 import { StaffPage } from '../sections/staff/staff-page';
 import { SecurityPage } from '../sections/security/security-page';
+import { PUBLIC_PATHS } from './public-routes';
 
 /** The real section components that own a descendant <Routes>, by section id. */
 const SECTION_COMPONENTS: Record<string, () => unknown> = {
@@ -152,12 +153,18 @@ function renderAt(url: string): string {
 const leaf = (url: string) => renderAt(url).replace(/^<i>|<\/i>$/g, '');
 
 describe('admin console route table (react-router v8)', () => {
-  it.each([
+  const publicRoutes = [
     ['/login', 'login'],
     ['/reset-password', 'reset-password'],
     ['/forgot-password', 'forgot-password'],
-  ])('public %s stays outside the auth gate', (url, expected) => {
+  ] as const;
+
+  it.each(publicRoutes)('public %s stays outside the auth gate', (url, expected) => {
     expect(leaf(url)).toBe(`/${expected}`);
+  });
+
+  it('keeps the session-expiry public-route guard in sync with App.tsx', () => {
+    expect(PUBLIC_PATHS).toEqual(publicRoutes.map(([url]) => url));
   });
 
   it('the app index (inside the auth gate + shell) redirects to Mission Control', () => {

@@ -698,6 +698,7 @@ func (s *Server) buildRouter(auditMiddleware *auditmiddleware.Middleware) *gin.E
 		// /monitoring-service prefix, with the platform gate applied directly.
 		adminStatus := api.Group("/monitoring-service/admin")
 		adminStatus.Use(middleware.RequirePlatformAuth(s.config.JWTSecret), middleware.StringifyUserID())
+		adminStatus.Use(sharedrbac.RequirePlatformPermission(s.db, rbac.PermissionPlatformHealth))
 		{
 			adminStatus.GET("/status", s.getAdminSystemStatus)
 			adminStatus.GET("/metrics", s.getAdminSystemMetrics)

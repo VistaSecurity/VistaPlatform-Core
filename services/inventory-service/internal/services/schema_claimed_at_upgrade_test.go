@@ -3,6 +3,7 @@ package services
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -144,4 +145,136 @@ func TestSchemaKeepsLateUpgradeRepairsForLegacyResidue(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSchemaKeepsDeadTableRetirementContract(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
+
+	retiredTables := []string{
+		"audit.audit_logs",
+		"audit.alert_instances",
+		"audit.retention_jobs",
+		"public.access_pattern_analysis",
+		"public.agent_ca_certificates",
+		"public.ai_analysis_results",
+		"public.ai_models",
+		"public.api_format_preferences",
+		"public.api_security_monitoring",
+		"public.ci_relationships",
+		"public.compliance_checks",
+		"public.compliance_framework_status",
+		"public.compliance_reports",
+		"public.compliance_requirements",
+		"public.dashboard_cache",
+		"public.dashboard_metrics",
+		"public.discovery_approval_queue",
+		"public.feature_adoption_metrics",
+		"public.feature_usage_events",
+		"public.health_insights",
+		"public.identity_link_requests",
+		"public.pending_sensors",
+		"public.platform_integration_secrets",
+		"public.resource_permissions",
+		"public.resource_tracking_config",
+		"public.security_events",
+		"public.sync_outbox",
+		"public.system_health_metrics",
+		"public.tenant_cost_analysis",
+		"public.tenant_usage_tracking",
+		"public.threat_detection_rules",
+	}
+
+	retiredFunctions := []string{
+		"public.calculate_tenant_cost",
+		"public.cleanup_expired_dashboard_cache",
+		"public.get_system_health_summary",
+		"public.update_tenant_usage",
+	}
+
+	for _, rel := range []string{
+		"scripts/database/schema.sql",
+		"charts/vistaplatform/files/schema/schema.sql",
+	} {
+		t.Run(rel, func(t *testing.T) {
+			body, err := os.ReadFile(filepath.Join(repoRoot, rel))
+			if err != nil {
+				t.Fatalf("read schema: %v", err)
+			}
+			sql := string(body)
+			code := stripSQLLineComments(sql)
+
+			for _, table := range retiredTables {
+				drop := "DROP TABLE IF EXISTS " + table + " CASCADE;"
+				if !strings.Contains(sql, drop) {
+					t.Fatalf("missing retirement drop %q in %s", drop, rel)
+				}
+
+				references := executableSQLStatementsReferencing(code, table)
+				if len(references) == 0 {
+					t.Fatalf("expected to see the retirement drop for %s in %s", table, rel)
+				}
+				for _, stmt := range references {
+					if stmt != drop {
+						t.Fatalf("%s still references retired table %s outside its drop: %s", rel, table, stmt)
+					}
+				}
+			}
+
+			for _, fn := range retiredFunctions {
+				drop := "DROP FUNCTION IF EXISTS " + fn + " CASCADE;"
+				if !strings.Contains(sql, drop) {
+					t.Fatalf("missing retirement drop %q in %s", drop, rel)
+				}
+
+				references := executableSQLStatementsReferencing(code, fn)
+				if len(references) == 0 {
+					t.Fatalf("expected to see the retirement drop for %s in %s", fn, rel)
+				}
+				for _, stmt := range references {
+					if stmt != drop {
+						t.Fatalf("%s still references retired function %s outside its drop: %s", rel, fn, stmt)
+					}
+				}
+			}
+		})
+	}
+}
+
+func stripSQLLineComments(sql string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(sql, "\n") {
+		if before, _, ok := strings.Cut(line, "--"); ok {
+			line = before
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+func executableSQLStatementsReferencing(sql, relation string) []string {
+	parts := strings.Split(relation, ".")
+	name := parts[len(parts)-1]
+	qualifier := ""
+	if len(parts) > 1 {
+		qualifier = `(?:` + regexp.QuoteMeta(parts[0]) + `\.)?`
+	}
+	reference := regexp.MustCompile(`(?i)(?:\b|")` + qualifier + regexp.QuoteMeta(name) + `(?:\b|")`)
+	statements := strings.Split(sql, ";")
+	matches := make([]string, 0)
+	for _, stmt := range statements {
+		stmt = strings.Join(strings.Fields(stmt), " ")
+		if stmt == "" {
+			continue
+		}
+		stmt += ";"
+		if reference.MatchString(stmt) {
+			matches = append(matches, stmt)
+		}
+	}
+	return matches
 }

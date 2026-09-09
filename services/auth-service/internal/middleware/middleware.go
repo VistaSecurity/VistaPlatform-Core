@@ -342,6 +342,11 @@ func RequireAuth(cfg *config.Config, jwtService *auth.JWTService, options ...Aut
 		c.Set("tenantID", claims.TenantID.String())
 		c.Set("role", claims.Role)
 		c.Set("email", claims.Email)
+		if claims.TenantID == uuid.Nil {
+			c.Set(sharedmw.CtxKeyUserType, sharedmw.UserTypePlatform)
+		} else {
+			c.Set(sharedmw.CtxKeyUserType, sharedmw.UserTypeTenant)
+		}
 		if claims.ID != "" {
 			c.Set("jti", claims.ID)
 		}
@@ -395,6 +400,25 @@ func extractActorClaims(c *gin.Context, token string) {
 	}
 	if ua, ok := actClaims["ua"].(string); ok {
 		c.Set("act.ua", ua)
+	}
+}
+
+// RequirePlatformIdentity ensures a role gate is being evaluated for a platform
+// token, not for a tenant token whose custom role happens to share a platform slug.
+func RequirePlatformIdentity() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if internal, _ := c.Get("isInternalCall"); internal == true {
+			c.Next()
+			return
+		}
+		if c.GetString(sharedmw.CtxKeyUserType) != sharedmw.UserTypePlatform {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "Platform user required",
+			})
+			c.Abort()
+			return
+		}
+		c.Next()
 	}
 }
 

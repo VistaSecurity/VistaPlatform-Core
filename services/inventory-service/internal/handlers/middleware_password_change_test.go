@@ -16,11 +16,12 @@ import (
 )
 
 type testRevocationChecker struct {
+	revokedJTIs  map[string]bool
 	revokedUsers map[uuid.UUID]bool
 }
 
-func (c testRevocationChecker) IsRevoked(context.Context, string) bool {
-	return false
+func (c testRevocationChecker) IsRevoked(_ context.Context, jti string) bool {
+	return c.revokedJTIs[jti]
 }
 
 func (c testRevocationChecker) IsUserRevoked(_ context.Context, userID uuid.UUID) bool {
@@ -120,24 +121,103 @@ func TestJWTMiddleware_PasswordChangeRequiredGate(t *testing.T) {
 	}
 }
 
-func TestJWTMiddleware_RevokedUserRejected(t *testing.T) {
+func TestJWTMiddleware_RevokedTokensRejected(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	secret := "test-secret-for-jwt-issuance-only-do-not-use"
 	cfg := &config.Config{JWT: config.JWTConfig{Secret: secret}}
 	erasedUserID := uuid.New()
+	revokedJTI := uuid.NewString()
 
 	previous := revocationCheckerFromEnv
 	revocationCheckerFromEnv = func() sharedmw.RevocationChecker {
-		return testRevocationChecker{revokedUsers: map[uuid.UUID]bool{erasedUserID: true}}
+		return testRevocationChecker{
+			revokedJTIs:  map[string]bool{revokedJTI: true},
+			revokedUsers: map[uuid.UUID]bool{erasedUserID: true},
+		}
 	}
 	t.Cleanup(func() { revocationCheckerFromEnv = previous })
 
-	mintToken := func(userID uuid.UUID) string {
+	mintToken := func(userID uuid.UUID, jti string) string {
 		token := jwt.NewWithClaims(jwt.SigningMethodHS256, &JWTClaims{
 			UserID:   userID,
 			TenantID: uuid.Nil,
 			Email:    "platform-admin@test.com",
 			Role:     "super_admin",
+			Type:     "access",
+			RegisteredClaims: jwt.RegisteredClaims{
+				Subject:   userID.String(),
+				IssuedAt:  jwt.NewNumericDate(time.Now()),
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+				NotBefore: jwt.NewNumericDate(time.Now().Add(-time.Minute)),
+				Issuer:    "crypto-inventory-auth",
+				Audience:  jwt.ClaimStrings{"crypto-inventory"},
+				ID:        jti,
+			},
+		})
+		signed, err := token.SignedString([]byte(secret))
+		if err != nil {
+			t.Fatalf("SignedString: %v", err)
+		}
+		return signed
+	}
+
+	r := gin.New()
+	r.GET("/algorithms", JWTMiddleware(cfg, nil), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	cases := []struct {
+		name       string
+		userID     uuid.UUID
+		jti        string
+		wantStatus int
+	}{
+		{
+			name:       "revoked jti rejected",
+			userID:     uuid.New(),
+			jti:        revokedJTI,
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "revoked user rejected",
+			userID:     erasedUserID,
+			jti:        uuid.NewString(),
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "live token allowed",
+			userID:     uuid.New(),
+			jti:        uuid.NewString(),
+			wantStatus: http.StatusOK,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/algorithms", nil)
+			req.Header.Set("Authorization", "Bearer "+mintToken(tc.userID, tc.jti))
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestJWTMiddleware_SetsUserTypeFromTenantClaim(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	secret := "test-secret-for-jwt-issuance-only-do-not-use"
+	cfg := &config.Config{JWT: config.JWTConfig{Secret: secret}}
+	userID := uuid.New()
+
+	mintToken := func(tenantID uuid.UUID) string {
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, &JWTClaims{
+			UserID:   userID,
+			TenantID: tenantID,
+			Email:    "user@test.com",
+			Role:     "platform_admin",
 			Type:     "access",
 			RegisteredClaims: jwt.RegisteredClaims{
 				Subject:   userID.String(),
@@ -156,24 +236,31 @@ func TestJWTMiddleware_RevokedUserRejected(t *testing.T) {
 		return signed
 	}
 
-	r := gin.New()
-	r.GET("/algorithms", JWTMiddleware(cfg, nil), func(c *gin.Context) {
-		c.Status(http.StatusOK)
-	})
+	for _, tc := range []struct {
+		name       string
+		tenantID   uuid.UUID
+		wantType   string
+		wantStatus int
+	}{
+		{"platform token", uuid.Nil, sharedmw.UserTypePlatform, http.StatusOK},
+		{"tenant token", uuid.New(), sharedmw.UserTypeTenant, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := gin.New()
+			r.GET("/algorithms", JWTMiddleware(cfg, nil), func(c *gin.Context) {
+				if got := c.GetString(sharedmw.CtxKeyUserType); got != tc.wantType {
+					t.Fatalf("userType = %q, want %q", got, tc.wantType)
+				}
+				c.Status(http.StatusOK)
+			})
 
-	req := httptest.NewRequest(http.MethodGet, "/algorithms", nil)
-	req.Header.Set("Authorization", "Bearer "+mintToken(erasedUserID))
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("revoked user: status = %d, want 401 (body: %s)", w.Code, w.Body.String())
-	}
-
-	req = httptest.NewRequest(http.MethodGet, "/algorithms", nil)
-	req.Header.Set("Authorization", "Bearer "+mintToken(uuid.New()))
-	w = httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("different user: status = %d, want 200 (body: %s)", w.Code, w.Body.String())
+			req := httptest.NewRequest(http.MethodGet, "/algorithms", nil)
+			req.Header.Set("Authorization", "Bearer "+mintToken(tc.tenantID))
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
+			}
+		})
 	}
 }

@@ -7,6 +7,7 @@ import { PlatformAuthProvider, createPlatformAuthClient, platformTokenManager } 
 import { createSessionExpiryHandler } from '@vistasecurity/primitives/shared';
 import { setSessionExpiredHandler } from '@vistasecurity/api-contract';
 import { queryClient } from './lib/query-client';
+import { isPublicPath } from './app/public-routes';
 import App from './App';
 import './index.css';
 
@@ -35,7 +36,7 @@ setSessionExpiredHandler(
       fetch('/api/v1/admin-service/admin/auth/me', { credentials: 'include' }).then((r) => r.status !== 401),
     onSessionExpired: (reason) => {
       platformTokenManager.clearTokens();
-      if (window.location.pathname !== '/login') {
+      if (!isPublicPath(window.location.pathname)) {
         window.location.assign(`/login?reason=${reason === 'expired' ? 'session-expired' : 'signed-out'}`);
       }
     },

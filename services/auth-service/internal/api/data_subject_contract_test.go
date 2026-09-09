@@ -246,6 +246,39 @@ func TestContract_EraseUserData_RollsBackWhenVerificationFails(t *testing.T) {
 	}
 }
 
+func TestContract_EraseUserData_ClearsRevocationWhenCommitFails(t *testing.T) {
+	revoker := &stubUserAccessRevoker{}
+	r, mock := newDSREngineWithRevoker(t, dsrActor, revoker)
+
+	expectTenantScope(mock)
+	mock.ExpectQuery("SELECT email FROM users").
+		WillReturnRows(sqlmock.NewRows([]string{"email"}).AddRow("person@example.com"))
+	mock.ExpectExec("UPDATE users SET").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("DELETE FROM api_tokens").WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec("UPDATE refresh_tokens").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("DELETE FROM invitations").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE audit.activity_logs").WillReturnResult(sqlmock.NewResult(0, 17))
+	mock.ExpectQuery("SELECT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
+
+	w := do(r, http.MethodPost, dsrBase+"/users/"+dsrSubject.String()+"/erase", nil)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 — failed commit must not report erasure success\nbody: %s",
+			w.Code, w.Body.String())
+	}
+	if !revoker.called || revoker.userID != dsrSubject {
+		t.Fatalf("erasure did not revoke active access tokens before mutation; called=%v user=%s",
+			revoker.called, revoker.userID)
+	}
+	if !revoker.cleared || revoker.clearedID != dsrSubject {
+		t.Fatalf("failed commit did not clear the pre-commit access-token revocation; cleared=%v user=%s",
+			revoker.cleared, revoker.clearedID)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
 func TestContract_EraseUserData_RollsBackWhenActiveSessionRevocationFails(t *testing.T) {
 	revoker := &stubUserAccessRevoker{err: errors.New("redis unavailable")}
 	r, mock := newDSREngineWithRevoker(t, dsrActor, revoker)

@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 	"github.com/vistasecurity/vistaplatform/shared/models"
 )
 
@@ -188,6 +189,39 @@ func TestRequireJWTAuth_StrictCookiePairRejectsFallbackOnMutations(t *testing.T)
 			req.Header.Set("X-CSRF-Token", tc.csrfValue)
 			w := httptest.NewRecorder()
 			newStrictRouter().ServeHTTP(w, req)
+			if w.Code != tc.wantStatus {
+				t.Fatalf("got status %d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestRequirePlatformAdminRejectsTenantTokenWithPlatformRole(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	newRouter := func() *gin.Engine {
+		r := gin.New()
+		r.Use(RequireJWTAuth(AuthConfig{JWTSecret: testJWTSecret}))
+		r.Use(RequirePlatformAdmin())
+		r.GET("/protected", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+		return r
+	}
+
+	cases := []struct {
+		name       string
+		tenantID   uuid.UUID
+		wantStatus int
+	}{
+		{"platform identity accepted", uuid.Nil, http.StatusOK},
+		{"tenant identity rejected despite platform role string", uuid.New(), http.StatusForbidden},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+			req.Header.Set("Authorization", "Bearer "+signAccessToken(t, tc.tenantID))
+			w := httptest.NewRecorder()
+			newRouter().ServeHTTP(w, req)
 			if w.Code != tc.wantStatus {
 				t.Fatalf("got status %d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
 			}
@@ -515,3 +549,37 @@ func TestRequireJWTAuth_PasswordChangeRequiredGate(t *testing.T) {
 		})
 	}
 }
+
+// Redis being unreachable must NOT lock every authenticated user out: the
+// revocation checkers fail OPEN by contract (see the RevocationChecker doc
+// comment and the "allowing request (fail-open)" log line in auth.go).
+//
+// The cost of that choice is real and worth stating where someone will read it:
+// while Redis is down, a revoked jti and an ERASED user's still-valid access
+// token both keep working until they expire. This test pins the deliberate
+// behaviour so it cannot be flipped by accident in either direction — it is not
+// an argument that fail-open is the right trade, which is a product decision.
+func TestRequireJWTAuth_FailsOpenWhenRedisRevocationUnavailable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:0"})
+	if err := rdb.Close(); err != nil {
+		t.Fatalf("close redis client: %v", err)
+	}
+	checker := NewRedisRevocationChecker(rdb)
+
+	r := gin.New()
+	r.Use(RequireJWTAuth(AuthConfig{JWTSecret: testJWTSecret, RevocationChecker: checker}))
+	r.GET("/protected", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer "+signAccessTokenForUserWithJTI(t, uuid.New(), "redis-down-jti"))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("redis revocation outage: got %d, want fail-open 200 (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+// TestRequireJWTAuth_NoCookieIsUnauthorized confirms the no-auth-at-all branch
+// still returns 401 when neither cookie nor bearer token is present.

@@ -371,6 +371,34 @@ func TestCleanupSubmitsDiscoveriesLeftInCaptureChannel(t *testing.T) {
 	}
 }
 
+func TestReinitCaptureBuffersDiscoveriesLeftInStoppedCaptureChannel(t *testing.T) {
+	const sensorID = "00000000-0000-0000-0000-000000000003"
+
+	cfg := &config.Config{SensorID: sensorID}
+	packetCapture := capture.NewPacketCapture(cfg)
+	packetCapture.GetDiscoveriesWritable() <- &models.CryptoDiscovery{
+		ID:       "reinit-flushed-1",
+		SensorID: sensorID,
+		Protocol: "TLS",
+		DestIP:   "192.0.2.30",
+		Port:     443,
+	}
+
+	s := &Sensor{
+		config:        cfg,
+		packetCapture: packetCapture,
+		discoveries:   make([]*models.CryptoDiscovery, 0),
+	}
+
+	if err := s.reinitCapture(); err == nil {
+		t.Fatal("reinitCapture succeeded with no configured interfaces; test requires Start to stop before replacing packetCapture")
+	}
+
+	if len(s.discoveries) != 1 || s.discoveries[0].ID != "reinit-flushed-1" {
+		t.Fatalf("discoveries buffered after reinit = %+v, want flushed discovery", s.discoveries)
+	}
+}
+
 func mustLoadConfig(t *testing.T, path string) *config.Config {
 	t.Helper()
 	cfg, err := config.LoadFromFile(path)

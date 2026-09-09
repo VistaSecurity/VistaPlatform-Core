@@ -565,6 +565,12 @@ func RequireTenant() gin.HandlerFunc {
 // Must be used after RequireJWTAuth.
 func RequirePlatformAdmin() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if GetUserType(c) != UserTypePlatform {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Platform admin access required"})
+			c.Abort()
+			return
+		}
+
 		role := GetRoleFromContext(c)
 		switch role {
 		case "super_admin", "platform_admin", "support_admin":

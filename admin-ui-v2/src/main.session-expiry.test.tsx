@@ -94,6 +94,19 @@ describe('admin main session-expiry handler', () => {
     expect(assign).toHaveBeenCalledWith('/login?reason=session-expired');
   });
 
+  it.each(['/reset-password', '/forgot-password'])(
+    'does not redirect public auth route %s when a stale platform session expires',
+    async (pathname) => {
+      const { assign, clearTokens, refresh, handler } = await loadMain(pathname);
+
+      await expect(handler.onAuthFailure(new Request('http://api.test/api/v1/admin-service/admin/auth/me'))).resolves.toBe(false);
+
+      expect(refresh).toHaveBeenCalledTimes(1);
+      expect(clearTokens).toHaveBeenCalledTimes(1);
+      expect(assign).not.toHaveBeenCalled();
+    },
+  );
+
   it('uses the signed-out reason when a protected request 401s without a platform session signal', async () => {
     const { assign, clearTokens, refresh, handler } = await loadMain('/tenants', false);
 
@@ -103,6 +116,19 @@ describe('admin main session-expiry handler', () => {
     expect(clearTokens).toHaveBeenCalledTimes(1);
     expect(assign).toHaveBeenCalledWith('/login?reason=signed-out');
   });
+
+  it.each(['/reset-password', '/forgot-password'])(
+    'does not redirect public auth route %s when there is no platform session signal',
+    async (pathname) => {
+      const { assign, clearTokens, refresh, handler } = await loadMain(pathname, false);
+
+      await expect(handler.onAuthFailure(new Request('http://api.test/api/v1/admin-service/admin/auth/me'))).resolves.toBe(false);
+
+      expect(refresh).not.toHaveBeenCalled();
+      expect(clearTokens).toHaveBeenCalledTimes(1);
+      expect(assign).not.toHaveBeenCalled();
+    },
+  );
 
   // Recovered-then-401 branch: the refresh "succeeded" but a replay still 401s.
   // admin-ui-v2 must confirm against admin-service's PLATFORM whoami, not the

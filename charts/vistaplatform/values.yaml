@@ -365,13 +365,13 @@ backends:
       digest: ""
 
   compliance-engine:
-    needs: {postgres: true, redis: false, nats: true}
+    needs: {postgres: true, redis: true, nats: true}
     # compliance-engine validates incoming JWT bearer tokens (jwtSecret) AND is
     # an HMAC client: the resource-tracking middleware signs metric posts to
     # resource-tracker-service and the audit middleware signs activity logs to
     # audit-service, both via INTERNAL_AUTH_SECRET. Without internalAuthSecret
     # those signed calls are rejected with 401.
-    secrets: {jwtSecret: true, internalAuthSecret: true}
+    secrets: {jwtSecret: true, internalAuthSecret: true, redisUrl: true}
     resources:
       requests: {cpu: 200m, memory: 256Mi}
       limits: {cpu: 500m, memory: 512Mi}
@@ -386,8 +386,8 @@ backends:
       digest: ""
 
   cbom-service:
-    needs: {postgres: true, redis: false, nats: true}
-    secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: true}
+    needs: {postgres: true, redis: true, nats: true}
+    secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: true, redisUrl: true}
     resources:
       requests: {cpu: 150m, memory: 192Mi}
       limits: {cpu: 400m, memory: 384Mi}
@@ -395,9 +395,9 @@ backends:
       digest: ""
 
   sensor-manager:
-    needs: {postgres: true, redis: false, nats: true, influxdb: true}
+    needs: {postgres: true, redis: true, nats: true, influxdb: true}
     secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: 
-        true}
+        true, redisUrl: true}
     resources:
       requests: {cpu: 100m, memory: 256Mi}
       limits: {cpu: 400m, memory: 512Mi}
@@ -476,9 +476,9 @@ backends:
       digest: ""
 
   resource-tracker-service:
-    needs: {postgres: true, redis: false, nats: true}
+    needs: {postgres: true, redis: true, nats: true}
     secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: 
-        true}
+        true, redisUrl: true}
     resources:
       requests: {cpu: 100m, memory: 128Mi}
       limits: {cpu: 300m, memory: 256Mi}
@@ -486,8 +486,8 @@ backends:
       digest: ""
 
   tenant-health-service:
-    needs: {postgres: true, redis: false, nats: true}
-    secrets: {jwtSecret: true, internalAuthSecret: true}
+    needs: {postgres: true, redis: true, nats: true}
+    secrets: {jwtSecret: true, internalAuthSecret: true, redisUrl: true}
     resources:
       requests: {cpu: 100m, memory: 128Mi}
       limits: {cpu: 300m, memory: 256Mi}
@@ -511,9 +511,9 @@ backends:
       digest: ""
 
   audit-service:
-    needs: {postgres: true, redis: false, nats: true}
+    needs: {postgres: true, redis: true, nats: true}
     secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey:
-        true}
+        true, redisUrl: true}
     resources:
       requests: {cpu: 150m, memory: 192Mi}
       limits: {cpu: 400m, memory: 384Mi}
@@ -521,9 +521,9 @@ backends:
       digest: ""
 
   notification-service:
-    needs: {postgres: true, redis: false, nats: true}
+    needs: {postgres: true, redis: true, nats: true}
     secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: 
-        true}
+        true, redisUrl: true}
     resources:
       requests: {cpu: 100m, memory: 128Mi}
       limits: {cpu: 300m, memory: 256Mi}

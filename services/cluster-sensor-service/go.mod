@@ -9,7 +9,7 @@ require (
 	github.com/lib/pq v1.12.3
 	github.com/nats-io/nats.go v1.53.1
 	github.com/vistasecurity/vistaplatform/shared v0.0.0
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 )
 
 replace github.com/vistasecurity/vistaplatform/shared => ../../shared

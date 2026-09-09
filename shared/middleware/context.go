@@ -96,6 +96,16 @@ func GetRoleFromContext(c *gin.Context) string {
 	return ""
 }
 
+// GetUserType retrieves whether the authenticated identity is a platform or tenant user.
+func GetUserType(c *gin.Context) string {
+	if val, exists := c.Get(CtxKeyUserType); exists {
+		if s, ok := val.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
 // GetEmailFromContext retrieves the user's email from the Gin context.
 func GetEmailFromContext(c *gin.Context) string {
 	if val, exists := c.Get(CtxKeyEmail); exists {

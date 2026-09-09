@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.5] - 2026-09-08
+
+A security release, and the most consequential thing in it is not a new bug: two
+of these fixes make earlier fixes actually work. 0.12.4 shipped erasure-session
+revocation that could not run in a real deployment, and a rollback compensation
+that could not see the failure it was written for. Both are corrected here.
+
+### Security
+
+- **A tenant could reach another tenant's data.** Three platform-only handlers
+  gated on the role *string* in the caller's token (`role == "platform_admin"`),
+  and two of them take the target tenant from the URL path. That string is not
+  platform-controlled: tenant custom roles are validated against a format pattern
+  with no reserved-name list, so a tenant administrator could create a role named
+  literally `platform_admin`, and the login path puts that name straight into the
+  token. The holder could then read and write **any** tenant's UI configuration.
+  Platform gates now require a platform identity — a nil tenant — in addition to
+  the role, so no tenant token can satisfy one however its role reads.
+
+  **No operator action required**, and no evidence this was exploited; the
+  affected surface is tenant UI configuration, not inventory or credentials.
+  Operators who allow tenants to define custom roles may still wish to audit
+  `tenant_roles` for platform-sounding names, which remain creatable and remain
+  confusing even though they no longer grant anything.
+
+- **Erased users kept working sessions against seven services.** 0.12.4 added a
+  per-user Redis denylist so data-subject erasure kills already-minted access
+  tokens, and taught two services' bespoke JWT middleware to consult it. But
+  compliance-engine, cbom-service, sensor-manager, resource-tracker-service,
+  tenant-health-service, audit-service and notification-service were never given
+  `REDIS_URL`, so their revocation checker resolved to nil and **both** the
+  per-user denylist and per-token (jti) revocation were skipped entirely — the
+  0.12.4 fix compiled, was tested, and did nothing in production. All seven now
+  declare the dependency, through the service registry, so the chart and compose
+  files carry it.
+
+- **A failed erasure could lock out a live user.** The compensating delete added
+  in 0.12.4 ran from inside the database transaction's closure, keyed on that
+  closure's error. A failure at COMMIT happens after the closure has already
+  returned success, so the compensation was skipped: the erasure rolled back
+  while the denylist entry stayed, denying access to an account that still
+  exists. The check now runs outside the transaction and covers both paths.
+
+- **golang.org/x/crypto → v0.56.0**, for two SSH advisories fixed there
+  ([GO-2026-6354] / CVE-2026-78662 and [GO-2026-6355] / CVE-2026-56855, both
+  denial of service through deadlocked channels). These reach further than the
+  advisory patched in 0.12.4: that one's affected entry points were server-side,
+  while these include `Dial` and `NewClientConn` — the client path every service
+  that probes a device over SSH goes through.
+
+[GO-2026-6354]: https://pkg.go.dev/vuln/GO-2026-6354
+[GO-2026-6355]: https://pkg.go.dev/vuln/GO-2026-6355
+
+### Fixed
+
+- **The tenant security summary always reported zero alerts.** It counted from
+  an audit table retired in an earlier release, through a best-effort helper that
+  rolls back and returns 0 on any error without logging. Every platform
+  administrator looking at any tenant saw a clean board regardless of what had
+  happened. It now reads the surviving partitioned activity log.
+- **Password-reset and invite links were dropped on arrival.** A stale CSRF
+  cookie made the admin console's startup session check redirect to the sign-in
+  page from anywhere that was not `/login` — including `/reset-password?token=…`
+  and `/forgot-password`, destroying the link before the operator could use it.
+  Those routes are now recognised as reachable while signed out.
+- **The sensor lost discoveries in two more places.** 0.12.4 fixed shutdown and
+  supervisor restart; capture *reconfiguration* had the same shape — the packet
+  capture flushes its assemblers into a channel that was then abandoned — and an
+  unbounded retry buffer could grow without limit. Reconfiguration now drains the
+  channel, and the buffer is capped with the drop logged rather than silent.
+- **JWK encoding no longer hand-rolls elliptic-curve coordinates** (carried from
+  0.12.4) is now pinned by a golden JWKS vector chosen so one coordinate has a
+  leading zero byte — the case that would regress if anyone reintroduced
+  leading-zero trimming.
+
+### Internal
+
+- The cosign guard added in 0.12.3 caught its **third** attempted
+  `cosign-installer` v3 → v4 bump, again at the pull-request gate rather than at
+  release time. The pin stays until the signing flow and the published
+  verification instructions move together.
+- Guards added this cycle now pin behaviour at the point it is wired, not only
+  where it is implemented: the cross-tenant route gate, the revoked-token check
+  in inventory-service, the retired-table contract in the schema, and the
+  admin console's public-route list against its own router.
+- Dependency refresh across Go modules, npm, and GitHub Actions; the internal QA
+  test runner moved to vitest 5.
+
 ## [0.12.4] - 2026-09-02
 
 A security release. Two of the fixes close gaps in code 0.12.3 itself shipped,

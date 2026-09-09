@@ -786,6 +786,11 @@ func (s *Sensor) handleDiscovery(discovery *models.CryptoDiscovery) {
 	// Add to in-memory list. This buffer is the only copy until submitDiscoveries
 	// ships it upstream; it is drained on success and re-queued on failure.
 	s.discoveries = append(s.discoveries, discovery)
+	if len(s.discoveries) > retryCapLimit {
+		dropped := len(s.discoveries) - retryCapLimit
+		log.Printf("⚠️  Discovery buffer overflow: dropping %d oldest discoveries (buffer was %d, cap %d)", dropped, len(s.discoveries), retryCapLimit)
+		s.discoveries = s.discoveries[dropped:]
+	}
 
 	log.Printf("🔍 Discovery: %s on %s:%d (confidence: %.2f)",
 		discovery.Protocol, discovery.DestIP, discovery.Port, discovery.Confidence)
@@ -1454,6 +1459,12 @@ func (s *Sensor) reinitCapture() error {
 	}
 	if s.packetCapture != nil {
 		s.packetCapture.Stop()
+		if flushedDiscoveries := s.drainStoppedCaptureDiscoveries(); len(flushedDiscoveries) > 0 {
+			log.Printf("📤 Buffered %d discoveries emitted during capture reconfiguration", len(flushedDiscoveries))
+			s.mu.Lock()
+			s.discoveries = append(s.discoveries, flushedDiscoveries...)
+			s.mu.Unlock()
+		}
 	}
 
 	pc := capture.NewPacketCapture(s.config)

@@ -2,10 +2,12 @@ package jwtkeys
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"math/big"
 	"net/http"
@@ -227,6 +229,43 @@ func TestRotate_OldTokensKeepVerifying(t *testing.T) {
 
 // ─── JWKS document ─────────────────────────────────────────────────────────
 
+func TestMarshalJWKS_CompatibilityVector(t *testing.T) {
+	// P-256 scalar 43's public point has a leading zero byte in Y, so this
+	// vector catches both wire-shape drift and coordinate-trimming regressions.
+	const pointHex = "04986ae2506f1ff104d04230861d8f4b498f4bc4c6d009b30f7544dc129b82d28d003cccc0a6460e0ae328a4d97d3c7b61d86fc6289c189f2525110c441bb07e97"
+	point, err := hex.DecodeString(pointHex)
+	if err != nil {
+		t.Fatalf("decode point: %v", err)
+	}
+	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), point)
+	if err != nil {
+		t.Fatalf("parse point: %v", err)
+	}
+	kid, err := DeriveKID(pub)
+	if err != nil {
+		t.Fatalf("DeriveKID: %v", err)
+	}
+	if kid != "6AzDqd_7nl93UJv4oXJxkw" {
+		t.Fatalf("kid = %q, want compatibility vector kid", kid)
+	}
+
+	body, err := MarshalJWKS([]PublicKey{{KID: kid, Key: pub}})
+	if err != nil {
+		t.Fatalf("MarshalJWKS: %v", err)
+	}
+	const want = `{"keys":[{"kty":"EC","crv":"P-256","kid":"6AzDqd_7nl93UJv4oXJxkw","use":"sig","alg":"ES256","x":"mGriUG8f8QTQQjCGHY9LSY9LxMbQCbMPdUTcEpuC0o0","y":"ADzMwKZGDgrjKKTZfTx7YdhvxiicGJ8lJREMRBuwfpc"}]}`
+	if string(body) != want {
+		t.Fatalf("MarshalJWKS bytes changed:\n got %s\nwant %s", body, want)
+	}
+	keys, err := ParseJWKS([]byte(want))
+	if err != nil {
+		t.Fatalf("ParseJWKS compatibility vector: %v", err)
+	}
+	if len(keys) != 1 || !keys[0].Key.Equal(pub) {
+		t.Fatalf("ParseJWKS compatibility vector returned %+v, want original key", keys)
+	}
+}
+
 func TestJWKS_RoundTripAndTampering(t *testing.T) {
 	s := mustSigner(t)
 	body, err := MarshalJWKS(s.PublicKeys())
@@ -263,6 +302,85 @@ func TestJWKS_RoundTripAndTampering(t *testing.T) {
 	if _, err := ParseJWKS(offCurve); err == nil {
 		t.Error("JWKS with an off-curve point was accepted")
 	}
+}
+
+func TestFromJWK_AcceptsTrimmedLeadingZeroCoordinates(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		scalar         int
+		trimCoordinate string
+	}{
+		{
+			name:           "x",
+			scalar:         379,
+			trimCoordinate: "x",
+		},
+		{
+			name:           "y",
+			scalar:         43,
+			trimCoordinate: "y",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, pub := publicKeyFromSmallScalar(t, tc.scalar)
+			kid, err := DeriveKID(pub)
+			if err != nil {
+				t.Fatalf("DeriveKID: %v", err)
+			}
+
+			x := raw[1 : 1+coordLen]
+			y := raw[1+coordLen:]
+			switch tc.trimCoordinate {
+			case "x":
+				if x[0] != 0 {
+					t.Fatal("fixture does not exercise a leading-zero x coordinate")
+				}
+				x = x[1:]
+			case "y":
+				if y[0] != 0 {
+					t.Fatal("fixture does not exercise a leading-zero y coordinate")
+				}
+				y = y[1:]
+			default:
+				t.Fatalf("unknown coordinate %q", tc.trimCoordinate)
+			}
+
+			back, err := FromJWK(JWK{
+				Kty: "EC",
+				Crv: "P-256",
+				Kid: kid,
+				Use: "sig",
+				Alg: Alg,
+				X:   base64.RawURLEncoding.EncodeToString(x),
+				Y:   base64.RawURLEncoding.EncodeToString(y),
+			})
+			if err != nil {
+				t.Fatalf("FromJWK rejected a JWK with a trimmed leading-zero %s coordinate: %v", tc.trimCoordinate, err)
+			}
+			if !back.Key.Equal(pub) {
+				t.Fatal("FromJWK did not restore the original public key after left-padding the trimmed coordinate")
+			}
+		})
+	}
+}
+
+func publicKeyFromSmallScalar(t *testing.T, scalar int) ([]byte, *ecdsa.PublicKey) {
+	t.Helper()
+	scalarBytes := make([]byte, coordLen)
+	for i := coordLen - 1; scalar > 0; i-- {
+		scalarBytes[i] = byte(scalar)
+		scalar >>= 8
+	}
+	priv, err := ecdh.P256().NewPrivateKey(scalarBytes)
+	if err != nil {
+		t.Fatalf("NewPrivateKey: %v", err)
+	}
+	raw := priv.PublicKey().Bytes()
+	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), raw)
+	if err != nil {
+		t.Fatalf("ParseUncompressedPublicKey: %v", err)
+	}
+	return raw, pub
 }
 
 // Coordinates must be fixed-width. A key whose X starts with a zero byte would

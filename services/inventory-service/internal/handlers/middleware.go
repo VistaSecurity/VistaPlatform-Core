@@ -266,6 +266,11 @@ func JWTMiddleware(cfg *config.Config, db *database.DB) gin.HandlerFunc {
 		c.Set("tenantID", claims.TenantID)
 		c.Set("role", claims.Role)
 		c.Set("email", claims.Email)
+		if claims.TenantID == uuid.Nil {
+			c.Set(sharedmw.CtxKeyUserType, sharedmw.UserTypePlatform)
+		} else {
+			c.Set(sharedmw.CtxKeyUserType, sharedmw.UserTypeTenant)
+		}
 		if claims.ID != "" {
 			c.Set("jti", claims.ID)
 		}

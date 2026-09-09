@@ -95,6 +95,26 @@ func TestProcessDiscoveries_CapsRetryQueueByDroppingOldestDiscoveries(t *testing
 	}
 }
 
+func TestHandleDiscoveryCapsBufferByDroppingOldestDiscoveries(t *testing.T) {
+	sensor := &Sensor{
+		config:      &config.Config{},
+		discoveries: make([]*models.CryptoDiscovery, 0),
+	}
+	for i := 0; i < retryCapLimit+2; i++ {
+		sensor.handleDiscovery(retryTestDiscovery(fmt.Sprintf("d-%04d", i)))
+	}
+
+	if len(sensor.discoveries) != retryCapLimit {
+		t.Fatalf("discoveries length = %d, want cap %d", len(sensor.discoveries), retryCapLimit)
+	}
+	if got := sensor.discoveries[0].ID; got != "d-0002" {
+		t.Fatalf("oldest retained discovery = %q, want d-0002 after dropping d-0000 and d-0001", got)
+	}
+	if got := sensor.discoveries[len(sensor.discoveries)-1].ID; got != "d-1001" {
+		t.Fatalf("newest retained discovery = %q, want d-1001", got)
+	}
+}
+
 func TestProcessDiscoveries_LeavesBufferedDiscoveriesUntilRegistrationCompletes(t *testing.T) {
 	sensor := &Sensor{
 		config:      &config.Config{},

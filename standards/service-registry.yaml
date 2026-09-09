@@ -362,7 +362,7 @@ services:
     required_secrets: [INTERNAL_AUTH_SECRET, JWT_SECRET]
     docker:
       type: go-service
-      dependencies: [postgres, nats]
+      dependencies: [postgres, redis, nats]
       env_template: standard-go-service
 
   - key: cbom-service
@@ -382,7 +382,7 @@ services:
     required_secrets: [INTERNAL_AUTH_SECRET, ENCRYPTION_MASTER_KEY, JWT_SECRET]
     docker:
       type: go-service
-      dependencies: [postgres, nats]
+      dependencies: [postgres, redis, nats]
       env_template: standard-go-service
 
   - key: sensor-manager
@@ -397,7 +397,7 @@ services:
     required_secrets: [INTERNAL_AUTH_SECRET, ENCRYPTION_MASTER_KEY, JWT_SECRET]
     docker:
       type: go-service
-      dependencies: [postgres, influxdb, nats]
+      dependencies: [postgres, redis, influxdb, nats]
       env_template: standard-go-service
 
   - key: cluster-sensor-service
@@ -500,7 +500,7 @@ services:
     required_secrets: [INTERNAL_AUTH_SECRET, ENCRYPTION_MASTER_KEY, JWT_SECRET]
     docker:
       type: go-service
-      dependencies: [postgres, nats]
+      dependencies: [postgres, redis, nats]
       env_template: standard-go-service
     endpoints:
       - path: /tenant/:id/resource-summary
@@ -521,7 +521,7 @@ services:
     required_secrets: [INTERNAL_AUTH_SECRET, JWT_SECRET]
     docker:
       type: go-service
-      dependencies: [postgres, nats]
+      dependencies: [postgres, redis, nats]
       env_template: standard-go-service
 
   - key: device-interrogation-service
@@ -556,7 +556,7 @@ services:
     required_secrets: [INTERNAL_AUTH_SECRET, ENCRYPTION_MASTER_KEY, JWT_SECRET]
     docker:
       type: go-service
-      dependencies: [postgres, nats]
+      dependencies: [postgres, redis, nats]
       env_template: standard-go-service
 
   - key: notification-service
@@ -571,7 +571,7 @@ services:
     required_secrets: [INTERNAL_AUTH_SECRET, ENCRYPTION_MASTER_KEY, JWT_SECRET]
     docker:
       type: go-service
-      dependencies: [postgres, nats]
+      dependencies: [postgres, redis, nats]
       env_template: standard-go-service
 
   - key: discovery-processor-service

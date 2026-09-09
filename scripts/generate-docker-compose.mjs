@@ -128,6 +128,7 @@ function generateServiceDefinition(service, isOptional = false, images = {}, web
 }
 
 function generateEnvironmentVariables(service, webUIPort = 3000, adminUIPort = 3006) {
+  const dependencies = new Set(service.docker?.dependencies || []);
   const baseEnv = [
     `PORT=${service.internal_port}`,
     'ENV=development',
@@ -157,7 +158,6 @@ function generateEnvironmentVariables(service, webUIPort = 3000, adminUIPort = 3
   // Add service-specific environment variables
   if (service.name === 'auth-service') {
     baseEnv.push(
-      'REDIS_URL=redis://:redis_pass_dev@redis:6379/0',
       'JWT_EXPIRY=24h',
       // Empty by default on purpose — auth-service treats "no SMTP host" as
       // "cannot deliver mail" and therefore does not demand email verification
@@ -185,6 +185,13 @@ function generateEnvironmentVariables(service, webUIPort = 3000, adminUIPort = 3
       'NATS_URL=nats://nats_user:nats_pass_dev@nats:4222'
     );
   }
+
+  // JWT revocation is backed by Redis. Drive REDIS_URL from the registry's
+  // datastore dependency so every JWT-verifying service can consult the shared
+  // denylist instead of silently failing open.
+  if (dependencies.has('redis')) {
+    baseEnv.push('REDIS_URL=redis://:redis_pass_dev@redis:6379/0');
+  }
   
   // Agent-facing services fail closed by default: with no AGENT_MTLS_REQUIRED
   // set they demand a per-agent client certificate. Compose dev has no agent CA
@@ -206,20 +213,15 @@ function generateEnvironmentVariables(service, webUIPort = 3000, adminUIPort = 3
     );
   }
   
-  if (['cbom-service'].includes(service.name)) {
-    baseEnv.push(
-      'REDIS_URL=redis://:redis_pass_dev@redis:6379/0'
-    );
-  }
-  
   return baseEnv;
 }
 
 function generateDependencies(service) {
   const deps = service.name === 'resource-tracker-service' ? ['postgres', 'nats'] : ['postgres'];
+  const declared = new Set(service.docker?.dependencies || []);
   
   // Add service-specific dependencies
-  if (['auth-service', 'cbom-service'].includes(service.name)) {
+  if (declared.has('redis')) {
     deps.push('redis');
   }
   

@@ -2200,7 +2200,7 @@ func (a *AuthService) GetTenantSecuritySummary(tenantID uuid.UUID) (*TenantSecur
 	var securityAlerts int
 	noUsers := false
 
-	// RLS-scoped: users, audit.activity_logs, and audit.audit_logs all carry
+	// RLS-scoped: users and audit.activity_logs carry
 	// tenant_isolation policies. The tenant is known, so all three reads run
 	// inside one WithTenantTx (app.tenant_id set). The audit counts are
 	// best-effort ("tolerate error → 0"), each guarded by its own SAVEPOINT: a
@@ -2235,14 +2235,13 @@ func (a *AuthService) GetTenantSecuritySummary(tenantID uuid.UUID) (*TenantSecur
 		`, tenantID)
 
 		// Count security-relevant audit events (last 24 hours). audit.audit_logs
-		// has no severity column — the high/critical clause this once had
-		// referenced one that never existed, which is what poisoned the
-		// transaction on every single call (see comment above).
+		// was retired; audit.activity_logs is the surviving tenant-scoped audit
+		// source that receives these actions.
 		securityAlerts = bestEffortCount(tx, "sec_summary_security_alerts", `
 			SELECT COUNT(*)
-			FROM audit.audit_logs
+			FROM audit.activity_logs
 			WHERE tenant_id = $1
-			  AND created_at > NOW() - INTERVAL '24 hours'
+			  AND occurred_at > NOW() - INTERVAL '24 hours'
 			  AND (action ILIKE '%failed%' OR action ILIKE '%lockout%' OR action ILIKE '%unauthorized%')
 		`, tenantID)
 		return nil

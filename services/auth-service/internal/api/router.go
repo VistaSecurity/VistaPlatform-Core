@@ -514,6 +514,7 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 		// Platform-admin only, so the same shared-domain cookie hazard applies —
 		// see PlatformCookiesFirst on the /admin group above.
 		tenantSecurity.Use(middleware.RequireAuth(cfg, jwtService, middleware.PlatformCookiesFirst()))
+		tenantSecurity.Use(middleware.RequirePlatformIdentity())
 		tenantSecurity.Use(middleware.RequireAnyRole("platform_admin", "super_admin"))
 		{
 			tenantSecurity.GET("/security-summary", getTenantSecuritySummaryHandler(authService))
