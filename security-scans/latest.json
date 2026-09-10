@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-09-09T09:19:39Z",
-  "generated_date": "2026-09-09",
+  "generated_at": "2026-09-10T09:18:35Z",
+  "generated_date": "2026-09-10",
   "registry": "ghcr.io/vistasecurity",
   "tag": "latest",
-  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/34333924623",
+  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/34459765459",
   "scanner": "trivy",
   "scope": {
     "severities": [
@@ -14,14 +14,12 @@
   },
   "totals": {
     "images_expected": 18,
-    "images_scanned": 17,
-    "images_not_scanned": 1,
+    "images_scanned": 18,
+    "images_not_scanned": 0,
     "critical": 2,
     "high": 4
   },
-  "not_scanned": [
-    "pcap-processor"
-  ],
+  "not_scanned": [],
   "images": [
     {
       "image": "admin-service",
@@ -138,6 +136,13 @@
     {
       "image": "notification-service",
       "ref": "ghcr.io/vistasecurity/notification-service:latest",
+      "critical": 0,
+      "high": 0,
+      "findings": []
+    },
+    {
+      "image": "pcap-processor",
+      "ref": "ghcr.io/vistasecurity/pcap-processor:latest",
       "critical": 0,
       "high": 0,
       "findings": []
