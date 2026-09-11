@@ -3,16 +3,16 @@
 Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 - **Scanned**: `ghcr.io/vistasecurity/*:latest` (18 images)
-- **Generated**: 2026-09-10T09:18:35Z
+- **Generated**: 2026-09-11T09:17:24Z
 - **Scanner**: [Trivy](https://github.com/aquasecurity/trivy)
 - **Scope**: fixable `CRITICAL` and `HIGH` findings (`--ignore-unfixed`) in OS packages and application dependencies
 
-## 2 CRITICAL · 4 HIGH (fixable, across 18 scanned images)
+## 0 CRITICAL · 6 HIGH (fixable, across 18 scanned images)
 
 | Image | CRITICAL | HIGH |
 |---|---:|---:|
 | `admin-service` | 0 | 0 ✅ |
-| `admin-ui` | 1 | 2 |
+| `admin-ui` | 0 | 3 |
 | `audit-service` | 0 | 0 ✅ |
 | `auth-service` | 0 | 0 ✅ |
 | `cbom-service` | 0 | 0 ✅ |
@@ -28,7 +28,7 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 | `resource-tracker-service` | 0 | 0 ✅ |
 | `sensor-manager` | 0 | 0 ✅ |
 | `tenant-health-service` | 0 | 0 ✅ |
-| `web-ui` | 1 | 2 |
+| `web-ui` | 0 | 3 |
 
 ## Findings
 
@@ -36,7 +36,7 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 | Severity | CVE | Package | Installed | Fixed in |
 |---|---|---|---|---|
-| CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
+| HIGH | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
 | HIGH | [CVE-2026-84304](https://nvd.nist.gov/vuln/detail/CVE-2026-84304) | `google.golang.org/grpc` | `v1.82.1` | `1.83.1` |
 | HIGH | [CVE-2026-84445](https://nvd.nist.gov/vuln/detail/CVE-2026-84445) | `google.golang.org/grpc` | `v1.82.1` | `1.82.2, 1.83.2, 1.85.0-dev.0.20260825072537-93e31b48545e` |
 
@@ -44,7 +44,7 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 | Severity | CVE | Package | Installed | Fixed in |
 |---|---|---|---|---|
-| CRITICAL | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
+| HIGH | [CVE-2026-56854](https://nvd.nist.gov/vuln/detail/CVE-2026-56854) | `golang.org/x/crypto` | `v0.53.0` | `0.55.0` |
 | HIGH | [CVE-2026-84304](https://nvd.nist.gov/vuln/detail/CVE-2026-84304) | `google.golang.org/grpc` | `v1.82.1` | `1.83.1` |
 | HIGH | [CVE-2026-84445](https://nvd.nist.gov/vuln/detail/CVE-2026-84445) | `google.golang.org/grpc` | `v1.82.1` | `1.82.2, 1.83.2, 1.85.0-dev.0.20260825072537-93e31b48545e` |
 
@@ -62,4 +62,4 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 To report a vulnerability, see [SECURITY.md](../SECURITY.md). Please do not open a public issue.
 
-<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/34459765459).</sub>
+<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/34583302777).</sub>

@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-09-10T09:18:35Z",
-  "generated_date": "2026-09-10",
+  "generated_at": "2026-09-11T09:17:24Z",
+  "generated_date": "2026-09-11",
   "registry": "ghcr.io/vistasecurity",
   "tag": "latest",
-  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/34459765459",
+  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/34583302777",
   "scanner": "trivy",
   "scope": {
     "severities": [
@@ -16,8 +16,8 @@
     "images_expected": 18,
     "images_scanned": 18,
     "images_not_scanned": 0,
-    "critical": 2,
-    "high": 4
+    "critical": 0,
+    "high": 6
   },
   "not_scanned": [],
   "images": [
@@ -31,11 +31,11 @@
     {
       "image": "admin-ui",
       "ref": "ghcr.io/vistasecurity/admin-ui:latest",
-      "critical": 1,
-      "high": 2,
+      "critical": 0,
+      "high": 3,
       "findings": [
         {
-          "severity": "CRITICAL",
+          "severity": "HIGH",
           "id": "CVE-2026-56854",
           "package": "golang.org/x/crypto",
           "installed": "v0.53.0",
@@ -171,11 +171,11 @@
     {
       "image": "web-ui",
       "ref": "ghcr.io/vistasecurity/web-ui:latest",
-      "critical": 1,
-      "high": 2,
+      "critical": 0,
+      "high": 3,
       "findings": [
         {
-          "severity": "CRITICAL",
+          "severity": "HIGH",
           "id": "CVE-2026-56854",
           "package": "golang.org/x/crypto",
           "installed": "v0.53.0",
