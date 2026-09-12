@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-09-11T09:17:24Z",
-  "generated_date": "2026-09-11",
+  "generated_at": "2026-09-12T08:58:04Z",
+  "generated_date": "2026-09-12",
   "registry": "ghcr.io/vistasecurity",
   "tag": "latest",
-  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/34583302777",
+  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/34684535042",
   "scanner": "trivy",
   "scope": {
     "severities": [
@@ -14,12 +14,15 @@
   },
   "totals": {
     "images_expected": 18,
-    "images_scanned": 18,
-    "images_not_scanned": 0,
+    "images_scanned": 16,
+    "images_not_scanned": 2,
     "critical": 0,
     "high": 6
   },
-  "not_scanned": [],
+  "not_scanned": [
+    "cbom-service",
+    "compliance-engine"
+  ],
   "images": [
     {
       "image": "admin-service",
@@ -78,22 +81,8 @@
       "findings": []
     },
     {
-      "image": "cbom-service",
-      "ref": "ghcr.io/vistasecurity/cbom-service:latest",
-      "critical": 0,
-      "high": 0,
-      "findings": []
-    },
-    {
       "image": "cluster-sensor-service",
       "ref": "ghcr.io/vistasecurity/cluster-sensor-service:latest",
-      "critical": 0,
-      "high": 0,
-      "findings": []
-    },
-    {
-      "image": "compliance-engine",
-      "ref": "ghcr.io/vistasecurity/compliance-engine:latest",
       "critical": 0,
       "high": 0,
       "findings": []
