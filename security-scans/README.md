@@ -3,15 +3,17 @@
 Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 - **Scanned**: `ghcr.io/vistasecurity/*:latest` (18 images)
-- **Generated**: 2026-09-13T09:55:24Z
+- **Generated**: 2026-09-14T10:13:53Z
 - **Scanner**: [Trivy](https://github.com/aquasecurity/trivy)
 - **Scope**: fixable `CRITICAL` and `HIGH` findings (`--ignore-unfixed`) in OS packages and application dependencies
 
-## 0 CRITICAL · 6 HIGH (fixable, across 18 scanned images)
+> [!WARNING]
+> **1 of 18 images could not be scanned on this run.** The counts below therefore describe only the images that were: they are not a clean bill of health for the release. Unscanned images are listed at the bottom.
+
+## 0 CRITICAL · 6 HIGH (fixable, across 17 scanned images)
 
 | Image | CRITICAL | HIGH |
 |---|---:|---:|
-| `admin-service` | 0 | 0 ✅ |
 | `admin-ui` | 0 | 3 |
 | `audit-service` | 0 | 0 ✅ |
 | `auth-service` | 0 | 0 ✅ |
@@ -29,6 +31,7 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 | `sensor-manager` | 0 | 0 ✅ |
 | `tenant-health-service` | 0 | 0 ✅ |
 | `web-ui` | 0 | 3 |
+| `admin-service` | ❌ not scanned | ❌ not scanned |
 
 ## Findings
 
@@ -48,6 +51,12 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 | HIGH | [CVE-2026-84304](https://nvd.nist.gov/vuln/detail/CVE-2026-84304) | `google.golang.org/grpc` | `v1.82.1` | `1.83.1` |
 | HIGH | [CVE-2026-84445](https://nvd.nist.gov/vuln/detail/CVE-2026-84445) | `google.golang.org/grpc` | `v1.82.1` | `1.82.2, 1.83.2, 1.85.0-dev.0.20260825072537-93e31b48545e` |
 
+## Not scanned on this run
+
+Trivy did not produce a usable report for these images. An image that was not scanned is reported as unscanned rather than as clean.
+
+- `ghcr.io/vistasecurity/admin-service:latest`
+
 ## How to read this
 
 - **Fixable only.** Findings with no fix available upstream are excluded, because they are not actionable by upgrading. A count of zero here does not mean zero known CVEs.
@@ -62,4 +71,4 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 To report a vulnerability, see [SECURITY.md](../SECURITY.md). Please do not open a public issue.
 
-<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/34750457042).</sub>
+<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/34831987394).</sub>
