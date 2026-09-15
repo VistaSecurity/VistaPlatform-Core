@@ -1,85 +1,124 @@
-// Global search command palette — ⌘K / Ctrl+K (or the top-bar search button)
-// opens a quick-find overlay. Ported from the legacy web-ui command palette
-// (_legacy/web-ui/src/components/common/command-palette.tsx), re-targeted to
-// frontend-v2 routes + the typed @vistasecurity/api-contract clients.
+// Global command palette — ⌘K / Ctrl+K (or the top-bar search button) opens a
+// quick-find overlay with TWO modes (ADR-0006 D9).
 //
-// Frontend-only by design (feature): there is NO backend /search endpoint.
-// It fans out to existing per-entity endpoints and merges client-side —
-//   • assets / certificates → server-side `search` param
-//   • devices / sensors     → full list, filtered in the browser (small lists)
-// Empty query shows a static Quick-Navigation list. Selecting an asset/cert
-// navigates to the inventory lens seeded with `?q=` so the item surfaces.
+//   search  the deterministic one, in every edition. Fans out to existing
+//           per-entity endpoints and merges client-side — assets and
+//           certificates by server-side `search`, devices and sensors filtered
+//           in the browser, classes from the generated registry, and the
+//           relationships of the best asset match. There is no backend /search
+// endpoint (feature).
+//   ask     Enterprise, and only when a provider is configured. A question in
+//           words becomes a query-language predicate the server wrote,
+//           validated, and ran; the rows it selected are rendered as the SAME
+//           result rows search mode uses, and the query is shown with "Open in
+//           Inventory" so it can be edited and saved as a view.
+//
+// The toggle is not rendered at all when the query seam is not live for this
+// tenant. That is D9's rule and it is the honest one: a toggle that led to a
+// 402 or a 403 would leave the user unable to tell whether they are broken or
+// switched off.
+//
+// Selecting an ASSET opens its page (`/inventory/assets/:id`) — the ops journey
+// in ADR-0006's personas is "⌘K → type a hostname → the asset page opens", and
+// handing back a filtered list made the user choose their own result twice. A
+// certificate still seeds the certificate lens with `?q=`: certificates have no
+// page of their own.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
-import { useFeatures, type FeatureName } from '@vistasecurity/primitives/features';
+import { useFeatures } from '@vistasecurity/primitives/features';
 import { clients } from '../lib/clients';
-import { Icon, levelFromScore } from '../components/ui';
+import { Icon } from '../components/ui';
+import { ServerQueryErrors } from '../sections/inventory/query-editor';
+import { INVENTORY_LENSES } from '../sections/inventory/lenses';
+import {
+  KIND_ICON, KIND_LABEL, assetItem, classesOfAssets, inventoryQueryLink, inventorySearchLink,
+  matchingClasses, relationshipItem, sectionsOf,
+  type CommandItem, type ResultKind,
+} from './palette-results';
+import { askRows, askToggleVisible, readableSummary, useAsk, useAskAvailability, type AskResult } from './ask-mode';
 
-type ResultKind = 'nav' | 'asset' | 'cert' | 'device' | 'sensor';
+export type { CommandItem, ResultKind };
 
-interface CommandItem {
-  id: string;
-  kind: ResultKind;
-  label: string;
-  sublabel?: string;
-  badge?: string;
-  to: string;
-  /** Entitlement key this quick-nav target requires; omitted = every edition. */
-  feature?: FeatureName;
-}
-
-const KIND_LABEL: Record<ResultKind, string> = {
-  nav: 'Quick Navigation',
-  asset: 'Infrastructure Assets',
-  cert: 'Certificates',
-  device: 'Devices',
-  sensor: 'Sensors',
-};
-
-const KIND_ICON: Record<ResultKind, string> = {
-  nav: 'arrow-right',
-  asset: 'server',
-  cert: 'file-badge',
-  device: 'monitor-smartphone',
-  sensor: 'wifi',
-};
+/**
+ * The inventory quick-jump targets, DERIVED from the lens registry.
+ *
+ * The hand-written list they replace advertised `infrastructure` and `network`
+ * — retired keys that only redirect — and offered none of the lenses added
+ * since. A palette is a map of the product; one drawn by hand goes out of date
+ * the first time a lens is added, and nothing fails when it does.
+ *
+ * Sub-lenses (TLS/SSH under Configuration) are left out: the palette lists
+ * places, and those are filters of one.
+ */
+export const LENS_NAV_ITEMS: CommandItem[] = INVENTORY_LENSES
+  .filter((l) => l.primary)
+  .map((l) => ({
+    id: `nav-inv-${l.key}`,
+    kind: 'nav' as const,
+    label: `Inventory · ${l.label}`,
+    // A placeholder lens is a real destination — it explains what is coming —
+    // but saying so here means nobody arrives expecting data.
+    sublabel: l.placeholder ? `${l.placeholder.phase} — not built yet` : undefined,
+    to: `/inventory?lens=${l.key}`,
+  }));
 
 // Static quick-jump targets — frontend-v2 5-section IA. Shown when the query is
 // empty, and also filtered by the typed query (so "post" finds Posture).
-const NAV_ITEMS: CommandItem[] = [
+export const NAV_ITEMS: CommandItem[] = [
   { id: 'nav-dashboard', kind: 'nav', label: 'Dashboard', sublabel: 'Health overview', to: '/dashboard' },
   { id: 'nav-inventory', kind: 'nav', label: 'Inventory', sublabel: 'Assets, certificates, keys, configurations', to: '/inventory' },
-  { id: 'nav-inv-infra', kind: 'nav', label: 'Inventory · Infrastructure', sublabel: 'Assets', to: '/inventory?lens=infrastructure' },
-  { id: 'nav-inv-cert', kind: 'nav', label: 'Inventory · Certificates', sublabel: 'All certificates', to: '/inventory?lens=certificate' },
-  { id: 'nav-inv-keys', kind: 'nav', label: 'Inventory · Cryptographic Keys', to: '/inventory?lens=keys' },
-  { id: 'nav-inv-config', kind: 'nav', label: 'Inventory · Configuration', to: '/inventory?lens=configuration' },
-  { id: 'nav-inv-network', kind: 'nav', label: 'Inventory · Network', to: '/inventory?lens=network' },
-  { id: 'nav-inv-conn', kind: 'nav', label: 'Inventory · 3rd Party Connections', to: '/inventory?lens=connections' },
+  ...LENS_NAV_ITEMS,
   { id: 'nav-posture', kind: 'nav', label: 'Risk & Compliance · Posture', sublabel: 'Compliance posture & frameworks', to: '/risk-compliance/posture' },
   { id: 'nav-findings', kind: 'nav', label: 'Risk & Compliance · Findings', to: '/risk-compliance/findings' },
-  { id: 'nav-cbom', kind: 'nav', label: 'CBOM', sublabel: 'Cryptographic Bill of Materials', to: '/risk-compliance/cbom' },
+  // The sublabel spells the four kinds out because the palette matches on
+  // label AND sublabel: without them, someone typing "SBOM" — the whole reason
+  // the page was renamed from "CBOM" (ADR-0005 D6) — found nothing here, in the
+  // one control whose job is to answer "where is the thing I am looking for".
+  {
+    id: 'nav-cbom',
+    kind: 'nav',
+    label: 'Risk & Compliance · Bills of Materials',
+    sublabel: 'CBOM, SBOM, HBOM and full-inventory snapshots',
+    to: '/risk-compliance/cbom',
+  },
   // Enterprise-only (cbom-service/ee/diff) — filtered out below when the
   // cbom_signing entitlement is off, so ⌘K never offers a locked page.
-  { id: 'nav-cbom-compare', kind: 'nav', label: 'Compare CBOMs', to: '/risk-compliance/cbom/compare', feature: 'cbom_signing' },
+  {
+    id: 'nav-cbom-compare',
+    kind: 'nav',
+    label: 'Risk & Compliance · Compare artifacts',
+    sublabel: 'Diff two bills of materials of the same kind',
+    to: '/risk-compliance/cbom/compare',
+    feature: 'cbom_signing',
+  },
   { id: 'nav-discovery', kind: 'nav', label: 'Discovery', sublabel: 'Sensors, jobs, devices, scans', to: '/discovery' },
   { id: 'nav-sensors', kind: 'nav', label: 'Discovery · Sensors', to: '/discovery/sensors' },
   { id: 'nav-devices', kind: 'nav', label: 'Discovery · Devices', to: '/discovery/devices' },
   { id: 'nav-remediation', kind: 'nav', label: 'Remediation · Queue', to: '/remediation/queue' },
   { id: 'nav-settings', kind: 'nav', label: 'Settings', sublabel: 'Organization configuration', to: '/settings' },
+  // The two pages that explain how the inventory is DECIDED (ADR-0006 D7).
+  // They are the answer to "why is this thing a server?" and "why did these
+  // two sightings become one asset?", and they sit deep in Settings where
+  // nobody looking for that answer would think to go.
+  { id: 'nav-settings-classes', kind: 'nav', label: 'Settings · Classes', sublabel: 'The asset class taxonomy and its attributes', to: '/settings/classes' },
+  { id: 'nav-settings-identification-rules', kind: 'nav', label: 'Settings · Identification rules', sublabel: 'How a sighting is matched to an existing asset', to: '/settings/identification-rules' },
 ];
 
-const invSearchTo = (lens: string, term: string) =>
-  `/inventory?lens=${lens}${term ? `&q=${encodeURIComponent(term)}` : ''}`;
+type Mode = 'search' | 'ask';
 
 export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
   const navigate = useNavigate();
+  const [requestedMode, setMode] = useState<Mode>('search');
   const [query, setQuery] = useState('');
   const [dq, setDq] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const { features } = useFeatures();
+  const ask = useAskAvailability();
+  const askCall = useAsk();
+  const [askResult, setAskResult] = useState<AskResult | null>(null);
   // Drop quick-nav targets this edition/plan doesn't ship before anything else
   // sees them — both the empty-query list and the typed filter read this.
   const navItems = useMemo(
@@ -101,23 +140,46 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     return () => document.removeEventListener('keydown', onKey);
   }, [open, onOpenChange]);
 
-  // Reset + focus on open.
+  // Reset + focus on open. The MODE resets too: a palette that reopened in ask
+  // mode would spend a model call on someone who pressed ⌘K to jump to a page.
   useEffect(() => {
     if (!open) return;
+    setMode('search');
     setQuery('');
     setDq('');
     setActiveIndex(0);
+    setAskResult(null);
+    askCall.reset();
     const t = setTimeout(() => inputRef.current?.focus(), 40);
     return () => clearTimeout(t);
+    // askCall.reset is stable; re-running this on every render of the mutation
+    // would clear the box mid-typing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  // Debounce the query (300ms) so we don't fan out on every keystroke.
+  // The toggle appears only when something can actually answer. `loading` is a
+  // third state and renders nothing: telling a user a capability is off before
+  // we have looked is the failure this whole area is written against.
+  const canAsk = askToggleVisible(ask);
+
+  // The mode actually IN FORCE, derived rather than stored.
+  //
+  // Losing the capability mid-session — a tenant admin switches the assistant
+  // off in another tab and the status refetches — must not leave the palette in
+  // a mode nothing can answer. Deriving it makes that fall out for free; an
+  // effect correcting a stored value would render one frame of an ask box that
+  // cannot ask.
+  const mode: Mode = canAsk ? requestedMode : 'search';
+
+  // Debounce the query (300ms) so we don't fan out on every keystroke. Ask mode
+  // never fans out — it runs on Enter — so the debounce is search's alone.
   useEffect(() => {
     const t = setTimeout(() => setDq(query.trim()), 300);
     return () => clearTimeout(t);
   }, [query]);
 
-  const enabled = open && dq.length >= 2;
+  const searching = mode === 'search';
+  const enabled = open && searching && dq.length >= 2;
 
   // Assets — server-side search, top 6.
   const assetsQ = useQuery({
@@ -125,24 +187,11 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     enabled,
     staleTime: 30_000,
     placeholderData: keepPreviousData,
-    queryFn: async (): Promise<CommandItem[]> => {
+    queryFn: async () => {
       const { data } = await clients.inventory.GET('/infrastructure-assets', {
         params: { query: { page: 1, page_size: 6, search: dq } },
       });
-      return (data?.assets ?? []).map((a) => {
-        const name = a.hostname || a.ip_address || a.id;
-        // Only badge Medium+ risk (>=40) — every score maps to a level, so
-        // badging all of them would just print "Informational" on everything.
-        const badge = typeof a.risk_score === 'number' && a.risk_score >= 40 ? (a.risk_level || levelFromScore(a.risk_score)) : undefined;
-        return {
-          id: `asset-${a.id}`,
-          kind: 'asset' as const,
-          label: name,
-          sublabel: [a.ip_address, a.asset_type, a.environment].filter(Boolean).join(' · ') || undefined,
-          badge,
-          to: invSearchTo('infrastructure', a.hostname || a.ip_address || ''),
-        };
-      });
+      return data?.assets ?? [];
     },
   });
 
@@ -166,7 +215,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
           label,
           sublabel: c.issuer_dn || undefined,
           badge,
-          to: invSearchTo('certificate', c.common_name || c.subject_dn || ''),
+          to: inventorySearchLink('certificate', c.common_name || c.subject_dn || ''),
         };
       });
     },
@@ -192,9 +241,56 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     },
   });
 
+  // Relationships of the BEST asset match (ADR-0006 D9).
+  //
+  // One asset, not all six: the ops journey is "the switch being replaced on
+  // Friday — what is behind it?", which is a question about one thing, and
+  // fanning out to six assets' edges would spend six requests to bury the
+  // answer. There is no tenant-wide relationship search to use instead.
+  // In ASK mode the best match is the answer's first row, not a search result —
+  // search mode's queries are disabled there. Deriving one `topAsset` for both
+  // modes is what lets the relationship rows below be the SAME rows (D9) rather
+  // than a second, ask-shaped copy of them.
+  // Memoised, not a bare conditional: a fresh `[]` on every render would make
+  // the results `useMemo` below re-run on every keystroke of a mode that does
+  // not fetch on keystrokes.
+  const askAnswerRows = useMemo(
+    () => (askResult?.kind === 'answer' ? (askResult.answer.rows ?? []) : []),
+    [askResult],
+  );
+  const topAsset = mode === 'ask' ? askAnswerRows[0] : assetsQ.data?.[0];
+  const relsQ = useQuery({
+    queryKey: ['cmd', 'rels', topAsset?.id],
+    // `open`, not `enabled`: `enabled` carries "search mode and two characters
+    // typed", which is never true in ask mode — gating on it is what left ask
+    // answers with no relationship rows at all.
+    enabled: open && !!topAsset?.id,
+    staleTime: 60_000,
+    queryFn: async () => {
+      const { data } = await clients.inventory.GET('/infrastructure-assets/{id}/relationships', {
+        params: { path: { id: topAsset!.id }, query: { direction: 'both', limit: 4 } },
+      });
+      return data?.relationships ?? [];
+    },
+  });
+
   const isFetching = enabled && (assetsQ.isFetching || certsQ.isFetching);
 
   const items: CommandItem[] = useMemo(() => {
+    if (mode === 'ask') {
+      if (askResult?.kind !== 'answer') return [];
+      // The same three kinds search mode offers, built by the same builders
+      // (D9: "renders the tool results as the same result rows"). Ask mode used
+      // to render assets alone, so one surface had two behaviours depending on
+      // how the user phrased the question.
+      const out = askRows(askResult.answer);
+      out.push(...classesOfAssets(askAnswerRows));
+      if (topAsset) {
+        const name = topAsset.display_name || topAsset.hostname || topAsset.id;
+        out.push(...(relsQ.data ?? []).map((rel) => relationshipItem(topAsset.id, name, rel)));
+      }
+      return out;
+    }
     if (!enabled) {
       return navItems;
     }
@@ -204,8 +300,17 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     // Quick-nav entries that match the typed text, first.
     out.push(...navItems.filter((n) => n.label.toLowerCase().includes(q) || (n.sublabel ?? '').toLowerCase().includes(q)));
 
-    out.push(...(assetsQ.data ?? []));
+    out.push(...(assetsQ.data ?? []).map(assetItem));
     out.push(...(certsQ.data ?? []));
+
+    // Classes (D9) — from the generated registry, no request.
+    out.push(...matchingClasses(dq));
+
+    // Relationships (D9) — the top asset's edges, read from its own side.
+    if (topAsset) {
+      const name = topAsset.display_name || topAsset.hostname || topAsset.id;
+      out.push(...(relsQ.data ?? []).map((rel) => relationshipItem(topAsset.id, name, rel)));
+    }
 
     (devicesQ.data ?? [])
       .filter((d) => (d.hostname ?? '').toLowerCase().includes(q) || (d.ip_address ?? '').toLowerCase().includes(q))
@@ -231,22 +336,38 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
       }));
 
     return out;
-  }, [enabled, dq, navItems, assetsQ.data, certsQ.data, devicesQ.data, sensorsQ.data]);
+  }, [mode, askResult, askAnswerRows, enabled, dq, navItems, assetsQ.data, certsQ.data, devicesQ.data, sensorsQ.data, relsQ.data, topAsset]);
 
-  // Keep the highlight in range as results change.
-  useEffect(() => { setActiveIndex(0); }, [dq]);
+  // Keep the highlight in range as results change. Ask mode starts with NOTHING
+  // highlighted (-1) so Enter asks the question rather than opening a row.
+  useEffect(() => { setActiveIndex(mode === 'ask' ? -1 : 0); }, [dq, mode]);
   useEffect(() => {
-    if (activeIndex > items.length - 1) setActiveIndex(Math.max(0, items.length - 1));
-  }, [items.length, activeIndex]);
+    if (activeIndex > items.length - 1) setActiveIndex(Math.max(mode === 'ask' ? -1 : 0, items.length - 1));
+  }, [items.length, activeIndex, mode]);
 
-  const go = useCallback((item: CommandItem) => { navigate(item.to); close(); }, [navigate, close]);
+  const go = useCallback((item: CommandItem) => { void navigate(item.to); close(); }, [navigate, close]);
+
+  const runAsk = useCallback(() => {
+    const question = query.trim();
+    if (!question) return;
+    setAskResult(null);
+    askCall.mutate(question, { onSuccess: (r) => { setAskResult(r); setActiveIndex(-1); } });
+  }, [query, askCall]);
 
   // Arrow / Enter / Esc navigation while open.
   const onInputKey = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') { e.preventDefault(); close(); return; }
     if (e.key === 'ArrowDown') { e.preventDefault(); setActiveIndex((i) => Math.min(i + 1, items.length - 1)); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); setActiveIndex((i) => Math.max(i - 1, 0)); }
-    else if (e.key === 'Enter') { e.preventDefault(); const it = items[activeIndex]; if (it) go(it); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setActiveIndex((i) => Math.max(i - 1, mode === 'ask' ? -1 : 0)); }
+    else if (e.key === 'Enter') {
+      e.preventDefault();
+      // In ask mode with nothing highlighted, Enter ASKS. Once the user has
+      // arrowed into the rows, it opens the highlighted one — so the keyboard
+      // reaches both without a second key to learn.
+      if (mode === 'ask' && activeIndex < 0) { runAsk(); return; }
+      const it = items[activeIndex];
+      if (it) go(it);
+    }
   };
 
   // Scroll the active row into view.
@@ -254,18 +375,13 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     listRef.current?.querySelector<HTMLElement>('[data-active="true"]')?.scrollIntoView({ block: 'nearest' });
   }, [activeIndex]);
 
-  // Section grouping (contiguous runs of the same kind).
-  const sections = useMemo(() => {
-    const out: { kind: ResultKind; start: number; count: number }[] = [];
-    let last: ResultKind | null = null;
-    items.forEach((it, i) => {
-      if (it.kind !== last) { out.push({ kind: it.kind, start: i, count: 1 }); last = it.kind; }
-      else out[out.length - 1].count++;
-    });
-    return out;
-  }, [items]);
+  const sections = useMemo(() => sectionsOf(items), [items]);
 
   if (!open) return null;
+
+  const answer = askResult?.kind === 'answer' ? askResult.answer : null;
+  const refusal = askResult?.kind === 'refusal' ? askResult.refusal : null;
+  const askError = askResult?.kind === 'error' ? askResult.message : null;
 
   return (
     <div
@@ -284,29 +400,128 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
           borderRadius: 14, boxShadow: 'var(--app-shadow)', overflow: 'hidden', display: 'flex', flexDirection: 'column',
         }}
       >
+        {/* Mode toggle — rendered ONLY when the query seam can answer for this
+            tenant (ADR-0006 D9). Absent, not disabled: a control that cannot be
+            used tells a reader nothing about why. */}
+        {canAsk && (
+          <div
+            role="tablist"
+            aria-label="Palette mode"
+            data-testid="palette-mode-toggle"
+            style={{ display: 'flex', gap: 4, padding: '8px 12px 0' }}
+          >
+            {(['search', 'ask'] as Mode[]).map((m) => (
+              <button
+                key={m}
+                role="tab"
+                aria-selected={mode === m}
+                onClick={() => { setMode(m); setAskResult(null); inputRef.current?.focus(); }}
+                className="ui-btn ghost"
+                style={{
+                  fontSize: 12, padding: '4px 10px', borderRadius: 8,
+                  background: mode === m ? 'var(--rail-active)' : 'transparent',
+                  color: mode === m ? 'var(--rail-accent)' : 'var(--app-t3)',
+                }}
+              >
+                {m === 'search' ? 'Search' : 'Ask'}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Input row */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '13px 16px', borderBottom: '1px solid var(--app-border)' }}>
-          <Icon name="search" size={17} />
+          <Icon name={mode === 'ask' ? 'sparkles' : 'search'} size={17} />
           <input
             ref={inputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onInputKey}
-            placeholder="Search assets, certificates, devices, sensors — or jump to a page…"
-            aria-label="Search"
+            placeholder={mode === 'ask'
+              ? 'Ask about your inventory — “production servers with a certificate expiring this month”'
+              : 'Search assets, certificates, devices, sensors — or jump to a page…'}
+            aria-label={mode === 'ask' ? 'Ask about your inventory' : 'Search'}
             autoComplete="off"
             style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: 'var(--app-t1)', fontSize: 14, fontFamily: 'var(--font-body)' }}
           />
-          {isFetching && <Icon name="loader" size={15} style={{ animation: 'spin 1.1s linear infinite' }} />}
+          {(isFetching || askCall.isPending) && <Icon name="loader" size={15} style={{ animation: 'spin 1.1s linear infinite' }} />}
           <style>{'@keyframes spin { to { transform: rotate(360deg); } }'}</style>
           <button onClick={close} aria-label="Close" className="ui-btn ghost" style={{ flex: 'none', padding: '0 8px' }}><Icon name="x" size={15} /></button>
         </div>
+
+        {/* The answer panel: the QUERY first, then the rows, then the prose.
+            That order is the design — the query is the checkable artefact, and a
+            user who disagrees with the summary edits it. */}
+        {mode === 'ask' && answer && (
+          <div data-testid="ask-answer" style={{ padding: '12px 16px', borderBottom: '1px solid var(--app-border)', display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <code
+                data-testid="ask-canonical-query"
+                style={{ fontSize: 12, fontFamily: 'var(--font-mono)', background: 'var(--app-panel2)', padding: '4px 8px', borderRadius: 6, color: 'var(--app-t1)', wordBreak: 'break-word' }}
+              >
+                {answer.query || 'no query was echoed'}
+              </code>
+              {answer.query && (
+                <button
+                  data-testid="ask-open-in-inventory"
+                  className="ui-btn ghost"
+                  style={{ fontSize: 12, padding: '3px 9px' }}
+                  onClick={() => go({ id: 'ask-open', kind: 'nav', label: 'Open in Inventory', to: inventoryQueryLink(answer.query) })}
+                >
+                  Open in Inventory
+                </button>
+              )}
+            </div>
+            {answer.text && (
+              <p style={{ margin: 0, fontSize: 13, lineHeight: 1.5, color: 'var(--app-t2)' }}>{readableSummary(answer.text)}</p>
+            )}
+            {/* ADR-0008 D4.1: a generated answer says so, and says what wrote it. */}
+            <span style={{ fontSize: 11, color: 'var(--app-t3)' }}>
+              Written from the rows below{answer.provenance?.model_id ? ` by ${answer.provenance.model_id}` : ''}. Check them.
+            </span>
+          </div>
+        )}
+
+        {/* A refusal is an ANSWER, not an error: a provider replied and the
+            validator said exactly why it could not be used. The diagnostics go
+            out verbatim, through the same renderer the query editor uses. */}
+        {mode === 'ask' && refusal && (
+          <div data-testid="ask-refusal" style={{ padding: '12px 16px', borderBottom: '1px solid var(--app-border)', display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <p style={{ margin: 0, fontSize: 13, color: 'var(--app-t2)' }}>{refusal.error}</p>
+            {refusal.query && <ServerQueryErrors query={refusal.query} errors={refusal.errors} />}
+            {!refusal.query && refusal.errors.length > 0 && (
+              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: 'var(--app-t2)' }}>
+                {refusal.errors.map((e, i) => (
+                  <li key={`${e.code}-${i}`}>{e.code}: {e.message}{e.suggestion ? ` — ${e.suggestion}` : ''}</li>
+                ))}
+              </ul>
+            )}
+            {refusal.query && (
+              <button
+                data-testid="ask-edit-refused-query"
+                className="ui-btn ghost"
+                style={{ fontSize: 12, padding: '3px 9px', alignSelf: 'flex-start' }}
+                onClick={() => go({ id: 'ask-edit', kind: 'nav', label: 'Edit in Inventory', to: inventoryQueryLink(refusal.query!) })}
+              >
+                Edit it in Inventory
+              </button>
+            )}
+          </div>
+        )}
+
+        {mode === 'ask' && askError && (
+          <p data-testid="ask-error" style={{ margin: 0, padding: '14px 16px', fontSize: 13, color: 'var(--app-t2)', borderBottom: '1px solid var(--app-border)' }}>
+            {askError}
+          </p>
+        )}
 
         {/* Results */}
         <div ref={listRef} role="listbox" style={{ maxHeight: '56vh', overflowY: 'auto', padding: '4px 0' }}>
           {items.length === 0 && (
             <p style={{ padding: '36px 16px', textAlign: 'center', fontSize: 13, color: 'var(--app-t3)' }}>
-              {enabled ? 'No results found' : 'Start typing to search…'}
+              {mode === 'ask'
+                ? (askCall.isPending ? 'Writing a query…' : askResult ? 'No assets matched.' : 'Ask a question and press ↵.')
+                : enabled ? 'No results found' : 'Start typing to search…'}
             </p>
           )}
 
@@ -322,6 +537,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
                   <button
                     key={item.id}
                     data-active={active}
+                    data-kind={item.kind}
                     role="option"
                     aria-selected={active}
                     onClick={() => go(item)}
@@ -353,7 +569,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
         {/* Footer hints */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '8px 16px', borderTop: '1px solid var(--app-border)', fontSize: 11, color: 'var(--app-t3)', userSelect: 'none' }}>
           <span>↑↓ navigate</span>
-          <span>↵ open</span>
+          <span>{mode === 'ask' ? '↵ ask' : '↵ open'}</span>
           <span>esc close</span>
           <span style={{ marginLeft: 'auto' }}>⌘K toggle</span>
         </div>

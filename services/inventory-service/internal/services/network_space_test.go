@@ -6,33 +6,46 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+
+	"github.com/vistasecurity/vistaplatform/shared/assetclass"
+	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
-// getTestDBForNetworkSpace returns a test database connection
-// Uses the same pattern as asset_approval_test.go
-func getTestDBForNetworkSpace(t *testing.T) *database.DB {
-	// Use the same getTestDB function from asset_approval_test.go
-	// This will be available since it's in the same package
-	return getTestDB(t)
-}
+// The DB-backed tests in this file share getTestDBAndTenant with
+// asset_approval_test.go, and with it the same exposure: `make
+// test-integration-db` and the nightly job run package binaries in PARALLEL
+// against one Postgres, so a neighbouring binary can be applying
+// scripts/database/schema.sql while these ordinary writes are in flight. The
+// apply takes ACCESS EXCLUSIVE across the partitioned asset tables; these tests
+// hold row locks on them in a different order; Postgres breaks the cycle by
+// killing whichever session was mid-statement. The failure names this test and
+// has nothing to do with network spaces:
+//
+//	DETAIL: Process A waits for AccessShareLock on <partition>; blocked by B.
+//	        Process B waits for AccessExclusiveLock on <partition>; blocked by A.
+//	        Process B: -- Vista Platform - Consolidated Database Schema ...
+//
+// testdb.HoldSchemaShareLock makes the overlap impossible rather than retrying
+// after it: the appliers take the same advisory key EXCLUSIVELY, and the shared
+// mode means any number of these tests still run at once. It goes AFTER
+// getTestDBAndTenant, never before — that helper applies the schema itself and
+// takes the same key exclusively to do it.
+//
+// asset_approval_sharelock_test.go is the source-level guard that every test
+// using the shared fixture takes the lock, in this file and in that one.
 
 // TestClassifyAssetInternal tests that assets in defined CIDR ranges are classified as 'internal'
-func TestClassifyAssetInternal(t *testing.T) {
+func TestIntegration_ClassifyAssetInternal(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test")
 	}
 
-	db := getTestDBForNetworkSpace(t)
-	if db == nil {
-		return
-	}
-	defer func() { _ = db.Close() }()
+	db, tenantID := getTestDBAndTenant(t)
+	testdb.HoldSchemaShareLock(t, db.DB.DB) // see the file comment above
 
 	service := NewNetworkSpaceService(db)
-	tenantID := uuid.New()
-	userID := uuid.New()
+	userID := seedTestUser(t, db, tenantID)
 
 	// Create a network space for internal network
 	spaces := []models.NetworkSpace{
@@ -64,19 +77,15 @@ func TestClassifyAssetInternal(t *testing.T) {
 }
 
 // TestClassifyAssetThirdParty tests that assets not matching any network space are classified as 'third_party'
-func TestClassifyAssetThirdParty(t *testing.T) {
+func TestIntegration_ClassifyAssetThirdParty(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test")
 	}
 
-	db := getTestDBForNetworkSpace(t)
-	if db == nil {
-		return
-	}
-	defer func() { _ = db.Close() }()
+	db, tenantID := getTestDBAndTenant(t)
+	testdb.HoldSchemaShareLock(t, db.DB.DB) // see the file comment above
 
 	service := NewNetworkSpaceService(db)
-	tenantID := uuid.New()
 
 	// No network spaces defined
 	ip := "203.0.113.10"
@@ -85,7 +94,7 @@ func TestClassifyAssetThirdParty(t *testing.T) {
 	assert.Equal(t, "unknown", ownership, "Asset with no network spaces defined should be 'unknown'")
 
 	// Create a network space
-	userID := uuid.New()
+	userID := seedTestUser(t, db, tenantID)
 	spaces := []models.NetworkSpace{
 		{
 			ID:          uuid.New().String(),
@@ -106,20 +115,16 @@ func TestClassifyAssetThirdParty(t *testing.T) {
 }
 
 // TestGetTagsForAssetSingleMatch tests that tags are applied when asset matches one network space
-func TestGetTagsForAssetSingleMatch(t *testing.T) {
+func TestIntegration_GetTagsForAssetSingleMatch(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test")
 	}
 
-	db := getTestDBForNetworkSpace(t)
-	if db == nil {
-		return
-	}
-	defer func() { _ = db.Close() }()
+	db, tenantID := getTestDBAndTenant(t)
+	testdb.HoldSchemaShareLock(t, db.DB.DB) // see the file comment above
 
 	service := NewNetworkSpaceService(db)
-	tenantID := uuid.New()
-	userID := uuid.New()
+	userID := seedTestUser(t, db, tenantID)
 
 	// Create a network space with tags
 	spaces := []models.NetworkSpace{
@@ -151,20 +156,16 @@ func TestGetTagsForAssetSingleMatch(t *testing.T) {
 }
 
 // TestGetTagsForAssetMultipleMatches tests that tags are merged when asset matches multiple network spaces
-func TestGetTagsForAssetMultipleMatches(t *testing.T) {
+func TestIntegration_GetTagsForAssetMultipleMatches(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test")
 	}
 
-	db := getTestDBForNetworkSpace(t)
-	if db == nil {
-		return
-	}
-	defer func() { _ = db.Close() }()
+	db, tenantID := getTestDBAndTenant(t)
+	testdb.HoldSchemaShareLock(t, db.DB.DB) // see the file comment above
 
 	service := NewNetworkSpaceService(db)
-	tenantID := uuid.New()
-	userID := uuid.New()
+	userID := seedTestUser(t, db, tenantID)
 
 	// Create multiple network spaces with overlapping ranges and different tags
 	spaces := []models.NetworkSpace{
@@ -210,20 +211,16 @@ func TestGetTagsForAssetMultipleMatches(t *testing.T) {
 }
 
 // TestGetTagsForAssetNoMatch tests that no tags are returned when asset doesn't match any network space
-func TestGetTagsForAssetNoMatch(t *testing.T) {
+func TestIntegration_GetTagsForAssetNoMatch(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test")
 	}
 
-	db := getTestDBForNetworkSpace(t)
-	if db == nil {
-		return
-	}
-	defer func() { _ = db.Close() }()
+	db, tenantID := getTestDBAndTenant(t)
+	testdb.HoldSchemaShareLock(t, db.DB.DB) // see the file comment above
 
 	service := NewNetworkSpaceService(db)
-	tenantID := uuid.New()
-	userID := uuid.New()
+	userID := seedTestUser(t, db, tenantID)
 
 	// Create a network space
 	spaces := []models.NetworkSpace{
@@ -270,21 +267,17 @@ func TestMergeTags(t *testing.T) {
 }
 
 // TestReclassifyAllAssetsWithTags tests that reclassification updates both ownership and tags
-func TestReclassifyAllAssetsWithTags(t *testing.T) {
+func TestIntegration_ReclassifyAllAssetsWithTags(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test")
 	}
 
-	db := getTestDBForNetworkSpace(t)
-	if db == nil {
-		return
-	}
-	defer func() { _ = db.Close() }()
+	db, tenantID := getTestDBAndTenant(t)
+	testdb.HoldSchemaShareLock(t, db.DB.DB) // see the file comment above
 
 	networkSpaceService := NewNetworkSpaceService(db)
 	assetService := NewAssetService(db)
-	tenantID := uuid.New()
-	userID := uuid.New()
+	userID := seedTestUser(t, db, tenantID)
 
 	// Create a network space with tags
 	spaces := []models.NetworkSpace{
@@ -310,7 +303,7 @@ func TestReclassifyAllAssetsWithTags(t *testing.T) {
 	asset, err := assetService.CreateAsset(tenantID, models.AssetInput{
 		Hostname:  &hostname,
 		IPAddress: &ip,
-		AssetType: "server",
+		ClassKey:  assetclass.KeyServer,
 		Tags:      models.JSONB{"existing": "tag"},
 		Metadata:  models.JSONB{},
 	})
@@ -321,10 +314,16 @@ func TestReclassifyAllAssetsWithTags(t *testing.T) {
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, updatedCount, 1, "At least one asset should be updated")
 
-	// Verify asset ownership and tags were updated
+	// Verify asset ownership and tags were updated.
+	//
+	// The status filter is EXPLICIT: a newly created asset is
+	// `pending_approval`, and the list defaults to `monitoring` only. This test
+	// is about classification, not approval, so it asks for the asset where the
+	// asset actually is rather than approving it to make a default match.
 	assets, _, err := assetService.GetAssets(tenantID, models.AssetFilters{
-		Page:     1,
-		PageSize: 10,
+		AssetStatus: []string{"pending_approval", "monitoring"},
+		Page:        1,
+		PageSize:    10,
 	})
 	require.NoError(t, err)
 

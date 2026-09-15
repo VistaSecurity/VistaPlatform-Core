@@ -5,12 +5,23 @@ import { useEffect, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { useFeature } from '@vistasecurity/primitives/features';
 import { Icon } from '../../components/ui';
-import { PageWrap, Note, catMeta, sortChanges, DIFF_CATEGORIES } from './kit';
-import { artifactName, useArtifacts, useCompare, type CBOMArtifact, type DiffChange } from './queries';
+import { PageWrap, Note, catMeta, kindMeta, sortChanges, DIFF_CATEGORIES, diffRowAnchor, narrativeLabel, narrativeSegments } from './kit';
+import { artifactName, useArtifacts, useCompare, type CBOMArtifact, type DiffChange, type NarrativeDetail } from './queries';
 
-function ArtifactSelect({ label, value, exclude, artifacts, onChange }: {
-  label: string; value: string; exclude?: string; artifacts: CBOMArtifact[]; onChange: (id: string) => void;
+/**
+ * One side of the comparison.
+ *
+ * `lockKind` restricts the list to artifacts of the same kind as the other
+ * side, because the server refuses a cross-kind diff with 400 — the two kinds'
+ * match keys come from disjoint identity spaces, so the result would be every
+ * component removed and every component added. Offering the choice and then
+ * failing it would teach the user the feature is broken; not offering it says
+ * what is actually true.
+ */
+function ArtifactSelect({ label, value, exclude, lockKind, artifacts, onChange }: {
+  label: string; value: string; exclude?: string; lockKind?: string | null; artifacts: CBOMArtifact[]; onChange: (id: string) => void;
 }) {
+  const selectable = artifacts.filter((a) => a.id !== exclude && (!lockKind || (a.artifact_kind ?? 'cbom') === lockKind));
   return (
     <label style={{ flex: 1, minWidth: 0 }}>
       <div className="eyebrow-app" style={{ marginBottom: 6 }}>{label}</div>
@@ -20,18 +31,55 @@ function ArtifactSelect({ label, value, exclude, artifacts, onChange }: {
         style={{ width: '100%', height: 38, padding: '0 12px', borderRadius: 9, border: '1px solid var(--app-border2)', background: 'var(--app-panel2)', color: 'var(--app-t1)', fontSize: 12.5, outline: 'none', cursor: 'pointer' }}
       >
         <option value="">Select an artifact…</option>
-        {artifacts.filter((a) => a.id !== exclude).map((a) => (
-          <option key={a.id} value={a.id}>{artifactName(a)} · {a.scope_name_snapshot}</option>
+        {selectable.map((a) => (
+          <option key={a.id} value={a.id}>{kindMeta(a.artifact_kind).label.replace(/ \(.*\)$/, '')} · {artifactName(a)} · {a.scope_name_snapshot}</option>
         ))}
       </select>
+      {lockKind && (
+        <div style={{ fontSize: 11, color: 'var(--app-t3)', marginTop: 5 }}>
+          Limited to {kindMeta(lockKind).label.replace(/ \(.*\)$/, '').toLowerCase()} artifacts — a comparison is same-kind only.
+        </div>
+      )}
     </label>
+  );
+}
+
+// The narrative panel: prose, its citations as links to the rows they back,
+// and who wrote it. The label is not decoration — "Summarised by rules" and
+// "Summarised by claude-…" are different claims about where the sentence came
+// from, and a reader deciding how much to trust it needs to know which.
+function NarrativePanel({ text, detail }: { text: string; detail?: NarrativeDetail }) {
+  const label = narrativeLabel(detail);
+  // Prefer the marked-up text so citations land on the clause they support;
+  // fall back to the plain sentence from a server that predates the seam.
+  const segments = narrativeSegments(detail?.text || text);
+  return (
+    <>
+      <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.7, color: 'var(--app-t1)' }}>
+        {segments.map((seg, i) => seg.cite ? (
+          <a
+            key={`c${i}`}
+            href={`#${diffRowAnchor(seg.cite)}`}
+            title={`Jump to the change this cites (${seg.cite})`}
+            style={{ display: 'inline-block', margin: '0 1px', padding: '0 5px', borderRadius: 5, background: 'var(--app-panel2)', border: '1px solid var(--app-border2)', color: 'var(--app-t3)', fontSize: 10.5, lineHeight: '15px', verticalAlign: 'text-top', textDecoration: 'none' }}
+          >{seg.cite}</a>
+        ) : <span key={`t${i}`}>{seg.text}</span>)}
+      </p>
+      {label && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 10, fontSize: 11, color: 'var(--app-t3)' }}>
+          <Icon name={detail?.source === 'model' ? 'sparkles' : 'scale'} size={12} />
+          {label}
+          {detail?.source === 'model' && <span>· every sentence cites a change below; anything it could not cite was discarded</span>}
+        </div>
+      )}
+    </>
   );
 }
 
 function ChangeRow({ ch }: { ch: DiffChange }) {
   const m = catMeta(ch.category);
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '128px 96px 110px minmax(0,1.4fr) minmax(0,1.8fr)', gap: 12, padding: '0 16px', minHeight: 46, alignItems: 'center', borderBottom: '1px solid var(--app-border)' }}>
+    <div id={diffRowAnchor(ch.row_id)} style={{ display: 'grid', gridTemplateColumns: '128px 96px 110px minmax(0,1.4fr) minmax(0,1.8fr)', gap: 12, padding: '0 16px', minHeight: 46, alignItems: 'center', borderBottom: '1px solid var(--app-border)', scrollMarginTop: 80 }}>
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 22, padding: '0 9px', borderRadius: 7, background: m.bg, color: m.c, fontSize: 11, fontWeight: 600, width: 'fit-content' }}>
         <Icon name={m.icon} size={12} />{m.label}
       </span>
@@ -53,17 +101,22 @@ export function ComparePage() {
   // skip every query so a deep link shows an upgrade card, not a failed diff.
   const evidenceEntitled = useFeature('cbom_signing');
 
-  const listQ = useArtifacts(undefined, evidenceEntitled);
+  const listQ = useArtifacts(undefined, undefined, evidenceEntitled);
   const artifacts = useMemo(() => listQ.data ?? [], [listQ.data]);
 
   // When arriving with only ?head= set (row "Compare" action), auto-pick the
-  // most recent prior artifact of the same scope as Base.
+  // most recent prior artifact of the same scope AND KIND as Base. Same kind
+  // because the server refuses anything else — auto-picking a CBOM to diff
+  // against an SBOM would land the user on a 400 they did not ask for.
   useEffect(() => {
     if (!head || base || artifacts.length === 0) return;
     const h = artifacts.find((a) => a.id === head);
     if (!h) return;
     const prior = artifacts
-      .filter((a) => a.id !== head && a.scope_id === h.scope_id && a.generated_at < h.generated_at)
+      .filter((a) => a.id !== head
+        && a.scope_id === h.scope_id
+        && (a.artifact_kind ?? 'cbom') === (h.artifact_kind ?? 'cbom')
+        && a.generated_at < h.generated_at)
       .sort((a, b) => b.generated_at.localeCompare(a.generated_at))[0];
     if (prior) setParams((p) => { p.set('base', prior.id); return p; }, { replace: true });
   }, [head, base, artifacts, setParams]);
@@ -83,8 +136,8 @@ export function ComparePage() {
   if (!evidenceEntitled) {
     return (
       <PageWrap
-        title="Compare CBOMs"
-        subtitle="Component-level drift between two CBOM snapshots."
+        title="Compare artifacts"
+        subtitle="Component-level drift between two snapshots."
         actions={<button className="ui-btn sm" onClick={() => nav('/risk-compliance/cbom')}><Icon name="arrow-left" size={14} />Back to artifacts</button>}
       >
         <Note
@@ -97,16 +150,16 @@ export function ComparePage() {
 
   return (
     <PageWrap
-      title="Compare CBOMs"
-      subtitle="Every component-level change between two snapshots, categorized improvement / regression / drift / neutral."
+      title="Compare artifacts"
+      subtitle="Every component-level change between two snapshots of the same kind, categorized improvement / regression / drift / neutral."
       actions={<button className="ui-btn sm" onClick={() => nav('/risk-compliance/cbom')}><Icon name="arrow-left" size={14} />Back to artifacts</button>}
     >
       {/* picker */}
       <div className="panel" style={{ padding: 16, borderRadius: 14, marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'flex-end', gap: 14 }}>
-          <ArtifactSelect label="Base (before)" value={base} exclude={head} artifacts={artifacts} onChange={(id) => setSide('base', id)} />
+          <ArtifactSelect label="Base (before)" value={base} exclude={head} lockKind={headA ? (headA.artifact_kind ?? 'cbom') : null} artifacts={artifacts} onChange={(id) => setSide('base', id)} />
           <Icon name="arrow-right" size={18} style={{ color: 'var(--app-t3)', marginBottom: 9, flex: 'none' }} />
-          <ArtifactSelect label="Head (after)" value={head} exclude={base} artifacts={artifacts} onChange={(id) => setSide('head', id)} />
+          <ArtifactSelect label="Head (after)" value={head} exclude={base} lockKind={baseA ? (baseA.artifact_kind ?? 'cbom') : null} artifacts={artifacts} onChange={(id) => setSide('head', id)} />
         </div>
         {baseA && headA && baseA.scope_id !== headA.scope_id && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 11, fontSize: 11.5, color: 'var(--warn)' }}>
@@ -125,7 +178,7 @@ export function ComparePage() {
         <>
           {/* narrative + counts */}
           <div className="panel" style={{ padding: 18, borderRadius: 14, marginBottom: 14 }}>
-            <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6, color: 'var(--app-t1)' }}>{diff.narrative}</p>
+            <NarrativePanel text={diff.narrative} detail={diff.narrative_detail} />
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 9, marginTop: 14 }}>
               {Object.keys(DIFF_CATEGORIES).map((cat) => {
                 const m = catMeta(cat);

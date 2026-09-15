@@ -38,8 +38,8 @@ func newIngestFixture(t *testing.T) (*AssetService, uuid.UUID, uuid.UUID) {
 
 	asset := uuid.New()
 	if _, err := db.Exec(`
-		INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,'ingest.example.test','server','monitoring',NOW(),NOW(),NOW(),NOW())`, asset, tenant); err != nil {
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, 'ingest.example.test', 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`, asset, tenant); err != nil {
 		t.Fatalf("insert asset: %v", err)
 	}
 
@@ -208,7 +208,7 @@ func TestIntegration_ApproveAssets_MaterializesAndClearsDeferredFindings(t *test
 		CipherSuite: &suite,
 	})
 
-	if err := svc.ApproveAssets(tenant, []uuid.UUID{asset}); err != nil {
+	if err := svc.ApproveAssets(tenant, []uuid.UUID{asset}, uuid.Nil); err != nil {
 		t.Fatalf("approve asset: %v", err)
 	}
 
@@ -217,7 +217,7 @@ func TestIntegration_ApproveAssets_MaterializesAndClearsDeferredFindings(t *test
 	var implementations int
 	if err := db.QueryRow(`
 		SELECT asset_status, metadata ? 'deferred_findings'
-		  FROM network_assets
+		  FROM assets
 		 WHERE tenant_id = $1 AND id = $2`, tenant, asset).Scan(&status, &hasDeferred); err != nil {
 		t.Fatalf("read approved asset metadata: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestIntegration_ApproveAssets_PreservesDeferredFindingsWhenMaterializationF
 		ProtocolVersion: &tooLongProtocolVersion,
 	})
 
-	err := svc.ApproveAssets(tenant, []uuid.UUID{asset})
+	err := svc.ApproveAssets(tenant, []uuid.UUID{asset}, uuid.Nil)
 	if err == nil {
 		t.Fatal("ApproveAssets returned nil after deferred crypto materialization violated the schema")
 	}
@@ -264,7 +264,7 @@ func TestIntegration_ApproveAssets_PreservesDeferredFindingsWhenMaterializationF
 	var deferredCount int
 	if err := db.QueryRow(`
 		SELECT asset_status, jsonb_array_length(metadata->'deferred_findings')
-		  FROM network_assets
+		  FROM assets
 		 WHERE tenant_id = $1 AND id = $2`, tenant, asset).Scan(&status, &deferredCount); err != nil {
 		t.Fatalf("read preserved deferred finding: %v", err)
 	}
@@ -287,15 +287,8 @@ func insertPendingAssetWithDeferredFinding(t *testing.T, db *database.DB, tenant
 	}
 
 	if _, err := db.Exec(`
-		INSERT INTO network_assets (
-			id, tenant_id, hostname, asset_type, asset_status, metadata,
-			last_seen_at, first_discovered_at, created_at, updated_at
-		)
-		VALUES (
-			$1, $2, 'approval-deferred.example.test', 'server', 'pending_approval',
-			jsonb_build_object('deferred_findings', $3::jsonb),
-			NOW(), NOW(), NOW(), NOW()
-		)`, asset, tenant, string(deferredJSON)); err != nil {
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, metadata, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, 'approval-deferred.example.test', 'server', 'hardware.computer.server', 'pending_approval', jsonb_build_object('deferred_findings', $3::jsonb), NOW(), NOW(), NOW(), NOW())`, asset, tenant, string(deferredJSON)); err != nil {
 		t.Fatalf("insert pending asset with deferred finding: %v", err)
 	}
 	return asset

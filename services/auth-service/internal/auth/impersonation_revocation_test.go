@@ -41,26 +41,34 @@ func newRecordingRedisClient(t *testing.T) (*redis.Client, *redisCommandRecorder
 	return client, recorder
 }
 
-func requireSingleSetExCommand(t *testing.T, recorder *redisCommandRecorder, wantKey string, wantSeconds int64) {
+// requireSingleRevocationSetCommand pins the wire shape of a revocation write:
+// `SET <key> "1" EX <seconds>` — the modern spelling of SETEX (go-redis
+// deprecated SetEx; SET ... EX is what Redis has recommended since 2.6.12).
+// What matters to the readers is the KEY format and that a TTL is set, so
+// those are asserted exactly.
+func requireSingleRevocationSetCommand(t *testing.T, recorder *redisCommandRecorder, wantKey string, wantSeconds int64) {
 	t.Helper()
 	if len(recorder.commands) != 1 {
 		t.Fatalf("recorded Redis commands = %v, want exactly one", recorder.commands)
 	}
 	got := recorder.commands[0]
-	if len(got) != 4 {
-		t.Fatalf("Redis command args = %#v, want SETEX with 4 args", got)
+	if len(got) != 5 {
+		t.Fatalf("Redis command args = %#v, want SET <key> <value> EX <seconds> (5 args)", got)
 	}
-	if got[0] != "setex" {
-		t.Fatalf("Redis command = %v, want setex", got[0])
+	if got[0] != "set" {
+		t.Fatalf("Redis command = %v, want set", got[0])
 	}
 	if got[1] != wantKey {
 		t.Fatalf("Redis key = %v, want %q", got[1], wantKey)
 	}
-	if got[2] != wantSeconds {
-		t.Fatalf("Redis TTL seconds = %v (%T), want %d", got[2], got[2], wantSeconds)
+	if got[2] != "1" {
+		t.Fatalf("Redis value = %v, want %q", got[2], "1")
 	}
-	if got[3] != "1" {
-		t.Fatalf("Redis value = %v, want %q", got[3], "1")
+	if got[3] != "ex" {
+		t.Fatalf("Redis expiry mode = %v, want ex", got[3])
+	}
+	if got[4] != wantSeconds {
+		t.Fatalf("Redis TTL seconds = %v (%T), want %d", got[4], got[4], wantSeconds)
 	}
 }
 
@@ -73,7 +81,7 @@ func TestRevokeJTIWritesSharedRevocationKey(t *testing.T) {
 		t.Fatalf("RevokeJTI: %v", err)
 	}
 
-	requireSingleSetExCommand(t, recorder, sharedmw.RevokedTokenKey(jti), int64(15*time.Minute/time.Second))
+	requireSingleRevocationSetCommand(t, recorder, sharedmw.RevokedTokenKey(jti), int64(15*time.Minute/time.Second))
 }
 func TestRevokeUserAccessWithoutRedisIsNoop(t *testing.T) {
 	svc := &AuthService{jwt: NewJWTService("test-secret-key-32-chars-minimum!", time.Minute, time.Hour)}

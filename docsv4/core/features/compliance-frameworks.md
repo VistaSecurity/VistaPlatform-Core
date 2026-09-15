@@ -68,8 +68,10 @@ The platform frameworks you can activate today:
 - **Best Practices** (free, always active) — core TLS, certificate, cipher, and key hygiene.
 - **Certificate Hygiene** and **Certificate Expiry** (Not-Expired / 30-day / 90-day) — focused certificate posture.
 - **Post-Quantum Readiness** — quantum exposure across certificates *and* crypto-configurations (see below).
+- **Inventory Hygiene** — the quality of the inventory record itself (see below).
+- **Lifecycle** — what has outlived its vendor support (see below).
 
-Those six ship with every edition, Core included.
+Those eight ship with every edition, Core included.
 
 
 > **Note on copying:** earlier versions let tenants *copy* a published framework. That workflow has been removed. To diverge from a platform framework, author a **Custom Policy** (below) instead.
@@ -91,6 +93,62 @@ It measures both your **certificates** and your **crypto-configurations**, becau
 **Why key exchange is Critical:** "harvest now, decrypt later." An adversary can record your encrypted traffic today and decrypt it once quantum computers exist — so quantum-vulnerable key exchange is the most urgent thing to migrate. Each finding names the recommended NIST post-quantum target (e.g. **ML-KEM** for key exchange, **ML-DSA / SLH-DSA** for signatures). Hybrid algorithms (e.g. `X25519MLKEM768`) count as quantum-safe.
 
 **How to act on it:** the by-control lens groups your quantum-vulnerable crypto by control; from there (or from **Remediation**) you can open a **PQC migration** plan and track the work like any other remediation.
+
+### Inventory Hygiene
+
+**Inventory Hygiene** scores the inventory *record*, not the cryptography on it.
+It is the answer to a question every other framework assumes away: how much of
+what you are reporting on do you actually know anything about?
+
+| Control | What it checks | Severity |
+|---|---|---|
+| IH-001 | The asset names an owner — an owner email **or** a support group | Low |
+| IH-002 | The asset has a real class, not the `unknown_host` placeholder | Low |
+| IH-003 | The asset records a location — site, region, zone or a location record | Low |
+| IH-004 | Something has observed the asset within the last 30 days | Low |
+| IH-005 | No suspected duplicate records for the asset | Med |
+| IH-006 | No relationships pointing at an asset that has been archived or deleted | Low |
+
+Nothing here contributes to an asset's **risk score**. A host with no owner is
+not less secure; it is less *manageable*, and the two are worth keeping apart.
+Everything here is a worklist, not a threat.
+
+**Two things it deliberately does not do:**
+
+- **It ignores assets still waiting in Approvals.** A discovery nobody has
+  approved has no owner by construction, so counting it would make your hygiene
+  score a function of how much you scanned this week.
+- **It does not guess about duplicates or orphan relationships.** IH-005 and
+  IH-006 report **Not assessed** until the platform's hygiene checks have
+  actually evaluated the asset. A count of zero from a check that never ran is
+  not a clean bill of health, and the platform will not show it as one.
+
+### Lifecycle
+
+**Lifecycle** tracks what in your inventory has outlived its vendor support.
+
+| Control | What it checks | Severity |
+|---|---|---|
+| LC-001 | The asset's operating system is past its end-of-life date | High |
+| LC-002 | The asset's operating system has 90 days or less of vendor support left | Low |
+| LC-003 | Installed software is past its end-of-life date | Med |
+| LC-004 | The asset's hardware is past its vendor end-of-**support** date | Med |
+
+LC-001 and LC-002 exist as two controls on purpose: "already unsupported" and
+"unsupported next quarter" call for different work, and a single control would
+have to pick one of them to be about. **The two rungs are cumulative, not
+exclusive** — LC-002 is "ninety days or less of support remaining", which
+includes none at all, so an operating system that is already past end of life
+fails both controls and appears on both worklists. LC-004 is end of *support*,
+not end of sale — the date after which the vendor ships no more firmware fixes.
+
+**Scored only where a date could be resolved.** Each control reads a lifecycle
+date the platform matched from its end-of-life catalogue. An operating system,
+package or model the catalogue does not cover carries no date, and the control
+reports **Not assessed** for that asset — never "supported". A lifecycle report
+that quietly counts "we could not find out" as "it is fine" is worse than no
+report at all, so the coverage line tells you how much of your estate was
+actually checked.
 
 ### Re-evaluate on demand
 

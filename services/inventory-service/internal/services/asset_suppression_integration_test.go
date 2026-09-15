@@ -12,7 +12,7 @@ package services
 // documented a mechanism that could not work.
 //
 // The primary deny guard — the `asset_status = 'denied'` check on the existing
-// network_assets row — masks this for as long as that row survives. The
+// assets row — masks this for as long as that row survives. The
 // fingerprint only carries the promise once the row is gone, which is the case
 // the second test below reproduces.
 //
@@ -54,9 +54,16 @@ func TestIntegration_DenyAssets_RecordsSuppression(t *testing.T) {
 	ip := "192.0.2.44"
 	port := 443
 	mustExec(t, db.DB.DB, `
-		INSERT INTO network_assets (id, tenant_id, hostname, ip_address, port, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,'server','pending_approval',NOW(),NOW(),NOW(),NOW())`,
-		assetID, tenant, host, ip, port)
+		INSERT INTO assets (id, tenant_id, hostname, primary_address, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, $4::inet, 'server', 'hardware.computer.server', 'pending_approval', NOW(), NOW(), NOW(), NOW())`,
+		assetID, tenant, host, ip)
+	// The port is an endpoint now, and the suppression fingerprint is built from
+	// it — so the fixture has to create one or the deny would record a
+	// port-less fingerprint that never matches the rediscovery.
+	mustExec(t, db.DB.DB, `
+		INSERT INTO asset_endpoints (id, tenant_id, asset_id, address, port, transport)
+			VALUES ($1, $2, $3, $4::inet, $5, 'tcp')`,
+		uuid.New(), tenant, assetID, ip, port)
 
 	if err := svc.DenyAssets(tenant, []uuid.UUID{assetID}, uuid.New()); err != nil {
 		t.Fatalf("DenyAssets: %v", err)
@@ -96,16 +103,23 @@ func TestIntegration_Suppression_PreventsRediscoveryAfterDelete(t *testing.T) {
 	ip := "192.0.2.45"
 	port := 8443
 	mustExec(t, db.DB.DB, `
-		INSERT INTO network_assets (id, tenant_id, hostname, ip_address, port, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,'server','pending_approval',NOW(),NOW(),NOW(),NOW())`,
-		assetID, tenant, host, ip, port)
+		INSERT INTO assets (id, tenant_id, hostname, primary_address, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, $4::inet, 'server', 'hardware.computer.server', 'pending_approval', NOW(), NOW(), NOW(), NOW())`,
+		assetID, tenant, host, ip)
+	// The port is an endpoint now, and the suppression fingerprint is built from
+	// it — so the fixture has to create one or the deny would record a
+	// port-less fingerprint that never matches the rediscovery.
+	mustExec(t, db.DB.DB, `
+		INSERT INTO asset_endpoints (id, tenant_id, asset_id, address, port, transport)
+			VALUES ($1, $2, $3, $4::inet, $5, 'tcp')`,
+		uuid.New(), tenant, assetID, ip, port)
 
 	if err := svc.DenyAssets(tenant, []uuid.UUID{assetID}, uuid.New()); err != nil {
 		t.Fatalf("DenyAssets: %v", err)
 	}
 
 	// Hard-delete the denied row, removing the primary guard entirely.
-	mustExec(t, db.DB.DB, `DELETE FROM network_assets WHERE id = $1`, assetID)
+	mustExec(t, db.DB.DB, `DELETE FROM assets WHERE id = $1`, assetID)
 
 	suppressed, err := svc.isSuppressed(tenant, &host, &ip, &port)
 	if err != nil {

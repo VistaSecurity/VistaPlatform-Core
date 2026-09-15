@@ -21,6 +21,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/approval"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -113,14 +114,34 @@ func TestIntegration_ManageAutoApprovalRules_NilUserStillCreatesRule(t *testing.
 		IsActive  bool       `db:"is_active"`
 		CreatedBy *uuid.UUID `db:"created_by"`
 	}
+	// The rule is found by the `network.segment_id=<uuid>` TERM in its query,
+	// the same way ManageAutoApprovalRules finds the rule it owns. A LIKE over
+	// the text would be the fragile form; this asserts the term is there.
 	getRule := func() {
 		t.Helper()
+		var rows []struct {
+			ID        uuid.UUID  `db:"id"`
+			IsActive  bool       `db:"is_active"`
+			CreatedBy *uuid.UUID `db:"created_by"`
+			Query     string     `db:"query"`
+		}
 		err := database.WithTenantTx(t.Context(), svc.db, tenant, func(tx *sqlx.Tx) error {
-			return tx.Get(&rule, `SELECT id, is_active, created_by FROM discovery_auto_approval_rules
-				WHERE tenant_id = $1 AND conditions->>'network_segment_id' = $2`, tenant, seg.ID.String())
+			return tx.Select(&rows, `SELECT id, is_active, created_by, query
+				FROM discovery_auto_approval_rules WHERE tenant_id = $1`, tenant)
 		})
 		if err != nil {
-			t.Fatalf("rule lookup (save without user context did not create the rule?): %v", err)
+			t.Fatalf("rule lookup: %v", err)
+		}
+		found := false
+		for _, r := range rows {
+			if segID, ok := approval.SegmentIDFromQuery(r.Query); ok && segID == seg.ID {
+				rule.ID, rule.IsActive, rule.CreatedBy = r.ID, r.IsActive, r.CreatedBy
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("no rule names segment %s (save without user context did not create the rule?); rows=%+v", seg.ID, rows)
 		}
 	}
 	getRule()

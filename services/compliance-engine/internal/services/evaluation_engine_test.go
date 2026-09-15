@@ -13,21 +13,21 @@ import (
 // findings that no longer violate — never duplicating or losing a pair. reconcilePlan
 // is pure, so these run without a database.
 
-func set(pairs ...controlAsset) map[controlAsset]bool {
-	m := make(map[controlAsset]bool, len(pairs))
+func set(pairs ...controlSubject) map[controlSubject]bool {
+	m := make(map[controlSubject]bool, len(pairs))
 	for _, p := range pairs {
 		m[p] = true
 	}
 	return m
 }
 
-func sortPairs(in []controlAsset) []controlAsset {
-	out := append([]controlAsset(nil), in...)
+func sortPairs(in []controlSubject) []controlSubject {
+	out := append([]controlSubject(nil), in...)
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].ControlID != out[j].ControlID {
 			return out[i].ControlID.String() < out[j].ControlID.String()
 		}
-		return out[i].AssetID.String() < out[j].AssetID.String()
+		return out[i].SubjectID.String() < out[j].SubjectID.String()
 	})
 	return out
 }
@@ -35,9 +35,9 @@ func sortPairs(in []controlAsset) []controlAsset {
 func TestReconcilePlan(t *testing.T) {
 	c1, c2 := uuid.New(), uuid.New()
 	a1, a2 := uuid.New(), uuid.New()
-	p11 := controlAsset{c1, a1}
-	p12 := controlAsset{c1, a2}
-	p21 := controlAsset{c2, a1}
+	p11 := controlSubject{c1, a1}
+	p12 := controlSubject{c1, a2}
+	p21 := controlSubject{c2, a1}
 
 	t.Run("new violation activates, stale inactivates", func(t *testing.T) {
 		stored := set(p11, p21) // p11 still violates, p21 no longer does
@@ -75,7 +75,7 @@ func TestReconcilePlan(t *testing.T) {
 
 	t.Run("all cleared: violations empty => all stored inactivate", func(t *testing.T) {
 		stored := set(p11, p12, p21)
-		act, inact := reconcilePlan(stored, map[controlAsset]bool{})
+		act, inact := reconcilePlan(stored, map[controlSubject]bool{})
 		if len(act) != 0 {
 			t.Fatalf("expected 0 activations, got %v", act)
 		}
@@ -86,7 +86,7 @@ func TestReconcilePlan(t *testing.T) {
 
 	t.Run("first run: nothing stored => all activate, none inactivate", func(t *testing.T) {
 		now := set(p11, p12)
-		act, inact := reconcilePlan(map[controlAsset]bool{}, now)
+		act, inact := reconcilePlan(map[controlSubject]bool{}, now)
 		if len(act) != 2 || len(inact) != 0 {
 			t.Fatalf("expected 2 activate / 0 inactivate, got %d / %d", len(act), len(inact))
 		}
@@ -124,12 +124,12 @@ func TestBuildAssetViolations(t *testing.T) {
 	t.Run("scopes to target asset; one pair per control; first kept; nil skipped", func(t *testing.T) {
 		results := map[uuid.UUID]*EvaluationResult{
 			c1: {ControlID: c1, Findings: []models.ComplianceFinding{
-				{ControlID: c1, AssetID: asset, Summary: "first"},
-				{ControlID: c1, AssetID: asset, Summary: "second"},      // same pair → deduped
-				{ControlID: c1, AssetID: other, Summary: "other-asset"}, // filtered out
+				{ControlID: c1, SubjectID: asset, Summary: "first"},
+				{ControlID: c1, SubjectID: asset, Summary: "second"},      // same pair → deduped
+				{ControlID: c1, SubjectID: other, Summary: "other-asset"}, // filtered out
 			}},
 			c2: {ControlID: c2, Findings: []models.ComplianceFinding{
-				{ControlID: c2, AssetID: other, Summary: "other-only"}, // no pair for target
+				{ControlID: c2, SubjectID: other, Summary: "other-only"}, // no pair for target
 			}},
 			uuid.New(): nil, // nil result skipped
 		}
@@ -138,14 +138,14 @@ func TestBuildAssetViolations(t *testing.T) {
 		if len(viol) != 1 {
 			t.Fatalf("expected exactly 1 violating pair for the target asset, got %d", len(viol))
 		}
-		ca := controlAsset{ControlID: c1, AssetID: asset}
+		ca := controlSubject{ControlID: c1, SubjectID: asset}
 		if !viol[ca] {
 			t.Fatalf("expected (c1, asset) to violate")
 		}
 		if byPair[ca].Summary != "first" {
 			t.Fatalf("expected the first finding kept as representative, got %q", byPair[ca].Summary)
 		}
-		if viol[controlAsset{ControlID: c2, AssetID: asset}] {
+		if viol[controlSubject{ControlID: c2, SubjectID: asset}] {
 			t.Fatalf("c2 had only an other-asset finding; it must not violate for the target asset")
 		}
 	})
@@ -153,7 +153,7 @@ func TestBuildAssetViolations(t *testing.T) {
 	t.Run("no findings for the asset => empty set (pass derives from absence)", func(t *testing.T) {
 		results := map[uuid.UUID]*EvaluationResult{
 			c1: {ControlID: c1, Findings: []models.ComplianceFinding{
-				{ControlID: c1, AssetID: other, Summary: "x"},
+				{ControlID: c1, SubjectID: other, Summary: "x"},
 			}},
 		}
 		viol, byPair := buildAssetViolations(results, asset)

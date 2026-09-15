@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,27 +116,54 @@ func TestIsDuplicateScope(t *testing.T) {
 	}
 }
 
-// TestSystemDefaults_NonDevTestIsExcludeShaped guards the seed itself: the
-// scope's whole meaning is its Exclude clause, which the generator ignored
-// until the scope-evaluation fix.
-func TestSystemDefaults_NonDevTestIsExcludeShaped(t *testing.T) {
-	defaults := systemDefaults(uuid.New(), uuid.New())
-	var nonDevTest *Scope
-	for i := range defaults {
-		if defaults[i].Name == string(DefaultNonDevTest) {
-			nonDevTest = &defaults[i]
+// TestSystemDefaults_QueriesValidate is the check the jsonb shape could not
+// have: every seeded scope must be a LEGAL query.
+//
+// It is not a formality. The old Production default listed `prod` alongside
+// `production`, and `environment` is the `environment_type` enum — which has no
+// such member, so that value could never match a row and nothing said so. Here
+// it is a compile-time-ish failure: the validator rejects it.
+func TestSystemDefaults_QueriesValidate(t *testing.T) {
+	for _, scope := range systemDefaults(uuid.New(), uuid.New()) {
+		canonical, err := ValidateQuery(scope.Query)
+		if err != nil {
+			t.Errorf("seeded scope %q does not validate: %v", scope.Name, err)
+			continue
+		}
+		if canonical != scope.Query {
+			t.Errorf("seeded scope %q is not in canonical form: stored %q, canonical %q",
+				scope.Name, scope.Query, canonical)
 		}
 	}
-	if nonDevTest == nil {
-		t.Fatal("Non-Dev/Test default is missing")
+}
+
+// TestSystemDefaults_EachNarrowsDifferently guards the seed itself: three scopes
+// that mean the same thing are one scope with three names.
+//
+// Non-Dev/Test in particular has two arms — the environment COLUMN and the tag
+// — and it lost the tag one once before, which let every asset with no
+// environment recorded slip into a scope whose whole purpose is to keep them
+// out.
+func TestSystemDefaults_EachNarrowsDifferently(t *testing.T) {
+	byName := map[string]string{}
+	for _, scope := range systemDefaults(uuid.New(), uuid.New()) {
+		byName[scope.Name] = scope.Query
 	}
-	if nonDevTest.Predicate.Exclude == nil {
-		t.Fatal("Non-Dev/Test has no Exclude clause")
+
+	if got := byName[string(DefaultAll)]; got != "" {
+		t.Errorf("All must constrain nothing, got %q", got)
 	}
-	if len(nonDevTest.Predicate.Exclude.TagsAnyOf) == 0 {
+	if got := byName[string(DefaultProduction)]; got == "" || !strings.Contains(got, "environment") {
+		t.Errorf("Production must constrain the environment, got %q", got)
+	}
+	nonDevTest := byName[string(DefaultNonDevTest)]
+	if nonDevTest == "" {
+		t.Fatal("Non-Dev/Test reads as an empty query, which would make it identical to All")
+	}
+	if !strings.Contains(nonDevTest, "environment") {
+		t.Error("Non-Dev/Test lost its environment-column arm")
+	}
+	if !strings.Contains(nonDevTest, "tag:") {
 		t.Error("Non-Dev/Test lost its tag arm — assets with no environment column would slip in")
-	}
-	if nonDevTest.Predicate.IsEmpty() {
-		t.Error("Non-Dev/Test reads as an empty predicate, which would make it identical to All")
 	}
 }

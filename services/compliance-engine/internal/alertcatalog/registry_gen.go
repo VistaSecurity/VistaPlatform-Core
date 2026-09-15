@@ -3,6 +3,25 @@
 // `make generate`.
 package alertcatalog
 
+// LadderRung is one step of a FIXED ladder — a ladder whose boundaries come
+// from a published standard (the CVSS qualitative bands) or from the finding
+// ladder the alert is driven by, rather than from a tenant preference.
+//
+// Threshold is the boundary in the detector's own units, as a label a person
+// reads ("CVSS 7.0 or higher"). It is deliberately free text and deliberately
+// NOT parsed: the producer owns the numbers, the registry owns what a rung
+// MEANS, and parsing an integer back out of an English sentence would make a
+// typo in the YAML a silent change of behaviour. (Same split, and the same
+// reasoning, as the findings registry's rungs.)
+//
+// Distinct from [Rung], which is a rung of a TUNABLE day ladder assembled per
+// tenant by BuildLadder and carries a Source saying where it came from. A
+// fixed rung has no source to report: it is the product's, always.
+type LadderRung struct {
+	Threshold string `json:"threshold"`
+	Severity  string `json:"severity"`
+}
+
 // Entry is one registry alert type (the catalog row).
 type Entry struct {
 	ID               string `json:"id"`
@@ -19,6 +38,10 @@ type Entry struct {
 	AutoResolve      string `json:"auto_resolve,omitempty"`
 	EnabledByDefault bool   `json:"enabled_by_default"`
 	Description      string `json:"description"`
+
+	// Rungs is the fixed ladder, worst-last. Empty for a fixed-severity type
+	// and for a ladder type that declares a tunable baseline_rung instead.
+	Rungs []LadderRung `json:"rungs,omitempty"`
 }
 
 // Registry is the generated alert-type catalog, in YAML order.
@@ -70,6 +93,87 @@ var Registry = []Entry{
 		AutoResolve:      "score recovers",
 		EnabledByDefault: true,
 		Description:      "A framework's compliance score fell more than 10 points in 24 hours.",
+	},
+	{
+		ID:               "hygiene_score_drop",
+		Track:            "tenant",
+		Kind:             "policy",
+		Status:           "live",
+		Source:           "compliance-engine",
+		SubjectType:      "framework",
+		SeverityModel:    "fixed",
+		DefaultSeverity:  "medium",
+		BaselineDays:     0,
+		BaselinePercent:  0,
+		BaselineSeverity: "",
+		AutoResolve:      "score recovers",
+		EnabledByDefault: true,
+		Description:      "Your Inventory Hygiene score fell more than 10 points in 24 hours. Same detector and same threshold as the compliance score drop, split out as its own type because inventory hygiene is data quality rather than security posture — it is worth routing (and silencing) separately.",
+	},
+	{
+		ID:               "known_vulnerability",
+		Track:            "tenant",
+		Kind:             "policy",
+		Status:           "live",
+		Source:           "compliance-engine",
+		SubjectType:      "software_install",
+		SeverityModel:    "ladder",
+		DefaultSeverity:  "",
+		BaselineDays:     0,
+		BaselinePercent:  0,
+		BaselineSeverity: "",
+		AutoResolve:      "the vulnerability finding stops being detected — the next inventory pass sees a fixed version, or the install is gone",
+		EnabledByDefault: true,
+		Description:      "An installed software version matches a published advisory. One alert per install, escalating with the worst CVSS across every advisory that matched it. The rungs are the CVSS v3.1/v4.0 qualitative severity ratings, the same anchor the platform's risk bands use. Advisories below CVSS 4.0, and advisories the feed has not scored, are recorded as findings and shown on the asset — they just do not open an alert; \"not scored\" is never reported as \"nothing found\".",
+		Rungs: []LadderRung{
+			{Threshold: "CVSS 4.0 or higher (Medium)", Severity: "medium"},
+			{Threshold: "CVSS 7.0 or higher (High)", Severity: "high"},
+			{Threshold: "CVSS 9.0 or higher (Critical)", Severity: "critical"},
+		},
+	},
+	{
+		ID:               "end_of_life",
+		Track:            "tenant",
+		Kind:             "policy",
+		Status:           "live",
+		Source:           "compliance-engine",
+		SubjectType:      "asset",
+		SeverityModel:    "ladder",
+		DefaultSeverity:  "",
+		BaselineDays:     0,
+		BaselinePercent:  0,
+		BaselineSeverity: "",
+		AutoResolve:      "the end-of-life finding stops being detected — the next inventory pass sees an upgraded version, or the subject is gone",
+		EnabledByDefault: true,
+		Description:      "Something on this asset has passed, or is approaching, the date its vendor stops shipping fixes — its operating system, its hardware, or an installed package. One alert per subject, escalating as the date nears and then recedes. The first rung a subject can reach depends on how far ahead the catalogue starts reporting it: 180 days for hardware, 90 days for an operating system or a package.",
+		Rungs: []LadderRung{
+			{Threshold: "180 days to end of life", Severity: "low"},
+			{Threshold: "90 days to end of life", Severity: "medium"},
+			{Threshold: "past end of life", Severity: "high"},
+			{Threshold: "past end of life by more than a year", Severity: "critical"},
+		},
+	},
+	{
+		ID:               "drift_detected",
+		Track:            "tenant",
+		Kind:             "policy",
+		Status:           "live",
+		Source:           "compliance-engine",
+		SubjectType:      "asset",
+		SeverityModel:    "ladder",
+		DefaultSeverity:  "",
+		BaselineDays:     0,
+		BaselinePercent:  0,
+		BaselineSeverity: "",
+		AutoResolve:      "the drift findings stop being detected — the next pass sees the subject back in line with its baseline, or somebody accepts the change and resolves the finding",
+		EnabledByDefault: true,
+		Description:      "Something about this subject changed relative to its recent baseline: a new device class on its segment, a protocol it has not spoken before, a different set of listening ports, or a certificate from an issuer it has not presented. One alert per subject, graded by the worst open drift finding. Drift is not automatically bad — most of these are planned changes, and resolving the finding is how you tell the baseline so.",
+		Rungs: []LadderRung{
+			{Threshold: "a change the drift producer graded low", Severity: "low"},
+			{Threshold: "a change the drift producer graded medium", Severity: "medium"},
+			{Threshold: "a change the drift producer graded high", Severity: "high"},
+			{Threshold: "a change the drift producer graded critical", Severity: "critical"},
+		},
 	},
 	{
 		ID:               "sensor_offline",

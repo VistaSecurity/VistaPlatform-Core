@@ -21,21 +21,32 @@ type ServiceHints struct {
 
 // CryptoDiscovery represents a discovered cryptographic implementation
 type CryptoDiscovery struct {
-	ID              string                 `json:"id"`
-	SensorID        string                 `json:"sensor_id"`
-	Timestamp       time.Time              `json:"timestamp"`
-	SourceIP        string                 `json:"source_ip"`
-	DestIP          string                 `json:"dest_ip"`
-	Port            int                    `json:"port"`
-	Protocol        string                 `json:"protocol"`
-	Version         string                 `json:"version"`
-	CipherSuite     string                 `json:"cipher_suite"`
-	KeySize         int                    `json:"key_size"`
-	DiscoveryMethod string                 `json:"discovery_method"`
-	Confidence      float64                `json:"confidence"`
-	RawMetadata     map[string]interface{} `json:"raw_metadata"`
-	ServiceHints    *ServiceHints          `json:"service_hints,omitempty"`
-	CreatedAt       time.Time              `json:"created_at"`
+	ID              string    `json:"id"`
+	SensorID        string    `json:"sensor_id"`
+	Timestamp       time.Time `json:"timestamp"`
+	SourceIP        string    `json:"source_ip"`
+	DestIP          string    `json:"dest_ip"`
+	Port            int       `json:"port"`
+	Protocol        string    `json:"protocol"`
+	Version         string    `json:"version"`
+	CipherSuite     string    `json:"cipher_suite"`
+	KeySize         int       `json:"key_size"`
+	DiscoveryMethod string    `json:"discovery_method"`
+	// DiscoveryType names the KIND of thing observed, distinct from the method
+	// used to observe it. Empty on every crypto discovery, which is the legacy
+	// shape and means "a cryptographic observation"; "host_observation" marks a
+	// passive host-presence row whose payload is a hostobs.HostObservation
+	// under RawMetadata["host_observation"] (asset-inventory ADR-0004 D2).
+	//
+	// sensor-manager promotes this into the metadata envelope ONLY when it is
+	// non-empty: written unconditionally, the empty string would travel as an
+	// outer envelope key and erase a nested discovery_type on the way through
+	// discovery-processor's outer-wins promotion.
+	DiscoveryType string                 `json:"discovery_type,omitempty"`
+	Confidence    float64                `json:"confidence"`
+	RawMetadata   map[string]interface{} `json:"raw_metadata"`
+	ServiceHints  *ServiceHints          `json:"service_hints,omitempty"`
+	CreatedAt     time.Time              `json:"created_at"`
 	// SessionID is a UUID assigned per TCP flow by the TLS assembler and is always
 	// non-empty for passive ("passive") discoveries.
 	SessionID string `json:"session_id,omitempty"`
@@ -140,9 +151,18 @@ type SensorConfig struct {
 type CaptureConfig struct {
 	ActiveProbing    bool `json:"active_probing"`
 	NetworkDiscovery bool `json:"network_discovery"`
-	MaxConnections   int  `json:"max_connections"`
-	TimeoutSeconds   int  `json:"timeout_seconds"`
-	DedupTTLMinutes  int  `json:"dedup_ttl_minutes"`
+	// HostObservation is the platform-pushed switch for passive host
+	// observation, alongside network_discovery.
+	//
+	// A POINTER, unlike its neighbours, because it is new: a control plane
+	// older than this field sends no value at all, and a plain bool would
+	// unmarshal that silence as false and switch the feature off on every
+	// sensor talking to it. nil means "the platform said nothing", and the
+	// sensor keeps its own configured value.
+	HostObservation *bool `json:"host_observation,omitempty"`
+	MaxConnections  int   `json:"max_connections"`
+	TimeoutSeconds  int   `json:"timeout_seconds"`
+	DedupTTLMinutes int   `json:"dedup_ttl_minutes"`
 }
 
 // SensorCommands represents a collection of commands for a sensor

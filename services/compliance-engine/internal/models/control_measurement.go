@@ -14,15 +14,14 @@ import (
 // plain declaration compiles, passes every test that does not touch Postgres,
 // and then fails on every real row. Read this row through
 // [MeasurementTypeColumns], which also COALESCEs the nullable text columns —
-// every seeded measurement type has a NULL extraction_query, and NULL does not
-// scan into a string either.
+// a measurement type with no units or category has NULL in them, and NULL does
+// not scan into a string either.
 type MeasurementType struct {
 	ID               uuid.UUID                `json:"id" db:"id"`
 	Code             string                   `json:"code" db:"code"`
 	Name             string                   `json:"name" db:"name"`
 	Description      string                   `json:"description" db:"description"`
 	DataType         string                   `json:"data_type" db:"data_type"` // integer, string, enum, date, boolean
-	ExtractionQuery  string                   `json:"extraction_query,omitempty" db:"extraction_query"`
 	Units            string                   `json:"units,omitempty" db:"units"`
 	ValidRange       shareddb.JSONMap         `json:"valid_range,omitempty" db:"valid_range"`
 	AllowedRuleTypes shareddb.JSONStringSlice `json:"allowed_rule_types,omitempty" db:"allowed_rule_types"` // Array of allowed rule types
@@ -36,12 +35,15 @@ type MeasurementType struct {
 
 // MeasurementTypeColumns is the canonical SELECT list for a [MeasurementType],
 // shared by every read so they cannot drift apart on which columns need a
-// COALESCE. description / extraction_query / units / category are all nullable
-// and land in plain string fields.
+// COALESCE. description / units / category are all nullable and land in plain
+// string fields.
+//
+// `extraction_query` is absent because the COLUMN is gone (ADR-0005 D5): it
+// held SQL that nothing executed, and what a measurement type reads is now
+// declared in standards/measurement-types.yaml.
 const MeasurementTypeColumns = `id, code, name,
 	       COALESCE(description, '') AS description,
 	       data_type,
-	       COALESCE(extraction_query, '') AS extraction_query,
 	       COALESCE(units, '') AS units,
 	       valid_range, allowed_rule_types, enum_values, valid_operators, predicate_schema,
 	       COALESCE(category, '') AS category,

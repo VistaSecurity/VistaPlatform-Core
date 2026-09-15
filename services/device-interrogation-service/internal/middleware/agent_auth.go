@@ -6,6 +6,7 @@ import (
 	"encoding/pem"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -46,7 +47,21 @@ func AgentAuth(db, bypassDB *sql.DB, requireMTLS bool) gin.HandlerFunc {
 	certService := certificates.NewCertificateService(db, bypassDB, "")
 
 	return func(c *gin.Context) {
+		// The agent identity comes from the route param where there is one, and
+		// from the X-Agent-ID header on the outbound routes that have no :id
+		// segment (host inventory is the first — a local collection is not
+		// about any single job or device, so there is no id in its path).
+		//
+		// The header is only ever a CLAIM, and it is never trusted on its own.
+		// Under agent mTLS the certificate CN must equal this value a few lines
+		// below, so a forged header authenticates as nothing; without agent
+		// mTLS it is exactly as trusted as the path parameter it stands in for,
+		// which is to say this is the same legacy posture is closing and
+		// not a new hole beside it.
 		agentIDStr := c.Param("id")
+		if agentIDStr == "" {
+			agentIDStr = strings.TrimSpace(c.GetHeader("X-Agent-ID"))
+		}
 		if agentIDStr == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Missing agent id parameter"})
 			c.Abort()

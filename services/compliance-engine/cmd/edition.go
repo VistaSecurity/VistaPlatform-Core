@@ -5,7 +5,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jmoiron/sqlx"
+	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/services"
+	"github.com/vistasecurity/vistaplatform/shared/ai"
 	sharedservices "github.com/vistasecurity/vistaplatform/shared/services"
 )
 
@@ -42,6 +44,23 @@ type editionHooks struct {
 	// RegisterThresholdOverrideRoutes mounts the per-tenant measurement
 	// predicate override endpoints. Nil in Core.
 	RegisterThresholdOverrideRoutes func(g *gin.RouterGroup, db *sqlx.DB, rawDB *sql.DB)
+
+	// RegisterAuthorRoutes mounts the ADR-0008 Author seam's drafting
+	// endpoints — POST /custom-policies/:id/draft-controls (tenant) and
+	// POST /admin/frameworks/:id/draft-controls (platform) — and returns
+	// whether the seam can actually answer in this process.
+	//
+	// Nil in Core, where neither route exists: the generative model clients are
+	// Enterprise (shared/ai/ee/providers), so a Core-mounted drafting endpoint
+	// could only ever answer 503. Core still SERVES the availability endpoints
+	// (see main.go) using the zero AuthorAvailability, which reads
+	// `{"available":false,"reason":"edition"}` — the honest answer, and the one
+	// the two authoring UIs ask for before offering the button.
+	//
+	// The return value is what makes this hook different from its siblings: in
+	// an Enterprise build the seam may still be unavailable because AI_PROVIDER
+	// names nothing reachable, and an operator needs those two "no"s told apart.
+	RegisterAuthorRoutes func(tenant, admin *gin.RouterGroup, db *sqlx.DB, rawDB *sql.DB, sink ai.AuditSink) models.AuthorAvailability
 
 	// NewTenantMeasurementAuthor returns the authoring backend the
 	// measurement-template "apply to a tenant framework control" path needs,

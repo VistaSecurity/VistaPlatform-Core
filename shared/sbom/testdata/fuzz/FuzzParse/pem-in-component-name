@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.6\",\"components\":[{\"type\":\"library\",\"name\":\"k -----BEGIN RSA PRIVATE KEY-----\\nAAAA\\n-----END RSA PRIVATE KEY-----\",\"version\":\"1\"}]}")

@@ -69,8 +69,8 @@ export function InviteMemberModal({ open, onClose }: { open: boolean; onClose: (
       return data;
     },
     onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['settings', 'members', tenantId] });
-      queryClient.invalidateQueries({ queryKey: ['settings', 'invitations', tenantId] });
+      void queryClient.invalidateQueries({ queryKey: ['settings', 'members', tenantId] });
+      void queryClient.invalidateQueries({ queryKey: ['settings', 'invitations', tenantId] });
       setSent(data.message || 'Invitation sent.');
       setAcceptUrl((data as { accept_url?: string }).accept_url ?? null);
     },
@@ -114,7 +114,7 @@ export function InviteMemberModal({ open, onClose }: { open: boolean; onClose: (
         <ModalField label="Invite link" hint="Share this directly if the email doesn't arrive. Anyone with the link can accept as the invited address.">
           <div style={{ display: 'flex', gap: 8 }}>
             <ModalInput readOnly value={acceptUrl} onFocus={(e) => e.currentTarget.select()} style={{ flex: 1 }} />
-            <button className="ui-btn sm" type="button" onClick={() => { navigator.clipboard?.writeText(acceptUrl); setCopied(true); }}>
+            <button className="ui-btn sm" type="button" onClick={() => { void navigator.clipboard?.writeText(acceptUrl); setCopied(true); }}>
               {copied ? 'Copied' : 'Copy'}
             </button>
           </div>
@@ -156,7 +156,7 @@ export function ChangeRoleModal({ member, open, onClose }: { member: TenantUser;
       }
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['settings', 'members', tenantId] });
+      void queryClient.invalidateQueries({ queryKey: ['settings', 'members', tenantId] });
       onClose();
     },
   });

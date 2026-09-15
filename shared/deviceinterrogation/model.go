@@ -119,6 +119,15 @@ type DeviceIdentity struct {
 	FirmwareVersion string `json:"firmware_version,omitempty"`
 	SerialNumber    string `json:"serial_number,omitempty"`
 	OSVersion       string `json:"os_version,omitempty"`
+	// ClassHint is an asset-class key (shared/assetclass) proposing what this
+	// device is — `firewall` for a PAN-OS appliance, `access_point` for a
+	// UniFi uap. A proposal for the classifier seam (ADR-0002 D2), never a
+	// decision: class changes go through Approvals.
+	//
+	// The mappings live in classhint.go today and move to the seeded
+	// classification-rule table in ADR-0004 D6 (workstream 2.10), which is why
+	// they are deliberately small and data-shaped.
+	ClassHint string `json:"class_hint,omitempty"`
 }
 
 // InterrogateResult is the raw output of a single interrogation. Wrappers map
@@ -131,6 +140,14 @@ type InterrogateResult struct {
 	// DeviceIdentity, when populated, is the structured device identity shared
 	// across every asset from this interrogation.
 	DeviceIdentity *DeviceIdentity `json:"device_identity,omitempty"`
+	// Facts are the registered ops facts this interrogation measured —
+	// interfaces, neighbours, VLANs, uptime, hardware identity (ADR-0004 D1).
+	// Every key is registered in standards/fact-keys.yaml; see observations.go.
+	Facts []FactObservation `json:"facts,omitempty"`
+	// Relationships are the edges this interrogation observed — an adoption, an
+	// uplink, an LLDP neighbour (ADR-0003). Every type is one of the canonical
+	// ten in shared/relationships.
+	Relationships []RelationshipObservation `json:"relationships,omitempty"`
 }
 
 // DeviceInterrogator is implemented by every vendor/protocol client.

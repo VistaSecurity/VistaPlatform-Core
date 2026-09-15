@@ -300,8 +300,16 @@ export interface paths {
         put: operations["updateDevice"];
         post?: never;
         /**
-         * Delete a device
-         * @description Tenant-isolated — a device owned by another tenant returns 404.
+         * Stop managing a device
+         * @description Removes the device's management configuration (`asset_management`) and
+         *     its stored credentials (`asset_credentials`). **The asset itself stays**,
+         *     with its endpoints, certificates, crypto configurations, findings and
+         *     history — it simply leaves the Devices page, which is the filter "assets
+         *     with management configured" (ADR-0002 D5). Deleting the asset would be an
+         *     inventory-wide deletion triggered from a button that says "remove
+         *     device". The unmanage is recorded in `asset_history`.
+         *
+         *     Tenant-isolated — a device owned by another tenant returns 404.
          */
         delete: operations["deleteDevice"];
         options?: never;
@@ -326,6 +334,22 @@ export interface paths {
          * @description Kicks off interrogation of the device. The success path performs live
          *     device I/O (HTTP to the target), so it is integration-tested; the contract
          *     test pins the request-validation paths (400 bad id / 404 device not found).
+         *
+         *     The body is OPTIONAL and the endpoint predates it: a request with no body
+         *     queues a `device_interrogation`, exactly as it always did.
+         *
+         *     Sending `job_type: host_inventory` queues a general host inventory
+         *     instead — OS, hardware identity, installed packages, listening sockets
+         *     and trust stores (asset-inventory ADR-0004 D3). It requires
+         *     `mode: "remote"` and an `agent_id`: a LOCAL collection is
+         *     agent-originated (the agent describes its own host on its own schedule
+         *     and posts the result to the agent-authenticated intake route), so there
+         *     is nothing here to queue and a local-mode job would never be claimed.
+         *
+         *     `transport` defaults to `ssh`, which reaches Linux, macOS and
+         *     Windows-with-OpenSSH. `winrm` is REFUSED with an explanation: its Go
+         *     client pulls MPL-2.0 dependencies that are outside this product's
+         *     MIT/Apache/BSD policy.
          */
         post: operations["interrogateDevice"];
         delete?: never;
@@ -411,8 +435,9 @@ export interface paths {
         };
         /**
          * List interrogation jobs for the current tenant
-         * @description Returns a paginated page of jobs. Filters (status[], job_type, device_id,
+         * @description Returns a paginated page of jobs. Filters (status[], job_type, asset_id,
          *     integration_id) are accepted as query params; page / page_size paginate.
+         *     `device_id` is still accepted as a deprecated alias of `asset_id`.
          */
         get: operations["listInterrogationJobs"];
         put?: never;
@@ -649,7 +674,7 @@ export interface paths {
          *     `tenant_name` + `tenant_slug`), plus the assigned `worker` (the executing
          *     agent id, from `device_jobs.agent_id`).
          *
-         *     Same optional filters (status[], job_type, device_id, integration_id) and
+         *     Same optional filters (status[], job_type, asset_id, integration_id) and
          *     page / page_size pagination as `GET /jobs`. An optional `tenant_id` narrows
          *     the roll-up to a single tenant server-side (the operator "scope" selector) so
          *     the client is never shipped other tenants' rows; omit it for the full
@@ -885,6 +910,10 @@ export interface components {
              *     client_secret, service_account_json, api_key, password.
              *     assume_role_arn and role_session_name are NOT secret and are
              *     returned as stored.
+             *     `enumerate_compute` (boolean, default TRUE when absent) decides
+             *     whether a cloud discovery run for this integration also enumerates
+             *     compute instances, virtual networks and subnets. It is not secret
+             *     and is returned as stored.
              */
             config: {
                 [key: string]: unknown;
@@ -1053,6 +1082,33 @@ export interface components {
             message: string;
             job_id: string;
         };
+        /**
+         * @description Optional body for POST /devices/{id}/interrogate. Every field is
+         *     optional; an absent body means a plain device interrogation.
+         */
+        InterrogateDeviceRequest: {
+            /**
+             * @description What to run. Defaults to device_interrogation. cloud_discovery is not queued against a device — use /cloud/discover.
+             * @enum {string}
+             */
+            job_type?: "device_interrogation" | "host_inventory";
+            /**
+             * @description host_inventory only, and it must be "remote". Local collection is agent-originated: the agent posts its own host's inventory on its own schedule, so a queued local job would never be claimed.
+             * @enum {string}
+             */
+            mode?: "remote";
+            /**
+             * @description host_inventory only. "ssh" reaches Linux, macOS and Windows-with-OpenSSH. "winrm" is recognised and refused — its Go client pulls MPL-2.0 dependencies outside this product's MIT/Apache/BSD dependency policy.
+             * @default ssh
+             * @enum {string}
+             */
+            transport: "ssh";
+            /**
+             * Format: uuid
+             * @description Required for host_inventory: the collection runs FROM an agent that can reach the target host, and device_jobs' valid_job_assignment constraint requires the column for this job type.
+             */
+            agent_id?: string;
+        };
         /** @description Open envelope for the device action endpoints (interrogate / test-connection / bulk-interrogate). The concrete shape (queued-job id or live connectivity result) depends on live device I/O and is integration- tested, not contract-pinned — hence additionalProperties:true with no required fields. */
         DeviceActionAccepted: {
             [key: string]: unknown;
@@ -1062,18 +1118,47 @@ export interface components {
             message: string;
         };
         /**
-         * @description A network device registered for interrogation (models.Device). Field
-         *     presence follows the json tags: the nullable pointer / JSONB fields are
-         *     required-but-nullable (serialize as null when unset); credential_id /
-         *     username / password are `omitempty` and appear only when set. password is
-         *     masked/encrypted server-side.
+         * @description An asset with management configured (models.Device, ADR-0002 D5).
+         *
+         *     The `devices` table it used to mirror was removed in phase 1: a device
+         *     is an asset of a hardware or cloud class that additionally has an
+         *     `asset_management` row, and the Discovery -> Devices page is the filter
+         *     "assets with management configured". `id` is therefore the ASSET id, and
+         *     `asset_id` carries the same value spelled so a client does not have to
+         *     infer it. `class` is what the device IS (the asset class); `device_type`
+         *     names which vendor interrogator drives it, which is a different question
+         *     — an F5 BIG-IP is class `load_balancer` with device_type `f5`.
+         *
+         *     Field presence follows the json tags: the nullable pointer / JSONB
+         *     fields are required-but-nullable (serialize as null when unset);
+         *     credential_id / username / password are `omitempty` and appear only when
+         *     set. password is masked server-side; the stored value is ciphertext.
          */
         Device: {
-            /** Format: uuid */
+            /**
+             * Format: uuid
+             * @description The asset id. Identical to asset_id.
+             */
             id: string;
+            /**
+             * Format: uuid
+             * @description The asset this device is. Same value as `id`; both are present
+             *     because there is no separate device id any more.
+             */
+            asset_id: string;
             /** Format: uuid */
             tenant_id: string;
-            /** @description unifi / cisco / fortinet / palo_alto / f5. */
+            /**
+             * @description Asset class key (shared/assetclass) — what the device IS:
+             *     `load_balancer`, `firewall`, `switch`, `wireless_controller`,
+             *     `object_storage`, ... Absent when nothing classified it.
+             */
+            class?: string;
+            /**
+             * @description Which vendor interrogator drives this device — unifi / cisco /
+             *     fortinet / palo_alto / f5, or a cloud resource kind such as
+             *     `aws_s3_bucket`. NOT the asset class; see `class`.
+             */
             device_type: string;
             vendor: string | null;
             model: string | null;
@@ -1165,6 +1250,32 @@ export interface components {
              *     with job_count, distinguishes "enrolled but unused" from "went quiet".
              */
             last_job_at: string | null;
+            /**
+             * Format: date-time
+             * @description When this agent last reported a HOST INVENTORY that reached the
+             *     inventory — what it found out about the machine it is installed on,
+             *     rather than what it was told to interrogate.
+             *
+             *     A separate line from last_job_at because it answers a different
+             *     question: a host inventory is not work an operator queued, so a busy
+             *     agent that has never reported its own host looks identical on
+             *     job_count alone. Null means it never has, which is usually
+             *     HOST_INVENTORY_ENABLED being unset.
+             */
+            last_host_inventory_at: string | null;
+            /**
+             * @description Software installs recorded from that collection — the number an
+             *     inventory query would return, not the number the collector
+             *     enumerated. Null when the agent has never reported, and also when the
+             *     package step FAILED on the last run: a host whose package database
+             *     could not be read and a host with no packages are different answers.
+             */
+            host_inventory_packages: number | null;
+            /**
+             * @description Listening sockets recorded from that collection, each an endpoint on
+             *     the host's asset. Null when the agent has never reported one.
+             */
+            host_inventory_listeners: number | null;
         };
         /** @description One address bound on an agent host (a public.agent_addresses row). */
         AgentAddress: {
@@ -1202,7 +1313,16 @@ export interface components {
             tenant_id: string;
             job_type: string;
             status: string;
-            /** Format: uuid */
+            /**
+             * Format: uuid
+             * @description The asset the job targets (device_jobs.asset_id).
+             */
+            asset_id?: string;
+            /**
+             * Format: uuid
+             * @description Deprecated alias of `asset_id`, carrying the same value for one
+             *     release. Use `asset_id`.
+             */
             device_id?: string;
             device_name?: string;
             device_type?: string;
@@ -1217,6 +1337,8 @@ export interface components {
             error_message?: string;
             progress?: number;
             assets_discovered?: number;
+            enumeration?: components["schemas"]["CloudEnumerationCounts"];
+            host_inventory?: components["schemas"]["HostInventoryCounts"];
             duration_seconds?: number;
             metadata?: {
                 [key: string]: unknown;
@@ -1237,6 +1359,71 @@ export interface components {
              *     name (or "Device Agent" if it has none).
              */
             executor: string;
+        };
+        /**
+         * @description What a cloud discovery run's enumeration half found: compute instances,
+         *     virtual networks, subnets and the distinct security groups it saw
+         *     membership of (handlers.CloudEnumerationCounts).
+         *
+         *     ABSENT on a job means enumeration did not run — the integration has
+         *     `enumerate_compute` off, or the job is not a cloud discovery. Four
+         *     zeros mean it ran and the account was empty. The two are different
+         *     answers and are not flattened.
+         *
+         *     Security groups are counted but are NOT assets: a security group is a
+         *     policy object, recorded as the `cloud.security_groups` membership fact
+         *     on the resources that are in it.
+         */
+        CloudEnumerationCounts: {
+            instances: number;
+            networks: number;
+            subnets: number;
+            security_groups: number;
+        };
+        /**
+         * @description What a host-inventory run put into the inventory
+         *     (handlers.HostInventoryCounts, asset-inventory workstream 2.11b): the
+         *     asset the collection landed on, its facts, its listening sockets as
+         *     endpoints, and its software installs.
+         *
+         *     ABSENT on a job means it is not a host inventory, or the run never
+         *     reached the consumer. Zeros mean one ran and landed nothing. The two are
+         *     different answers and are not flattened.
+         */
+        HostInventoryCounts: {
+            /**
+             * Format: uuid
+             * @description The asset this collection landed on. Absent when the identity was
+             *     contested and the engine created nothing — see `contested`.
+             */
+            asset_id?: string;
+            facts: number;
+            /** @description Listening sockets recorded as endpoints on the host's asset. */
+            endpoints: number;
+            /**
+             * @description Active measured software installs after the run — the number an
+             *     inventory query would return, not the number the collector
+             *     enumerated. ABSENT when the package step FAILED, which is not the
+             *     same as zero: a host whose package database could not be read has
+             *     not been enumerated at all, and no absent-install sweep ran for it.
+             */
+            packages?: number;
+            installs_created: number;
+            /**
+             * @description Installs the run marked `removed` because they were absent from it.
+             *     Never a delete — the row keeps its first_seen_at, so "this was here
+             *     in March and is gone now" stays answerable. A version UPGRADE shows
+             *     here too: a new version is a different catalogue row, so the old
+             *     one's install is removed and the new one created.
+             */
+            installs_removed: number;
+            /**
+             * @description A merge proposal is waiting because the identity could not be
+             *     settled — typically an agent id that matches one asset while the
+             *     hardware serial says a different machine. Neither a failure nor a
+             *     success: a person has to say which host this is.
+             */
+            contested?: boolean;
         };
         Last24hStats: {
             completed: number;
@@ -1352,7 +1539,16 @@ export interface components {
             tenant_slug: string;
             job_type: string;
             status: string;
-            /** Format: uuid */
+            /**
+             * Format: uuid
+             * @description The asset the job targets (device_jobs.asset_id).
+             */
+            asset_id?: string;
+            /**
+             * Format: uuid
+             * @description Deprecated alias of `asset_id`, carrying the same value for one
+             *     release. Use `asset_id`.
+             */
             device_id?: string;
             device_name?: string;
             device_type?: string;
@@ -2158,7 +2354,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Deletion acknowledged. */
+            /** @description Unmanage acknowledged; the asset remains in Inventory. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2182,7 +2378,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["InterrogateDeviceRequest"];
+            };
+        };
         responses: {
             /** @description Interrogation accepted (async). Body is the queued-job info (not contract-pinned). */
             202: {
@@ -2529,6 +2729,8 @@ export interface operations {
                 /** @description Repeatable; filters by job status (status=pending&status=failed). */
                 status?: string[];
                 job_type?: string;
+                asset_id?: string;
+                /** @description Deprecated alias of `asset_id`. */
                 device_id?: string;
                 integration_id?: string;
             };

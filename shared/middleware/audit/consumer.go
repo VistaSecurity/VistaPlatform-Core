@@ -100,16 +100,6 @@ func (m *Middleware) PendingEntries() []*ActivityLogRequest {
 // the audit trail.
 const maxErrorKindLen = 64
 
-// validEventCategories mirrors the activity_logs valid_event_category CHECK
-// constraint in scripts/database/schema.sql. Keeping the list here means a bad
-// category fails loudly at the caller instead of being dropped by a constraint
-// violation three hops away, inside a batch flush nobody is watching.
-var validEventCategories = map[string]bool{
-	"asset": true, "discovery": true, "compliance": true, "user": true,
-	"tenant": true, "system": true, "report": true, "certificate": true,
-	"data": true, "config": true, "job": true, "authentication": true,
-}
-
 // LogConsumerEvent records one unit of consumer/poller work on the shared
 // audit path.
 //
@@ -120,7 +110,7 @@ func (m *Middleware) LogConsumerEvent(ctx context.Context, ev ConsumerEvent) err
 	if m == nil {
 		return nil
 	}
-	if !validEventCategories[ev.EventCategory] {
+	if !ValidEventCategory(ev.EventCategory) {
 		return fmt.Errorf("audit: invalid event_category %q for consumer event %q", ev.EventCategory, ev.EventType)
 	}
 

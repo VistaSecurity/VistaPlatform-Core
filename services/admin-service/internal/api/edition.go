@@ -5,9 +5,11 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/vistasecurity/vistaplatform/admin-service/internal/catalogs"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/handlers"
 	adminservices "github.com/vistasecurity/vistaplatform/admin-service/internal/services"
+	"github.com/vistasecurity/vistaplatform/shared/ai"
 	"github.com/vistasecurity/vistaplatform/shared/cache"
 )
 
@@ -187,6 +189,46 @@ type EditionHooks struct {
 	// when a stripe-billed tier is saved. Nil in Core: tiers are still fully
 	// creatable, editable and assignable, they just carry no Stripe price.
 	NewTierPricer func(cfg *config.Config) adminservices.TierPricer
+
+	// NewCatalogEnricher returns the ADR-0008 Enricher seam's GENERATIVE
+	// implementation — the thing that proposes end-of-life catalogue rows for
+	// products the catalogues cannot answer for — and reports whether it can
+	// actually answer in this process.
+	//
+	// Nil in Core, where the whole rest of the feature is nevertheless present:
+	// the rule/lookup enricher, the gap list, the proposal table, the review
+	// queue, accept and reject. What Core lacks is only the thing that FILLS
+	// the queue, because the model clients live in shared/ai/ee/providers and a
+	// Core-mounted proposer could only ever answer 503. The queue staying empty
+	// is the correct Core behaviour, and it is also where a future non-AI
+	// proposal source would land.
+	//
+	// Core still SERVES the availability endpoint (see server.go) with the
+	// zero CatalogEnrichAvailability, which reads
+	// {"available":false,"reason":"edition"} — the honest answer, and the one
+	// the console asks for before offering the button.
+	//
+	// Like compliance-engine's RegisterAuthorRoutes, this hook RETURNS a value
+	// rather than only mounting things: in an Enterprise build the seam may
+	// still be unavailable because AI_PROVIDER names nothing reachable, and an
+	// operator needs those two "no"s told apart.
+	NewCatalogEnricher func(CatalogEnricherDeps) (catalogs.Proposer, handlers.CatalogEnrichAvailability)
+}
+
+// CatalogEnricherDeps is the plumbing the generative enricher needs. Same
+// design rule as BillingDeps and MSPDeps: a small bag of already-constructed
+// primitives, never the *Server.
+type CatalogEnricherDeps struct {
+	// Candidates is the keyword-retrieval half of ADR-0008 D7 — the
+	// catalogue's own nearest rows, used to ground the prompt. It is the ONLY
+	// database access the Enterprise package is given: it proposes, and the
+	// Core gap pass is what stores a proposal and what the review workflow
+	// acts on. An Enterprise package that could reach the proposal table could
+	// bypass the approval path the table exists to enforce.
+	Candidates catalogs.CandidateReader
+
+	// AuditSink receives one audit record per provider call (ADR-0008 D4.7).
+	AuditSink ai.AuditSink
 }
 
 // Edition reports the build's edition for startup logging, so an operator can
@@ -237,6 +279,25 @@ type EditionCapabilities struct {
 type EditionInfo struct {
 	Edition      string              `json:"edition"`
 	Capabilities EditionCapabilities `json:"capabilities"`
+}
+
+// enrichStateLabel renders the enricher's availability as the three-valued
+// state seams.Describe uses, for the startup log.
+//
+// Three values rather than a bool, for the reason AI_SEAMS.md §3 gives: an
+// operator who configured a provider and sees no proposals needs "configured,
+// unavailable" told apart from "this build has none". Collapsing them is the
+// "did not check, rendered as passed" shape on the line whose whole job is to
+// say what is turned on.
+func enrichStateLabel(av handlers.CatalogEnrichAvailability) string {
+	switch {
+	case av.Available:
+		return "active"
+	case av.Reason == handlers.EnrichReasonEdition:
+		return "unavailable (edition)"
+	default:
+		return "configured_unavailable (" + av.Reason + ")"
+	}
 }
 
 // Info resolves the build's edition read-out.

@@ -37,6 +37,27 @@ type jobHarness struct {
 func newJobHarness(t *testing.T) *jobHarness {
 	t.Helper()
 	owner := testdb.Connect(t)
+	// This package needs a SEEDED database, not just a schema-loaded one, and
+	// it has to say so itself. The asset-limit fixtures build a tier by joining
+	// billable_items, and the max_assets item exists only in seed.sql —
+	// schema.sql creates the catalog empty. The harness used to apply neither
+	// and simply assumed the rows were there, which held exactly when some
+	// OTHER binary had seeded first: under `go test ./...` the services
+	// package's ApplySchemaAndSeed landed partway through this package's run,
+	// so TestIntegration_AssetLimitScan_CountsHostsNotEndpoints (alphabetically
+	// the first integration test here) read an empty catalog and the three
+	// asset-limit tests eighteen tests later read a full one. Run alone against
+	// a schema-only database, two of the four failed and the other two passed
+	// vacuously — they assert "no alert", and a tenant whose cap cannot be
+	// resolved raises none. It was recorded on as an unreproduced flake;
+	// it is deterministic given a cold database.
+	//
+	// ApplySeed rather than ApplySchemaAndSeed: the schema is the harness's
+	// stated contract and the seed was the only precondition missing. It takes
+	// the same advisory lock as every other applier, so it queues behind a
+	// concurrent binary's schema apply instead of racing it, and it is
+	// idempotent and cheap (well under a second).
+	testdb.ApplySeed(t, owner)
 	appRaw := testdb.ConnectAsAppRole(t, owner)
 	app := sqlx.NewDb(appRaw, "postgres")
 	bypass := sqlx.NewDb(owner, "postgres")
@@ -98,6 +119,26 @@ func (h *jobHarness) exec(t *testing.T, q string, args ...interface{}) {
 	t.Helper()
 	if _, err := h.owner.Exec(q, args...); err != nil {
 		t.Fatalf("seed failed (%s): %v", q, err)
+	}
+}
+
+// execAffecting is exec for a statement whose row count IS the fixture: an
+// INSERT ... SELECT whose subquery finds nothing succeeds with zero rows, and
+// a test built on it then fails somewhere downstream, phrased as a product bug
+// ("did not alert") rather than as the missing catalog row it actually is.
+func (h *jobHarness) execAffecting(t *testing.T, want int64, q string, args ...interface{}) {
+	t.Helper()
+	res, err := h.owner.Exec(q, args...)
+	if err != nil {
+		t.Fatalf("seed failed (%s): %v", q, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		t.Fatalf("seed rows affected (%s): %v", q, err)
+	}
+	if n != want {
+		t.Fatalf("seed affected %d rows, want %d — the row its subquery joins is missing "+
+			"(is seed.sql applied to this database?): %s", n, want, q)
 	}
 }
 
@@ -219,9 +260,14 @@ func TestIntegration_ControlNoncompliantScan_FiresOnActiveFinding(t *testing.T) 
 	}
 
 	// detection_state / workflow_status use the uppercase vocabulary the
-	// reconciler writes; severity uses the 'Med'-style control vocabulary.
-	h.exec(t, `INSERT INTO compliance_findings (tenant_id, control_id, asset_id, severity, summary, detection_state, workflow_status)
-	           VALUES ($1,$2,$3,'High','weak cipher negotiated','ACTIVE','NEW')`, tenant, controlID, uuid.New())
+	// reconciler writes. The finding's own severity is the registry's lowercase
+	// ladder; the CONTROL's baseline_severity above is still the authoring
+	// vocabulary ('High'), and the alert takes its severity from that, not this.
+	h.exec(t, `INSERT INTO findings
+	             (tenant_id, producer, kind, control_id, subject_id, subject_type,
+	              severity, summary, detection_state, workflow_status)
+	           VALUES ($1,'compliance','control_noncompliant',$2,$3,'asset',
+	                   'high','weak cipher negotiated','ACTIVE','NEW')`, tenant, controlID, uuid.New())
 	job.ScanAll()
 	if got := h.alertCount(t, tenant, "control_noncompliant"); got != 1 {
 		t.Fatalf("active finding on a licensed control did not raise an alert: got %d, want 1", got)
@@ -283,7 +329,10 @@ func (h *jobHarness) newTierWithAssetCap(t *testing.T, tenant uuid.UUID, cap, st
 	tierID := uuid.New()
 	h.exec(t, `INSERT INTO subscription_tiers (id, name, display_name, max_assets)
 	           VALUES ($1,$2,'Predicate Audit Tier', $3)`, tierID, "pat-"+uuid.NewString()[:8], staleColumnValue)
-	h.exec(t, `INSERT INTO tier_entitlements (tier_id, item_id, included_value)
+	// Exactly one row, or the tier has no cap at all: the resolver answers
+	// ErrUnknownItem, the job (correctly) measures nothing, and every "no
+	// alert" assertion downstream passes for the wrong reason.
+	h.execAffecting(t, 1, `INSERT INTO tier_entitlements (tier_id, item_id, included_value)
 	           SELECT $1, id, jsonb_build_object('quantity', $2::int) FROM billable_items WHERE key = 'max_assets'`,
 		tierID, cap)
 	h.exec(t, `UPDATE tenants SET subscription_tier_id = $1 WHERE id = $2`, tierID, tenant)
@@ -303,7 +352,7 @@ func TestIntegration_AssetLimitScan_FiresNearPlanLimit(t *testing.T) {
 
 	// 3/10 = 30% — below the 80% warn rung.
 	for i := 0; i < 3; i++ {
-		h.exec(t, `INSERT INTO network_assets_partitioned (tenant_id, asset_type) VALUES ($1,'server')`, tenant)
+		h.exec(t, `INSERT INTO assets (tenant_id, class_key, class_path) VALUES ($1,'server','hardware.computer.server')`, tenant)
 	}
 	job.ScanAll()
 	if got := h.alertCount(t, tenant, "asset_limit_approaching"); got != 0 {
@@ -313,7 +362,7 @@ func TestIntegration_AssetLimitScan_FiresNearPlanLimit(t *testing.T) {
 	// 9/10 = 90% — over the warn rung, under the high rung.
 	// Against the stale column (50) this is 18% and would NOT alert.
 	for i := 0; i < 6; i++ {
-		h.exec(t, `INSERT INTO network_assets_partitioned (tenant_id, asset_type) VALUES ($1,'server')`, tenant)
+		h.exec(t, `INSERT INTO assets (tenant_id, class_key, class_path) VALUES ($1,'server','hardware.computer.server')`, tenant)
 	}
 	job.ScanAll()
 	if got := h.alertCount(t, tenant, "asset_limit_approaching"); got != 1 {
@@ -332,7 +381,7 @@ func TestIntegration_AssetLimitScan_IgnoresTheStaleTierColumn(t *testing.T) {
 	h.newTierWithAssetCap(t, tenant, 1000, 10)
 
 	for i := 0; i < 9; i++ {
-		h.exec(t, `INSERT INTO network_assets_partitioned (tenant_id, asset_type) VALUES ($1,'server')`, tenant)
+		h.exec(t, `INSERT INTO assets (tenant_id, class_key, class_path) VALUES ($1,'server','hardware.computer.server')`, tenant)
 	}
 	NewAssetLimitScanJob(h.app, h.bypass, h.catlg, h.engine, time.Hour).ScanAll()
 
@@ -352,10 +401,10 @@ func TestIntegration_AssetLimitScan_HonoursAPerTenantOverride(t *testing.T) {
 
 	// 9/10 = 90% on the tier — would alert.
 	for i := 0; i < 9; i++ {
-		h.exec(t, `INSERT INTO network_assets_partitioned (tenant_id, asset_type) VALUES ($1,'server')`, tenant)
+		h.exec(t, `INSERT INTO assets (tenant_id, class_key, class_path) VALUES ($1,'server','hardware.computer.server')`, tenant)
 	}
 	// ...but this tenant negotiated 1000.
-	h.exec(t, `INSERT INTO tenant_entitlements (tenant_id, item_id, override_value, effective_from)
+	h.execAffecting(t, 1, `INSERT INTO tenant_entitlements (tenant_id, item_id, override_value, effective_from)
 	           SELECT $1, id, '{"quantity": 1000}'::jsonb, now() - interval '1 day'
 	           FROM billable_items WHERE key = 'max_assets'`, tenant)
 

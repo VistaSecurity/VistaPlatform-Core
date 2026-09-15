@@ -33,8 +33,8 @@ func newSSHIngestFixture(t *testing.T, hostname string) (*AssetService, uuid.UUI
 
 	asset := uuid.New()
 	if _, err := db.Exec(`
-		INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,$3,'server','monitoring',NOW(),NOW(),NOW(),NOW())`, asset, tenant, hostname); err != nil {
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`, asset, tenant, hostname); err != nil {
 		t.Fatalf("insert asset: %v", err)
 	}
 	return &AssetService{db: db, algorithmService: NewAlgorithmService(db)}, tenant, asset

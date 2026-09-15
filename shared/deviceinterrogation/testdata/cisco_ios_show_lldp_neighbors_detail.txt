@@ -1,0 +1,21 @@
+------------------------------------------------
+Chassis id: 198.51.100.9
+Port id: Gi0/0/1
+Port Description: GigabitEthernet0/0/1
+System Name: rtr-edge-1.example.net
+
+System Description:
+Cisco IOS XE Software, Version 17.09.04a
+username admin privilege 15 password 0 MUST-NOT-BE-COLLECTED
+
+Time remaining: 108 seconds
+System Capabilities: B,R
+Enabled Capabilities: R
+Management Addresses:
+    IP: 198.51.100.9
+Auto Negotiation - not supported
+Physical media capabilities - not advertised
+Media Attachment Unit type - not advertised
+Vlan ID: - not advertised
+
+Total entries displayed: 1

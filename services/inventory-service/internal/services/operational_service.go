@@ -86,7 +86,7 @@ func (s *OperationalService) GetLocationEnvironments(tenantID, locationID uuid.U
 	return out, nil
 }
 
-// GetEnvironmentAssets returns assets for a given location and environment (from network_assets).
+// GetEnvironmentAssets returns assets for a given location and environment (from assets).
 // Uses explicit column list and tags/metadata as text so JSONB scans correctly into models.Asset.
 func (s *OperationalService) GetEnvironmentAssets(tenantID, locationID uuid.UUID, environment string, page, pageSize int) ([]models.Asset, int, error) {
 	if pageSize <= 0 {
@@ -99,17 +99,17 @@ func (s *OperationalService) GetEnvironmentAssets(tenantID, locationID uuid.UUID
 
 	query := `
 		SELECT
-			a.id, a.tenant_id, a.hostname, a.ip_address, a.port, a.asset_type,
-			a.operating_system, a.environment::text, a.business_unit, a.owner_email,
+			a.id, a.tenant_id, a.hostname, host(a.primary_address), ep.port, a.class_key,
+			` + assetOperatingSystemSQL + `, a.environment::text, a.business_unit, a.owner_email,
 			a.description, a.tags::text, a.metadata::text, a.asset_ownership, a.asset_status,
 			a.first_discovered_at, a.last_seen_at,
 			a.created_at, a.updated_at, a.deleted_at,
 			a.location_id, a.network_segment_id, ns.name AS network_segment_name,
-			a.service_name, a.service_version,
-			a.service_confidence, a.service_identification_method,
+			ep.service_name, ep.service_version,
+			ep.service_confidence, ep.service_identification_method,
 			a.risk_score, ` + models.RiskLevelCaseSQL("COALESCE(a.risk_score, 0)") + ` AS risk_level
-		FROM network_assets a
-		LEFT JOIN network_segments ns ON ns.id = a.network_segment_id
+		FROM assets a
+		LEFT JOIN network_segments ns ON ns.id = a.network_segment_id` + primaryEndpointJoin + `
 		WHERE a.tenant_id = $1 AND a.location_id = $2 AND a.deleted_at IS NULL
 		  AND (a.environment::text = $3 OR ($3 = 'unknown' AND a.environment IS NULL))
 		ORDER BY a.risk_score DESC NULLS LAST, a.last_seen_at DESC
@@ -118,10 +118,10 @@ func (s *OperationalService) GetEnvironmentAssets(tenantID, locationID uuid.UUID
 
 	var total int
 	var assets []models.Asset
-	// RLS-scoped reads over network_assets (JOIN network_segments) — count + page in one tenant tx.
+	// RLS-scoped reads over assets (JOIN network_segments) — count + page in one tenant tx.
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		if e := tx.QueryRow(`
-		SELECT COUNT(*) FROM network_assets
+		SELECT COUNT(*) FROM assets
 		WHERE tenant_id = $1 AND location_id = $2 AND deleted_at IS NULL
 		  AND (environment::text = $3 OR ($3 = 'unknown' AND environment IS NULL))
 	`, tenantID, locationID, environment).Scan(&total); e != nil {
@@ -140,17 +140,22 @@ func (s *OperationalService) GetEnvironmentAssets(tenantID, locationID uuid.UUID
 		for rows.Next() {
 			var asset models.Asset
 			var tagsText, metadataText string
+			var operatingSystem *string
+			var ep models.Endpoint
 			if e := rows.Scan(
-				&asset.ID, &asset.TenantID, &asset.Hostname, &asset.IPAddress, &asset.Port,
-				&asset.AssetType, &asset.OperatingSystem, &asset.Environment, &asset.BusinessUnit,
+				&asset.ID, &asset.TenantID, &asset.Hostname, &asset.PrimaryAddress, &ep.Port,
+				&asset.ClassKey, &operatingSystem, &asset.Environment, &asset.BusinessUnit,
 				&asset.OwnerEmail, &asset.Description, &tagsText, &metadataText, &asset.AssetOwnership, &asset.AssetStatus,
 				&asset.FirstDiscoveredAt, &asset.LastSeenAt, &asset.CreatedAt, &asset.UpdatedAt,
-				&asset.DeletedAt, &asset.LocationID, &asset.NetworkSegmentID, &asset.NetworkSegmentName, &asset.ServiceName, &asset.ServiceVersion,
-				&asset.ServiceConfidence, &asset.ServiceIdentificationMethod,
+				&asset.DeletedAt, &asset.LocationID, &asset.NetworkSegmentID, &asset.NetworkSegmentName, &ep.ServiceName, &ep.ServiceVersion,
+				&ep.ServiceConfidence, &ep.ServiceIdentificationMethod,
 				&asset.RiskScore, &asset.RiskLevel,
 			); e != nil {
 				return e
 			}
+			setAssetOperatingSystem(&asset, operatingSystem)
+			attachPrimaryEndpoint(&asset, ep)
+			normalizeAssetCollections(&asset)
 			if tagsText != "" {
 				_ = json.Unmarshal([]byte(tagsText), &asset.Tags)
 			}

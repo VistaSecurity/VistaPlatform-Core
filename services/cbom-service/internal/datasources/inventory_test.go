@@ -58,7 +58,7 @@ func TestInventoryDataSourceQueryAssetsAggregatesPaginatedResults(t *testing.T) 
 		t.Fatalf("NewInventoryDataSource returned error: %v", err)
 	}
 
-	items, err := dataSource.QueryAssets(context.Background(), "test-token", "00000000-0000-0000-0000-000000000001")
+	items, err := dataSource.QueryAssets(context.Background(), "test-token", "00000000-0000-0000-0000-000000000001", "")
 	if err != nil {
 		t.Fatalf("QueryAssets returned error: %v", err)
 	}

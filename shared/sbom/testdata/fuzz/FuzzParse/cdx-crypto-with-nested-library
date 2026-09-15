@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.7\",\"components\":[{\"type\":\"cryptographic-asset\",\"bom-ref\":\"alg\",\"name\":\"RSA\",\"cryptoProperties\":{\"assetType\":\"algorithm\"},\"components\":[{\"type\":\"library\",\"bom-ref\":\"lib\",\"name\":\"libcrypto\",\"version\":\"3.0\"}]}]}")

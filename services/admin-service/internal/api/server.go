@@ -6,6 +6,7 @@ package api
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -14,8 +15,11 @@ import (
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/auth"
+	catalogsvc "github.com/vistasecurity/vistaplatform/admin-service/internal/catalogs"
+	"github.com/vistasecurity/vistaplatform/admin-service/internal/classificationrules"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/handlers"
+	"github.com/vistasecurity/vistaplatform/admin-service/internal/jobs/catalogfeeds"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/middleware"
 	adminservices "github.com/vistasecurity/vistaplatform/admin-service/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/cache"
@@ -23,6 +27,7 @@ import (
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
+	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	resourcetracking "github.com/vistasecurity/vistaplatform/shared/middleware/resource-tracking"
 	"github.com/vistasecurity/vistaplatform/shared/security/jwtkeys"
 	"github.com/vistasecurity/vistaplatform/shared/version"
@@ -54,6 +59,18 @@ type Server struct {
 	billingRuntime BillingRuntime
 	// mspRuntime is the MSP management-plane background handle, nil in Core.
 	mspRuntime MSPRuntime
+	// catalogRunner mirrors the public EOL and vulnerability feeds into the
+	// platform catalogues. Core — the catalogues are free in every edition —
+	// and controlled by CATALOG_FEEDS_ENABLED rather than by an edition hook.
+	catalogRunner *catalogfeeds.Runner
+	// catalogEnricher is the ADR-0008 Enricher seam's Core implementation: the
+	// rule/lookup answer out of eol_catalogue and vulnerability_matches. Held
+	// on the server because it is the seam every future consumer resolves
+	// through, and because its describe-line belongs in the startup log.
+	catalogEnricher *catalogsvc.LookupEnricher
+	// catalogGapRunner works the gap list. Present in every edition; it simply
+	// has no proposer to call in Core.
+	catalogGapRunner *catalogsvc.GapRunner
 }
 
 // NewServer creates and initializes a Core-edition HTTP server instance.
@@ -583,6 +600,95 @@ func (s *Server) setupRouter() {
 				storageConfig.POST("/test", handlers.TestStorageConnection(s.db, s.bypassDB)) // Test storage connectivity
 			}
 
+			// Catalog ▸ End-of-life and Catalog ▸ Vulnerability feed (ADR-0006
+			// D7). The non-crypto platform catalogues sit beside Algorithms and
+			// Frameworks in the console, which is the point: crypto is one
+			// catalogue among several.
+			//
+			// Gated on catalogs.manage, not algorithms.manage — curating crypto
+			// ratings and re-pointing the platform at a vulnerability source are
+			// different trust decisions, even though both are granted to
+			// super_admin and platform_admin today.
+			//
+			// CORE: the catalogues are free in every edition, so unlike the MSP
+			// and billing surfaces these routes are mounted unconditionally.
+			catalogStore := catalogfeeds.NewSQLStore(s.bypassDB)
+			s.catalogRunner = catalogfeeds.NewRunner(catalogfeeds.LoadConfig(), catalogStore, s.bypassDB)
+
+			// The ADR-0008 Enricher seam (workstream 4.5b). Everything here is
+			// CORE except the thing that fills the proposal queue: the
+			// rule/lookup enricher, the gap list, the proposal table and the
+			// whole accept/reject workflow ship in every edition.
+			enrichStore := catalogsvc.NewSQLStore(s.bypassDB)
+			s.catalogEnricher = catalogsvc.NewLookupEnricher(enrichStore)
+			var proposer catalogsvc.Proposer
+			enrichAvailability := handlers.CatalogEnrichAvailability{Reason: handlers.EnrichReasonEdition}
+			if s.hooks.NewCatalogEnricher != nil {
+				proposer, enrichAvailability = s.hooks.NewCatalogEnricher(CatalogEnricherDeps{
+					Candidates: enrichStore,
+					AuditSink:  auditmiddleware.NewAISink(handlers.PlatformAuditActivityLogger(), "admin-service"),
+				})
+			}
+			s.catalogGapRunner = catalogsvc.NewGapRunner(enrichStore, proposer)
+			// One line at startup saying what this deployment's enricher
+			// actually is, the way cbom-service logs its narrator. An operator
+			// reading "proposals=unavailable (edition)" in the first ten lines
+			// of the pod log does not open a support ticket about a button that
+			// is missing on purpose.
+			log.Printf("[catalogs] enricher: lookup=%s proposals=%s provider=%s",
+				catalogsvc.ImplLookup, enrichStateLabel(enrichAvailability), enrichAvailability.Provider)
+			// The gap pass runs AFTER a full mirror pass, not before: a gap the
+			// upstream feed has just filled should not have a model asked about
+			// it, and the feeds are what fill it.
+			s.catalogRunner.SetFollowUp(func(ctx context.Context) {
+				if _, err := s.catalogGapRunner.Run(ctx); err != nil &&
+					!errors.Is(err, catalogsvc.ErrNoProposer) && !errors.Is(err, catalogsvc.ErrEnrichBusy) {
+					log.Printf("[catalogs] scheduled gap pass failed: %v", err)
+				}
+			})
+
+			catalogs := protected.Group("/catalogs")
+			catalogs.Use(rbacMiddleware.RequirePlatformPermission(rbac.PermissionCatalogsManage))
+			{
+				catalogs.GET("/eol", handlers.ListEOLCatalogue(catalogStore))
+				catalogs.GET("/vulnerabilities", handlers.ListVulnerabilityCatalogue(catalogStore))
+				catalogs.GET("/feeds", handlers.ListCatalogFeeds(catalogStore, s.catalogRunner))
+				catalogs.POST("/feeds/:feed/sync", handlers.SyncCatalogFeed(s.catalogRunner))
+				catalogs.POST("/import-bundle", handlers.ImportCatalogBundle(catalogfeeds.BundleImporter{Store: catalogStore}))
+
+				// Proposals and gaps. Mounted unconditionally, including the
+				// enrich trigger: the route existing in every edition is what
+				// lets a Core console get a 503 that says "not available on this
+				// deployment" instead of a 404 it cannot distinguish from a
+				// broken build.
+				catalogs.POST("/eol/lookup", handlers.LookupEOL(s.catalogEnricher))
+				catalogs.GET("/eol/proposals", handlers.ListEOLProposals(enrichStore))
+				catalogs.POST("/eol/proposals/:id/accept", handlers.AcceptEOLProposal(enrichStore))
+				catalogs.POST("/eol/proposals/:id/reject", handlers.RejectEOLProposal(enrichStore))
+				catalogs.GET("/eol/misses", handlers.ListCatalogMisses(enrichStore))
+				catalogs.POST("/eol/enrich", handlers.RunCatalogEnrichment(s.catalogGapRunner))
+				catalogs.GET("/eol/enrich/availability", handlers.GetCatalogEnrichAvailability(enrichAvailability))
+
+				// Catalog ▸ Classification rules (ADR-0004 D6, workstream
+				// 2.10a). The fingerprint rules behind every class proposal:
+				// OUI, SNMP sysObjectID, EtherNet/IP vendor id, cloud resource
+				// type, banner, port profile, model prefix and collector
+				// platform. Seeded from standards/classification-rules.yaml and
+				// curated here — D6's argument is that they are DATA, so the
+				// catalogue grows without a release.
+				//
+				// Full CRUD, unlike the two read-only catalogues above, because
+				// there is no upstream feed to mirror: these rules are ours and
+				// the admin's, and without a write path the seed is all a
+				// deployment would ever have.
+				classificationRuleStore := classificationrules.NewSQLStore(s.bypassDB)
+				catalogs.GET("/classification-rules", handlers.ListClassificationRules(classificationRuleStore))
+				catalogs.POST("/classification-rules", handlers.CreateClassificationRule(classificationRuleStore))
+				catalogs.GET("/classification-rules/:id", handlers.GetClassificationRule(classificationRuleStore))
+				catalogs.PUT("/classification-rules/:id", handlers.UpdateClassificationRule(classificationRuleStore))
+				catalogs.DELETE("/classification-rules/:id", handlers.DeleteClassificationRule(classificationRuleStore))
+			}
+
 			// Platform Integrations endpoints - AWS, 3rd party SaaS integrations
 			// Manage integration credentials securely with encryption
 			platformIntegrations := protected.Group("/integrations")
@@ -740,6 +846,14 @@ func (s *Server) Start() error {
 		s.billingRuntime.Start()
 	}
 
+	// Start the catalogue mirror jobs (EOL, NVD, OSV). Core. Start() logs and
+	// returns immediately when CATALOG_FEEDS_ENABLED=false, so an operator can
+	// see in the pod's output that the feeds are off rather than infer it from
+	// a catalogue that never grows.
+	if s.catalogRunner != nil {
+		s.catalogRunner.Start(context.Background())
+	}
+
 	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -759,6 +873,20 @@ func (s *Server) Start() error {
 	// Stop the Enterprise billing background workers. Nil in Core.
 	if s.billingRuntime != nil {
 		s.billingRuntime.Stop()
+	}
+
+	// Stop the catalogue mirror jobs and wait for an in-flight pass, so a
+	// shutdown mid-run still records its outcome instead of leaving
+	// catalog_feed_state stuck on 'running'.
+	if s.catalogRunner != nil {
+		s.catalogRunner.Stop()
+	}
+	// And any manually-triggered enrichment pass. The SCHEDULED one descends
+	// from the feed runner's context and is already ended by the line above; a
+	// pass started from the console has its own lifetime, and without this a
+	// shutdown would wait out the remaining provider calls.
+	if s.catalogGapRunner != nil {
+		s.catalogGapRunner.Stop()
 	}
 
 	// Shutdown both servers

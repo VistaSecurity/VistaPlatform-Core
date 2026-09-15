@@ -14,7 +14,7 @@ type Channel = NC['schemas']['TenantNotificationChannel'];
 type Rule = NC['schemas']['TenantNotificationRule'];
 
 function legacyMessage(error: unknown, fallback: string): string {
-  if (error && typeof error === 'object' && 'error' in error) return String((error as { error: unknown }).error);
+  if (error && typeof error === 'object' && 'error' in error) return String(error.error);
   return fallback;
 }
 
@@ -58,7 +58,7 @@ export function ChannelModal({ channel, open, onClose }: { channel: Channel | nu
       }
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['settings', 'channels'] });
+      void queryClient.invalidateQueries({ queryKey: ['settings', 'channels'] });
       onClose();
     },
   });
@@ -112,7 +112,7 @@ export function ChannelDeleteModal({ channel, open, onClose }: { channel: Channe
       if (error || !response.ok) throw new Error(legacyMessage(error, 'Failed to delete the channel'));
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['settings', 'channels'] });
+      void queryClient.invalidateQueries({ queryKey: ['settings', 'channels'] });
       onClose();
     },
   });
@@ -187,7 +187,7 @@ export function RuleModal({ rule, channels, open, onClose }: { rule: Rule | null
       }
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['settings', 'notification-rules'] });
+      void queryClient.invalidateQueries({ queryKey: ['settings', 'notification-rules'] });
       onClose();
     },
   });
@@ -261,7 +261,7 @@ export function RuleDeleteModal({ rule, open, onClose }: { rule: Rule | null; op
       if (error || !response.ok) throw new Error(legacyMessage(error, 'Failed to delete the rule'));
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['settings', 'notification-rules'] });
+      void queryClient.invalidateQueries({ queryKey: ['settings', 'notification-rules'] });
       onClose();
     },
   });

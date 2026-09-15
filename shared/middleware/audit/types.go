@@ -16,7 +16,26 @@ type RelatedResource struct {
 	Name string `json:"name"` // Human-readable name
 }
 
-// Standard event categories
+// The event categories audit.activity_logs will accept.
+//
+// This is not a style guide. `event_category` carries a CHECK constraint in
+// scripts/database/schema.sql (`valid_event_category`), so a category outside
+// this set is not "unusual" — the INSERT is REJECTED with SQLSTATE 23514 and
+// the audit entry is never written. Nothing makes that visible to the caller:
+// LogActivity appends to an in-memory batch and returns nil, the flush is a
+// background goroutine, and the only trace is a line in audit-service's log.
+//
+// Two of these constants used to be values the database rejects —
+// EventCategorySensor ("sensor") and EventCategoryConfig ("configuration") —
+// so the package published two categories that could not be stored. Nothing
+// used the constants, but a handler that copied the string did: both tenant
+// settings handlers wrote "configuration", and the auto-accepted-merge event
+// wrote "data_modification". All three were discarded on INSERT.
+//
+// `sensor` is gone rather than corrected: there is no rung for it in the CHECK
+// and sensor activity is asset or discovery activity. Add a category ONLY by
+// adding it to the CHECK and here in the same change;
+// TestEventCategories_MatchTheSchemaCheck fails if the two drift.
 const (
 	EventCategoryAsset       = "asset"
 	EventCategoryCertificate = "certificate"
@@ -25,10 +44,11 @@ const (
 	EventCategoryCompliance  = "compliance"
 	EventCategoryReport      = "report"
 	EventCategoryDiscovery   = "discovery"
-	EventCategorySensor      = "sensor"
-	EventCategoryConfig      = "configuration"
+	EventCategoryConfig      = "config"
 	EventCategorySystem      = "system"
 	EventCategoryData        = "data"
+	EventCategoryTenant      = "tenant"
+	EventCategoryJob         = "job"
 )
 
 // Standard event types by category

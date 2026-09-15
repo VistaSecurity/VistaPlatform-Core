@@ -28,11 +28,35 @@ type NetworkSegment struct {
 	// AutoApproveSourcesKey) rather than in its own column, and hydrated on
 	// read — see AutoApproveSourcesFromMetadata for why "absent" means
 	// sensor-only.
-	AutoApproveSources []string  `json:"auto_approve_sources" db:"-"`
-	Tags               JSONB     `json:"tags" db:"tags"`
-	Metadata           JSONB     `json:"metadata" db:"metadata"`
-	CreatedAt          time.Time `json:"created_at" db:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at" db:"updated_at"`
+	AutoApproveSources []string `json:"auto_approve_sources" db:"-"`
+	// CloudNetworkRef is the cloud network (VPC / VNet / GCP network) this
+	// segment belongs to, as the provider's own resource id. NULL for every
+	// operator-drawn LAN segment, which is all of them except the ones cloud
+	// enumeration creates.
+	//
+	// It is part of the segment's IDENTITY: uniqueness is
+	// (tenant_id, value, coalesce(cloud_network_ref, '')), because a CIDR is
+	// not unique in a cloud account — two VPCs from one Terraform module both
+	// get 10.0.0.0/16. Read-only here: the segment UI does not set it, and a
+	// cloud run writes it (ADR-0002 D3 erratum).
+	CloudNetworkRef *string   `json:"cloud_network_ref,omitempty" db:"cloud_network_ref"`
+	Tags            JSONB     `json:"tags" db:"tags"`
+	Metadata        JSONB     `json:"metadata" db:"metadata"`
+	CreatedAt       time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at" db:"updated_at"`
+	// SourceKind / SourceRef are the segment's provenance (ADR-0005's
+	// vocabulary: measured / imported / declared / inferred). NULL — nil here —
+	// means "drawn before this column existed", which is deliberately NOT the
+	// same as `declared`: a segment somebody drew two years ago has no recorded
+	// provenance, and labelling it would invent a fact.
+	//
+	// They are on the struct because four queries in this service `SELECT ns.*`
+	// into it and sqlx is not in unsafe mode: a column the struct does not name
+	// makes those queries fail outright with "missing destination name". A new
+	// column on this table therefore MUST be mirrored here — as cloud_network_ref
+	// above is, for the same reason.
+	SourceKind *string `json:"source_kind,omitempty" db:"source_kind"`
+	SourceRef  *string `json:"source_ref,omitempty" db:"source_ref"`
 	// Joined for responses (from locations join)
 	LocationName     *string `json:"location_name,omitempty" db:"location_name"`
 	LocationFullPath *string `json:"location_full_path,omitempty" db:"location_full_path"`

@@ -65,7 +65,14 @@ import (
 //     configuration — and it errs toward under-deduping, which is the safe
 //     direction.
 type cryptoImplementationKey struct {
-	AssetID         uuid.UUID
+	AssetID uuid.UUID
+	// EndpointID is the face the configuration was measured on, and it IS part
+	// of the key: the same protocol and cipher suite on :443 and on :8443 are
+	// two configurations of one asset, and merging them would lose the
+	// distinction the old port-as-asset model kept by accident (they were two
+	// assets then). uuid.Nil means no endpoint — an at-rest resource — and the
+	// null-safe comparison below keeps those matching each other.
+	EndpointID      uuid.UUID
 	Protocol        string
 	ProtocolVersion *string
 	CipherSuite     *string
@@ -103,6 +110,7 @@ const findCryptoImplementationSQL = `
 		 WHERE tenant_id = $1
 		   AND asset_id = $2
 		   AND deleted_at IS NULL
+		   AND endpoint_id IS NOT DISTINCT FROM $12::uuid
 		   AND protocol = $3::public.protocol_type
 		   AND protocol_version       IS NOT DISTINCT FROM $4::text
 		   AND cipher_suite           IS NOT DISTINCT FROM $5::text
@@ -136,6 +144,104 @@ const refreshCryptoImplementationSQL = `
 		       last_verified_at = NOW(),
 		       updated_at       = NOW()
 		 WHERE id = $1`
+
+// setCryptoRiskScoreSQL writes a configuration's risk score.
+//
+// Note what refreshCryptoImplementationSQL above does NOT touch: risk_score.
+// A re-observation refreshes the evidence and the last-seen stamp, and the
+// score is recomputed separately from the components the same pass just linked
+// — see persistCryptoRiskScore.
+const setCryptoRiskScoreSQL = `
+		UPDATE crypto_implementations
+		   SET risk_score = $1,
+		       updated_at = NOW()
+		 WHERE id = $2`
+
+// persistCryptoRiskScore writes the score of a configuration that was ASSESSED,
+// including a score of zero.
+//
+// The caller decides "assessed"; this decides nothing. The split matters because
+// the two states a zero can mean are settled before the write, not by it.
+//
+// # What this fixes
+//
+// The write used to be guarded by `if score > 0`, with the reasoning that a
+// persisted 0 is indistinguishable from "nobody looked". The reasoning is right
+// and the guard was the wrong place to act on it, because the column it guards
+// is a LAST-WRITE, not an accumulator: a configuration first observed
+// negotiating TLS 1.0 with SHA-1 scored 75 and kept 75 for ever, even after the
+// operator fixed the server and every later observation resolved to a clean
+// set. Re-observation could raise a score and, at the bottom of the range,
+// could not lower it. The product therefore reported remediation as unfinished
+// precisely when it had been finished.
+//
+// The score can move DOWN for two reasons and both are legitimate: the
+// configuration now resolves to better components, or the catalogue row that
+// scored it was corrected — which is the whole promise of "edit the catalogue
+// row, not Go code" (CLAUDE.md, "The catalogue drives risk scoring"). Nothing
+// about either says the number may only ever climb.
+//
+// # And zero still means two things
+//
+// The three-valued honesty is kept, just not by refusing to write. For a
+// configuration, ASSESSED is a derived fact with a home of its own: at least one
+// catalogue component linked in a `cryptoassess.CatalogueRiskRoles` role, in
+// `crypto_implementation_algorithms`. That is exactly the predicate the `crypto`
+// finding producer already reads (its `cat.linked` count) to decide whether an
+// asset's crypto was judged at all, so there is one definition rather than two,
+// and no new column on a table that is one partitioned parent plus eight
+// partitions.
+//
+//	risk_score 0, no linked component  → NOT ASSESSED
+//	risk_score 0, linked components    → assessed, and clean
+//	risk_score N > 0                   → assessed, and not clean
+//
+// A pass that resolved nothing therefore writes nothing at all and leaves the
+// row exactly as it was — which is the honest outcome: it has no opinion to
+// record, and overwriting a real earlier verdict with a 0 it cannot justify
+// would be a worse lie than the stale score this change removes.
+func persistCryptoRiskScore(tx *sqlx.Tx, implID uuid.UUID, score int) error {
+	if _, err := tx.Exec(setCryptoRiskScoreSQL, score, implID); err != nil {
+		return fmt.Errorf("set risk score on crypto implementation %s: %w", implID, err)
+	}
+	return nil
+}
+
+// linkLeafCertificateSQL writes the `leaf` row of the certificate↔configuration
+// junction for a configuration that names a certificate.
+//
+// The junction is the ONE source of truth for that link: every reader that asks
+// "which certificates belong to this asset / endpoint / configuration" walks it
+// — `shared/findings.AssetSubjects` (the certificate descendant path behind
+// `finding:(…)` and the `has_findings` facet), the `asset/cert`,
+// `endpoint/cert`, `crypto_configuration/cert` and `certificate/asset` shapes in
+// `shared/query/sql`, the location roll-up, and the crypto-risk certificate
+// expiry bands. `crypto_implementations.certificate_id` stays as the LEAF
+// denormalisation those few readers that want one certificate use directly
+// (the crypto-configuration list, the asset↔certificate links endpoint).
+//
+// Writing it here, in the caller's transaction, is the whole point. The two
+// used to be written apart: the column by the INSERT/UPDATE below and the
+// junction by a later, separate, best-effort `LinkCertificateToImplementation`
+// call that only logged on failure. They diverged in production — the original
+// `valid_certificate_role` CHECK rejected the literal 'leaf', so on every
+// sensor-discovered certificate the column was set, the junction insert was
+// refused, and the certificate became invisible from its own asset while ingest
+// reported success. Same transaction means that cannot recur: either both land
+// or neither does.
+//
+// The certificate is SELECTed back out of the row rather than bound from the
+// caller, so the junction cannot name a different certificate from the column —
+// and so a re-observation of a legacy row converges it, even when this
+// observation carried no chain of its own.
+const linkLeafCertificateSQL = `
+		INSERT INTO crypto_implementation_certificates (
+			crypto_implementation_id, certificate_id, certificate_role, certificate_order
+		)
+		SELECT id, certificate_id, 'leaf', 0
+		  FROM crypto_implementations
+		 WHERE id = $1 AND certificate_id IS NOT NULL
+		ON CONFLICT (crypto_implementation_id, certificate_id) DO NOTHING`
 
 // lockAssetMaterializationSQL serializes concurrent materialization for one
 // asset.
@@ -173,10 +279,19 @@ func assetMaterializationLockKey(tenantID, assetID uuid.UUID) string {
 // a measured one. Callers that write must check it; the fingerprint path below
 // does not write and substitutes its own identity string.
 func (s *AssetService) cryptoKeyForFinding(assetID uuid.UUID, f IngestFinding) (cryptoImplementationKey, bool) {
+	return s.cryptoKeyForFindingOnEndpoint(assetID, uuid.Nil, f)
+}
+
+// cryptoKeyForFindingOnEndpoint is cryptoKeyForFinding with the endpoint the
+// observation was measured on. The two-argument form exists because the
+// fingerprint path (deferredFindingFingerprint) has no asset yet, let alone an
+// endpoint, and must not pretend otherwise.
+func (s *AssetService) cryptoKeyForFindingOnEndpoint(assetID, endpointID uuid.UUID, f IngestFinding) (cryptoImplementationKey, bool) {
 	protocol, verdict := resolveProtocol(f.Protocol)
 	derived := s.deriveCipherComponents(f)
 	return cryptoImplementationKey{
 		AssetID:         assetID,
+		EndpointID:      endpointID,
 		Protocol:        protocol,
 		ProtocolVersion: derived.ProtocolVersion,
 		CipherSuite:     f.CipherSuite,
@@ -211,10 +326,14 @@ func upsertCryptoImplementation(
 		tenantID, k.AssetID, k.Protocol,
 		k.ProtocolVersion, k.CipherSuite, k.KeyExchange, k.Signature,
 		k.Symmetric, k.Hash, k.KeySize, k.DiscoveryMethod,
+		nullUUIDValue(k.EndpointID),
 	).Scan(&existing)
 	if err == nil {
 		if _, e := tx.Exec(refreshCryptoImplementationSQL, existing, certificateID, sourceSensorID, rawJSON); e != nil {
 			return uuid.Nil, false, fmt.Errorf("refresh crypto implementation %s: %w", existing, e)
+		}
+		if e := linkLeafCertificate(tx, existing); e != nil {
+			return uuid.Nil, false, e
 		}
 		return existing, false, nil
 	}
@@ -228,11 +347,30 @@ func upsertCryptoImplementation(
 		id, tenantID, k.AssetID, k.Protocol, k.ProtocolVersion, k.CipherSuite,
 		k.Hash, k.KeySize, certificateID, sourceSensorID, rawJSON,
 		k.KeyExchange, k.Signature, k.Symmetric,
-		k.DiscoveryMethod,
+		k.DiscoveryMethod, nullUUIDValue(k.EndpointID),
 	); e != nil {
 		return uuid.Nil, false, fmt.Errorf("insert crypto implementation: %w", e)
 	}
+	if e := linkLeafCertificate(tx, id); e != nil {
+		return uuid.Nil, false, e
+	}
 	return id, true, nil
+}
+
+// linkLeafCertificate is the one call site shape of linkLeafCertificateSQL, so
+// the insert and refresh branches above cannot drift apart.
+//
+// It is deliberately FATAL rather than best-effort. Its predecessor logged and
+// carried on, which is precisely how a configuration came to name a certificate
+// that no reader could reach from the asset — a silent hole, reported as a
+// successful ingest. Rolling the transaction back leaves no configuration at
+// all, which is the honest outcome: the certificate link is not decoration, it
+// is how the certificate is found.
+func linkLeafCertificate(tx *sqlx.Tx, implID uuid.UUID) error {
+	if _, err := tx.Exec(linkLeafCertificateSQL, implID); err != nil {
+		return fmt.Errorf("link leaf certificate for crypto implementation %s: %w", implID, err)
+	}
+	return nil
 }
 
 // deferredFindingFingerprint identifies a deferred finding for dedup purposes.
@@ -318,4 +456,14 @@ func derefInt(p *int) string {
 		return "\x00"
 	}
 	return strconv.Itoa(*p)
+}
+
+// nullUUIDValue binds uuid.Nil as SQL NULL. The zero uuid is not an id — it
+// names no row — and binding it literally would make every at-rest
+// configuration collide on one fictional endpoint.
+func nullUUIDValue(id uuid.UUID) interface{} {
+	if id == uuid.Nil {
+		return nil
+	}
+	return id
 }

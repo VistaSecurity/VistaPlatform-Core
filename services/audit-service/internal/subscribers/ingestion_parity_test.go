@@ -77,8 +77,8 @@ func TestEnvelopeFallsBackForPublishersWithoutTheFields(t *testing.T) {
 	if got.EventType != "asset.updated" {
 		t.Fatalf("EventType = %q, want the action %q as the fallback", got.EventType, "asset.updated")
 	}
-	if got.EventCategory != "api" {
-		t.Fatalf("EventCategory = %q, want the %q fallback", got.EventCategory, "api")
+	if got.EventCategory != "system" {
+		t.Fatalf("EventCategory = %q, want the %q fallback (a value the activity_logs CHECK accepts)", got.EventCategory, "system")
 	}
 	if !got.Success {
 		t.Fatal("a 200 with no explicit outcome must still derive as success")

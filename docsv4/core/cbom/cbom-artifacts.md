@@ -2,29 +2,44 @@
 
 A **CBOM Artifact** is a frozen, dated, content-hashed snapshot of every cryptographic component matching a [Scope](../features/scopes.md) at the moment of generation. It's what you hand an auditor, attach to a vendor questionnaire, or submit alongside a regulatory filing.
 
+> **The CBOM is one of four kinds.** The same pipeline also produces a software
+> BOM, a hardware BOM and a full-inventory snapshot — same scope, same hash,
+> same signature, same comparison. See **[Bills of Materials](./xbom.md)** for
+> what each kind contains and for the OCSF event export. This page covers the
+> cryptographic kind, which is the default and what this page always described.
+
 Once generated, an artifact is immutable. Regenerating against the same scope tomorrow produces a *different* artifact — that's deliberate. You keep both. The two can be compared (Enterprise — see below) to show how your posture changed.
 
 ## Where to find them
 
-**Risk & Compliance → CBOM** in the primary nav. Or directly: `/risk-compliance/cbom`.
+**Risk & Compliance → Bills of Materials** in the primary nav. Or directly:
+`/risk-compliance/cbom`.
 
-The page lists every artifact your tenant has generated, newest first. Each row shows:
+The page lists every artifact your tenant has generated, of every kind, newest
+first. Use the **Kind** filter to narrow it to CBOMs. Each row shows:
 
 | Column | What it means |
 |---|---|
 | Name | Either the human name you gave it at generation time, or `<scope> — <date>` if you skipped naming. |
 | Scope | The boundary the artifact was generated against, plus the scope version that was in force. Auditable. |
+| Kind | Which bill of materials this is — see [Bills of Materials](./xbom.md). |
 | Generated | When the snapshot was taken. |
-| Components | How many crypto components are in the BOM (certificates, algorithms, protocols, keys, libraries). |
+| Entries | How many components are in the BOM. For a CBOM: certificates, algorithms, protocols, keys, libraries. |
 | Size | Canonical byte count. Used for storage billing. |
-| Storage | "Object" = lives in S3 (production). "Inline" = stored in Postgres (dev / brand-new installs that haven't configured S3 yet). |
+
+Where the bytes live is on the artifact itself rather than in the list: open a
+row and the **Storage** line reads "Object" (S3, production) or "Inline"
+(Postgres — dev, and brand-new installs that have not configured S3 yet). It
+gave up its column to **Kind**, which distinguishes two artifacts of the same
+scope on the same day; storage does not.
 
 ## Generating an artifact
 
-1. Click **Generate CBOM**.
-2. Pick a [Scope](../features/scopes.md). Every artifact lives against exactly one scope.
-3. Optionally give it a meaningful name. For audit submissions, name the artifact after the engagement: "Q2 2026 PCI Submission," "ACME Vendor Onboarding 2026-05."
-4. Click **Generate**. The snapshot is taken synchronously; a new row appears.
+1. Click **Generate**.
+2. Leave **Kind** on **Cryptographic (CBOM)** — it is the default. The other three kinds are described in [Bills of Materials](./xbom.md).
+3. Pick a [Scope](../features/scopes.md). Every artifact lives against exactly one scope.
+4. Optionally give it a meaningful name. For audit submissions, name the artifact after the engagement: "Q2 2026 PCI Submission," "ACME Vendor Onboarding 2026-05."
+5. Click **Generate**. The snapshot is taken synchronously; a new row appears.
 
 ## Downloading
 

@@ -1,0 +1,38 @@
+------------------------------------------------
+Local Intf: Gi1/0/1
+Chassis id: 00b0.e1a2.0001
+Port id: Gi1/0/24
+Port Description: uplink to access
+System Name: core-sw-1.example.net
+
+System Description:
+Cisco IOS Software, C3750E Software (C3750E-UNIVERSALK9-M), Version 15.2(4)E10
+crypto isakmp key MUST-NOT-BE-COLLECTED address 0.0.0.0
+
+Time remaining: 97 seconds
+System Capabilities: B,R
+Enabled Capabilities: B,R
+Management Addresses:
+    IP: 198.51.100.1
+Auto Negotiation - supported, enabled
+Physical media capabilities:
+    1000baseT(FD)
+Media Attachment Unit type: 30
+Vlan ID: 1
+
+------------------------------------------------
+Local Intf: Gi1/0/9
+Chassis id: 0c:47:c9:aa:bb:cc
+Port id: 1
+Port Description: not advertised
+System Name: not advertised
+
+System Description: not advertised
+
+Time remaining: 101 seconds
+System Capabilities: T
+Enabled Capabilities: T
+Management Addresses - not advertised
+Auto Negotiation - not supported
+
+Total entries displayed: 2

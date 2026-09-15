@@ -35,8 +35,14 @@ type TenantFrameworkControl struct {
 	Description      string     `json:"description" db:"description"`
 	BaselineSeverity string     `json:"baseline_severity" db:"baseline_severity"`
 	CryptoRelevant   bool       `json:"crypto_relevant" db:"crypto_relevant"`
-	CreatedAt        time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at" db:"updated_at"`
+
+	// SourceKind / SourceRef are ADR-0008 D4.1 provenance — see
+	// PlatformFrameworkControl for what empty means.
+	SourceKind string `json:"source_kind,omitempty" db:"source_kind"`
+	SourceRef  string `json:"source_ref,omitempty" db:"source_ref"`
+
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 
 	// Joined fields
 	Family       *Family              `json:"family,omitempty" db:"-"`
@@ -58,4 +64,9 @@ type TenantFrameworkControlInput struct {
 	Description      string     `json:"description"`
 	BaselineSeverity string     `json:"baseline_severity" binding:"required,oneof=Low Med High Critical"`
 	CryptoRelevant   bool       `json:"crypto_relevant"`
+
+	// SourceKind / SourceRef record where this control came from, read on
+	// create only. See PlatformFrameworkControlInput for the full reasoning.
+	SourceKind string `json:"source_kind,omitempty" binding:"omitempty,oneof=declared inferred"`
+	SourceRef  string `json:"source_ref,omitempty" binding:"omitempty,max=200"`
 }

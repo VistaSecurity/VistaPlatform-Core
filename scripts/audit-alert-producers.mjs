@@ -18,7 +18,9 @@
 //
 // Run via `make audit` (strict). Mutation-test any change to it: flip a
 // `planned` type to `live` (must FAIL), comment out a raise site (must FAIL),
-// clean tree (must PASS).
+// delete ONE branch of a helper that routes two types — the
+// `hygiene_score_drop` arm of `alertTypeForFramework` — (must FAIL naming
+// hygiene_score_drop, not compliance_score_drop), clean tree (must PASS).
 import fs from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -139,38 +141,226 @@ function extractRaiseBlocks(src) {
   return blocks;
 }
 
+// --- alert-type resolution ---------------------------------------------------
+//
+// The RHS of an `AlertType:` field is rarely a literal. It is a const, a struct
+// field (`j.spec.alertType`), or a value a helper returned (`fs.alertType()`),
+// so crediting a producer means following the value back to the string(s) it can
+// carry.
+//
+// This used to end in a FILE-LEVEL FALLBACK: a value the resolver could not
+// trace credited every registry id appearing as a literal anywhere in the same
+// file. That is what made the audit unable to tell `compliance_score_drop` and
+// `hygiene_score_drop` apart — one job serves both, the RHS is a local bound
+// from a method call, and the fallback handed it both ids whether or not either
+// was still reachable. Delete the hygiene branch of `alertTypeForFramework` and
+// the audit stayed green while nothing could raise `hygiene_score_drop` again.
+//
+// The fallback is gone. Resolution follows the value: identifier → the things
+// bound to that NAME → the expressions those hold → the bodies of the functions
+// they name, transitively. A value that still cannot be traced is reported as an
+// UNRESOLVED blind spot (which fails the audit) rather than papered over with
+// every id in the file.
+//
+// Only literals that are REGISTRY IDS are collected while following a chain,
+// because a helper's body legitimately contains other strings (log formats, SQL)
+// and crediting those would resurrect the same looseness pointed the other way.
+// A DIRECT literal at the `AlertType:` field is not filtered, so a typo there is
+// still caught by the unknown-type check below.
+
+const IDENT_RE = /[A-Za-z_][A-Za-z0-9_]*/g;
+
+// skipString returns the index of the closing quote of the Go string or rune
+// literal that starts at src[i].
+function skipString(src, i) {
+  const quote = src[i];
+  i++;
+  for (; i < src.length; i++) {
+    if (src[i] === '\\' && quote !== '`') {
+      i++;
+      continue;
+    }
+    if (src[i] === quote) return i;
+  }
+  return src.length;
+}
+
+// balancedExpr reads the expression starting at `from`, ending at the first
+// newline reached with every bracket closed. That is what lets a multi-line
+// composite literal (`var m = map[uuid.UUID]string{\n  k: v,\n}`) be read as ONE
+// expression instead of being truncated at its first line — which is where the
+// audit-service rule→type map lives.
+function balancedExpr(src, from) {
+  let depth = 0;
+  let i = from;
+  for (; i < src.length; i++) {
+    const c = src[i];
+    if (c === '"' || c === '`' || c === "'") {
+      i = skipString(src, i);
+      continue;
+    }
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') {
+      if (depth === 0) break;
+      depth--;
+    } else if (c === '\n' && depth === 0) break;
+  }
+  return src.slice(from, i);
+}
+
+// funcBody returns the body of the function declaration whose `func` keyword is
+// at `from`, or '' when it cannot be delimited.
+function funcBody(src, from) {
+  let paren = 0;
+  let bracket = 0;
+  let i = from + 4;
+  for (; i < src.length; i++) {
+    const c = src[i];
+    if (c === '"' || c === '`' || c === "'") {
+      i = skipString(src, i);
+      continue;
+    }
+    if (c === '(') paren++;
+    else if (c === ')') paren--;
+    else if (c === '[') bracket++;
+    else if (c === ']') bracket--;
+    else if (c === '{' && paren === 0 && bracket === 0) break;
+  }
+  if (i >= src.length) return '';
+  let depth = 0;
+  for (let j = i; j < src.length; j++) {
+    const c = src[j];
+    if (c === '"' || c === '`' || c === "'") {
+      j = skipString(src, j);
+      continue;
+    }
+    if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (depth === 0) return src.slice(i, j + 1);
+    }
+  }
+  return '';
+}
+
+// funcReturns lists the expressions a function body can hand back.
+function funcReturns(body) {
+  const out = [];
+  const re = /\breturn\b/g;
+  let m;
+  while ((m = re.exec(body)) !== null) {
+    const expr = balancedExpr(body, m.index + m[0].length).trim();
+    if (expr) out.push(expr);
+  }
+  return out;
+}
+
+// buildSymbols indexes one file: per NAME, the string literals bound to it, the
+// expressions bound to it, and the bodies of functions declared with it. A file
+// is still the unit (as it was before), but a name now only contributes what is
+// actually bound to THAT name.
+function buildSymbols(src) {
+  const literals = new Map(); // name -> Set(literal)
+  const exprs = new Map(); // name -> [expression source]
+  const funcs = new Map(); // name -> [body source]
+  const add = (map, key, value) => {
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(value);
+  };
+
+  // `name = expr`, `name := expr`, `name: expr` (a composite-literal field) and
+  // the multi-value `name, other := expr`. The identifier must sit immediately
+  // before the operator, which is what keeps `==`, `!=`, `>=` and `+=` out.
+  const bind = /([A-Za-z_][A-Za-z0-9_]*)\s*(?:,\s*[A-Za-z_][A-Za-z0-9_]*\s*)?(:=|=|:)(?![=:])\s*/g;
+  let m;
+  while ((m = bind.exec(src)) !== null) {
+    const name = m[1];
+    const rhs = balancedExpr(src, m.index + m[0].length).trim();
+    if (!rhs) continue;
+    const lit = rhs.match(/^"([^"\\]*)"$/);
+    if (lit) {
+      if (!literals.has(name)) literals.set(name, new Set());
+      literals.get(name).add(lit[1]);
+    } else {
+      add(exprs, name, rhs);
+    }
+  }
+
+  const fn = /\bfunc\b/g;
+  while ((m = fn.exec(src)) !== null) {
+    // `func Name(` or `func (r T) Name(`.
+    const named = src.slice(m.index, m.index + 240).match(/^func\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/);
+    if (!named) continue;
+    const body = funcBody(src, m.index);
+    // Only the RETURN expressions, never the whole body. A body mentions all
+    // sorts of names — loop variables, the type consts it compares against, log
+    // arguments — and following every one of them re-creates the file-level
+    // fallback by a longer route: with the whole body in play, deleting the
+    // `hygiene_score_drop` branch of `alertTypeForFramework` still left the id
+    // reachable through an unrelated identifier. What a function can HAND BACK
+    // is what its caller can carry.
+    for (const ret of funcReturns(body)) add(funcs, named[1], ret);
+  }
+
+  return { literals, exprs, funcs };
+}
+
+function identsIn(chunk) {
+  return chunk.match(IDENT_RE) || [];
+}
+
+function litsIn(chunk) {
+  const out = [];
+  const re = /"([^"\\]*)"/g;
+  let m;
+  while ((m = re.exec(chunk)) !== null) out.push(m[1]);
+  return out;
+}
+
+// expandName follows one identifier to every registry id it can carry.
+//
+// Depth-limited and cycle-guarded, and the guard is keyed by (kind, name): a
+// local named `alertType` bound from `fs.alertType()` and the METHOD
+// `alertType()` are two different nodes that share a name, and collapsing them
+// is precisely the step that would lose the hygiene/compliance distinction.
+function expandName(name, symbols, knownIDs, seen, depth) {
+  const found = new Set();
+  if (depth > 6) return found;
+
+  const lits = symbols.literals.get(name);
+  if (lits && !seen.has(`lit:${name}`)) {
+    seen.add(`lit:${name}`);
+    for (const l of lits) if (knownIDs.has(l)) found.add(l);
+  }
+
+  const visit = (kind, chunks) => {
+    if (!chunks.length || seen.has(`${kind}:${name}`)) return;
+    seen.add(`${kind}:${name}`);
+    for (const chunk of chunks) {
+      for (const lit of litsIn(chunk)) if (knownIDs.has(lit)) found.add(lit);
+      for (const ident of identsIn(chunk)) {
+        for (const id of expandName(ident, symbols, knownIDs, seen, depth + 1)) found.add(id);
+      }
+    }
+  };
+  visit('expr', symbols.exprs.get(name) || []);
+  visit('func', symbols.funcs.get(name) || []);
+  return found;
+}
+
 // resolveAlertType maps the RHS of an `AlertType:` field onto the alert-type
-// string(s) it can carry: a quoted literal resolves to itself; an identifier
-// (const, struct field such as j.spec.alertType) resolves to every string
-// literal bound to that name in the same file — which is how one generic job
-// serving two registry types (sensor_offline / discovery_agent_offline) is
-// credited with both.
-// A value the caller reads out of a map or a parameter (`alertType` bound by
-// `alertType, ok := someMap[...]`) cannot be traced by name, so the last resort
-// is every registry id bound as a string literal in the same file. That cannot
-// invent a producer out of nothing — the file must both construct an
-// AlertRaiseEvent and contain the id as a literal — it only loses the ability to
-// tell two ids apart within one file.
-function resolveAlertType(rhs, fileSrc, knownIDs) {
+// string(s) it can carry. An EMPTY result means unresolved, which the caller
+// reports as an error — a blind spot is not a pass.
+function resolveAlertType(rhs, symbols, knownIDs) {
   const literal = rhs.match(/^"([a-z0-9_]+)"$/);
   if (literal) return [literal[1]];
 
-  const ident = rhs.match(/([A-Za-z_][A-Za-z0-9_]*)$/);
-  if (ident) {
-    const found = new Set();
-    const re = new RegExp(`\\b${ident[1]}\\s*[:=]+\\s*"([a-z0-9_]+)"`, 'g');
-    let m;
-    while ((m = re.exec(fileSrc)) !== null) found.add(m[1]);
-    if (found.size) return [...found];
-  }
-
-  const fallback = new Set();
-  const lit = /[:=(]\s*"([a-z0-9_]+)"/g;
-  let m;
-  while ((m = lit.exec(fileSrc)) !== null) {
-    if (knownIDs.has(m[1])) fallback.add(m[1]);
-  }
-  return [...fallback];
+  // Drop a trailing call's arguments so `fs.alertType()` resolves through the
+  // METHOD named `alertType`, then take the trailing identifier of the selector.
+  const head = rhs.replace(/\([^()]*\)\s*$/, '');
+  const ident = head.match(/([A-Za-z_][A-Za-z0-9_]*)\s*$/);
+  if (!ident) return [];
+  return [...expandName(ident[1], symbols, knownIDs, new Set(), 0)];
 }
 
 async function main() {
@@ -191,13 +381,14 @@ async function main() {
       const src = stripComments(await fs.readFile(file, 'utf8'));
       if (!src.includes('AlertRaiseEvent{')) continue;
       const rel = path.relative(root, file);
+      const symbols = buildSymbols(src);
       for (const block of extractRaiseBlocks(src)) {
         const field = block.match(/\bAlertType:\s*([^,\n]+?),?\s*\n/);
         if (!field) {
           unresolved.push(`${rel}: AlertRaiseEvent literal with no AlertType field`);
           continue;
         }
-        const ids = resolveAlertType(field[1].trim(), src, knownIDs);
+        const ids = resolveAlertType(field[1].trim(), symbols, knownIDs);
         if (!ids.length) {
           unresolved.push(`${rel}: could not resolve AlertType value ${field[1].trim()}`);
           continue;

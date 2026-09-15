@@ -41,7 +41,7 @@ type stubLifecycleStore struct {
 func (s *stubLifecycleStore) GetStaleAssets(_ uuid.UUID, _ models.StaleAssetFilters) ([]models.StaleAsset, int, error) {
 	return s.stale, s.staleTotal, s.staleErr
 }
-func (s *stubLifecycleStore) UpdateStaleStatus(_ uuid.UUID, _ []uuid.UUID, _ string) error {
+func (s *stubLifecycleStore) UpdateStaleStatus(_ uuid.UUID, _ []uuid.UUID, _ string, _ uuid.UUID) error {
 	return s.updateErr
 }
 func (s *stubLifecycleStore) GetLifecyclePolicy(_ uuid.UUID) (*models.AssetLifecyclePolicy, error) {

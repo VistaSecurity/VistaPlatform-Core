@@ -53,15 +53,34 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
-// upgradeFromTagCount is how many prior release tags to test upgrading from.
-// Ordered newest-first, so the default of 2 covers "upgrade from the latest
-// release" (what the next release does to every current install) and "skip one
-// release" (what a customer who upgrades occasionally does). Raise it with
-// SCHEMA_UPGRADE_FROM_COUNT when auditing a risky schema change; each extra tag
-// costs a full schema+seed apply cycle.
-const upgradeFromTagCount = 2
+// upgradeFromTagCount is how many prior release tags to test upgrading from,
+// newest first. Raise it with SCHEMA_UPGRADE_FROM_COUNT when auditing a risky
+// schema change; each extra tag costs a full schema+seed apply cycle.
+//
+// It is ZERO until core-v1.0.0, per ADR-0007 D2.5. This test asks "does the
+// current schema apply over the shape release X left behind?", and from phase 1
+// onwards the honest answer for every existing core-v* tag is "no, and
+// deliberately": `assets`, `devices` and the `asset_type`
+// enum are REPLACED, not migrated, because the owner established
+// that there are no installs of those releases to carry forward. Leaving the
+// count at 2 would fail the suite on a decision, which teaches the next person
+// to weaken the test rather than to read the ADR.
+//
+// core-v1.0.0 is the first release of the new shape and the first one anything
+// can upgrade FROM. Re-arm this to 2 when it ships — the test is the only thing
+// that catches a statement which is fine against today's tables and fails
+// against a prior release's (a `SET NOT NULL` on a column old rows hold NULL in,
+// a `CHECK` old-format data violates); a populated double-apply is structurally
+// blind to that class.
+const upgradeFromTagCount = 0
 
 func TestIntegration_Schema_UpgradesFromPriorReleases(t *testing.T) {
+	if n := upgradeFromTagCountFromEnv(); n == 0 {
+		t.Skip("upgrade-path verification is disarmed until core-v1.0.0 (ADR-0007 D2.5): " +
+			"phase 1 replaces the asset tables rather than migrating them, and there are no " +
+			"installs of any current core-v* release to upgrade. Set SCHEMA_UPGRADE_FROM_COUNT " +
+			"to run it against that many prior tags anyway.")
+	}
 	admin := testdb.Connect(t)
 	root := testdb.RepoRoot(t)
 
@@ -266,9 +285,9 @@ func populateForUpgrade(t *testing.T, db *sql.DB) uuid.UUID {
 
 	assetID, implID, certID := uuid.New(), uuid.New(), uuid.New()
 
-	tryExec(t, db, "network_assets", `
-		INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,'schema-upgrade.example.test','server','monitoring',NOW(),NOW(),NOW(),NOW())`,
+	tryExec(t, db, "assets", `
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, 'schema-upgrade.example.test', 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`,
 		assetID, tenant)
 
 	tryExec(t, db, "crypto_implementations", `
@@ -307,12 +326,12 @@ func assertTenantDataSurvived(t *testing.T, db *sql.DB, tenant uuid.UUID, tag st
 			"destroyed pre-existing tenant data", tenants, tag)
 	}
 
-	// network_assets is only asserted when the old release could populate it;
+	// assets is only asserted when the old release could populate it;
 	// tryExec logged a skip otherwise, so an absent row there is not a failure.
 	var assets int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1`, tenant).Scan(&assets); err != nil {
-		t.Logf("network_assets not queryable after upgrade from %s: %v", tag, err)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM assets WHERE tenant_id = $1`, tenant).Scan(&assets); err != nil {
+		t.Logf("assets not queryable after upgrade from %s: %v", tag, err)
 		return
 	}
-	t.Logf("upgrade from %s preserved %d network_assets row(s) for the test tenant", tag, assets)
+	t.Logf("upgrade from %s preserved %d assets row(s) for the test tenant", tag, assets)
 }

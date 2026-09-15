@@ -9,8 +9,10 @@ export type CBOMArtifact = components['schemas']['CBOMArtifact'];
 export type Scope = components['schemas']['Scope'];
 export type DiffResult = components['schemas']['DiffResult'];
 export type DiffChange = components['schemas']['DiffChange'];
+export type NarrativeDetail = components['schemas']['NarrativeDetail'];
 export type VerifyResponse = components['schemas']['VerifyResponse'];
 export type Layer = components['schemas']['Layer'];
+export type ArtifactKind = components['schemas']['ArtifactKind'];
 
 /** Display name for an artifact — its given name, or "<scope> — <date>". */
 export function artifactName(a: CBOMArtifact): string {
@@ -20,15 +22,20 @@ export function artifactName(a: CBOMArtifact): string {
 
 /** The tenant's artifacts, newest first (server orders by generated_at DESC).
  *  Core route — `enabled` exists only so a gated page (Compare) can avoid a
- *  pointless fetch it will never render. */
-export function useArtifacts(scopeId?: string, enabled = true) {
+ *  pointless fetch it will never render.
+ *
+ *  An omitted `kind` means EVERY kind, matching the server: this is one list of
+ *  the tenant's artifacts, and defaulting the filter to `cbom` would hide an
+ *  SBOM someone just generated behind a filter they never set. */
+export function useArtifacts(scopeId?: string, kind?: ArtifactKind, enabled = true) {
   return useQuery({
-    queryKey: ['cbom', 'artifacts', scopeId ?? 'all'],
+    queryKey: ['cbom', 'artifacts', scopeId ?? 'all', kind ?? 'all'],
     enabled,
     queryFn: async () => {
-      const { data, error } = await clients.cbom.GET('/cbom/artifacts', {
-        params: { query: scopeId ? { scope_id: scopeId } : {} },
-      });
+      const query: { scope_id?: string; kind?: ArtifactKind } = {};
+      if (scopeId) query.scope_id = scopeId;
+      if (kind) query.kind = kind;
+      const { data, error } = await clients.cbom.GET('/cbom/artifacts', { params: { query } });
       if (error || !data) throw new Error('Failed to load CBOM artifacts');
       return data.artifacts ?? [];
     },
@@ -63,13 +70,16 @@ export function useScopes() {
 }
 
 /** Generate a new immutable artifact from a scope. Server defaults sign +
- *  include_attestation to true (audit-ready by default). */
+ *  include_attestation to true for entitled tenants (audit-ready by default).
+ *
+ *  `kind` is optional and omitted means `cbom` — the server's own default, so
+ *  the two agree without this layer restating it. */
 export function useGenerate() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (body: { scope_id: string; name?: string }) => {
+    mutationFn: async (body: { scope_id: string; name?: string; kind?: ArtifactKind }) => {
       const { data, error } = await clients.cbom.POST('/cbom/generate', { body });
-      if (error || !data) throw new Error(error?.error ?? 'CBOM generation failed');
+      if (error || !data) throw new Error(error?.error ?? 'Artifact generation failed');
       return data;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['cbom', 'artifacts'] }),
@@ -121,22 +131,37 @@ export function useCompare(base?: string, head?: string, entitled = true) {
   });
 }
 
-/** Download the canonical CycloneDX 1.6 bytes and save them client-side.
+/** File extension per download format. One place, so the saved name and the
+ *  bytes always agree — an OCSF stream saved as `.json` would be opened by a
+ *  JSON parser and rejected, since NDJSON is not one JSON document. */
+const DOWNLOAD_EXT: Record<DownloadFormat, string> = {
+  cyclonedx: 'cyclonedx.json',
+  ocsf: 'ocsf.ndjson',
+};
+
+export type DownloadFormat = 'cyclonedx' | 'ocsf';
+
+/** Download an artifact in one of the Core formats and save it client-side.
+ *
  *  Uses parseAs:'blob' so a 302 to a presigned URL (object-stored artifacts)
- *  and an inline byte stream (dev) are handled the same way. SPDX/PDF are
- *  not yet wired server-side, so only CycloneDX is offered. */
-export async function downloadArtifact(a: CBOMArtifact): Promise<void> {
+ *  and an inline byte stream (dev) are handled the same way.
+ *
+ *  Which formats an artifact offers depends on its kind — see
+ *  `downloadFormatsFor` in kit.tsx. SPDX and PDF are Enterprise and are not
+ *  offered here; a tenant with `cbom_signing` gets them through the same
+ *  endpoint, which is a follow-up on this surface. */
+export async function downloadArtifact(a: CBOMArtifact, format: DownloadFormat = 'cyclonedx'): Promise<void> {
   const { data, response } = await clients.cbom.GET('/cbom/artifacts/{id}/download', {
-    params: { path: { id: a.id }, query: { format: 'cyclonedx' } },
+    params: { path: { id: a.id }, query: { format } },
     parseAs: 'blob',
   });
   if (!response.ok || !data) throw new Error('Download failed');
   const blob = data as unknown as Blob;
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
-  const base = (a.name?.trim() || a.scope_name_snapshot || 'cbom').replace(/[^\w.-]+/g, '_');
+  const base = (a.name?.trim() || a.scope_name_snapshot || 'artifact').replace(/[^\w.-]+/g, '_');
   link.href = url;
-  link.download = `${base}.cyclonedx.json`;
+  link.download = `${base}.${DOWNLOAD_EXT[format]}`;
   document.body.appendChild(link);
   link.click();
   link.remove();

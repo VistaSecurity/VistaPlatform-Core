@@ -687,6 +687,12 @@ func getProfileFeatures(profile string) map[string]bool {
 		"active_probing":       false,
 		"network_discovery":    false,
 		"air_gapped_export":    false,
+		// Passive host observation (asset-inventory ADR-0004 D2). ON for every
+		// profile, unlike active_probing and network_discovery, because it is
+		// strictly passive: it decodes frames the interface already receives
+		// and sends nothing onto the wire. The reasons those two default off —
+		// traffic generated toward assets we may not own — do not apply.
+		"host_observation": true,
 	}
 
 	switch profile {
@@ -696,11 +702,16 @@ func getProfileFeatures(profile string) map[string]bool {
 	case "cloud_instance":
 		features["active_probing"] = true
 	case "end_user_machine":
-		// Minimal features
+		// Minimal features. Host observation stays on: an end-user machine's
+		// segment is exactly where the unmanaged devices an inventory is
+		// missing tend to live.
 	case "air_gapped":
 		features["air_gapped_export"] = true
 		features["active_probing"] = false
 		features["network_discovery"] = false
+		// Host observation stays on here too. It is the one collection method
+		// that works with no route to the platform and no packets emitted, and
+		// an air-gapped segment is the hardest kind to inventory any other way.
 	}
 
 	return features

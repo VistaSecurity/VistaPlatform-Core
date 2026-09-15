@@ -15,6 +15,15 @@ import { SPage, SSection, SCard, STable, STableRow, STag, SDot, SToggle, StateNo
 import { ChannelModal, ChannelDeleteModal, RuleModal, RuleDeleteModal, isDigest } from './notification-modals';
 import { CmdbProfileModal, CmdbDeleteModal, CmdbJobsModal, PLATFORM_LABEL, jobTone, type CMDBProfile } from './cmdb-modals';
 import { cmdbProfilesQuery, siemIntegrationsQuery, editionSectionState } from './integrations-queries';
+import { CONNECTOR_KIND_LABEL } from '@vistasecurity/primitives/connectors';
+import {
+  connectorCatalogueQuery, connectorAction, connectorCaption, isSelectable,
+  netboxConnectionsQuery, type ConnectorEntry, type NetBoxConnection,
+} from './connectors-queries';
+import {
+  NetBoxConnectionModal, NetBoxDeleteModal, NetBoxDriftModal, NetBoxRunsModal,
+  NetBoxRunButton, NetBoxTestButton, statusTone,
+} from './netbox-modals';
 import type { SettingsNavItem } from './nav';
 import type { notificationServiceComponents as NC, complianceEngineComponents } from '@vistasecurity/api-contract';
 
@@ -22,6 +31,7 @@ type Channel = NC['schemas']['TenantNotificationChannel'];
 type Rule = NC['schemas']['TenantNotificationRule'];
 type AlertCatalogEntry = complianceEngineComponents['schemas']['AlertCatalogEntry'];
 type AlertCatalogRung = complianceEngineComponents['schemas']['AlertCatalogRung'];
+type AlertCatalogFixedRung = complianceEngineComponents['schemas']['AlertCatalogFixedRung'];
 type AlertCatalogPreferenceRung = complianceEngineComponents['schemas']['AlertCatalogPreferenceRung'];
 
 const CHANNEL_CAT: Record<string, string> = {
@@ -108,8 +118,8 @@ function CmdbSyncButton({ profile }: { profile: CMDBProfile }) {
     },
     onSuccess: () => {
       toast.success('Sync started');
-      qc.invalidateQueries({ queryKey: ['settings', 'cmdb-jobs', profile.id] });
-      qc.invalidateQueries({ queryKey: ['settings', 'cmdb-profiles'] });
+      void qc.invalidateQueries({ queryKey: ['settings', 'cmdb-jobs', profile.id] });
+      void qc.invalidateQueries({ queryKey: ['settings', 'cmdb-profiles'] });
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Sync failed'),
   });
@@ -135,7 +145,7 @@ function CmdbPullButton({ profile }: { profile: CMDBProfile }) {
     },
     onSuccess: (data) => {
       toast.success(`Pulled ${data.created} new asset${data.created === 1 ? '' : 's'} (${data.skipped} already present)`);
-      qc.invalidateQueries({ queryKey: ['inventory'] });
+      void qc.invalidateQueries({ queryKey: ['inventory'] });
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Pull failed'),
   });
@@ -146,9 +156,74 @@ function CmdbPullButton({ profile }: { profile: CMDBProfile }) {
   );
 }
 
+// Kind labels come from the GENERATED registry mirror, not from a copy here.
+// A hand-kept label map beside the page is precisely what this whole section
+// replaces — the CMDB platform names lived in one, and nothing could see it
+// drift. A kind the map does not carry falls back to its key rather than
+// vanishing.
+const kindLabel = (kind: string): string =>
+  (CONNECTOR_KIND_LABEL as Record<string, string>)[kind] ?? kind;
+
+/**
+ * One connector in the catalogue.
+ *
+ * Four states, and the difference between the last two is the whole point:
+ * `upgrade` means "your plan does not include this", `soon` means "nobody can
+ * use this yet". Offering an upgrade for something that cannot be bought is
+ * the worse of the two mistakes, so a `registered` or `planned` connector is
+ * rendered dimmed and inert — never with a call to action.
+ */
+function ConnectorCard({ entry, onAdd }: { entry: ConnectorEntry; onAdd?: () => void }) {
+  const action = connectorAction(entry);
+  const selectable = isSelectable(entry) && !!onAdd;
+  const dimmed = action === 'soon';
+  return (
+    <SCard pad={13} style={dimmed ? { opacity: 0.6 } : undefined}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 7 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {entry.label}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--app-t3)' }}>{connectorCaption(entry)}</div>
+        </div>
+        {action === 'upgrade' && <STag color="var(--accent)">Enterprise</STag>}
+        {action === 'soon' && <STag color="var(--app-t3)">Soon</STag>}
+      </div>
+      {selectable ? (
+        <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
+          <button className="ui-btn sm" onClick={onAdd}><Icon name="plus" size={13} />Add</button>
+        </PermissionGate>
+      ) : null}
+    </SCard>
+  );
+}
+
+type NetBoxModalState =
+  | { kind: 'closed' }
+  | { kind: 'create' }
+  | { kind: 'edit'; connection: NetBoxConnection }
+  | { kind: 'delete'; connection: NetBoxConnection }
+  | { kind: 'runs'; connection: NetBoxConnection }
+  | { kind: 'drift'; connection: NetBoxConnection };
+
 export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
   const [modal, setModal] = useState<ChannelModalState>({ kind: 'closed' });
   const [cmdbModal, setCmdbModal] = useState<CmdbModalState>({ kind: 'closed' });
+  const [netboxModal, setNetboxModal] = useState<NetBoxModalState>({ kind: 'closed' });
+  const closeNetbox = () => setNetboxModal({ kind: 'closed' });
+
+  // The connector CATALOGUE is Core and registry-driven: it answers from
+  // standards/connectors.yaml, so what this page offers and what the platform
+  // can do are the same list by construction. It lists connectors this tenant
+  // cannot use too — the page's job is to show the shape of the product, not
+  // only the parts already paid for.
+  const catalogueQ = useQuery(connectorCatalogueQuery());
+  const catalogue = catalogueQ.data ?? [];
+
+  const netboxEntitled = useFeature('connector_netbox');
+  const netboxQ = useQuery(netboxConnectionsQuery(netboxEntitled));
+  const netboxState = netboxEntitled ? editionSectionState(netboxQ) : 'unavailable';
+  const netboxConnections = netboxQ.data ?? [];
   // CMDB sync and SIEM export are Enterprise-only routes with no entitlement
   // key to gate on — see integrations-queries.ts. Both are edition-probed: an
   // absent route resolves to `unavailable`, which renders an upgrade card (and
@@ -341,9 +416,125 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
         )}
       </SSection>
 
+      <SSection
+        title="NetBox"
+        desc="Pull sites, prefixes, VLANs and devices from your network source of truth. Read-only towards NetBox — nothing is ever written back."
+        style={{ marginTop: 22 }}
+        action={
+          netboxState === 'unavailable' ? undefined : (
+            <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
+              <button className="ui-btn sm accent" onClick={() => setNetboxModal({ kind: 'create' })}><Icon name="plus" size={14} />Connect NetBox</button>
+            </PermissionGate>
+          )
+        }
+      >
+        {netboxState === 'unavailable' ? (
+          <SCard>
+            <StateNote icon="lock" tone="var(--accent)" title="An Enterprise feature"
+              message="The NetBox connector reads your network source of truth — sites, prefixes, VLANs, device types and devices — so an address means something and a device arrives already classified. It also shows the drift between NetBox and what Vista discovered. Discovery and the whole inventory are included in every edition; reading a foreign source of truth is the paid part." />
+          </SCard>
+        ) : netboxState === 'error' ? (
+          <SCard><StateNote icon="alert-triangle" tone="var(--danger-text)" title="Couldn't load NetBox connections" message="The NetBox connections failed to load." /></SCard>
+        ) : netboxQ.isLoading ? (
+          <SCard><StateNote icon="loader" tone="var(--app-t3)" title="Loading NetBox connections…" message="Fetching configured connections." /></SCard>
+        ) : netboxConnections.length === 0 ? (
+          <SCard><StateNote icon="plug" tone="var(--app-t3)" title="No NetBox connected" message="Connect a NetBox to import its sites, prefixes, VLANs and devices, and to see where it and your inventory disagree." /></SCard>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: 12 }}>
+            {netboxConnections.map((c) => {
+              const tone = !c.is_enabled ? AMBER : statusTone(c.last_run_status);
+              const last = c.last_run_at ? `last import ${relTime(c.last_run_at)}` : 'never imported';
+              return (
+                <SCard key={c.id} pad={16}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 11, marginBottom: 12 }}>
+                    <span style={{ width: 34, height: 34, borderRadius: 9, flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--app-panel2)', border: '1px solid var(--app-border)', color: 'var(--app-t2)' }}>
+                      <Icon name="network" size={15} />
+                    </span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name}</div>
+                      <div style={{ fontSize: 11, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.base_url}</div>
+                    </div>
+                    <span title={c.is_enabled ? 'enabled' : 'disabled'}><SDot color={tone} /></span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: 'var(--app-t3)', minWidth: 0 }}>
+                      {c.last_run_status && <STag color={statusTone(c.last_run_status)}>{c.last_run_status}</STag>}
+                      <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{last}</span>
+                    </div>
+                    {/* Two gates, as for CMDB and for the same reason: managing
+                        the connection is settings.update, while running an
+                        import WRITES INVENTORY and is assets.manage. */}
+                    <div style={{ display: 'flex', gap: 4, flex: 'none' }}>
+                      <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
+                        <NetBoxTestButton connection={c} />
+                      </PermissionGate>
+                      <PermissionGate permission={TENANT_PERMISSIONS.assets.manage}>
+                        <NetBoxRunButton connection={c} />
+                      </PermissionGate>
+                      <button className="ui-btn sm ghost" title="Drift against NetBox" onClick={() => setNetboxModal({ kind: 'drift', connection: c })}><Icon name="git-compare" size={14} /></button>
+                      <button className="ui-btn sm ghost" title="Import history" onClick={() => setNetboxModal({ kind: 'runs', connection: c })}><Icon name="history" size={14} /></button>
+                      <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
+                        <button className="ui-btn sm ghost" title="Configure" onClick={() => setNetboxModal({ kind: 'edit', connection: c })}><Icon name="settings" size={14} /></button>
+                        <button className="ui-btn sm ghost" title="Remove" style={{ color: 'var(--danger-text)' }} onClick={() => setNetboxModal({ kind: 'delete', connection: c })}><Icon name="x" size={14} /></button>
+                      </PermissionGate>
+                    </div>
+                  </div>
+                </SCard>
+              );
+            })}
+          </div>
+        )}
+      </SSection>
+
+      <SSection
+        title="Available connectors"
+        desc="Everything Vista can integrate with, from the connector registry. What is not available yet says so rather than pretending otherwise."
+        style={{ marginTop: 22 }}
+      >
+        {catalogueQ.isLoading ? (
+          <SCard><StateNote icon="loader" tone="var(--app-t3)" title="Loading connectors…" message="Fetching the connector catalogue." /></SCard>
+        ) : catalogueQ.isError ? (
+          <SCard><StateNote icon="alert-triangle" tone="var(--danger-text)" title="Couldn't load the catalogue" message="The connector catalogue failed to load." /></SCard>
+        ) : (
+          catalogue.map((group) => (
+            <div key={group.kind} style={{ marginBottom: 18 }}>
+              <div style={{ fontSize: 11.5, fontWeight: 700, letterSpacing: 0.4, textTransform: 'uppercase', color: 'var(--app-t3)', marginBottom: 8 }}>
+                {kindLabel(group.kind)}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(240px,1fr))', gap: 10 }}>
+                {group.connectors.map((entry) => (
+                  <ConnectorCard
+                    key={entry.key}
+                    entry={entry}
+                    onAdd={
+                      entry.key === 'netbox'
+                        ? () => setNetboxModal({ kind: 'create' })
+                        : entry.kind === 'cmdb'
+                          ? () => setCmdbModal({ kind: 'create' })
+                          : undefined
+                    }
+                  />
+                ))}
+              </div>
+            </div>
+          ))
+        )}
+      </SSection>
+
       {(modal.kind === 'create' || modal.kind === 'edit') && (
         <ChannelModal key={modal.kind === 'edit' ? modal.channel.id : 'new'} channel={modal.kind === 'edit' ? modal.channel : null} open onClose={close} />
       )}
+      {(netboxModal.kind === 'create' || netboxModal.kind === 'edit') && (
+        <NetBoxConnectionModal
+          key={netboxModal.kind === 'edit' ? netboxModal.connection.id : 'new'}
+          connection={netboxModal.kind === 'edit' ? netboxModal.connection : null}
+          open
+          onClose={closeNetbox}
+        />
+      )}
+      {netboxModal.kind === 'delete' && <NetBoxDeleteModal connection={netboxModal.connection} open onClose={closeNetbox} />}
+      {netboxModal.kind === 'runs' && <NetBoxRunsModal connection={netboxModal.connection} open onClose={closeNetbox} />}
+      {netboxModal.kind === 'drift' && <NetBoxDriftModal connection={netboxModal.connection} open onClose={closeNetbox} />}
       {modal.kind === 'delete' && <ChannelDeleteModal channel={modal.channel} open onClose={close} />}
 
       {(cmdbModal.kind === 'create' || cmdbModal.kind === 'edit') && (
@@ -532,6 +723,23 @@ function RungChip({ rung }: { rung: AlertCatalogRung }) {
   );
 }
 
+/**
+ * One step of a FIXED ladder — a ladder whose boundaries come from a published
+ * standard (the CVSS bands) or from the finding ladder the alert is driven by,
+ * so there is nothing for the tenant to tune and no source to attribute. Shown
+ * as the threshold wording the registry supplies rather than a day count, which
+ * is what a CVSS rung has instead of days.
+ */
+function FixedRungChip({ rung }: { rung: AlertCatalogFixedRung }) {
+  const tone = SEVERITY_TONE[(rung.severity || '').toLowerCase()] ?? 'var(--app-t3)';
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '3px 10px', borderRadius: 40, fontSize: 11, fontWeight: 600, color: tone, background: `color-mix(in srgb, ${tone} 13%, transparent)` }}>
+      {rung.threshold}
+      <span style={{ fontSize: 9.5, opacity: 0.85, textTransform: 'uppercase', letterSpacing: 0.3 }}>{rung.severity}</span>
+    </span>
+  );
+}
+
 function CertRungEditor({ entry }: { entry: AlertCatalogEntry }) {
   const [open, setOpen] = useState(false);
   const [days, setDays] = useState(String(entry.preference_rung?.days ?? entry.baseline_days ?? 60));
@@ -590,7 +798,12 @@ function CatalogCard({ entry }: { entry: AlertCatalogEntry }) {
   const tone = planned
     ? 'var(--app-t3)'
     : entry.severity_model === 'ladder'
-      ? SEVERITY_TONE[(entry.ladder?.[entry.ladder.length - 1]?.severity ?? entry.baseline_severity ?? '').toLowerCase()] ?? 'var(--accent)'
+      ? SEVERITY_TONE[(
+          entry.rungs?.[entry.rungs.length - 1]?.severity
+            ?? entry.ladder?.[entry.ladder.length - 1]?.severity
+            ?? entry.baseline_severity
+            ?? ''
+        ).toLowerCase()] ?? 'var(--accent)'
       : SEVERITY_TONE[fixedSeverity] ?? 'var(--app-t3)';
 
   const toggle = (
@@ -625,6 +838,11 @@ function CatalogCard({ entry }: { entry: AlertCatalogEntry }) {
           {entry.severity_model === 'ladder' && (entry.ladder?.length ?? 0) > 0 && (
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
               {entry.ladder!.map((rung, i) => <RungChip key={`${rung.source}-${rung.days}-${i}`} rung={rung} />)}
+            </div>
+          )}
+          {entry.severity_model === 'ladder' && (entry.rungs?.length ?? 0) > 0 && (
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+              {entry.rungs!.map((rung, i) => <FixedRungChip key={`${rung.threshold}-${i}`} rung={rung} />)}
             </div>
           )}
           {entry.auto_resolve && (

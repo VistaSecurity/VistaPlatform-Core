@@ -56,14 +56,28 @@ node_modules_check:
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is required"; exit 1; }
 
 .PHONY: generate generate-docker-compose generate-k8s-ingress cluster-suspend cluster-resume cluster-status verify-generated verify-db-files \
-	sign-content-bundle verify-content-bundle stage-content-bundle unstage-content-bundle
+	sign-content-bundle verify-content-bundle stage-content-bundle unstage-content-bundle \
+	build-catalog-bundle
 generate: node_modules_check generate-k8s-ingress ## Generate shared docs/config from standards registry
 	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
-	node ./scripts/generate-from-registry.mjs | cat
-	node ./scripts/generate-docker-compose.mjs | cat
-	node ./scripts/generate-alert-registry.mjs | cat
-	node ./scripts/generate-permissions.mjs | cat
-	node ./scripts/generate-edition-matrix.mjs | cat
+	node ./scripts/generate-from-registry.mjs
+	node ./scripts/generate-docker-compose.mjs
+	node ./scripts/generate-alert-registry.mjs
+	node ./scripts/generate-findings-registry.mjs
+	node ./scripts/generate-fact-keys.mjs
+	node ./scripts/generate-oui-table.mjs
+	node ./scripts/generate-connectors.mjs
+	node ./scripts/generate-permissions.mjs
+	node ./scripts/generate-asset-classes.mjs
+	node ./scripts/generate-classification-rules.mjs
+	node ./scripts/generate-measurement-types.mjs
+	node ./scripts/generate-edition-matrix.mjs
+	# The query catalogue's TypeScript mirror. A Go program rather than another
+	# scripts/*.mjs because its input is Go values — the exported AllTargets()
+	# and FirstClassFields() of shared/query/catalog/registrycatalog — not a
+	# YAML file. It reads shared/findings and shared/assetclass through those
+	# packages, so it runs after the generators that write them.
+	cd shared && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go run ./query/catalog/registrycatalog/cmd/gen-ts-fields
 	# Note: Environment files (.env, .env.ec2-smoke, .env.prod) are generated
 	# by their respective deployment scripts, not here
 
@@ -96,6 +110,30 @@ CHART_EE_DIR       := charts/vistaplatform/files/ee
 unstage-content-bundle: ## Remove the staged bundle from charts/vistaplatform/files/ee
 	rm -rf $(CHART_EE_DIR)
 	@echo "✅ removed $(CHART_EE_DIR)"
+
+# ---------------------------------------------------------------------------
+# Offline catalogue bundle (end-of-life + vulnerability) — Core
+# ---------------------------------------------------------------------------
+# Unrelated to the Enterprise content bundle above, and deliberately simpler.
+# That one is SIGNED because it carries licensed content and the signature is
+# what makes it revocable by non-renewal. These catalogues are Core — free in
+# every edition — so there is nothing to revoke; what a bundle still needs is
+# INTEGRITY, and that is a SHA-256 per file in a manifest the importer verifies
+# before applying a single row.
+#
+# Build it on a CONNECTED install whose feeds are current, carry the tarball
+# across the gap, then import it at Catalog ▸ End-of-life ▸ Import bundle.
+# Runbook: docsv4/core/operate/catalogs.md.
+build-catalog-bundle: ## Export the EOL + vulnerability catalogues as an offline bundle (usage: make build-catalog-bundle DATABASE_URL=postgres://…)
+	@if [ -z "$(DATABASE_URL)" ]; then \
+		echo "❌ DATABASE_URL is required — the bundle is exported FROM a connected install."; \
+		echo "   Usage: make build-catalog-bundle DATABASE_URL=postgres://user:pass@host:5432/crypto_inventory"; \
+		echo "   Optional: CATALOG_BUNDLE_OUT=/path/to/catalog-bundle.tar.gz"; \
+		exit 1; \
+	fi
+	cd services/admin-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go run ./cmd/catalog-bundle \
+		-database-url "$(DATABASE_URL)" \
+		$(if $(CATALOG_BUNDLE_OUT),-out "$(abspath $(CATALOG_BUNDLE_OUT))",-out "$(CURDIR)/catalog-bundle-$(shell date -u +%Y-%m-%d).tar.gz")
 
 validate-db-init: ## Validate database initialization readiness (checks critical tables/columns)
 	@echo "Validating database initialization readiness..."
@@ -831,44 +869,53 @@ install-deps: ## Install development dependencies
 	@echo "Dependencies installed!"
 
 # Code Quality
-lint: ## Run linters for all code (golangci-lint + eslint)
-	@echo "Running Go linters..."
-	golangci-lint run ./services/...
-	golangci-lint run ./sensor/...
+#
+# Go linting goes through scripts/lint-go.sh, which runs golangci-lint from
+# INSIDE each module go.work declares. This is a go.work workspace with no
+# module at the root, so `golangci-lint run ./services/...` from here cannot
+# load anything — the go command rejects the pattern ("directory prefix
+# services does not contain modules listed in go.work") and golangci-lint
+# prints "0 issues." next to the typechecking error. `make lint` carried that
+# for the life of the workspace: red with the tool installed, having linted
+# nothing. scripts/enforce-standards.sh (`make enforce`) calls the same script,
+# so `make lint` and `make standards-check` cannot drift apart.
+lint: ## Run linters for all code (golangci-lint on every go.work module + eslint on both UIs)
+	@echo "Running Go linters (every go.work module, via scripts/lint-go.sh)..."
+	./scripts/lint-go.sh
 	@echo "Running frontend linters (eslint)..."
 	cd frontend-v2 && npm run lint
 	cd admin-ui-v2 && npm run lint
 
-# Service-specific lint targets
+# Service-specific lint targets — same script, one module.
 lint-auth-service: ## Lint auth-service
-	@golangci-lint run ./services/auth-service/...
+	@./scripts/lint-go.sh services/auth-service
 
 lint-inventory-service: ## Lint inventory-service
-	@golangci-lint run ./services/inventory-service/...
+	@./scripts/lint-go.sh services/inventory-service
 
 lint-compliance-engine: ## Lint compliance-engine
-	@golangci-lint run ./services/compliance-engine/...
+	@./scripts/lint-go.sh services/compliance-engine
 
 lint-cbom-service: ## Lint cbom-service
-	@golangci-lint run ./services/cbom-service/...
+	@./scripts/lint-go.sh services/cbom-service
 
 lint-sensor-manager: ## Lint sensor-manager
-	@golangci-lint run ./services/sensor-manager/...
+	@./scripts/lint-go.sh services/sensor-manager
 
 lint-admin-service: ## Lint admin-service
-	@golangci-lint run ./services/admin-service/...
+	@./scripts/lint-go.sh services/admin-service
 
 lint-monitoring-service: ## Lint monitoring-service
-	@golangci-lint run ./services/monitoring-service/...
+	@./scripts/lint-go.sh services/monitoring-service
 
 lint-cluster-sensor-service: ## Lint cluster-sensor-service
-	@golangci-lint run ./services/cluster-sensor-service/...
+	@./scripts/lint-go.sh services/cluster-sensor-service
 
 lint-resource-tracker-service: ## Lint resource-tracker-service
-	@golangci-lint run ./services/resource-tracker-service/...
+	@./scripts/lint-go.sh services/resource-tracker-service
 
 lint-tenant-health-service: ## Lint tenant-health-service
-	@golangci-lint run ./services/tenant-health-service/...
+	@./scripts/lint-go.sh services/tenant-health-service
 
 format: ## Format all code
 	@echo "Formatting Go code..."
@@ -881,6 +928,14 @@ format: ## Format all code
 edition-matrix: ## Regenerate docsv4/core/editions.md from editions.go + seed.sql + standards/editions.yaml
 	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
 	node ./scripts/generate-edition-matrix.mjs
+
+asset-classes: ## Audit the asset-class registry (alias for the --check run in 'make audit')
+	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
+	node ./scripts/generate-asset-classes.mjs --check
+
+classification-rules: ## Audit the classification-rule registry (alias for the --check run in 'make audit')
+	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
+	node ./scripts/generate-classification-rules.mjs --check
 
 .PHONY: api-contract
 api-contract: ## Spec-first API guardrail (ADR-0001): verify generated TS client is in sync with the OpenAPI spec, then run service contract tests
@@ -907,7 +962,17 @@ api-contract: ## Spec-first API guardrail (ADR-0001): verify generated TS client
 	@cd services/compliance-engine && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/handlers/ -run Contract
 	@echo "==> API contract: running Go contract tests (compliance-engine EE policy authoring: custom-policies + controls + measurements)..."
 	@cd services/compliance-engine && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ee/policyauthoring ]; then go test ./ee/policyauthoring/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
-	@echo "==> API contract: running Go contract tests (auth-service/cross-cutters + platform-config + trial-status + impersonation + tenant-branding + tenant-ui-config + tenant-users + onboarding-reads + onboarding-writes + billing-usage + tenant-billing + tiers)..."
+	@echo "==> API contract: running Go contract tests (compliance-engine EE control drafting: draft-controls + availability)..."
+	@cd services/compliance-engine && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ee/author ]; then go test -tags ee ./ee/author/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
+	@echo "==> API contract: running Go contract tests (compliance-engine remediation drafting, ENTERPRISE polarity)..."
+	@# The Core polarity of these two routes — both 402, nothing downstream run — is
+	@# covered by the untagged compliance-engine/internal/handlers run above. This
+	@# leg is the OTHER half: the edition boundary is a build-tag fact, so the
+	@# untagged build literally cannot compile the Enterprise assertions, and a
+	@# suite that only ever sees one side of a boundary cannot fail in the
+	@# direction that matters.
+	@cd services/compliance-engine && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ../../shared/ai/ee/remediator ]; then go test -tags ee ./internal/handlers/ -run Contract_Remediation; else echo "  (shared/ai/ee absent — open-source checkout, skipping)"; fi'
+	@echo "==> API contract: running Go contract tests (auth-service/cross-cutters + platform-config + trial-status + impersonation + tenant-branding + tenant-ui-config + tenant-users + onboarding-reads + onboarding-writes + billing-usage + tenant-billing + tiers + tenant-ai)..."
 	@cd services/auth-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/api/ -run Contract
 	@echo "==> API contract: running Go contract tests (auth-service EE SSO: tenant-sso + sso-write + sso-update + auth-policy + unlink)..."
 	@cd services/auth-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ee/sso ]; then go test ./ee/sso/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
@@ -921,7 +986,7 @@ api-contract: ## Spec-first API guardrail (ADR-0001): verify generated TS client
 	@cd services/device-interrogation-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/handlers/ -run Contract
 	@echo "==> API contract: running Go contract tests (notification-service/tenant-channels+rules + platform-channels+rules)..."
 	@cd services/notification-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/api/ -run Contract
-	@echo "==> API contract: running Go contract tests (admin-service core: platform-rbac + tiers + security + billable-items + platform-users + platform-user-email + tier-entitlements + storage + platform-settings + system-logs)..."
+	@echo "==> API contract: running Go contract tests (admin-service core: platform-rbac + tiers + security + billable-items + platform-users + platform-user-email + tier-entitlements + storage + platform-settings + system-logs + catalogs)..."
 	@cd services/admin-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/handlers/ -run Contract
 	@echo "==> API contract: running Go contract tests (admin-service MSP: tenants + tenant-lifecycle + costs + announcements + maintenance-windows + support-tickets + tenant-stats + dashboard)..."
 	@cd services/admin-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ee/msp ]; then go test ./ee/msp/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
@@ -929,6 +994,8 @@ api-contract: ## Spec-first API guardrail (ADR-0001): verify generated TS client
 	@cd services/admin-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ee/billingapi ]; then go test ./ee/billingapi/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
 	@echo "==> API contract: running Go contract tests (monitoring-service/status + alerting + trends + gateway + admin-status)..."
 	@cd services/monitoring-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/api/ -run Contract
+	@echo "==> API contract: mcp-service tool-surface snapshot (JSON-RPC, so OpenAPI does not apply)..."
+	@cd services/mcp-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/server/ -run ToolSurface
 	@echo "✅ Contract tests pass — live handlers conform to the spec."
 
 chart-lint: ## helm lint the chart against values.schema.json (catches schema/template drift the release would otherwise hit)
@@ -942,6 +1009,9 @@ chart-lint: ## helm lint the chart against values.schema.json (catches schema/te
 		--set platform.jwtSecret=l \
 		--set platform.internalAuthSecret=l \
 		--set platform.encryptionMasterKey=l
+
+changelog-audit-test: ## Mutation-test the CHANGELOG.md duplication guard
+	node ./scripts/audit-changelog.test.mjs
 
 # Workflow linting. This exists because `secrets` is not an available context in
 # `if:`, and a workflow that references it there does not fail a step — it fails
@@ -974,7 +1044,7 @@ lint-workflows:   ## Lint GitHub Actions workflows (context availability, expres
 drift-check:   ## Check for configuration drift
 	@echo "Drift check complete!"
 
-standards-check: generate verify-generated chart-lint lint-workflows  ## Generate, verify and run all standards checks
+standards-check: generate verify-generated chart-lint changelog-audit-test lint-workflows  ## Generate, verify and run all standards checks
 
 registry-first: generate verify-generated  ## Complete registry-first workflow
 	@echo "✅ Registry-first workflow complete!"

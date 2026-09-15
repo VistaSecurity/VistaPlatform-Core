@@ -4,7 +4,7 @@ info:
   version: "0.2.0"
   description: |
     Spec-first contract for cbom-service (ADR-0001). Covers the cbom-service
-    product surface: **Scopes** (Phase 1 — tenant-owned predicate definitions),
+    product surface: **Scopes** (tenant-owned query-language boundaries),
     **CBOM Artifacts** (Phase 2 — immutable, dated, content-hashed snapshots
     of a scope), and **Comparison** (Phase 3 — diff two artifacts).
 
@@ -109,8 +109,8 @@ paths:
       tags: [scopes]
       summary: Update a scope
       description: >
-        Overwrites name/description/predicate. Version is bumped (and an audit
-        row written) only when name or predicate actually changed.
+        Overwrites name/description/query. Version is bumped (and an audit
+        row written) only when name or query actually changed.
       requestBody:
         required: true
         content:
@@ -161,8 +161,10 @@ paths:
       tags: [scopes]
       summary: Preview the assets a scope matches
       description: >
-        Phase 1 stub — echoes the predicate with a not_implemented preview.
-        Phase 2 resolves the predicate against inventory-service and returns a
+        Echoes the scope's query in canonical form, with a not_implemented
+        preview count. Running the same query on
+        `GET /api/v1/inventory-service/assets?query=` returns the count today;
+        resolving it here against inventory-service returns a
         matched asset count.
       responses:
         "200":
@@ -232,15 +234,25 @@ paths:
                 $ref: "#/components/schemas/LegacyError"
         "422":
           description: >
-            The scope's predicate uses fields this deployment cannot evaluate.
+            The scope's stored query no longer validates, so the artifact this
+            would produce is not the one the scope describes.
             Generation is refused rather than producing an artifact whose
             contents are wider than the boundary it names.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/UnsupportedPredicateError"
+                $ref: "#/components/schemas/InvalidScopeQueryError"
         "500":
           $ref: "#/components/responses/LegacyServerError"
+        "501":
+          description: >
+            The requested `kind` is one this build recognises but this
+            deployment has no assembler wired for. Distinct from 400 (unknown
+            kind): the request was correct, the wiring is incomplete.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
 
   /cbom/artifacts:
     get:
@@ -262,6 +274,17 @@ paths:
           schema:
             type: string
             format: uuid
+        - name: kind
+          in: query
+          required: false
+          description: >
+            Filter to one artifact kind. **Omitted means every kind, not
+            `cbom`** — this is one list of the tenant's artifacts, and
+            defaulting the filter would hide an SBOM someone just generated
+            behind a filter they never set. An unrecognised value is 400, not
+            an empty list.
+          schema:
+            $ref: "#/components/schemas/ArtifactKind"
         - name: limit
           in: query
           required: false
@@ -346,6 +369,24 @@ paths:
           **Enterprise edition only.**
         - `pdf` → PDF rendering for human review (re-rendered from canonical
           bytes). **Enterprise edition only.**
+        - `ocsf` → OCSF **1.9.0** event stream as JSON Lines
+          (`application/x-ndjson`): one `Device Inventory Info` (class_uid
+          5001) per asset, one `Vulnerability Finding` (class_uid 2002) per
+          vulnerability the artifact records. **Core**, and defined **only for
+          `inventory` artifacts** — any other kind returns 400. Projected from
+          the stored canonical bytes, so what a SIEM ingests is exactly what
+          `content_hash` covers.
+
+        Format ↔ kind compatibility, checked after the edition gate so the two
+        answers stay distinguishable (402 = "this deployment/subscription
+        cannot render that format at all"; 400 = "that format is not defined
+        for this kind of artifact"):
+
+        | format | defined for |
+        |---|---|
+        | `cyclonedx` | every kind |
+        | `ocsf` | `inventory` only |
+        | `spdx`, `pdf` | `cbom` only |
 
         SPDX and PDF re-render server-side and therefore need the raw bytes
         to be loadable. Inline-stored artifacts read from
@@ -373,7 +414,7 @@ paths:
           description: Wire format. Defaults to `cyclonedx`.
           schema:
             type: string
-            enum: [cyclonedx, spdx, pdf]
+            enum: [cyclonedx, spdx, pdf, ocsf]
             default: cyclonedx
       responses:
         "200":
@@ -388,6 +429,10 @@ paths:
                 type: string
                 format: binary
             application/pdf:
+              schema:
+                type: string
+                format: binary
+            application/x-ndjson:
               schema:
                 type: string
                 format: binary
@@ -416,6 +461,15 @@ paths:
           $ref: "#/components/responses/LegacyNotFound"
         "500":
           $ref: "#/components/responses/LegacyServerError"
+        "501":
+          description: >
+            `format=ocsf` was requested but this deployment has no OCSF
+            renderer wired. A wiring fault, not a missing subscription — the
+            format is Core.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
 
   /cbom/artifacts/{id}/verify:
     parameters:
@@ -469,6 +523,13 @@ paths:
         type+name; each change is categorized `improvement` / `regression` /
         `drift` / `neutral` with a one-phrase reason.
 
+        **Same kind only.** Base and head must have the same `artifact_kind`;
+        a cross-kind request is 400. The match keys of two kinds are drawn
+        from disjoint identity spaces (a certificate fingerprint against an
+        asset id), so nothing would align and the result would be every
+        component of the base "removed" and every component of the head
+        "added" — precise, confident and entirely wrong.
+
         Requires the tenant's `cbom_signing` entitlement.
       requestBody:
         required: true
@@ -514,8 +575,8 @@ paths:
       summary: Diff two CBOM artifacts (URL form)
       description: >
         Same semantics as `POST /cbom/compare`, with the artifact ids in the
-        URL so a diff can be shared as a deep link. Requires the tenant's
-        `cbom_signing` entitlement.
+        URL so a diff can be shared as a deep link. Same-kind only (400
+        otherwise). Requires the tenant's `cbom_signing` entitlement.
       responses:
         "200":
           description: The diff result.
@@ -601,7 +662,7 @@ components:
         - id
         - tenant_id
         - name
-        - predicate
+        - query
         - version
         - is_default
         - is_system
@@ -621,8 +682,8 @@ components:
         description:
           type: string
           description: Optional; omitted when empty.
-        predicate:
-          $ref: "#/components/schemas/Predicate"
+        query:
+          $ref: "#/components/schemas/ScopeQuery"
         version:
           type: integer
         is_default:
@@ -649,50 +710,25 @@ components:
           type: string
           format: date-time
 
-    Predicate:
-      type: object
-      additionalProperties: false
+    ScopeQuery:
+      type: string
       description: >
-        Selection rule stored as JSONB. An empty predicate (no include and no
-        exclude) matches every asset visible to the tenant under RLS.
-      properties:
-        include:
-          $ref: "#/components/schemas/PredicateClause"
-        exclude:
-          $ref: "#/components/schemas/PredicateClause"
+        The scope's boundary, as a query-language string over the `asset`
+        target. An EMPTY string matches every asset visible to the tenant under
+        RLS, which is what the seeded `All` scope is.
 
-    PredicateClause:
-      type: object
-      additionalProperties: false
-      description: >
-        A set of asset-attribute filters joined OR-within-a-field and
-        OR-across-fields. Used for both include and exclude clauses.
-      properties:
-        environment:
-          type: array
-          items: { type: string }
-        asset_type:
-          type: array
-          items: { type: string }
-        asset_ownership:
-          type: array
-          items: { type: string }
-        asset_status:
-          type: array
-          items: { type: string }
-        business_unit:
-          type: array
-          items: { type: string }
-        location_region:
-          type: array
-          items: { type: string }
-        risk_level:
-          type: array
-          items: { type: string }
-        tags_any_of:
-          type: array
-          items: { type: string }
-          description: Case-insensitive match against the asset's tags JSONB.
+
+        It replaced a JSONB include/exclude predicate. The language is
+        documented at
+        docsv4/internal/developer/design/asset-inventory/QUERY_LANGUAGE.md and
+        is the same string `GET /api/v1/inventory-service/assets?query=` takes,
+        so a scope can be previewed by running it on the inventory list.
+
+
+        Validated on write and stored in canonical form: a CBOM artifact
+        captures scope_id + scope_version, and two spellings of one predicate
+        would be two versions a diff could not match.
+      example: "environment:production and not tag:(dev or test)"
 
     ScopeListResponse:
       type: object
@@ -720,8 +756,8 @@ components:
           maxLength: 255
         description:
           type: string
-        predicate:
-          $ref: "#/components/schemas/Predicate"
+        query:
+          $ref: "#/components/schemas/ScopeQuery"
 
     UpdateScopeRequest:
       type: object
@@ -734,37 +770,77 @@ components:
           maxLength: 255
         description:
           type: string
-        predicate:
-          $ref: "#/components/schemas/Predicate"
+        query:
+          $ref: "#/components/schemas/ScopeQuery"
 
     PreviewResult:
       type: object
       additionalProperties: false
-      required: [scope_id, name, predicate, preview]
+      required: [scope_id, name, query, preview]
       properties:
         scope_id:
           type: string
           format: uuid
         name:
           type: string
-        predicate:
-          $ref: "#/components/schemas/Predicate"
+        query:
+          $ref: "#/components/schemas/ScopeQuery"
         preview:
           type: object
           additionalProperties: false
-          required: [status, matched_count, note]
+          description: >
+            How many assets the scope currently matches. The count is answered
+            by inventory-service, compiling the SAME query string a CBOM
+            generation sends it — so the number a customer tunes a scope against
+            is the number of assets the artifact will cover, rather than a
+            second opinion computed here.
+          required: [status, matched_count]
           properties:
             status:
               type: string
-              enum: [not_implemented, ok]
+              enum: [ok, unavailable]
+              description: >
+                `ok` — `matched_count` is the live count.
+                `unavailable` — inventory-service could not be reached, and
+                `matched_count` is null. A count that cannot be obtained is
+                NEVER reported as zero: "your scope matches nothing" is the
+                worst possible wrong answer for an attestation boundary.
             matched_count:
               type: [integer, "null"]
+              description: Null iff status is `unavailable`.
             note:
               type: string
+              description: Present when status is `unavailable`, saying why.
 
     # ============================================================
     # CBOM Artifact domain (Phase 2 + Phase 4 — current shapes)
     # ============================================================
+    ArtifactKind:
+      type: string
+      enum: [cbom, sbom, hbom, inventory]
+      default: cbom
+      description: |
+        Which bill of materials an artifact is (ADR-0005 D6). One pipeline,
+        four products — same scope, same content hash, same signature, same
+        comparison; only the assembled components differ.
+
+        - `cbom` — cryptographic: certificates, algorithms, protocols, keys,
+          crypto libraries. The default, and what this API produced before
+          kinds existed.
+        - `sbom` — software: one `library` component per distinct software
+          product installed on the scope's assets, with the assets it was
+          found on as `evidence.occurrences`. No `dependencies` graph — an
+          install record says a product is present, not that anything depends
+          on it.
+        - `hbom` — hardware: one `device` component per hardware-class asset,
+          carrying its `hw.*` facts and its identifiers.
+        - `inventory` — everything: every asset as a component typed by its
+          class, endpoints as `services`, `asset_relationships` as the
+          `dependencies` graph, facts/identifiers/tags as `properties`, and
+          **only** the `vulnerability` producer's findings as
+          `vulnerabilities`. Other producers' findings are findings, not CVEs,
+          and are deliberately absent from that array.
+
     CBOMArtifact:
       type: object
       additionalProperties: false
@@ -779,6 +855,7 @@ components:
         - scope_id
         - scope_version
         - scope_name_snapshot
+        - artifact_kind
         - has_inline_content
         - content_hash
         - size_bytes
@@ -809,6 +886,8 @@ components:
         name:
           type: string
           description: Optional human-meaningful name; omitted when empty.
+        artifact_kind:
+          $ref: "#/components/schemas/ArtifactKind"
         storage_key:
           type: string
           description: >
@@ -934,6 +1013,14 @@ components:
         scope_id:
           type: string
           format: uuid
+        kind:
+          allOf:
+            - $ref: "#/components/schemas/ArtifactKind"
+          description: >
+            Which bill of materials to assemble. Omitted means `cbom` — exactly
+            what this endpoint produced before kinds existed, so an older
+            client's request is unchanged in meaning as well as in shape. An
+            unrecognised value is rejected with 400 rather than defaulted.
         name:
           type: string
           description: Optional human-meaningful name.
@@ -949,18 +1036,16 @@ components:
             Phase 4. HMAC-sign the artifact. Server defaults to true when
             omitted (requires INTERNAL_AUTH_SECRET on the server side).
 
-    UnsupportedPredicateError:
+    InvalidScopeQueryError:
       type: object
       additionalProperties: false
-      required: [error, unsupported_fields]
+      required: [error, query]
       properties:
         error:
           type: string
-        unsupported_fields:
-          type: array
-          items:
-            type: string
-          description: The predicate field names that could not be evaluated.
+        query:
+          type: string
+          description: The stored scope query that no longer validates.
 
     GenerateCBOMResponse:
       type: object
@@ -1060,8 +1145,16 @@ components:
     DiffChange:
       type: object
       additionalProperties: false
-      required: [kind, category, match_key, component_type, name, reason]
+      required: [row_id, kind, category, match_key, component_type, name, reason]
       properties:
+        row_id:
+          type: string
+          description: >
+            Citation target for this row — `r1`, `r2`, … assigned in the
+            order `changes` is returned in, which is stable for a given pair
+            of (immutable) artifacts. The narrative cites rows by this id;
+            the UI anchors each row at `diff-row-<row_id>`. Not a durable
+            identifier — `match_key` is the component identity.
         kind:
           $ref: "#/components/schemas/ChangeKind"
         category:
@@ -1134,7 +1227,85 @@ components:
             $ref: "#/components/schemas/DiffChange"
         narrative:
           type: string
-          description: One or two prose sentences summarizing the net change.
+          description: >
+            Prose summarising the net change, with the citation markers
+            stripped. Unchanged in shape from before citations existed, so a
+            client that only wants a sentence can keep reading this field.
+        narrative_detail:
+          $ref: "#/components/schemas/NarrativeDetail"
+
+    Citation:
+      type: object
+      additionalProperties: false
+      required: [kind, ref]
+      description: >
+        One row a narrative sentence draws on (ADR-0008 D4.4, "cite or
+        refuse"). Rendered by the UI as a link to the cited diff row.
+      properties:
+        kind:
+          type: string
+          enum: [diff_row]
+          description: What `ref` names. Only diff rows today.
+        ref:
+          type: string
+          description: The `row_id` of a change in this diff.
+
+    NarrativeDetail:
+      type: object
+      additionalProperties: false
+      required: [available, source, source_kind, source_ref, confidence, model_id]
+      description: >
+        The comparison narrative with its citations and provenance intact.
+        The prose in `text` carries inline `[row:<row_id>]` markers; `citations`
+        is the same set, derived from the text, in order of first appearance.
+      properties:
+        available:
+          type: boolean
+          description: >
+            False means there is no narrative to show — render nothing, not an
+            empty panel. In practice always true here: the deterministic
+            narrator can summarise any set of rows, including the empty one.
+        source:
+          type: string
+          enum: [rules, model]
+          description: >
+            Which narrator wrote it. `rules` is the deterministic narrator and
+            is what every deployment without a configured AI provider gets, and
+            what a configured one degrades to on any failure. `model` means a
+            model wrote it and every sentence cited rows that resolved.
+        text:
+          type: string
+          description: The prose, with `[row:<row_id>]` citation markers inline.
+        citations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Citation"
+          description: >
+            Each distinct row cited by `text`, in order of first appearance.
+            Absent when the narrative cites nothing, which for the rule
+            narrator means the comparison found no changes.
+        source_kind:
+          type: string
+          description: >
+            Always `inferred` (ADR-0008 D4.1). A narrative is prose derived
+            from rows, never a measured fact, and it is never persisted as one.
+        source_ref:
+          type: string
+          description: The producer — `narrator:rules` or `narrator:model`.
+        confidence:
+          type: number
+          description: >
+            The producer's own estimate, 0..1. The rule narrator reports 1 —
+            it asserts only arithmetic over the rows it cites. The model
+            narrator reports 0, meaning no estimate was made: we do not ask a
+            model to score itself, and a number we invented would read as a
+            measurement.
+        model_id:
+          type: string
+          description: >
+            What produced it, as the provider reported it. Empty for the rule
+            narrator — no model was involved, and "" is not a model named
+            unknown.
 
     LegacyError:
       type: object

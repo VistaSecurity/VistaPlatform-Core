@@ -12,11 +12,18 @@
     "./auth": "./src/auth/index.ts",
     "./platform-auth": "./src/platform-auth/index.ts",
     "./rbac": "./src/rbac/index.ts",
+    "./assets": "./src/assets/index.ts",
+    "./authoring": "./src/authoring/index.ts",
     "./features": "./src/features/index.ts",
-    "./shared": "./src/shared/index.ts"
+    "./connectors": "./src/connectors/index.ts",
+    "./facts": "./src/facts/index.ts",
+    "./findings": "./src/findings/index.ts",
+    "./shared": "./src/shared/index.ts",
+    "./query": "./src/query/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest"
   },
   "dependencies": {
     "@vistasecurity/api-contract": "*"
@@ -32,8 +39,10 @@
     }
   },
   "devDependencies": {
+    "@types/node": "^26.4.1",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.7",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.0"
   }
 }

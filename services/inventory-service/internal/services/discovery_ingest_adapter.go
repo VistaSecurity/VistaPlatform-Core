@@ -29,6 +29,18 @@ import "encoding/json"
 // both the cluster-sensor field names and the IngestFinding-native names so the
 // adapter can normalise either source.
 type ClusterSensorFinding struct {
+	// Kind is what the finding IS — empty for the legacy crypto shape,
+	// "host_observation" for a passive host-presence row.
+	//
+	// This struct having no `kind` field is precisely why host observations had
+	// to be held back at discovery-processor's boundary: the field survived the
+	// wire and was then dropped HERE, on the way to IngestFinding, so
+	// inventory-service could not tell an observation from a crypto finding and
+	// acted on it as one. cluster-sensor-service does not emit it (it produces
+	// crypto findings only), and its absence IS the legacy shape, so nothing
+	// that already worked changes.
+	Kind string `json:"kind,omitempty"`
+
 	// Pass-through fields (identical names in both contracts).
 	Hostname        *string `json:"hostname"`
 	Port            *int    `json:"port"`
@@ -36,7 +48,6 @@ type ClusterSensorFinding struct {
 	Protocol        string  `json:"protocol"`
 	OperatingSystem *string `json:"operating_system"`
 	SourceSensorID  *string `json:"source_sensor_id"`
-	DeviceID        *string `json:"device_id"`
 
 	// Resolved IP: cluster-sensor serialises "resolved_ip"; IngestFinding
 	// expects "ip_address". Accept either; ip_address wins when both are set.
@@ -75,13 +86,13 @@ type clusterSensorData struct {
 // preserves any IngestFinding-native fields the caller already populated.
 func (f ClusterSensorFinding) ToIngestFinding() IngestFinding {
 	out := IngestFinding{
+		Kind:                 f.Kind,
 		Hostname:             f.Hostname,
 		Port:                 f.Port,
 		AssetType:            f.AssetType,
 		Protocol:             f.Protocol,
 		OperatingSystem:      f.OperatingSystem,
 		SourceSensorID:       f.SourceSensorID,
-		DeviceID:             f.DeviceID,
 		ProtocolVersion:      f.ProtocolVersion,
 		CipherSuite:          f.CipherSuite,
 		KeyExchangeAlgorithm: f.KeyExchangeAlgorithm,

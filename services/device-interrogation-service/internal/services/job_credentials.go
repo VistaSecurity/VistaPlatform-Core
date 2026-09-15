@@ -2,8 +2,10 @@ package services
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/vistasecurity/vistaplatform/shared/agentcreds"
+	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
 )
 
@@ -65,10 +67,28 @@ func NormalizeJobCredentials(stored map[string]interface{}, masterKey string) (m
 
 // normalizeMasterEncryptedShape decrypts the sensitive fields of the embedded
 // device-credential shape with the platform master key.
+//
+// Two ciphertext spellings reach this function and both must open:
+//
+//   - `enc:v1:…` — what asset_credentials.password_enc holds. The shared
+//     credentials helper tags what it writes, so a reader never has to guess
+//     whether a value is encrypted.
+//   - untagged — what `devices.password` held, and what a device_jobs row
+//     queued before this release still carries in its frozen credential map.
+//
+// The branch is on the tag, not on "try one and fall back", because a fallback
+// is exactly the guess the tag exists to remove: a field flagged as encrypted
+// that will not decrypt is a real failure, and shipping the ciphertext on is
+// the bug that surfaces at the far end as an unexplained authentication
+// failure against the device.
 func normalizeMasterEncryptedShape(stored map[string]interface{}, masterKey string) (map[string]interface{}, error) {
 	enc, err := encryption.NewService(masterKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialise master encryption: %w", err)
+	}
+	cipher, err := credentials.NewCipher("job_credentials", masterKey, credentials.Policy{Fields: sensitiveCredentialFields})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialise credential cipher: %w", err)
 	}
 
 	out := copyWithout(stored, masterEncryptedFlag)
@@ -77,17 +97,37 @@ func normalizeMasterEncryptedShape(stored map[string]interface{}, masterKey stri
 		if !ok || s == "" {
 			continue
 		}
-		plaintext, decErr := enc.Decrypt(s)
+		plaintext, decErr := openCredentialValue(cipher, enc, s)
 		if decErr != nil {
-			// A field flagged as encrypted that will not decrypt is a real
-			// failure, not something to paper over: shipping the ciphertext on
-			// is precisely the bug being fixed, and it surfaces at the far end
-			// as an unexplained authentication failure against the device.
 			return nil, fmt.Errorf("failed to decrypt credential field %q: %w", field, decErr)
 		}
 		out[field] = plaintext
 	}
 	return out, nil
+}
+
+// openCredentialValue decrypts one stored credential value, branching on the
+// shared helper's tag rather than guessing.
+func openCredentialValue(cipher *credentials.Cipher, enc *encryption.Service, stored string) (string, error) {
+	if strings.HasPrefix(stored, credentials.Prefix) {
+		return cipher.DecryptValue(stored)
+	}
+	return enc.Decrypt(stored)
+}
+
+// openStoredCredential decrypts a single credential column value under the
+// platform master key, accepting both the tagged form the shared helper writes
+// and the untagged form `devices.password` used to hold.
+func openStoredCredential(masterKey, stored string) (string, error) {
+	enc, err := encryption.NewService(masterKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to initialise master encryption: %w", err)
+	}
+	cipher, err := credentials.NewCipher("asset_credentials", masterKey, credentials.Policy{Fields: sensitiveCredentialFields})
+	if err != nil {
+		return "", fmt.Errorf("failed to initialise credential cipher: %w", err)
+	}
+	return openCredentialValue(cipher, enc, stored)
 }
 
 // normalizeLegacyJobKeyShape unwraps {_job_key, config} into a flat map.

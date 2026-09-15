@@ -1,0 +1,510 @@
+# OUI → vendor table for passive host observation (shared/hostobs).
+#
+# Source of truth for shared/hostobs/oui_gen.go. Edit here and run
+# `make generate`; `make audit` fails if the generated Go drifts.
+#
+# WHAT THIS IS: a curated subset of IEEE MA-L assignments covering the
+# manufacturers that actually turn up on an enterprise or OT segment. It is
+# NOT the IEEE registry — that file is ~35,000 rows and changes weekly, and
+# compiling it into the sensor would add a megabyte to a binary that
+# cross-compiles to five platforms.
+#
+# WHAT AN ABSENT PREFIX MEANS: no vendor, not a guess. An unmatched OUI
+# leaves hw.vendor unset, which the consumer must read as "not determined" —
+# never as "unknown manufacturer". Guessing a vendor from a neighbouring
+# prefix would be exactly the fabricated-confidence failure this codebase
+# keeps paying for.
+#
+# LOCALLY-ADMINISTERED PREFIXES (the U/L bit set in the first octet) are
+# looked up like any other, but a hit means the VIRTUALISATION PLATFORM, not
+# the hardware: 52:54:00 is QEMU's synthetic NIC, not a manufacturer. The
+# observation carries mac_locally_administered alongside, so a consumer can
+# tell the two apart. A randomised phone MAC matches nothing here, which is
+# the correct answer.
+#
+# Format: prefix,vendor — prefix is the 24-bit OUI as AA:BB:CC (upper case).
+# Lines beginning with # and blank lines are ignored. Duplicate prefixes are
+# a generator error.
+
+prefix,vendor
+
+# --- Workstations, laptops, phones ---------------------------------------
+00:03:93,Apple
+00:0A:95,Apple
+00:1B:63,Apple
+00:25:00,Apple
+28:CF:DA,Apple
+3C:07:54,Apple
+60:33:4B,Apple
+AC:BC:32,Apple
+D0:23:DB,Apple
+F0:B4:79,Apple
+00:06:5B,Dell
+00:14:22,Dell
+00:1E:4F,Dell
+00:21:9B,Dell
+18:03:73,Dell
+24:B6:FD,Dell
+44:A8:42,Dell
+B8:2A:72,Dell
+D4:AE:52,Dell
+F8:BC:12,Dell
+00:01:E6,Hewlett Packard
+00:0B:CD,Hewlett Packard
+00:1B:78,Hewlett Packard
+00:23:7D,Hewlett Packard
+00:30:C1,Hewlett Packard
+08:00:09,Hewlett Packard
+3C:4A:92,Hewlett Packard
+78:AC:C0,Hewlett Packard
+94:18:82,Hewlett Packard
+EC:B1:D7,Hewlett Packard
+00:02:B3,Intel
+00:03:47,Intel
+00:07:E9,Intel
+00:0C:F1,Intel
+00:13:02,Intel
+00:15:17,Intel
+00:1B:21,Intel
+00:1E:64,Intel
+00:21:6A,Intel
+00:24:D7,Intel
+3C:97:0E,Intel
+5C:51:4F,Intel
+7C:7A:91,Intel
+8C:70:5A,Intel
+A0:88:69,Intel
+DC:53:60,Intel
+F8:16:54,Intel
+00:01:6C,Hon Hai Precision
+00:16:CE,Hon Hai Precision
+00:1B:24,Hon Hai Precision
+00:1E:68,Hon Hai Precision
+00:23:4D,Hon Hai Precision
+28:D2:44,Hon Hai Precision
+68:94:23,Hon Hai Precision
+90:4C:E5,Hon Hai Precision
+00:0C:6E,ASUSTek Computer
+00:15:F2,ASUSTek Computer
+00:1A:92,ASUSTek Computer
+00:22:15,ASUSTek Computer
+2C:56:DC,ASUSTek Computer
+50:46:5D,ASUSTek Computer
+AC:22:0B,ASUSTek Computer
+BC:AE:C5,ASUSTek Computer
+00:16:17,Micro-Star International
+00:21:85,Micro-Star International
+8C:89:A5,Micro-Star International
+D8:CB:8A,Micro-Star International
+00:1D:7D,GIGA-BYTE Technology
+1C:6F:65,GIGA-BYTE Technology
+50:E5:49,GIGA-BYTE Technology
+94:DE:80,GIGA-BYTE Technology
+00:00:39,Toshiba
+00:08:0D,Toshiba
+00:26:6C,Toshiba
+00:00:0E,Fujitsu
+00:17:42,Fujitsu
+90:1B:0E,Fujitsu
+00:04:AC,IBM
+00:09:6B,IBM
+00:11:25,IBM
+00:1A:64,IBM
+08:00:5A,IBM
+00:07:AB,Samsung Electronics
+00:15:99,Samsung Electronics
+00:17:C9,Samsung Electronics
+00:21:19,Samsung Electronics
+34:23:BA,Samsung Electronics
+5C:0A:5B,Samsung Electronics
+78:1F:DB,Samsung Electronics
+E8:50:8B,Samsung Electronics
+00:1C:62,LG Electronics
+00:1E:75,LG Electronics
+00:21:FB,LG Electronics
+10:68:3F,LG Electronics
+A8:16:D0,LG Electronics
+CC:FA:00,LG Electronics
+00:18:82,Huawei Technologies
+00:1E:10,Huawei Technologies
+00:25:9E,Huawei Technologies
+00:E0:FC,Huawei Technologies
+28:6E:D4,Huawei Technologies
+4C:1F:CC,Huawei Technologies
+AC:E2:15,Huawei Technologies
+00:15:EB,ZTE
+00:19:C6,ZTE
+00:1E:73,ZTE
+34:4B:50,ZTE
+0C:1D:AF,Xiaomi
+14:F6:5A,Xiaomi
+28:6C:07,Xiaomi
+50:8F:4C,Xiaomi
+64:09:80,Xiaomi
+8C:BE:BE,Xiaomi
+F0:B4:29,Xiaomi
+
+# --- Network infrastructure ----------------------------------------------
+00:00:0C,Cisco Systems
+00:01:42,Cisco Systems
+00:0A:41,Cisco Systems
+00:0F:23,Cisco Systems
+00:15:2B,Cisco Systems
+00:1A:2F,Cisco Systems
+00:21:1B,Cisco Systems
+00:26:0A,Cisco Systems
+00:3A:98,Cisco Systems
+00:50:0B,Cisco Systems
+00:18:0A,Cisco Meraki
+88:15:44,Cisco Meraki
+AC:17:C8,Cisco Meraki
+E0:CB:BC,Cisco Meraki
+00:0B:86,Aruba Networks
+00:1A:1E,Aruba Networks
+00:24:6C,Aruba Networks
+24:DE:C6,Aruba Networks
+6C:F3:7F,Aruba Networks
+94:B4:0F,Aruba Networks
+D8:C7:C8,Aruba Networks
+00:05:85,Juniper Networks
+00:12:1E,Juniper Networks
+00:14:F6,Juniper Networks
+00:1D:B5,Juniper Networks
+00:23:9C,Juniper Networks
+2C:21:31,Juniper Networks
+3C:61:04,Juniper Networks
+78:19:F7,Juniper Networks
+88:E0:F3,Juniper Networks
+F0:1C:2D,Juniper Networks
+00:1C:73,Arista Networks
+28:99:3A,Arista Networks
+44:4C:A8,Arista Networks
+74:83:EF,Arista Networks
+00:01:30,Extreme Networks
+00:04:96,Extreme Networks
+00:19:77,Extreme Networks
+00:04:38,Nortel Networks
+00:E0:B1,Alcatel-Lucent
+00:00:F4,Allied Telesis
+00:01:02,3Com
+00:10:4B,3Com
+00:50:04,3Com
+00:60:97,3Com
+00:09:0F,Fortinet
+08:5B:0E,Fortinet
+70:4C:A5,Fortinet
+90:6C:AC,Fortinet
+00:1B:17,Palo Alto Networks
+08:30:6B,Palo Alto Networks
+B4:0C:25,Palo Alto Networks
+D4:F4:BE,Palo Alto Networks
+00:1C:7F,Check Point Software
+00:06:B1,SonicWall
+00:90:7F,WatchGuard Technologies
+00:01:D7,F5 Networks
+00:23:E9,F5 Networks
+00:0E:B6,Riverbed Technology
+00:0C:42,MikroTik
+18:FD:74,MikroTik
+2C:C8:1B,MikroTik
+48:8F:5A,MikroTik
+4C:5E:0C,MikroTik
+6C:3B:6B,MikroTik
+74:4D:28,MikroTik
+CC:2D:E0,MikroTik
+00:15:6D,Ubiquiti Networks
+00:27:22,Ubiquiti Networks
+04:18:D6,Ubiquiti Networks
+24:A4:3C,Ubiquiti Networks
+44:D9:E7,Ubiquiti Networks
+68:72:51,Ubiquiti Networks
+74:83:C2,Ubiquiti Networks
+78:8A:20,Ubiquiti Networks
+80:2A:A8,Ubiquiti Networks
+B4:FB:E4,Ubiquiti Networks
+DC:9F:DB,Ubiquiti Networks
+E0:63:DA,Ubiquiti Networks
+F0:9F:C2,Ubiquiti Networks
+FC:EC:DA,Ubiquiti Networks
+00:13:92,Ruckus Wireless
+2C:E6:CC,Ruckus Wireless
+8C:0C:90,Ruckus Wireless
+C0:C5:20,Ruckus Wireless
+00:04:56,Cambium Networks
+58:C1:7A,Cambium Networks
+00:09:5B,NETGEAR
+00:0F:B5,NETGEAR
+00:14:6C,NETGEAR
+00:1B:2F,NETGEAR
+00:22:3F,NETGEAR
+00:24:B2,NETGEAR
+20:4E:7F,NETGEAR
+2C:30:33,NETGEAR
+A0:40:A0,NETGEAR
+C0:3F:0E,NETGEAR
+00:19:E0,TP-Link Technologies
+00:21:27,TP-Link Technologies
+00:23:CD,TP-Link Technologies
+00:27:19,TP-Link Technologies
+14:CC:20,TP-Link Technologies
+50:C7:BF,TP-Link Technologies
+54:E6:FC,TP-Link Technologies
+60:E3:27,TP-Link Technologies
+A0:F3:C1,TP-Link Technologies
+E8:DE:27,TP-Link Technologies
+F4:F2:6D,TP-Link Technologies
+00:05:5D,D-Link
+00:0D:88,D-Link
+00:11:95,D-Link
+00:15:E9,D-Link
+00:17:9A,D-Link
+00:1B:11,D-Link
+00:1E:58,D-Link
+00:22:B0,D-Link
+1C:7E:E5,D-Link
+90:94:E4,D-Link
+AC:F1:DF,D-Link
+C8:BE:19,D-Link
+00:11:50,Belkin International
+00:17:3F,Belkin International
+00:1C:DF,Belkin International
+08:86:3B,Belkin International
+94:10:3E,Belkin International
+EC:1A:59,Belkin International
+00:12:17,Linksys
+00:14:BF,Linksys
+00:18:39,Linksys
+00:1A:70,Linksys
+00:1D:7E,Linksys
+00:21:29,Linksys
+00:23:69,Linksys
+00:25:9C,Linksys
+48:F8:B3,Linksys
+C0:56:27,Linksys
+00:07:40,Buffalo
+4C:E6:76,Buffalo
+00:04:0E,AVM GmbH
+08:96:D7,AVM GmbH
+34:31:C4,AVM GmbH
+C8:0E:14,AVM GmbH
+00:14:7F,Technicolor
+00:15:A2,ARRIS Group
+3C:BD:3E,ARRIS Group
+00:0C:E5,Motorola
+00:A0:BF,Motorola
+00:01:EC,Ericsson
+00:10:18,Broadcom
+00:50:43,Marvell Semiconductor
+00:A0:C6,Qualcomm
+00:0C:E7,MediaTek
+00:E0:4C,Realtek Semiconductor
+
+# --- Virtualisation and platform NICs ------------------------------------
+00:05:69,VMware
+00:0C:29,VMware
+00:1C:14,VMware
+00:50:56,VMware
+00:03:FF,Microsoft
+00:12:5A,Microsoft
+00:15:5D,Microsoft Hyper-V
+00:17:FA,Microsoft
+00:1D:D8,Microsoft
+00:22:48,Microsoft
+00:25:AE,Microsoft
+28:18:78,Microsoft
+7C:1E:52,Microsoft
+7C:ED:8D,Microsoft
+00:16:3E,Xen
+08:00:27,Oracle VirtualBox
+00:1C:42,Parallels
+52:54:00,QEMU virtual NIC
+FA:16:3E,OpenStack
+02:42:AC,Docker
+50:6B:8D,Nutanix
+00:A0:98,NetApp
+00:60:16,EMC
+24:A9:37,Pure Storage
+00:11:32,Synology
+00:08:9B,QNAP Systems
+24:5E:BE,QNAP Systems
+00:14:EE,Western Digital
+00:90:A9,Western Digital
+00:25:90,Super Micro Computer
+00:30:48,Super Micro Computer
+0C:C4:7A,Super Micro Computer
+3C:EC:EF,Super Micro Computer
+AC:1F:6B,Super Micro Computer
+
+# --- Printers, cameras, telephony ----------------------------------------
+00:00:01,Xerox
+08:00:37,Fuji Xerox
+00:00:48,Seiko Epson
+00:26:AB,Seiko Epson
+38:9D:92,Seiko Epson
+A4:EE:57,Seiko Epson
+AC:18:26,Seiko Epson
+00:00:74,Ricoh
+00:26:73,Ricoh
+58:38:79,Ricoh
+00:00:85,Canon
+00:1E:8F,Canon
+2C:9E:FC,Canon
+88:87:17,Canon
+F4:81:39,Canon
+00:1B:A9,Brother Industries
+00:22:58,Brother Industries
+00:80:77,Brother Industries
+30:05:5C,Brother Industries
+00:04:00,Lexmark
+00:20:00,Lexmark
+00:21:B7,Lexmark
+00:20:6B,Konica Minolta
+00:17:C8,Kyocera
+00:C0:EE,Kyocera
+00:07:4D,Zebra Technologies
+00:23:68,Zebra Technologies
+48:A4:93,Zebra Technologies
+AC:3F:A4,Zebra Technologies
+00:40:8C,Axis Communications
+AC:CC:8E,Axis Communications
+B8:A4:4F,Axis Communications
+E8:27:25,Axis Communications
+44:19:B6,Hikvision
+4C:BD:8F,Hikvision
+54:C4:15,Hikvision
+BC:AD:28,Hikvision
+C0:56:E3,Hikvision
+3C:EF:8C,Dahua Technology
+4C:11:BF,Dahua Technology
+90:02:A9,Dahua Technology
+E0:50:8B,Dahua Technology
+00:04:F2,Polycom
+64:16:7F,Polycom
+00:04:0D,Avaya
+00:1B:4F,Avaya
+B4:B0:17,Avaya
+08:00:0F,Mitel
+00:08:5D,Aastra
+00:0B:82,Grandstream Networks
+C0:74:AD,Grandstream Networks
+00:15:65,Yealink
+24:9A:D8,Yealink
+80:5E:C0,Yealink
+00:04:13,Snom Technology
+
+# --- Industrial, building and OT ------------------------------------------
+08:00:06,Siemens
+00:0E:8C,Siemens
+00:1B:1B,Siemens
+00:1C:06,Siemens
+# IEEE registers 00:00:BC to "Allen-Bradley Company" and the two below to
+# "Rockwell Automation" — two registry names for one manufacturer, since the
+# 1985 acquisition. This table is CURATED, not a registry dump (08:00:27 is
+# registered to Cadmus and says "Oracle VirtualBox"), and one manufacturer gets
+# one name here: a second spelling is a second hw.vendor value that will not join
+# the end-of-life catalogue, and it makes two classification rules cancel each
+# other where they should agree.
+00:00:BC,Rockwell Automation
+00:00:0A,Omron
+00:1D:9C,Rockwell Automation
+5C:88:16,Rockwell Automation
+00:00:54,Schneider Electric
+00:80:F4,Schneider Electric
+00:C0:B7,American Power Conversion
+00:A0:45,Phoenix Contact
+00:90:E8,Moxa
+00:80:63,Hirschmann
+00:01:05,Beckhoff Automation
+00:30:DE,WAGO
+00:40:9D,Digi International
+00:20:4A,Lantronix
+00:D0:C9,Advantech
+00:10:7F,Crestron Electronics
+00:05:A6,Extron Electronics
+00:60:9F,AMX
+00:04:A5,Barco
+00:E0:86,Avocent
+00:0D:5D,Raritan
+
+# --- Consumer and IoT -----------------------------------------------------
+18:FE:34,Espressif
+24:0A:C4,Espressif
+2C:3A:E8,Espressif
+30:AE:A4,Espressif
+5C:CF:7F,Espressif
+60:01:94,Espressif
+84:0D:8E,Espressif
+A0:20:A6,Espressif
+AC:67:B2,Espressif
+B4:E6:2D,Espressif
+BC:DD:C2,Espressif
+C4:4F:33,Espressif
+CC:50:E3,Espressif
+DC:4F:22,Espressif
+EC:FA:BC,Espressif
+28:CD:C1,Raspberry Pi
+2C:CF:67,Raspberry Pi
+B8:27:EB,Raspberry Pi
+D8:3A:DD,Raspberry Pi
+DC:A6:32,Raspberry Pi
+E4:5F:01,Raspberry Pi
+00:BB:3A,Amazon Technologies
+0C:47:C9,Amazon Technologies
+34:D2:70,Amazon Technologies
+40:B4:CD,Amazon Technologies
+44:65:0D,Amazon Technologies
+50:DC:E7,Amazon Technologies
+68:37:E9,Amazon Technologies
+74:C2:46,Amazon Technologies
+A0:02:DC,Amazon Technologies
+AC:63:BE,Amazon Technologies
+F0:27:2D,Amazon Technologies
+FC:65:DE,Amazon Technologies
+00:1A:11,Google
+3C:5A:B4,Google
+54:60:09,Google
+6C:AD:F8,Google
+94:EB:2C,Google
+A4:77:33,Google
+F4:F5:D8,Google
+F4:F5:E8,Google
+18:B4:30,Nest Labs
+00:17:88,Philips Lighting
+EC:B5:FA,Philips Lighting
+00:0E:58,Sonos
+34:7E:5C,Sonos
+48:A6:B8,Sonos
+5C:AA:FD,Sonos
+B8:E9:37,Sonos
+B0:A7:37,Roku
+B8:3E:59,Roku
+CC:6D:A0,Roku
+D8:31:34,Roku
+DC:3A:5E,Roku
+04:52:C7,Bose
+08:DF:1F,Bose
+2C:41:A1,Bose
+38:18:4C,Bose
+00:09:BF,Nintendo
+00:1A:E9,Nintendo
+00:21:BD,Nintendo
+34:AF:2C,Nintendo
+58:BD:A3,Nintendo
+78:A2:A0,Nintendo
+98:B6:E9,Nintendo
+CC:9E:00,Nintendo
+00:D9:D1,Sony Interactive Entertainment
+28:0D:FC,Sony Interactive Entertainment
+2C:CC:44,Sony Interactive Entertainment
+70:9E:29,Sony Interactive Entertainment
+BC:60:A7,Sony Interactive Entertainment
+F8:46:1C,Sony Interactive Entertainment
+00:01:4A,Sony
+00:0A:D9,Sony
+00:13:A9,Sony
+00:19:63,Sony
+00:1D:BA,Sony
+30:F9:ED,Sony
+54:42:49,Sony
+FC:0F:E6,Sony
+00:80:45,Panasonic

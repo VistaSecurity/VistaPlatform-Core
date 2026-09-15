@@ -54,7 +54,7 @@ export function TicketDrawer({ ticket, onClose }: { ticket: Ticket; onClose: () 
     },
     onSuccess: () => {
       setComment('');
-      qc.invalidateQueries({ queryKey: ['remediation', 'ticket-comments', t.id] });
+      void qc.invalidateQueries({ queryKey: ['remediation', 'ticket-comments', t.id] });
     },
   });
 
@@ -111,8 +111,8 @@ export function TicketDrawer({ ticket, onClose }: { ticket: Ticket; onClose: () 
         <MetaRow k="Due" v={t.due_date ? t.due_date.slice(0, 10) : 'no due date'} mono />
         <MetaRow k="Assigned to" v={t.assigned_to as string} />
         <MetaRow k="Source" v={t.source} />
-        <MetaRow k="Created" v={(t.created_at as string)?.slice(0, 10)} mono />
-        <MetaRow k="Updated" v={(t.updated_at as string)?.slice(0, 10)} mono />
+        <MetaRow k="Created" v={t.created_at?.slice(0, 10)} mono />
+        <MetaRow k="Updated" v={t.updated_at?.slice(0, 10)} mono />
         {(t.tags?.length ?? 0) > 0 && (
           <div style={{ padding: '8px 0', borderBottom: '1px solid var(--app-border)', display: 'flex', gap: 5, flexWrap: 'wrap' }}>
             {t.tags!.map((tag) => <span key={tag} className="mono" style={{ fontSize: 11, color: 'var(--app-t2)', background: 'var(--app-panel2)', border: '1px solid var(--app-border)', borderRadius: 6, padding: '2px 7px' }}>{tag}</span>)}
@@ -166,7 +166,7 @@ export function TicketDrawer({ ticket, onClose }: { ticket: Ticket; onClose: () 
                 {!c.author_id && (
                   <span style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: 0.4, color: 'var(--app-t3)', background: 'var(--app-panel2)', border: '1px solid var(--app-border)', borderRadius: 5, padding: '1px 5px' }}>SYSTEM</span>
                 )}
-                {(c.created_at as string)?.slice(0, 16).replace('T', ' ')}
+                {c.created_at?.slice(0, 16).replace('T', ' ')}
               </div>
             </div>
           ))

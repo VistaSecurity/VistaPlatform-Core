@@ -43,6 +43,12 @@ INSERT INTO platform_permissions (name, resource, action, description) VALUES
 ('platform_roles.manage',     'platform_roles',     'manage', 'Create/edit/delete platform roles and set their permissions'),
 ('platform_permissions.read', 'platform_permissions','read',  'View platform permissions'),
 ('algorithms.manage',         'algorithms',         'manage', 'Create, edit, and deprecate algorithm definitions (the crypto-assessment source of truth)'),
+-- Catalog ▸ End-of-life and Catalog ▸ Vulnerability feed. Separate from
+-- algorithms.manage because they are separate catalogues with separate feeds:
+-- an operator who curates crypto ratings is not thereby trusted to re-point the
+-- platform at a vulnerability source. Both are granted to the same roles today,
+-- so nothing changes in practice until someone splits them.
+('catalogs.manage',           'catalogs',           'manage', 'Curate the platform catalogues (end-of-life, vulnerability), run feed syncs, and import an offline catalogue bundle'),
 ('tenant_roles.assign',       'tenant_roles',       'manage', 'Assign tenant roles across tenants'),
 ('platform.settings',         'platform',           'manage', 'Manage platform settings'),
 ('platform.billing',          'platform',           'manage', 'Manage platform billing'),
@@ -74,7 +80,7 @@ WHERE r.name = 'platform_admin'
     'tenants.read','tenants.update','tenants.manage','tenants.activate','tenants.suspend',
     'platform_users.read','platform_users.create','platform_users.update','platform_users.manage',
     'platform_roles.read','platform_permissions.read','tenant_roles.assign',
-    'algorithms.manage',
+    'algorithms.manage','catalogs.manage',
     'platform.settings','platform.billing','platform.analytics',
     'platform.health','platform.logs','platform.logs.read','platform.security','platform.audit',
     'platform.notifications.manage','platform.impersonate'
@@ -204,6 +210,7 @@ INSERT INTO billable_items (key, display_name, description, category, kind, unit
 ('cbom_signing',              'CBOM Signing & Attestation', 'Cryptographic signing of CBOM artifacts with compliance-attestation layers', 'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, true, 9900, 240),
 ('sso_saml',                  'SSO / SAML',                 'Single sign-on via your own identity provider — OIDC (Google, Microsoft, Azure AD) or SAML 2.0 — with group-to-role mapping and an org-wide authentication policy', 'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, true, 9900, 250),
 ('cmdb_sync',                 'CMDB / ITSM Sync',           'Sync inventory out to an external CMDB or ITSM (ServiceNow, Device42, SolarWinds)', 'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, false, NULL,  67),
+('connector_netbox',          'NetBox Connector',           'Pull sites, prefixes, VLANs, device types and devices from a NetBox network source of truth, and see the drift between NetBox and discovered inventory. Read-only towards NetBox.', 'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, false, NULL,  70),
 ('siem_export',               'SIEM Export',                'Forward audit events to an external SIEM (Splunk, Datadog, Elastic, webhook)',      'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, false, NULL,  68),
 ('custom_branding',           'Custom Branding',            'White-label admin and web UI with custom logos and colors', 'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, true, 14900, 260),
 ('billing_portal',            'Self-Service Billing',       'Tenant-facing subscription, invoices, plan change and payment portal (admin-service /my-billing). Absent from Core; usage-against-limits is unconditional.', 'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, false, NULL,  69),
@@ -244,6 +251,7 @@ FROM (VALUES
     ('community',     'sso_saml',                    '{"enabled": false}'),
     ('community',     'custom_branding',             '{"enabled": false}'),
     ('community',     'cmdb_sync',                   '{"enabled": false}'),
+    ('community',     'connector_netbox',            '{"enabled": false}'),
     ('community',     'siem_export',                 '{"enabled": false}'),
     ('community',     'billing_portal',              '{"enabled": false}'),
     ('community',     'support_sla_tier',            '{"value": "community"}'),
@@ -265,6 +273,7 @@ FROM (VALUES
     ('free',          'sso_saml',                    '{"enabled": false}'),
     ('free',          'custom_branding',             '{"enabled": false}'),
     ('free',          'cmdb_sync',                   '{"enabled": false}'),
+    ('free',          'connector_netbox',            '{"enabled": false}'),
     ('free',          'siem_export',                 '{"enabled": false}'),
     ('free',          'billing_portal',              '{"enabled": false}'),
     ('free',          'support_sla_tier',            '{"value": "community"}'),
@@ -286,6 +295,7 @@ FROM (VALUES
     ('starter',       'sso_saml',                    '{"enabled": false}'),
     ('starter',       'custom_branding',             '{"enabled": false}'),
     ('starter',       'cmdb_sync',                   '{"enabled": false}'),
+    ('starter',       'connector_netbox',            '{"enabled": false}'),
     ('starter',       'siem_export',                 '{"enabled": false}'),
     ('starter',       'billing_portal',              '{"enabled": false}'),
     ('starter',       'support_sla_tier',            '{"value": "business"}'),
@@ -307,6 +317,7 @@ FROM (VALUES
     ('pro',           'sso_saml',                    '{"enabled": false}'),
     ('pro',           'custom_branding',             '{"enabled": false}'),
     ('pro',           'cmdb_sync',                   '{"enabled": false}'),
+    ('pro',           'connector_netbox',            '{"enabled": false}'),
     ('pro',           'siem_export',                 '{"enabled": false}'),
     ('pro',           'billing_portal',              '{"enabled": false}'),
     ('pro',           'support_sla_tier',            '{"value": "nbd"}'),
@@ -346,6 +357,7 @@ FROM (VALUES
     ('enterprise',    'sso_saml',                    '{"enabled": false}'),
     ('enterprise',    'custom_branding',             '{"enabled": false}'),
     ('enterprise',    'cmdb_sync',                   '{"enabled": false}'),
+    ('enterprise',    'connector_netbox',            '{"enabled": false}'),
     ('enterprise',    'siem_export',                 '{"enabled": false}'),
     ('enterprise',    'billing_portal',              '{"enabled": false}'),
     ('enterprise',    'support_sla_tier',            '{"value": "premium"}')
@@ -379,36 +391,62 @@ WHERE subscription_tier_id IS NULL
 -- =================================================================
 -- Measurement Types (required for compliance framework controls)
 -- =================================================================
+-- BEGIN GENERATED: measurement type catalogue — from standards/measurement-types.yaml (make generate)
+-- The catalogue the rule builder offers and the extractor serves. Generated
+-- from standards/measurement-types.yaml, which also generates the Go registry
+-- (services/compliance-engine/internal/services/measurement_registry_gen.go),
+-- so a code offered here is always one the extractor implements.
+--
+-- ON CONFLICT DO UPDATE, not DO NOTHING: this is a catalogue, and an install
+-- that seeded it two releases ago must converge on the current text and value
+-- sets rather than keep the old ones forever. The row id is preserved, which
+-- is what control_measurements.measurement_type_id points at.
+--
+-- `extraction_query` is deliberately absent: ADR-0005 D5 drops that column
+-- rather than honouring it. SQL in a seeded row is an injection hazard and an
+-- upgrade hazard at once, and nothing ever executed it.
 INSERT INTO measurement_types (code, name, description, data_type, units, valid_range, allowed_rule_types, enum_values, valid_operators, category) VALUES
-('cert_expiration_days',   'Certificate Expiration Days',        'Number of days until certificate expiration',                                        'integer', 'days',    '{"min":0,"max":36500}'::jsonb,  '["threshold","range"]'::jsonb,    NULL,                                                                                                                   '["<=",">=","<",">","==","!="]'::jsonb, 'certificate'),
-('tls_version',            'TLS Protocol Version',               'TLS protocol version (TLS1.0, TLS1.1, TLS1.2, TLS1.3)',                              'enum',    'version', NULL,                            '["pattern","presence"]'::jsonb,   '["TLS1.0","TLS1.1","TLS1.2","TLS1.3"]'::jsonb,                                                                         NULL,                                   'tls'),
--- Key size is split by algorithm family, because one number means two different
--- things. 2048 bits is the SP 800-131A floor for RSA/DSA/DH; an elliptic-curve
--- key of 256 bits is STRONGER than RSA-2048 (SP 800-57 comparable strength:
--- 128-bit vs 112-bit). A single `key_size >= 2048` rule flagged every P-256 and
--- Ed25519 certificate as weak. The extractor routes each certificate to exactly
--- one of these by public_key_algorithm, and emits neither when the algorithm
--- cannot be classified (not assessed beats wrongly assessed).
-('key_size',               'Key Size (RSA/DSA/DH)',              'Cryptographic key size in bits for the finite-field family (RSA, DSA, Diffie-Hellman). Minimum 2048 bits (NIST SP 800-131A).', 'integer', 'bits',    '{"min":0,"max":16384}'::jsonb,  '["threshold","range"]'::jsonb,    NULL,                                                                                                                   '["<=",">=","<",">","==","!="]'::jsonb, 'certificate'),
-('key_size_ec',            'Key Size (Elliptic Curve)',          'Cryptographic key size in bits for the elliptic-curve family (ECDSA, EdDSA, X25519). Minimum 256 bits — equivalent to 128-bit classical security, above the RSA-2048 floor.', 'integer', 'bits',    '{"min":0,"max":1024}'::jsonb,   '["threshold","range"]'::jsonb,    NULL,                                                                                                                   '["<=",">=","<",">","==","!="]'::jsonb, 'certificate'),
-('cert_algorithm',         'Certificate Algorithm',              'Public key algorithm used in certificate (RSA, ECDSA, EdDSA, etc.)',                  'enum',    NULL,      NULL,                            '["pattern","presence"]'::jsonb,   '["RSA","ECDSA","EdDSA","DSA"]'::jsonb,                                                                                 NULL,                                   'certificate'),
-('key_exchange_algorithm', 'Key Exchange Algorithm',             'Key exchange algorithm used in TLS (ECDHE, DHE, RSA, ECDH, DH, NULL)',               'enum',    NULL,      NULL,                            '["pattern","presence"]'::jsonb,   '["ECDHE","DHE","RSA","ECDH","DH","NULL"]'::jsonb,                                                                       NULL,                                   'cipher'),
-('symmetric_encryption',   'Symmetric Encryption Algorithm',     'Symmetric encryption algorithm (AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305, etc.)', 'enum',    NULL,      NULL,                            '["pattern","presence"]'::jsonb,   '["AES-128-GCM","AES-256-GCM","AES-128-CBC","AES-256-CBC","ChaCha20-Poly1305","3DES","DES","RC4"]'::jsonb,               NULL,                                   'cipher'),
-('hash_algorithm',         'Hash Algorithm',                     'Hash algorithm used in cipher suite (SHA256, SHA384, SHA512, SHA1, MD5)',             'enum',    NULL,      NULL,                            '["pattern","presence"]'::jsonb,   '["SHA256","SHA384","SHA512","SHA1","MD5"]'::jsonb,                                                                      NULL,                                   'cipher'),
-('cipher_suite_name',      'Cipher Suite Name',                  'Full cipher suite name (e.g., TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384)',               'string',  NULL,      NULL,                            '["pattern","presence"]'::jsonb,   NULL,                                                                                                                   NULL,                                   'cipher'),
-('pfs_support',            'Perfect Forward Secrecy Support',    'Whether the connection supports Perfect Forward Secrecy (PFS)',                       'boolean', NULL,      NULL,                            '["presence"]'::jsonb,             NULL,                                                                                                                   NULL,                                   'tls'),
-('tls_compression_enabled','TLS Compression Enabled',            'Whether TLS compression is enabled (should be disabled)',                            'boolean', NULL,      NULL,                            '["presence"]'::jsonb,             NULL,                                                                                                                   NULL,                                   'tls'),
-('certificate_chain_valid','Certificate Chain Valid',             'Whether the certificate chain is valid and trusted',                                 'boolean', NULL,      NULL,                            '["presence"]'::jsonb,             NULL,                                                                                                                   NULL,                                   'certificate'),
-('ot_protocol_encryption', 'OT Protocol Encryption',              'Encryption status of an industrial / OT protocol session (Modbus, DNP3, MMS, ICCP, BACnet, EtherNet/IP). Returns the literal string "absent" when the protocol carries no cryptographic protection (a high-severity finding for OT cryptographic audits) and "present" when crypto is observed.', 'enum',    NULL,      NULL,                            '["pattern"]'::jsonb,              '["absent","present"]'::jsonb,                                                                                          NULL,                                   'ot'),
-('cert_pqc_status',        'Certificate PQC Status',             'Post-quantum readiness of a certificate public-key algorithm: quantum_vulnerable (classical RSA/ECDSA/EdDSA/DSA/DH) or quantum_safe (NIST PQC: ML-KEM/ML-DSA/SLH-DSA).', 'enum', NULL, NULL, '["pattern","presence"]'::jsonb, '["quantum_vulnerable","quantum_safe"]'::jsonb, NULL, 'certificate'),
-('cert_validity_days',     'Certificate Validity Period (days)', 'Total validity period of a certificate in days (not_after - not_before); distinct from days-until-expiry. Flags over-long certificate lifetimes (CA/Browser Forum max validity is trending toward 47 days).', 'integer', 'days', '{"min":0,"max":36500}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'certificate'),
--- PQC Readiness framework controls: certificate signature + crypto-config key-exchange/signature/symmetric.
--- Quantum (Shor) breaks asymmetric crypto (key exchange + signatures); symmetric (Grover) only loses half its margin.
-('cert_sig_pqc_status',    'Certificate Signature PQC Status',   'Post-quantum readiness of the algorithm a certificate was SIGNED with (the CA''s signature): quantum_vulnerable (classical RSA/ECDSA/EdDSA/DSA) or quantum_safe (NIST PQC: ML-DSA/SLH-DSA/FN-DSA).', 'enum', NULL, NULL, '["pattern","presence"]'::jsonb, '["quantum_vulnerable","quantum_safe"]'::jsonb, NULL, 'certificate'),
-('config_kex_pqc_status',  'Config Key-Exchange PQC Status',     'Post-quantum readiness of a crypto-config key-exchange algorithm: quantum_vulnerable (classical RSA/ECDH/DH) or quantum_safe (NIST PQC ML-KEM or a hybrid such as X25519MLKEM768). The most urgent PQC control — harvest-now-decrypt-later exposure.', 'enum', NULL, NULL, '["pattern","presence"]'::jsonb, '["quantum_vulnerable","quantum_safe"]'::jsonb, NULL, 'cipher'),
-('config_sig_pqc_status',  'Config Signature PQC Status',        'Post-quantum readiness of a crypto-config signature/authentication algorithm: quantum_vulnerable (classical RSA/ECDSA/EdDSA) or quantum_safe (NIST PQC: ML-DSA/SLH-DSA/FN-DSA).', 'enum', NULL, NULL, '["pattern","presence"]'::jsonb, '["quantum_vulnerable","quantum_safe"]'::jsonb, NULL, 'cipher'),
-('config_sym_strength',    'Config Symmetric Quantum Margin',    'Quantum strength margin of a crypto-config symmetric cipher: quantum_safe (AES-192/256 or ChaCha20, retain >=128-bit security under Grover) or quantum_marginal (AES-128 and weaker, below the post-quantum / CNSA 2.0 margin). Advisory.', 'enum', NULL, NULL, '["pattern","presence"]'::jsonb, '["quantum_safe","quantum_marginal"]'::jsonb, NULL, 'cipher')
-ON CONFLICT (code) DO NOTHING;
+('cert_expiration_days', 'Certificate Expiration Days', 'Number of days until certificate expiration', 'integer', 'days', '{"min":0,"max":36500}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'certificate'),
+('key_size', 'Key Size (RSA/DSA/DH)', 'Cryptographic key size in bits for the finite-field family (RSA, DSA, Diffie-Hellman). Minimum 2048 bits (NIST SP 800-131A).', 'integer', 'bits', '{"min":0,"max":16384}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'certificate'),
+('key_size_ec', 'Key Size (Elliptic Curve)', 'Cryptographic key size in bits for the elliptic-curve family (ECDSA, EdDSA, X25519). Minimum 256 bits — equivalent to 128-bit classical security, above the RSA-2048 floor.', 'integer', 'bits', '{"min":0,"max":1024}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'certificate'),
+('cert_algorithm', 'Certificate Algorithm', 'Public key algorithm used in certificate (RSA, ECDSA, EdDSA, etc.)', 'enum', NULL, NULL, '["pattern","presence"]'::jsonb, '["RSA","ECDSA","EdDSA","DSA"]'::jsonb, NULL, 'certificate'),
+('cert_pqc_status', 'Certificate PQC Status', 'Post-quantum readiness of a certificate public-key algorithm: quantum_vulnerable (classical RSA/ECDSA/EdDSA/DSA/DH) or quantum_safe (NIST PQC: ML-KEM/ML-DSA/SLH-DSA).', 'enum', NULL, NULL, '["pattern","presence"]'::jsonb, '["quantum_vulnerable","quantum_safe"]'::jsonb, NULL, 'certificate'),
+('cert_sig_pqc_status', 'Certificate Signature PQC Status', 'Post-quantum readiness of the algorithm a certificate was SIGNED with (the CA''s signature): quantum_vulnerable (classical RSA/ECDSA/EdDSA/DSA) or quantum_safe (NIST PQC: ML-DSA/SLH-DSA/FN-DSA).', 'enum', NULL, NULL, '["pattern","presence"]'::jsonb, '["quantum_vulnerable","quantum_safe"]'::jsonb, NULL, 'certificate'),
+('cert_validity_days', 'Certificate Validity Period (days)', 'Total validity period of a certificate in days (not_after - not_before); distinct from days-until-expiry. Flags over-long certificate lifetimes (CA/Browser Forum max validity is trending toward 47 days).', 'integer', 'days', '{"min":0,"max":36500}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'certificate'),
+('certificate_chain_valid', 'Certificate Chain Valid', 'Whether the certificate chain is valid and trusted', 'boolean', NULL, NULL, '["presence"]'::jsonb, NULL, NULL, 'certificate'),
+('tls_version', 'TLS Protocol Version', 'TLS protocol version (TLS1.0, TLS1.1, TLS1.2, TLS1.3)', 'enum', 'version', NULL, '["pattern","presence"]'::jsonb, '["TLS1.0","TLS1.1","TLS1.2","TLS1.3"]'::jsonb, NULL, 'tls'),
+('key_exchange_algorithm', 'Key Exchange Algorithm', 'Key exchange algorithm used in TLS (ECDHE, DHE, RSA, ECDH, DH, NULL)', 'enum', NULL, NULL, '["pattern","presence"]'::jsonb, '["ECDHE","DHE","RSA","ECDH","DH","NULL"]'::jsonb, NULL, 'cipher'),
+('symmetric_encryption', 'Symmetric Encryption Algorithm', 'Symmetric encryption algorithm (AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305, etc.)', 'enum', NULL, NULL, '["pattern","presence"]'::jsonb, '["AES-128-GCM","AES-256-GCM","AES-128-CBC","AES-256-CBC","ChaCha20-Poly1305","3DES","DES","RC4"]'::jsonb, NULL, 'cipher'),
+('hash_algorithm', 'Hash Algorithm', 'Hash algorithm used in cipher suite (SHA256, SHA384, SHA512, SHA1, MD5)', 'enum', NULL, NULL, '["pattern","presence"]'::jsonb, '["SHA256","SHA384","SHA512","SHA1","MD5"]'::jsonb, NULL, 'cipher'),
+('cipher_suite_name', 'Cipher Suite Name', 'Full cipher suite name (e.g., TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384)', 'string', NULL, NULL, '["pattern","presence"]'::jsonb, NULL, NULL, 'cipher'),
+('pfs_support', 'Perfect Forward Secrecy Support', 'Whether the connection supports Perfect Forward Secrecy (PFS)', 'boolean', NULL, NULL, '["presence"]'::jsonb, NULL, NULL, 'tls'),
+('tls_compression_enabled', 'TLS Compression Enabled', 'Whether TLS compression is enabled (should be disabled: CRIME). Read from the probe record, three-valued — a configuration whose probe did not record compression yields no measurement and is reported as not assessed, never as "compression disabled".', 'boolean', NULL, NULL, '["presence"]'::jsonb, NULL, NULL, 'tls'),
+('ot_protocol_encryption', 'OT Protocol Encryption', 'Encryption status of an industrial / OT protocol session (Modbus, DNP3, MMS, ICCP, BACnet, EtherNet/IP). Returns the literal string "absent" when the protocol carries no cryptographic protection (a high-severity finding for OT cryptographic audits) and "present" when crypto is observed.', 'enum', NULL, NULL, '["pattern"]'::jsonb, '["absent","present"]'::jsonb, NULL, 'ot'),
+('config_kex_pqc_status', 'Config Key-Exchange PQC Status', 'Post-quantum readiness of a crypto-config key-exchange algorithm: quantum_vulnerable (classical RSA/ECDH/DH) or quantum_safe (NIST PQC ML-KEM or a hybrid such as X25519MLKEM768). The most urgent PQC control — harvest-now-decrypt-later exposure.', 'enum', NULL, NULL, '["pattern","presence"]'::jsonb, '["quantum_vulnerable","quantum_safe"]'::jsonb, NULL, 'cipher'),
+('config_sig_pqc_status', 'Config Signature PQC Status', 'Post-quantum readiness of a crypto-config signature/authentication algorithm: quantum_vulnerable (classical RSA/ECDSA/EdDSA) or quantum_safe (NIST PQC: ML-DSA/SLH-DSA/FN-DSA).', 'enum', NULL, NULL, '["pattern","presence"]'::jsonb, '["quantum_vulnerable","quantum_safe"]'::jsonb, NULL, 'cipher'),
+('config_sym_strength', 'Config Symmetric Quantum Margin', 'Quantum strength margin of a crypto-config symmetric cipher: quantum_safe (AES-192/256 or ChaCha20, retain >=128-bit security under Grover) or quantum_marginal (AES-128 and weaker, below the post-quantum / CNSA 2.0 margin). Advisory.', 'enum', NULL, NULL, '["pattern","presence"]'::jsonb, '["quantum_safe","quantum_marginal"]'::jsonb, NULL, 'cipher'),
+('asset_has_owner', 'Asset Has Owner', 'Whether a monitored asset names someone accountable for it — an owner_email or a support_group. Mirrors the hygiene producer''s `no_owner` finding: an asset with neither is an asset nobody can be asked about.', 'boolean', NULL, NULL, '["presence"]'::jsonb, NULL, NULL, 'hygiene'),
+('asset_class', 'Asset Class', 'The asset''s class key from the platform taxonomy. `unknown_host` is the placeholder the classifier assigns when it could not decide, and an unclassified asset is invisible to class facets and to any class-scoped policy (the hygiene producer''s `no_class` finding).', 'string', NULL, NULL, '["pattern","presence"]'::jsonb, NULL, NULL, 'hygiene'),
+('asset_has_location', 'Asset Has Location', 'Whether a monitored asset records where it is — a site, region, zone or a location row. Mirrors the hygiene producer''s `no_location` finding.', 'boolean', NULL, NULL, '["presence"]'::jsonb, NULL, NULL, 'hygiene'),
+('last_seen_days', 'Days Since Last Seen', 'Days since any collector last observed the asset. The hygiene producer''s `stale` ladder starts at 30 days; a record nothing has confirmed for longer is the main way an inventory silently becomes wrong.', 'integer', 'days', '{"min":0,"max":36500}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'hygiene'),
+('duplicate_suspected_count', 'Suspected Duplicate Count', 'How many open `duplicate_suspected` findings the hygiene producer holds against this asset — two records sharing an identifier that the identification engine would not merge on its own. Zero is the compliant value. An asset the hygiene producer has never evaluated yields NO measurement and is reported as not assessed, never as clean.', 'integer', 'findings', '{"min":0,"max":1000}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'hygiene'),
+('orphan_relationship_count', 'Orphan Relationship Count', 'How many open `orphan_relationship` findings the hygiene producer holds against relationships this asset takes part in — edges pointing at an asset that has been archived or deleted. Zero is the compliant value; an asset the producer has never evaluated is not assessed.', 'integer', 'findings', '{"min":0,"max":1000}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'hygiene'),
+('mgmt_plaintext', 'Plaintext Management Findings', 'How many open `plaintext_management` findings this asset carries — a management plane reached over Telnet, FTP, SNMP v1/v2c or another protocol with no transport confidentiality. Zero is the compliant value. An asset the configuration producer has never evaluated yields NO measurement and is reported as not assessed, never as clean. Counts findings on the asset itself and on its endpoints, so a device with a live Telnet listener cannot read as compliant because the finding was recorded against the socket rather than the host.', 'integer', 'findings', '{"min":0,"max":1000}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'configuration'),
+('os_eol_days', 'Days Until OS End of Life', 'Days until the end-of-life date the EOL catalogue resolved for this asset''s operating system (`eol.os.date`). Negative once the date has passed. An asset with no resolved date yields NO measurement — an OS the catalogue does not cover is not assessed, not supported.', 'integer', 'days', '{"min":-36500,"max":36500}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'lifecycle'),
+('software_eol_days', 'Days Until Software End of Life', 'Days until the end-of-life date the EOL catalogue resolved for an installed software product on this asset (`eol.sw.date`). Negative once the date has passed. One measurement per resolved date; an asset with none is not assessed.', 'integer', 'days', '{"min":-36500,"max":36500}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'lifecycle'),
+('hardware_eos_days', 'Days Until Hardware End of Support', 'Days until the end-of-SUPPORT date the EOL catalogue resolved for this asset''s hardware (`eol.hw.date`) — the date after which the vendor ships no more firmware fixes, not the date it stopped selling it. Negative once the date has passed; hardware the catalogue does not cover is not assessed.', 'integer', 'days', '{"min":-36500,"max":36500}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'lifecycle')
+ON CONFLICT (code) DO UPDATE SET
+    name = EXCLUDED.name,
+    description = EXCLUDED.description,
+    data_type = EXCLUDED.data_type,
+    units = EXCLUDED.units,
+    valid_range = EXCLUDED.valid_range,
+    allowed_rule_types = EXCLUDED.allowed_rule_types,
+    enum_values = EXCLUDED.enum_values,
+    valid_operators = EXCLUDED.valid_operators,
+    category = EXCLUDED.category,
+    updated_at = NOW();
+-- END GENERATED: measurement type catalogue
 
 -- =================================================================
 -- Tenant Permissions (assigned to tenant roles when tenants are created)
@@ -2246,6 +2284,20 @@ DECLARE
     config_kex_pqc_mt_id UUID;
     config_sig_pqc_mt_id UUID;
     config_sym_mt_id UUID;
+
+    -- Inventory Hygiene and Lifecycle (ADR-0005 D5). These measure the
+    -- inventory itself rather than cryptography: whether a record is owned,
+    -- classified, located and fresh, and whether what it describes is still
+    -- supported by its vendor.
+    asset_has_owner_mt_id UUID;
+    asset_class_mt_id UUID;
+    asset_has_location_mt_id UUID;
+    last_seen_days_mt_id UUID;
+    duplicate_suspected_mt_id UUID;
+    orphan_relationship_mt_id UUID;
+    os_eol_days_mt_id UUID;
+    software_eol_days_mt_id UUID;
+    hardware_eos_days_mt_id UUID;
     fw_id UUID;
     ctl_id UUID;
 BEGIN
@@ -2259,6 +2311,15 @@ BEGIN
     SELECT id INTO config_kex_pqc_mt_id  FROM measurement_types WHERE code = 'config_kex_pqc_status';
     SELECT id INTO config_sig_pqc_mt_id  FROM measurement_types WHERE code = 'config_sig_pqc_status';
     SELECT id INTO config_sym_mt_id      FROM measurement_types WHERE code = 'config_sym_strength';
+    SELECT id INTO asset_has_owner_mt_id     FROM measurement_types WHERE code = 'asset_has_owner';
+    SELECT id INTO asset_class_mt_id         FROM measurement_types WHERE code = 'asset_class';
+    SELECT id INTO asset_has_location_mt_id  FROM measurement_types WHERE code = 'asset_has_location';
+    SELECT id INTO last_seen_days_mt_id      FROM measurement_types WHERE code = 'last_seen_days';
+    SELECT id INTO duplicate_suspected_mt_id FROM measurement_types WHERE code = 'duplicate_suspected_count';
+    SELECT id INTO orphan_relationship_mt_id FROM measurement_types WHERE code = 'orphan_relationship_count';
+    SELECT id INTO os_eol_days_mt_id         FROM measurement_types WHERE code = 'os_eol_days';
+    SELECT id INTO software_eol_days_mt_id   FROM measurement_types WHERE code = 'software_eol_days';
+    SELECT id INTO hardware_eos_days_mt_id   FROM measurement_types WHERE code = 'hardware_eos_days';
 
     -- ===================== Post-Quantum Readiness =====================
     INSERT INTO platform_frameworks (id, code, name, version, description, organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at)
@@ -2447,6 +2508,171 @@ BEGIN
     END IF;
 
     RAISE NOTICE 'Seeded certificate opt-in frameworks (PQC Readiness, Certificate Hygiene, Expiry: Not-Expired/30/90)';
+
+    -- ===================== Inventory Hygiene =====================
+    -- The general inventory's "best practices": is the record itself any good?
+    -- Nothing here is a security finding — a missing owner does not make a host
+    -- less secure — which is why the hygiene producer contributes 0 to risk and
+    -- this framework is scored separately from the crypto ones.
+    --
+    -- Every control is THREE-VALUED. The measurements behind IH-001 to IH-004
+    -- read the asset row and are always answerable for a monitored asset; the
+    -- two counting controls (IH-005, IH-006) yield NO measurement at all until
+    -- the hygiene producer has evaluated the asset, so an install where that
+    -- producer has never run shows them as "not assessed" rather than as a
+    -- clean bill of health.
+    INSERT INTO platform_frameworks (id, code, name, version, description, organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at)
+    VALUES (gen_random_uuid(), 'inventory-hygiene', 'Inventory Hygiene', '1.0',
+        'Measures the quality of the inventory record itself: is every asset owned, classified, located and recently seen, and are there duplicates or dangling relationships? Data quality, not security — nothing here contributes to an asset''s risk score. Activate to get a hygiene score and a worklist.',
+        'Vista Platform', 'published', false, NOW(),
+        COALESCE(platform_admin_id, '00000000-0000-0000-0000-000000000001'::uuid),
+        COALESCE(platform_admin_id, '00000000-0000-0000-0000-000000000001'::uuid), NOW(), NOW())
+    ON CONFLICT (code, version) DO UPDATE SET status='published', is_platform_default=false, description=EXCLUDED.description, updated_at=NOW()
+    RETURNING id INTO fw_id;
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'IH-001', 'Every asset has an owner',
+        'The asset records neither an owner email nor a support group. An asset nobody is accountable for is an asset nobody can be asked about when it fails a control.', 'Low', false, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF asset_has_owner_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=asset_has_owner_mt_id AND framework_type='platform') THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', asset_has_owner_mt_id, 'presence', '{"exists": true}'::jsonb, 'Low', 5, NOW(), NOW());
+    END IF;
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'IH-002', 'Every asset is classified',
+        'The asset still sits on the unknown_host placeholder the classifier assigns when it cannot decide what something is. An unclassified asset is invisible to class facets and to every class-scoped policy.', 'Low', false, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF asset_class_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=asset_class_mt_id AND framework_type='platform') THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', asset_class_mt_id, 'pattern', '{"pattern": "^unknown_host$", "flags": "i", "match_means_violation": true}'::jsonb, 'Low', 5, NOW(), NOW());
+    END IF;
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'IH-003', 'Every asset has a location',
+        'The asset records no site, region, zone or location. Location is what turns a compliance finding into a work order somebody can act on.', 'Low', false, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF asset_has_location_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=asset_has_location_mt_id AND framework_type='platform') THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', asset_has_location_mt_id, 'presence', '{"exists": true}'::jsonb, 'Low', 4, NOW(), NOW());
+    END IF;
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'IH-004', 'No stale asset records',
+        'No collector has observed the asset for more than 30 days — the first rung of the hygiene producer''s stale ladder. Stale records are the main way an inventory silently becomes wrong.', 'Low', false, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF last_seen_days_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=last_seen_days_mt_id AND framework_type='platform') THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', last_seen_days_mt_id, 'threshold', '{"operator": "<=", "value": 30}'::jsonb, 'Low', 4, NOW(), NOW());
+    END IF;
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'IH-005', 'No suspected duplicate assets',
+        'The identification engine found two records sharing an identifier but disagreeing on others, and did not merge them on its own. The merge proposal is waiting in Approvals. Not assessed until the hygiene producer has evaluated the asset.', 'Med', false, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF duplicate_suspected_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=duplicate_suspected_mt_id AND framework_type='platform') THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', duplicate_suspected_mt_id, 'threshold', '{"operator": "==", "value": 0}'::jsonb, 'Med', 6, NOW(), NOW());
+    END IF;
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'IH-006', 'No orphan relationships',
+        'A relationship this asset takes part in points at an asset that has been archived or deleted. The edge is kept so the history stays readable, but it should be resolved. Not assessed until the hygiene producer has evaluated the asset.', 'Low', false, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF orphan_relationship_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=orphan_relationship_mt_id AND framework_type='platform') THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', orphan_relationship_mt_id, 'threshold', '{"operator": "==", "value": 0}'::jsonb, 'Low', 3, NOW(), NOW());
+    END IF;
+
+    -- ===================== Lifecycle =====================
+    -- Every control here measures an `eol.*` fact the platform resolved from the
+    -- end-of-life catalogue. An asset whose OS, software or hardware the
+    -- catalogue does not cover carries no such fact and therefore produces NO
+    -- measurement: the control reads as NOT ASSESSED, never as supported. That
+    -- distinction is the whole value of the framework — "we could not find out"
+    -- and "it is fine" are different answers, and a lifecycle report that
+    -- conflates them is worse than none.
+    --
+    -- Severities follow the eol producer's ladders in
+    -- standards/findings-registry.yaml: an OS past end of life is High and one
+    -- approaching it is Low; software and hardware are rated a rung below the
+    -- platform they run on, because the blast radius of one package is narrower.
+    INSERT INTO platform_frameworks (id, code, name, version, description, organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at)
+    VALUES (gen_random_uuid(), 'lifecycle', 'Lifecycle', '1.0',
+        'Tracks what in your inventory has outlived its vendor support: operating systems past end of life, installed software past end of life, and hardware past end of support, plus an early warning 90 days out. Scored only where the end-of-life catalogue could resolve a date — anything it does not cover is reported as not assessed, never as supported.',
+        'Vista Platform', 'published', false, NOW(),
+        COALESCE(platform_admin_id, '00000000-0000-0000-0000-000000000001'::uuid),
+        COALESCE(platform_admin_id, '00000000-0000-0000-0000-000000000001'::uuid), NOW(), NOW())
+    ON CONFLICT (code, version) DO UPDATE SET status='published', is_platform_default=false, description=EXCLUDED.description, updated_at=NOW()
+    RETURNING id INTO fw_id;
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'LC-001', 'No end-of-life operating systems',
+        'The asset runs an operating system whose end-of-life date has passed. It receives no further security fixes from its vendor, so every future vulnerability in it is permanent.', 'High', false, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF os_eol_days_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=os_eol_days_mt_id AND framework_type='platform' AND predicate = '{"operator": ">", "value": 0}'::jsonb) THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', os_eol_days_mt_id, 'threshold', '{"operator": ">", "value": 0}'::jsonb, 'High', 8, NOW(), NOW());
+    END IF;
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'LC-002', 'Operating systems approaching end of life',
+        'The asset runs an operating system with 90 days or less of vendor support remaining. This is the planning window: an upgrade scheduled now is maintenance, and one scheduled after the date is an incident. The rung is cumulative — an operating system already past end of life has none remaining, so it fails this control as well as LC-001.', 'Low', false, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF os_eol_days_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=os_eol_days_mt_id AND framework_type='platform' AND predicate = '{"operator": ">", "value": 90}'::jsonb) THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', os_eol_days_mt_id, 'threshold', '{"operator": ">", "value": 90}'::jsonb, 'Low', 3, NOW(), NOW());
+    END IF;
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'LC-003', 'No end-of-life software',
+        'An installed software product on this asset has passed its end-of-life date. Scored below the operating system control because the blast radius of one package is narrower than the platform it runs on.', 'Med', false, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF software_eol_days_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=software_eol_days_mt_id AND framework_type='platform') THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', software_eol_days_mt_id, 'threshold', '{"operator": ">", "value": 0}'::jsonb, 'Med', 6, NOW(), NOW());
+    END IF;
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'LC-004', 'No hardware past end of support',
+        'The asset''s hardware is past its vendor end-of-SUPPORT date — the date after which no further firmware fixes ship, which is not the date it stopped being sold.', 'Med', false, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF hardware_eos_days_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=hardware_eos_days_mt_id AND framework_type='platform') THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', hardware_eos_days_mt_id, 'threshold', '{"operator": ">", "value": 0}'::jsonb, 'Med', 5, NOW(), NOW());
+    END IF;
+
+    RAISE NOTICE 'Seeded inventory frameworks (Inventory Hygiene, Lifecycle)';
 END $$;
 
 -- =====================================================================
@@ -2509,17 +2735,13 @@ SET predicate = jsonb_set(predicate, '{pattern}',
     updated_at = NOW()
 WHERE predicate ->> 'pattern' = '^(TLS.?1\.0|TLS.?1\.1|1\.0|1\.1)$';
 
--- CMP-4: `key_size` used to mean "any certificate's key size" and carried the
--- 2048-bit floor for all of them. It is now the finite-field (RSA/DSA/DH)
--- measurement, with `key_size_ec` alongside it for the elliptic-curve family.
--- measurement_types is seeded ON CONFLICT DO NOTHING, so the renamed row needs
--- an explicit update on existing deployments. Keyed on the old text.
-UPDATE measurement_types
-SET name = 'Key Size (RSA/DSA/DH)',
-    description = 'Cryptographic key size in bits for the finite-field family (RSA, DSA, Diffie-Hellman). Minimum 2048 bits (NIST SP 800-131A).',
-    updated_at = NOW()
-WHERE code = 'key_size'
-  AND description = 'Cryptographic key size in bits';
+-- CMP-4's repair of the `key_size` row is gone, not lost: the generated
+-- measurement-type catalogue above now upserts name, description and every
+-- value set with ON CONFLICT DO UPDATE, so an install seeded before the
+-- finite-field/elliptic-curve split converges on the current text on its next
+-- seed run. The hand-written UPDATE that used to sit here could only ever match
+-- the OLD description, which the region three hundred lines above had already
+-- replaced — an inert statement pretending to be a migration.
 
 -- CMP-1: boolean presence predicates were inverted. `exists` states the PASS
 -- condition, so BP-004 ("PFS must be supported") and BP-007 ("chain must be
@@ -2545,10 +2767,10 @@ WHERE mt.id = cm.measurement_type_id
 -- Helm chart applies them from a separately signed content bundle when
 -- `enterprise.contentBundle.enabled=true`.
 --
--- Core seeds six frameworks, all of them free and all of them above:
+-- Core seeds eight frameworks, all of them free and all of them above:
 --   best-practices (platform default, auto-licensed), pqc-readiness,
 --   cert-hygiene, cert-expiry-not-expired, cert-expiry-30-day,
---   cert-expiry-90-day.
+--   cert-expiry-90-day, inventory-hygiene, lifecycle.
 --
 -- Nothing below depends on the regulated frameworks: the auto-license
 -- triggers in schema.sql look their frameworks up by code and no-op when the
@@ -2557,7 +2779,7 @@ WHERE mt.id = cm.measurement_type_id
 
 -- Final summary of framework seeding.
 --
--- Counts only the six FREE frameworks Core is responsible for. It deliberately
+-- Counts only the eight FREE frameworks Core is responsible for. It deliberately
 -- does NOT count all published frameworks: an Enterprise install also carries
 -- the regulated content bundle, so a total count would differ by edition and
 -- could not be asserted here.
@@ -2569,12 +2791,13 @@ BEGIN
     FROM platform_frameworks
     WHERE status = 'published'
       AND code IN ('best-practices', 'pqc-readiness', 'cert-hygiene',
-                   'cert-expiry-not-expired', 'cert-expiry-30-day', 'cert-expiry-90-day');
+                   'cert-expiry-not-expired', 'cert-expiry-30-day', 'cert-expiry-90-day',
+                   'inventory-hygiene', 'lifecycle');
 
-    IF free_framework_count = 6 THEN
-        RAISE NOTICE '✅ Framework seeding complete: all 6 free frameworks published';
+    IF free_framework_count = 8 THEN
+        RAISE NOTICE '✅ Framework seeding complete: all 8 free frameworks published';
     ELSIF free_framework_count > 0 THEN
-        RAISE WARNING '⚠️  Framework seeding incomplete: only % of 6 free frameworks published', free_framework_count;
+        RAISE WARNING '⚠️  Framework seeding incomplete: only % of 8 free frameworks published', free_framework_count;
         RAISE WARNING '   Check logs above for missing measurement_types or other errors';
     ELSE
         RAISE EXCEPTION 'CRITICAL: No frameworks were created! Check that measurement_types table exists and is populated.';
@@ -4079,7 +4302,7 @@ WHERE  bi.id = te.item_id
          'custom_policies', 'threshold_overrides',
          'ot_active_probing', 'ot_primary_lens',
          'cbom_signing', 'sso_saml', 'custom_branding',
-         'cmdb_sync', 'siem_export', 'billing_portal'
+         'cmdb_sync', 'connector_netbox', 'siem_export', 'billing_portal'
        )
   AND  te.included_value IS DISTINCT FROM '{"enabled": false}'::jsonb;
 
@@ -4228,3 +4451,849 @@ INSERT INTO service_identification_rules (port, protocol, service_name, service_
     (44818, 'ETHERNET_IP', 'EtherNet/IP',       'ot',            true, NULL),
     (47808, 'BACNET',      'BACnet/IP',         'ot',            true, NULL)
 ON CONFLICT (port, protocol) WHERE tenant_id IS NULL DO NOTHING;
+
+
+-- =================================================================
+-- Platform asset classes (ADR-0002 D2, BUILD_PLAN workstream 0.1/0.2)
+-- =================================================================
+-- The fixed class hierarchy, as the platform (tenant_id IS NULL) rows of
+-- public.asset_classes. GENERATED from standards/asset-classes.yaml by
+-- scripts/generate-asset-classes.mjs — do not hand-edit the region below; edit
+-- the YAML and run `make generate`. `make audit` fails on drift, in this file
+-- and in the standalone scripts/database/seed-asset-classes.sql, which carries
+-- the same statement for readability.
+--
+-- Spliced inline rather than `\i`-included: the chart's seed-data Job hands
+-- psql a ConfigMap key built from {{ .Files.Get "files/schema/seed.sql" }},
+-- and a `\i` there resolves to a path that does not exist in the container —
+-- it would fail, or (without ON_ERROR_STOP, which the seed Job deliberately
+-- omits) skip silently, which is worse.
+--
+-- Tenant leaf subclasses are runtime rows with tenant_id set and
+-- is_fixed = false; this never touches them. The upsert restates every
+-- generated column, so re-applying after a taxonomy change reconciles existing
+-- rows rather than erroring.
+
+-- BEGIN GENERATED: platform asset classes — from standards/asset-classes.yaml (make generate)
+INSERT INTO public.asset_classes (
+    tenant_id, key, parent_key, path,
+    label, description, icon,
+    attribute_schema, identifier_precedence,
+    cmdb_ci_type, cyclonedx_type, is_fixed
+) VALUES
+    (NULL, 'hardware', NULL, 'hardware',
+     'Hardware', 'A physical thing with a chassis. Use this class directly when a device is known to be physical but nothing narrows it further.', 'CircuitBoard',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."}}}'::jsonb, ARRAY['serial_number', 'cmdb_sys_id', 'mac_address', 'fqdn', 'hostname', 'ip_address']::text[],
+     'cmdb_ci_hardware', 'device', true),
+    (NULL, 'computer', 'hardware', 'hardware.computer',
+     'Computer', 'A general-purpose machine running an operating system.', 'Computer',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"operating_system":{"type":"string","description":"OS product name, e.g. \"Ubuntu\", \"Windows Server\"."},"os_version":{"type":"string","description":"OS version string as reported."},"architecture":{"type":"string","description":"CPU architecture, e.g. amd64, arm64."},"cpu_count":{"type":"integer","description":"Logical CPU count."},"memory_mb":{"type":"integer","description":"Installed memory in mebibytes."}}}'::jsonb, ARRAY['agent_id', 'serial_number', 'cmdb_sys_id', 'ssh_host_key_fingerprint', 'mac_address', 'fqdn', 'hostname', 'ip_address']::text[],
+     'cmdb_ci_computer', 'device', true),
+    (NULL, 'server', 'computer', 'hardware.computer.server',
+     'Server', 'A computer providing services to other machines.', 'Server',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"operating_system":{"type":"string","description":"OS product name, e.g. \"Ubuntu\", \"Windows Server\"."},"os_version":{"type":"string","description":"OS version string as reported."},"architecture":{"type":"string","description":"CPU architecture, e.g. amd64, arm64."},"cpu_count":{"type":"integer","description":"Logical CPU count."},"memory_mb":{"type":"integer","description":"Installed memory in mebibytes."},"server_role":{"type":"string","description":"Primary role the server plays, e.g. web, database, file, domain controller. Free text; the relationship graph is authoritative."}}}'::jsonb, ARRAY['agent_id', 'serial_number', 'cmdb_sys_id', 'ssh_host_key_fingerprint', 'mac_address', 'fqdn', 'hostname', 'ip_address']::text[],
+     'cmdb_ci_server', 'device', true),
+    (NULL, 'workstation', 'computer', 'hardware.computer.workstation',
+     'Workstation', 'A desktop computer used by a person.', 'Monitor',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"operating_system":{"type":"string","description":"OS product name, e.g. \"Ubuntu\", \"Windows Server\"."},"os_version":{"type":"string","description":"OS version string as reported."},"architecture":{"type":"string","description":"CPU architecture, e.g. amd64, arm64."},"cpu_count":{"type":"integer","description":"Logical CPU count."},"memory_mb":{"type":"integer","description":"Installed memory in mebibytes."},"assigned_user":{"type":"string","description":"Primary user, by email or directory name."}}}'::jsonb, ARRAY['agent_id', 'serial_number', 'cmdb_sys_id', 'mac_address', 'fqdn', 'hostname']::text[],
+     'cmdb_ci_pc_hardware', 'device', true),
+    (NULL, 'laptop', 'computer', 'hardware.computer.laptop',
+     'Laptop', 'A portable computer used by a person.', 'Laptop',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"operating_system":{"type":"string","description":"OS product name, e.g. \"Ubuntu\", \"Windows Server\"."},"os_version":{"type":"string","description":"OS version string as reported."},"architecture":{"type":"string","description":"CPU architecture, e.g. amd64, arm64."},"cpu_count":{"type":"integer","description":"Logical CPU count."},"memory_mb":{"type":"integer","description":"Installed memory in mebibytes."},"assigned_user":{"type":"string","description":"Primary user, by email or directory name."}}}'::jsonb, ARRAY['agent_id', 'serial_number', 'cmdb_sys_id', 'mac_address', 'hostname']::text[],
+     'cmdb_ci_pc_hardware', 'device', true),
+    (NULL, 'mobile', 'computer', 'hardware.computer.mobile',
+     'Mobile device', 'A phone or tablet.', 'Smartphone',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"operating_system":{"type":"string","description":"OS product name, e.g. \"Ubuntu\", \"Windows Server\"."},"os_version":{"type":"string","description":"OS version string as reported."},"architecture":{"type":"string","description":"CPU architecture, e.g. amd64, arm64."},"cpu_count":{"type":"integer","description":"Logical CPU count."},"memory_mb":{"type":"integer","description":"Installed memory in mebibytes."},"platform":{"type":"string","enum":["ios","android","other"],"description":"Mobile platform family."},"mdm_enrolled":{"type":"boolean","description":"Whether the device is enrolled in mobile device management."}}}'::jsonb, ARRAY['agent_id', 'serial_number', 'cmdb_sys_id', 'mac_address', 'hostname']::text[],
+     NULL, 'device', true),
+    (NULL, 'network_device', 'hardware', 'hardware.network_device',
+     'Network device', 'Equipment whose job is moving or filtering traffic.', 'Network',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"firmware_version":{"type":"string","description":"Running firmware or network-OS version."}}}'::jsonb, ARRAY['serial_number', 'cmdb_sys_id', 'ssh_host_key_fingerprint', 'mac_address', 'fqdn', 'hostname', 'ip_address']::text[],
+     'cmdb_ci_netgear', 'device', true),
+    (NULL, 'switch', 'network_device', 'hardware.network_device.switch',
+     'Switch', 'A layer-2 (or layer-3) forwarding device.', 'EthernetPort',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"firmware_version":{"type":"string","description":"Running firmware or network-OS version."},"switch_layer":{"type":"integer","description":"2 or 3, per the forwarding the switch performs."},"port_count":{"type":"integer","description":"Physical port count."}}}'::jsonb, ARRAY['serial_number', 'cmdb_sys_id', 'ssh_host_key_fingerprint', 'mac_address', 'fqdn', 'hostname', 'ip_address']::text[],
+     'cmdb_ci_ip_switch', 'device', true),
+    (NULL, 'router', 'network_device', 'hardware.network_device.router',
+     'Router', 'A device routing between networks.', 'Router',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"firmware_version":{"type":"string","description":"Running firmware or network-OS version."},"routing_protocols":{"type":"array","items":{"type":"string"},"description":"Routing protocols observed in the configuration."}}}'::jsonb, ARRAY['serial_number', 'cmdb_sys_id', 'ssh_host_key_fingerprint', 'mac_address', 'fqdn', 'hostname', 'ip_address']::text[],
+     'cmdb_ci_ip_router', 'device', true),
+    (NULL, 'firewall', 'network_device', 'hardware.network_device.firewall',
+     'Firewall', 'A policy-enforcing filter between network zones.', 'Shield',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"firmware_version":{"type":"string","description":"Running firmware or network-OS version."},"ha_role":{"type":"string","enum":["standalone","active","passive","unknown"],"description":"Role in a high-availability pair."}}}'::jsonb, ARRAY['serial_number', 'cmdb_sys_id', 'ssh_host_key_fingerprint', 'mac_address', 'fqdn', 'hostname', 'ip_address']::text[],
+     'cmdb_ci_ip_firewall', 'device', true),
+    (NULL, 'load_balancer', 'network_device', 'hardware.network_device.load_balancer',
+     'Load balancer', 'A device distributing connections across backends. Often the tenant''s largest concentration of TLS termination.', 'Split',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"firmware_version":{"type":"string","description":"Running firmware or network-OS version."},"virtual_server_count":{"type":"integer","description":"Number of configured virtual servers or listeners."},"ssl_offload_enabled":{"type":"boolean","description":"Whether the device terminates TLS on behalf of backends."}}}'::jsonb, ARRAY['serial_number', 'cmdb_sys_id', 'ssh_host_key_fingerprint', 'mac_address', 'fqdn', 'hostname', 'ip_address']::text[],
+     'cmdb_ci_lb', 'device', true),
+    (NULL, 'wireless_controller', 'network_device', 'hardware.network_device.wireless_controller',
+     'Wireless controller', 'A controller managing a fleet of access points.', 'RadioTower',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"firmware_version":{"type":"string","description":"Running firmware or network-OS version."},"managed_ap_count":{"type":"integer","description":"Access points the controller reports managing."}}}'::jsonb, ARRAY['serial_number', 'cmdb_sys_id', 'ssh_host_key_fingerprint', 'mac_address', 'fqdn', 'hostname', 'ip_address']::text[],
+     NULL, 'device', true),
+    (NULL, 'access_point', 'network_device', 'hardware.network_device.access_point',
+     'Access point', 'A wireless access point.', 'Wifi',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"firmware_version":{"type":"string","description":"Running firmware or network-OS version."},"radio_bands":{"type":"array","items":{"type":"string"},"description":"Radio bands in service, e.g. 2.4GHz, 5GHz, 6GHz."},"controller_managed":{"type":"boolean","description":"Whether a wireless controller manages this AP."}}}'::jsonb, ARRAY['serial_number', 'cmdb_sys_id', 'mac_address', 'fqdn', 'hostname', 'ip_address']::text[],
+     'cmdb_ci_wap_network', 'device', true),
+    (NULL, 'vpn_gateway', 'network_device', 'hardware.network_device.vpn_gateway',
+     'VPN gateway', 'A device terminating remote-access or site-to-site tunnels.', 'ShieldCheck',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"firmware_version":{"type":"string","description":"Running firmware or network-OS version."},"vpn_types":{"type":"array","items":{"type":"string"},"description":"Tunnel families terminated, e.g. ipsec, ssl, wireguard."}}}'::jsonb, ARRAY['serial_number', 'cmdb_sys_id', 'ssh_host_key_fingerprint', 'mac_address', 'fqdn', 'hostname', 'ip_address']::text[],
+     NULL, 'device', true),
+    (NULL, 'storage_device', 'hardware', 'hardware.storage_device',
+     'Storage device', 'A storage array, NAS or SAN appliance.', 'HardDrive',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"firmware_version":{"type":"string","description":"Running firmware version."},"capacity_gb":{"type":"integer","description":"Raw capacity in gigabytes."},"storage_protocols":{"type":"array","items":{"type":"string"},"description":"Protocols served, e.g. iscsi, nfs, smb, fc."}}}'::jsonb, ARRAY['serial_number', 'cmdb_sys_id', 'mac_address', 'fqdn', 'hostname', 'ip_address']::text[],
+     'cmdb_ci_storage_device', 'device', true),
+    (NULL, 'printer', 'hardware', 'hardware.printer',
+     'Printer', 'A printer or multifunction device.', 'Printer',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"firmware_version":{"type":"string","description":"Running firmware version."},"print_protocols":{"type":"array","items":{"type":"string"},"description":"Print protocols offered, e.g. ipp, lpd, raw9100."}}}'::jsonb, ARRAY['serial_number', 'cmdb_sys_id', 'mac_address', 'fqdn', 'hostname', 'ip_address']::text[],
+     'cmdb_ci_printer', 'device', true),
+    (NULL, 'ot_device', 'hardware', 'hardware.ot_device',
+     'OT device', 'Operational-technology equipment on a plant or substation network. Rarely carries an agent and often cannot be actively probed safely.', 'Factory',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"firmware_version":{"type":"string","description":"Running firmware version."},"purdue_level":{"type":"integer","description":"Purdue model level 0-5 the device sits at."},"industrial_protocols":{"type":"array","items":{"type":"string"},"description":"Industrial protocols spoken, e.g. modbus, dnp3, ethernet-ip."}}}'::jsonb, ARRAY['serial_number', 'cmdb_sys_id', 'mac_address', 'hostname', 'ip_address']::text[],
+     NULL, 'device', true),
+    (NULL, 'plc', 'ot_device', 'hardware.ot_device.plc',
+     'PLC', 'A programmable logic controller.', 'Cpu',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"firmware_version":{"type":"string","description":"Running firmware version."},"purdue_level":{"type":"integer","description":"Purdue model level 0-5 the device sits at."},"industrial_protocols":{"type":"array","items":{"type":"string"},"description":"Industrial protocols spoken, e.g. modbus, dnp3, ethernet-ip."}}}'::jsonb, ARRAY['serial_number', 'cmdb_sys_id', 'mac_address', 'hostname', 'ip_address']::text[],
+     NULL, 'device', true),
+    (NULL, 'rtu', 'ot_device', 'hardware.ot_device.rtu',
+     'RTU', 'A remote terminal unit relaying field telemetry.', 'Radio',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"firmware_version":{"type":"string","description":"Running firmware version."},"purdue_level":{"type":"integer","description":"Purdue model level 0-5 the device sits at."},"industrial_protocols":{"type":"array","items":{"type":"string"},"description":"Industrial protocols spoken, e.g. modbus, dnp3, ethernet-ip."},"telemetry_protocol":{"type":"string","description":"Primary telemetry protocol, e.g. dnp3, iec-101."}}}'::jsonb, ARRAY['serial_number', 'cmdb_sys_id', 'mac_address', 'hostname', 'ip_address']::text[],
+     NULL, 'device', true),
+    (NULL, 'hmi', 'ot_device', 'hardware.ot_device.hmi',
+     'HMI', 'A human-machine interface panel or station.', 'Gauge',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"firmware_version":{"type":"string","description":"Running firmware version."},"purdue_level":{"type":"integer","description":"Purdue model level 0-5 the device sits at."},"industrial_protocols":{"type":"array","items":{"type":"string"},"description":"Industrial protocols spoken, e.g. modbus, dnp3, ethernet-ip."},"hmi_software":{"type":"string","description":"HMI/SCADA software product running on the panel."},"hmi_software_version":{"type":"string","description":"Version of that software."}}}'::jsonb, ARRAY['serial_number', 'cmdb_sys_id', 'mac_address', 'hostname', 'ip_address']::text[],
+     NULL, 'device', true),
+    (NULL, 'ied', 'ot_device', 'hardware.ot_device.ied',
+     'IED', 'An intelligent electronic device, typically in a substation.', 'Zap',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"firmware_version":{"type":"string","description":"Running firmware version."},"purdue_level":{"type":"integer","description":"Purdue model level 0-5 the device sits at."},"industrial_protocols":{"type":"array","items":{"type":"string"},"description":"Industrial protocols spoken, e.g. modbus, dnp3, ethernet-ip."},"iec61850_edition":{"type":"string","description":"IEC 61850 edition the device implements, if any."}}}'::jsonb, ARRAY['serial_number', 'cmdb_sys_id', 'mac_address', 'hostname', 'ip_address']::text[],
+     NULL, 'device', true),
+    (NULL, 'iot_device', 'hardware', 'hardware.iot_device',
+     'IoT device', 'A network-attached embedded device that is not OT — cameras, sensors, badge readers, building controls.', 'Cctv',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"firmware_version":{"type":"string","description":"Running firmware version."},"device_category":{"type":"string","description":"What the thing is, e.g. camera, badge reader, thermostat."}}}'::jsonb, ARRAY['serial_number', 'cmdb_sys_id', 'mac_address', 'hostname', 'ip_address']::text[],
+     NULL, 'device', true),
+    (NULL, 'bmc', 'hardware', 'hardware.bmc',
+     'Management controller', 'An out-of-band management controller (iDRAC, iLO, IPMI, Redfish). It has its own address, its own crypto, and its own lifecycle from the host it manages.', 'ServerCog',
+     '{"type":"object","additionalProperties":false,"properties":{"vendor":{"type":"string","description":"Manufacturer or brand as reported by the device."},"model":{"type":"string","description":"Manufacturer model designation."},"asset_tag":{"type":"string","description":"Organisation''s own inventory tag, if one is affixed."},"firmware_version":{"type":"string","description":"Running controller firmware version."},"bmc_protocol":{"type":"string","enum":["ipmi","redfish","proprietary","unknown"],"description":"Management protocol the controller answers."}}}'::jsonb, ARRAY['serial_number', 'cmdb_sys_id', 'mac_address', 'fqdn', 'hostname', 'ip_address']::text[],
+     NULL, 'device', true),
+    (NULL, 'virtual', NULL, 'virtual',
+     'Virtual', 'Something running on top of someone else''s hardware, inside this tenant''s own estate. Cloud-provider resources have their own top-level class.', 'Layers',
+     '{"type":"object","additionalProperties":false,"properties":{"cpu_count":{"type":"integer","description":"Allocated virtual CPUs."},"memory_mb":{"type":"integer","description":"Allocated memory in mebibytes."}}}'::jsonb, ARRAY['agent_id', 'cloud_resource_id', 'cmdb_sys_id', 'ssh_host_key_fingerprint', 'mac_address', 'fqdn', 'hostname', 'ip_address']::text[],
+     NULL, 'platform', true),
+    (NULL, 'virtual_machine', 'virtual', 'virtual.virtual_machine',
+     'Virtual machine', 'A guest machine running on a hypervisor.', 'Box',
+     '{"type":"object","additionalProperties":false,"properties":{"cpu_count":{"type":"integer","description":"Allocated virtual CPUs."},"memory_mb":{"type":"integer","description":"Allocated memory in mebibytes."},"operating_system":{"type":"string","description":"Guest OS product name."},"os_version":{"type":"string","description":"Guest OS version string."},"guest_tools_version":{"type":"string","description":"Hypervisor guest-tools version, if installed."}}}'::jsonb, ARRAY['agent_id', 'cloud_resource_id', 'cmdb_sys_id', 'ssh_host_key_fingerprint', 'mac_address', 'fqdn', 'hostname', 'ip_address']::text[],
+     'cmdb_ci_vm_instance', 'platform', true),
+    (NULL, 'container', 'virtual', 'virtual.container',
+     'Container', 'A running container. Identified by its image and orchestration identity, never by serial number, MAC or address — all three are ephemeral for containers.', 'Container',
+     '{"type":"object","additionalProperties":false,"properties":{"cpu_count":{"type":"integer","description":"Allocated virtual CPUs."},"memory_mb":{"type":"integer","description":"Allocated memory in mebibytes."},"image":{"type":"string","description":"Image reference the container runs."},"image_digest":{"type":"string","description":"Immutable digest of that image."},"runtime":{"type":"string","description":"Container runtime, e.g. containerd, docker, cri-o."},"namespace":{"type":"string","description":"Orchestrator namespace the container runs in."}}}'::jsonb, ARRAY['agent_id', 'cloud_resource_id', 'cmdb_sys_id', 'hostname']::text[],
+     NULL, 'container', true),
+    (NULL, 'cluster', 'virtual', 'virtual.cluster',
+     'Cluster', 'A group of nodes managed as one scheduling or failover unit.', 'Boxes',
+     '{"type":"object","additionalProperties":false,"properties":{"cpu_count":{"type":"integer","description":"Allocated virtual CPUs."},"memory_mb":{"type":"integer","description":"Allocated memory in mebibytes."},"orchestrator":{"type":"string","description":"Cluster technology, e.g. kubernetes, vsphere, nomad."},"orchestrator_version":{"type":"string","description":"Version of that technology."},"node_count":{"type":"integer","description":"Member nodes reported by the cluster."}}}'::jsonb, ARRAY['cloud_resource_id', 'cmdb_sys_id', 'fqdn', 'hostname']::text[],
+     'cmdb_ci_cluster', 'platform', true),
+    (NULL, 'hypervisor', 'virtual', 'virtual.hypervisor',
+     'Hypervisor', 'A host running guest machines.', 'SquareStack',
+     '{"type":"object","additionalProperties":false,"properties":{"cpu_count":{"type":"integer","description":"Allocated virtual CPUs."},"memory_mb":{"type":"integer","description":"Allocated memory in mebibytes."},"product":{"type":"string","description":"Hypervisor product, e.g. ESXi, Hyper-V, KVM, Proxmox."},"product_version":{"type":"string","description":"Version of that product."}}}'::jsonb, ARRAY['agent_id', 'serial_number', 'cmdb_sys_id', 'ssh_host_key_fingerprint', 'mac_address', 'fqdn', 'hostname', 'ip_address']::text[],
+     'cmdb_ci_server', 'platform', true),
+    (NULL, 'cloud_resource', NULL, 'cloud_resource',
+     'Cloud resource', 'A resource managed by a cloud provider''s control plane. Identified by its provider resource id; never by MAC address.', 'Cloud',
+     '{"type":"object","additionalProperties":false,"properties":{"provider":{"type":"string","enum":["aws","azure","gcp","oci","other"],"description":"Cloud provider."},"account_id":{"type":"string","description":"Account, subscription or project the resource belongs to."},"region":{"type":"string","description":"Provider region."}}}'::jsonb, ARRAY['cloud_resource_id', 'cmdb_sys_id', 'fqdn']::text[],
+     NULL, 'platform', true),
+    (NULL, 'compute_instance', 'cloud_resource', 'cloud_resource.compute_instance',
+     'Compute instance', 'A provider-managed virtual machine.', 'CloudCog',
+     '{"type":"object","additionalProperties":false,"properties":{"provider":{"type":"string","enum":["aws","azure","gcp","oci","other"],"description":"Cloud provider."},"account_id":{"type":"string","description":"Account, subscription or project the resource belongs to."},"region":{"type":"string","description":"Provider region."},"instance_type":{"type":"string","description":"Provider instance size, e.g. m6i.large."},"image_id":{"type":"string","description":"Machine image the instance booted from."},"operating_system":{"type":"string","description":"Guest OS product name."},"os_version":{"type":"string","description":"Guest OS version string."}}}'::jsonb, ARRAY['agent_id', 'cloud_resource_id', 'cmdb_sys_id', 'ssh_host_key_fingerprint', 'fqdn', 'hostname', 'ip_address']::text[],
+     'cmdb_ci_vm_instance', 'platform', true),
+    (NULL, 'managed_database', 'cloud_resource', 'cloud_resource.managed_database',
+     'Managed database', 'A provider-operated database service instance.', 'Database',
+     '{"type":"object","additionalProperties":false,"properties":{"provider":{"type":"string","enum":["aws","azure","gcp","oci","other"],"description":"Cloud provider."},"account_id":{"type":"string","description":"Account, subscription or project the resource belongs to."},"region":{"type":"string","description":"Provider region."},"engine":{"type":"string","description":"Database engine, e.g. postgres, mysql, sqlserver."},"engine_version":{"type":"string","description":"Engine version."}}}'::jsonb, ARRAY['cloud_resource_id', 'cmdb_sys_id', 'fqdn']::text[],
+     'cmdb_ci_db_instance', 'application', true),
+    (NULL, 'object_storage', 'cloud_resource', 'cloud_resource.object_storage',
+     'Object storage', 'A bucket or container of objects.', 'Archive',
+     '{"type":"object","additionalProperties":false,"properties":{"provider":{"type":"string","enum":["aws","azure","gcp","oci","other"],"description":"Cloud provider."},"account_id":{"type":"string","description":"Account, subscription or project the resource belongs to."},"region":{"type":"string","description":"Provider region."},"encryption_algorithm":{"type":"string","description":"Algorithm the provider reports for default encryption."},"public_access_blocked":{"type":"boolean","description":"Whether public access is blocked at the resource level."}}}'::jsonb, ARRAY['cloud_resource_id', 'cmdb_sys_id', 'fqdn']::text[],
+     NULL, 'data', true),
+    (NULL, 'key_store', 'cloud_resource', 'cloud_resource.key_store',
+     'Key store', 'A KMS, key vault, HSM or secrets manager. We inventory its posture — never the key material it holds.', 'KeyRound',
+     '{"type":"object","additionalProperties":false,"properties":{"provider":{"type":"string","enum":["aws","azure","gcp","oci","other"],"description":"Cloud provider."},"account_id":{"type":"string","description":"Account, subscription or project the resource belongs to."},"region":{"type":"string","description":"Provider region."},"key_store_kind":{"type":"string","enum":["kms","key_vault","hsm","secrets_manager","other"],"description":"What kind of store this is."},"certification_level":{"type":"string","description":"Certification claimed, e.g. \"FIPS 140-3 Level 3\"."},"key_count":{"type":"integer","description":"Number of keys the store reports holding."}}}'::jsonb, ARRAY['cloud_resource_id', 'cmdb_sys_id', 'fqdn']::text[],
+     NULL, 'platform', true),
+    (NULL, 'cloud_load_balancer', 'cloud_resource', 'cloud_resource.cloud_load_balancer',
+     'Cloud load balancer', 'A provider-managed load balancer.', 'Scale',
+     '{"type":"object","additionalProperties":false,"properties":{"provider":{"type":"string","enum":["aws","azure","gcp","oci","other"],"description":"Cloud provider."},"account_id":{"type":"string","description":"Account, subscription or project the resource belongs to."},"region":{"type":"string","description":"Provider region."},"scheme":{"type":"string","enum":["internet_facing","internal","unknown"],"description":"Whether the balancer is reachable from the internet."},"listener_count":{"type":"integer","description":"Configured listeners."},"tls_policy":{"type":"string","description":"Provider TLS security policy applied to listeners."}}}'::jsonb, ARRAY['cloud_resource_id', 'cmdb_sys_id', 'fqdn']::text[],
+     'cmdb_ci_lb', 'platform', true),
+    (NULL, 'api_gateway', 'cloud_resource', 'cloud_resource.api_gateway',
+     'API gateway', 'A provider-managed API front door.', 'Webhook',
+     '{"type":"object","additionalProperties":false,"properties":{"provider":{"type":"string","enum":["aws","azure","gcp","oci","other"],"description":"Cloud provider."},"account_id":{"type":"string","description":"Account, subscription or project the resource belongs to."},"region":{"type":"string","description":"Provider region."},"endpoint_type":{"type":"string","enum":["regional","edge","private","unknown"],"description":"Deployment type of the gateway endpoint."}}}'::jsonb, ARRAY['cloud_resource_id', 'cmdb_sys_id', 'fqdn']::text[],
+     NULL, 'application', true),
+    (NULL, 'cdn_distribution', 'cloud_resource', 'cloud_resource.cdn_distribution',
+     'CDN distribution', 'A content delivery distribution fronting one or more origins.', 'Globe',
+     '{"type":"object","additionalProperties":false,"properties":{"provider":{"type":"string","enum":["aws","azure","gcp","oci","other"],"description":"Cloud provider."},"account_id":{"type":"string","description":"Account, subscription or project the resource belongs to."},"region":{"type":"string","description":"Provider region."},"origin_count":{"type":"integer","description":"Configured origins."}}}'::jsonb, ARRAY['cloud_resource_id', 'cmdb_sys_id', 'fqdn']::text[],
+     NULL, 'platform', true),
+    (NULL, 'serverless_function', 'cloud_resource', 'cloud_resource.serverless_function',
+     'Serverless function', 'A function executed on demand by the provider.', 'CloudLightning',
+     '{"type":"object","additionalProperties":false,"properties":{"provider":{"type":"string","enum":["aws","azure","gcp","oci","other"],"description":"Cloud provider."},"account_id":{"type":"string","description":"Account, subscription or project the resource belongs to."},"region":{"type":"string","description":"Provider region."},"runtime":{"type":"string","description":"Execution runtime, e.g. nodejs, python, go."},"runtime_version":{"type":"string","description":"Runtime version."},"memory_mb":{"type":"integer","description":"Configured memory in mebibytes."}}}'::jsonb, ARRAY['cloud_resource_id', 'cmdb_sys_id']::text[],
+     NULL, 'application', true),
+    (NULL, 'virtual_network', 'cloud_resource', 'cloud_resource.virtual_network',
+     'Virtual network', 'A provider-managed network (VPC, VNet). CycloneDX has no network component type, so it is emitted as `platform`.', 'Waypoints',
+     '{"type":"object","additionalProperties":false,"properties":{"provider":{"type":"string","enum":["aws","azure","gcp","oci","other"],"description":"Cloud provider."},"account_id":{"type":"string","description":"Account, subscription or project the resource belongs to."},"region":{"type":"string","description":"Provider region."},"cidr_blocks":{"type":"array","items":{"type":"string"},"description":"CIDR blocks assigned to the network."}}}'::jsonb, ARRAY['cloud_resource_id', 'cmdb_sys_id']::text[],
+     'cmdb_ci_network', 'platform', true),
+    (NULL, 'subnet', 'cloud_resource', 'cloud_resource.subnet',
+     'Subnet', 'A subdivision of a virtual network.', 'Share2',
+     '{"type":"object","additionalProperties":false,"properties":{"provider":{"type":"string","enum":["aws","azure","gcp","oci","other"],"description":"Cloud provider."},"account_id":{"type":"string","description":"Account, subscription or project the resource belongs to."},"region":{"type":"string","description":"Provider region."},"cidr_block":{"type":"string","description":"CIDR block of the subnet."},"availability_zone":{"type":"string","description":"Provider availability zone."},"is_public":{"type":"boolean","description":"Whether the subnet routes to an internet gateway."}}}'::jsonb, ARRAY['cloud_resource_id', 'cmdb_sys_id']::text[],
+     'cmdb_ci_ip_network', 'platform', true),
+    (NULL, 'application', NULL, 'application',
+     'Application', 'Software running on a host. Dependent identity: matched by its host asset plus product plus instance name, not by an address of its own.', 'AppWindow',
+     '{"type":"object","additionalProperties":false,"properties":{"product":{"type":"string","description":"Software product name."},"version":{"type":"string","description":"Product version."},"vendor":{"type":"string","description":"Publisher of the software."}}}'::jsonb, ARRAY['cmdb_sys_id', 'name']::text[],
+     'cmdb_ci_appl', 'application', true),
+    (NULL, 'web_application', 'application', 'application.web_application',
+     'Web application', 'An application served over HTTP(S).', 'Globe',
+     '{"type":"object","additionalProperties":false,"properties":{"product":{"type":"string","description":"Software product name."},"version":{"type":"string","description":"Product version."},"vendor":{"type":"string","description":"Publisher of the software."},"base_url":{"type":"string","description":"Root URL the application is served from."},"framework":{"type":"string","description":"Application framework, if identified."},"server_software":{"type":"string","description":"Server banner or identified server software."}}}'::jsonb, ARRAY['cmdb_sys_id', 'name']::text[],
+     NULL, 'application', true),
+    (NULL, 'database_instance', 'application', 'application.database_instance',
+     'Database instance', 'A database engine running on a host the tenant operates.', 'Database',
+     '{"type":"object","additionalProperties":false,"properties":{"product":{"type":"string","description":"Software product name."},"version":{"type":"string","description":"Product version."},"vendor":{"type":"string","description":"Publisher of the software."},"engine":{"type":"string","description":"Database engine, e.g. postgres, mysql, oracle."},"engine_version":{"type":"string","description":"Engine version."},"instance_name":{"type":"string","description":"Instance or SID name that distinguishes it on its host."},"tls_required":{"type":"boolean","description":"Whether the engine requires TLS for client connections."}}}'::jsonb, ARRAY['cmdb_sys_id', 'name']::text[],
+     'cmdb_ci_db_instance', 'application', true),
+    (NULL, 'service_daemon', 'application', 'application.service_daemon',
+     'Service daemon', 'A long-running background process, usually with a listening port.', 'Cog',
+     '{"type":"object","additionalProperties":false,"properties":{"product":{"type":"string","description":"Software product name."},"version":{"type":"string","description":"Product version."},"vendor":{"type":"string","description":"Publisher of the software."},"process_name":{"type":"string","description":"Executable or unit name."},"service_account":{"type":"string","description":"Account the process runs as."}}}'::jsonb, ARRAY['cmdb_sys_id', 'name']::text[],
+     NULL, 'application', true),
+    (NULL, 'middleware', 'application', 'application.middleware',
+     'Middleware', 'Software other software talks through — message brokers, application servers, API proxies.', 'Blocks',
+     '{"type":"object","additionalProperties":false,"properties":{"product":{"type":"string","description":"Software product name."},"version":{"type":"string","description":"Product version."},"vendor":{"type":"string","description":"Publisher of the software."},"middleware_kind":{"type":"string","enum":["message_broker","application_server","api_proxy","cache","other"],"description":"What role the middleware plays."}}}'::jsonb, ARRAY['cmdb_sys_id', 'name']::text[],
+     NULL, 'application', true),
+    (NULL, 'service', NULL, 'service',
+     'Service', 'A declared service, never discovered. Dependent identity: a service is identified by its name within the tenant and nothing else.', 'Workflow',
+     '{"type":"object","additionalProperties":false,"properties":{"criticality":{"type":"string","enum":["critical","high","medium","low"],"description":"How badly the organisation is hurt when this is down."}}}'::jsonb, ARRAY['name']::text[],
+     'cmdb_ci_service', 'service', true),
+    (NULL, 'business_service', 'service', 'service.business_service',
+     'Business service', 'A service the organisation offers to people, stated in their terms.', 'Briefcase',
+     '{"type":"object","additionalProperties":false,"properties":{"criticality":{"type":"string","enum":["critical","high","medium","low"],"description":"How badly the organisation is hurt when this is down."},"business_capability":{"type":"string","description":"Capability the service delivers, e.g. \"online banking\"."}}}'::jsonb, ARRAY['name']::text[],
+     'cmdb_ci_service_business', 'service', true),
+    (NULL, 'technical_service', 'service', 'service.technical_service',
+     'Technical service', 'A service other services consume, stated in technical terms.', 'Settings',
+     '{"type":"object","additionalProperties":false,"properties":{"criticality":{"type":"string","enum":["critical","high","medium","low"],"description":"How badly the organisation is hurt when this is down."},"technology_domain":{"type":"string","description":"Domain the service belongs to, e.g. messaging, identity."}}}'::jsonb, ARRAY['name']::text[],
+     'cmdb_ci_service_technical', 'service', true),
+    (NULL, 'external', NULL, 'external',
+     'External party', 'An endpoint belonging to somebody else. Today''s external-connections destination. Never actively probed (active-probing scope rule).', 'ExternalLink',
+     '{"type":"object","additionalProperties":false,"properties":{"organization":{"type":"string","description":"Organisation the endpoint is attributed to, if known."},"relationship":{"type":"string","enum":["vendor","partner","customer","unknown"],"description":"How the tenant relates to that organisation."}}}'::jsonb, ARRAY['fqdn', 'ip_address']::text[],
+     NULL, 'service', true),
+    (NULL, 'unknown_host', NULL, 'unknown_host',
+     'Unknown host', 'A reachable address inside the tenant''s own space that nothing has identified further, or a serial nothing has classified yet. A real asset with a real gap, not a placeholder — it is what makes "how much don''t we know" answerable.', 'CircleQuestionMark',
+     '{"type":"object","additionalProperties":false,"properties":{}}'::jsonb, ARRAY['serial_number', 'agent_id', 'ssh_host_key_fingerprint', 'mac_address', 'fqdn', 'hostname', 'ip_address']::text[],
+     NULL, 'device', true)
+ON CONFLICT (key) WHERE tenant_id IS NULL DO UPDATE SET
+    parent_key            = EXCLUDED.parent_key,
+    path                  = EXCLUDED.path,
+    label                 = EXCLUDED.label,
+    description           = EXCLUDED.description,
+    icon                  = EXCLUDED.icon,
+    attribute_schema      = EXCLUDED.attribute_schema,
+    identifier_precedence = EXCLUDED.identifier_precedence,
+    cmdb_ci_type          = EXCLUDED.cmdb_ci_type,
+    cyclonedx_type        = EXCLUDED.cyclonedx_type,
+    is_fixed              = true;
+-- END GENERATED: platform asset classes
+
+
+-- ----------------------------------------------------------------------------
+-- public.classification_rules. GENERATED from standards/classification-rules.yaml
+-- AND standards/oui-vendors.csv by scripts/generate-classification-rules.mjs —
+-- do not hand-edit the region below; edit those two and run `make generate`.
+-- `make audit` fails on drift.
+-- ----------------------------------------------------------------------------
+-- The evidence behind every class proposal (ADR-0004 D6, workstream 2.10a):
+-- OUI, SNMP sysObjectID, EtherNet/IP vendor id, cloud resource type, banner
+-- regex, port profile, model prefix and collector platform, each mapped to a
+-- vendor and — only where the mapping is unambiguous — an asset class.
+--
+-- The OUI rows come from standards/oui-vendors.csv, which is also what
+-- shared/hostobs compiles into the sensor: OUI -> vendor has one owner, and
+-- these rows only add the class the YAML's oui_classes map attaches to a
+-- vendor. Most of them carry no class, which is the point — a manufacturer
+-- selling servers, switches and printers under one assignment has no majority
+-- worth guessing at.
+--
+-- Platform rows: no tenant_id, no RLS, every tenant classified against the
+-- same table. Spliced inline rather than `\i`-included for the same reason the
+-- asset-class region above is: the chart's seed-data Job hands psql a ConfigMap
+-- key, and a `\i` there resolves to a path that does not exist in the
+-- container.
+--
+-- The upsert reconciles a seeded rule that changed and LEAVES ALONE any rule a
+-- platform admin added through Catalog ▸ Classification rules — those are not
+-- in the VALUES list and nothing here deletes. An admin who wants a different
+-- answer for a seeded pattern adds a more specific rule rather than editing
+-- the seeded one, because the next release's seed run would overwrite the edit.
+
+-- BEGIN GENERATED: classification rules — from standards/classification-rules.yaml (make generate)
+INSERT INTO public.classification_rules (
+    rule_kind, pattern, class_key, vendor, model, confidence, source_url
+) VALUES
+    ('oui', '000001', NULL, 'Xerox', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00000A', 'ot_device', 'Omron', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '00000C', 'network_device', 'Cisco Systems', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '00000E', NULL, 'Fujitsu', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000039', NULL, 'Toshiba', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000048', 'printer', 'Seiko Epson', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '000054', 'ot_device', 'Schneider Electric', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '000074', 'printer', 'Ricoh', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000085', 'printer', 'Canon', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '0000BC', 'ot_device', 'Rockwell Automation', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '0000F4', 'network_device', 'Allied Telesis', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '000102', NULL, '3Com', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000105', 'ot_device', 'Beckhoff Automation', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '000130', 'network_device', 'Extreme Networks', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '000142', 'network_device', 'Cisco Systems', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '00014A', NULL, 'Sony', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00016C', NULL, 'Hon Hai Precision', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0001D7', 'load_balancer', 'F5 Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0001E6', NULL, 'Hewlett Packard', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0001EC', NULL, 'Ericsson', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0002B3', NULL, 'Intel', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000347', NULL, 'Intel', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000393', NULL, 'Apple', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0003FF', NULL, 'Microsoft', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000400', 'printer', 'Lexmark', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00040D', NULL, 'Avaya', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00040E', NULL, 'AVM GmbH', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000413', NULL, 'Snom Technology', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000438', NULL, 'Nortel Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000456', 'network_device', 'Cambium Networks', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '000496', 'network_device', 'Extreme Networks', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '0004A5', NULL, 'Barco', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0004AC', NULL, 'IBM', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0004F2', NULL, 'Polycom', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00055D', NULL, 'D-Link', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000569', 'virtual_machine', 'VMware', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000585', 'network_device', 'Juniper Networks', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '0005A6', NULL, 'Extron Electronics', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00065B', NULL, 'Dell', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0006B1', 'firewall', 'SonicWall', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '000740', NULL, 'Buffalo', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00074D', NULL, 'Zebra Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0007AB', NULL, 'Samsung Electronics', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0007E9', NULL, 'Intel', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00080D', NULL, 'Toshiba', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00085D', NULL, 'Aastra', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00089B', 'storage_device', 'QNAP Systems', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00090F', NULL, 'Fortinet', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00095B', NULL, 'NETGEAR', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00096B', NULL, 'IBM', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0009BF', NULL, 'Nintendo', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000A41', 'network_device', 'Cisco Systems', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '000A95', NULL, 'Apple', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000AD9', NULL, 'Sony', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000B82', NULL, 'Grandstream Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000B86', 'network_device', 'Aruba Networks', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '000BCD', NULL, 'Hewlett Packard', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000C29', 'virtual_machine', 'VMware', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000C42', 'network_device', 'MikroTik', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '000C6E', NULL, 'ASUSTek Computer', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000CE5', NULL, 'Motorola', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000CE7', NULL, 'MediaTek', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000CF1', NULL, 'Intel', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000D5D', NULL, 'Raritan', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000D88', NULL, 'D-Link', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000E58', NULL, 'Sonos', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000E8C', NULL, 'Siemens', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000EB6', NULL, 'Riverbed Technology', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '000F23', 'network_device', 'Cisco Systems', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '000FB5', NULL, 'NETGEAR', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001018', NULL, 'Broadcom', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00104B', NULL, '3Com', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00107F', NULL, 'Crestron Electronics', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001125', NULL, 'IBM', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001132', 'storage_device', 'Synology', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001150', NULL, 'Belkin International', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001195', NULL, 'D-Link', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001217', NULL, 'Linksys', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00121E', 'network_device', 'Juniper Networks', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '00125A', NULL, 'Microsoft', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001302', NULL, 'Intel', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001392', 'network_device', 'Ruckus Wireless', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '0013A9', NULL, 'Sony', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001422', NULL, 'Dell', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00146C', NULL, 'NETGEAR', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00147F', NULL, 'Technicolor', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0014BF', NULL, 'Linksys', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0014EE', 'storage_device', 'Western Digital', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '0014F6', 'network_device', 'Juniper Networks', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '001517', NULL, 'Intel', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00152B', 'network_device', 'Cisco Systems', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '00155D', 'virtual_machine', 'Microsoft Hyper-V', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001565', NULL, 'Yealink', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00156D', NULL, 'Ubiquiti Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001599', NULL, 'Samsung Electronics', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0015A2', NULL, 'ARRIS Group', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0015E9', NULL, 'D-Link', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0015EB', NULL, 'ZTE', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0015F2', NULL, 'ASUSTek Computer', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001617', NULL, 'Micro-Star International', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00163E', 'virtual_machine', 'Xen', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '0016CE', NULL, 'Hon Hai Precision', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00173F', NULL, 'Belkin International', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001742', NULL, 'Fujitsu', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001788', NULL, 'Philips Lighting', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00179A', NULL, 'D-Link', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0017C8', 'printer', 'Kyocera', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '0017C9', NULL, 'Samsung Electronics', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0017FA', NULL, 'Microsoft', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00180A', NULL, 'Cisco Meraki', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001839', NULL, 'Linksys', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001882', NULL, 'Huawei Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001963', NULL, 'Sony', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001977', 'network_device', 'Extreme Networks', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '0019C6', NULL, 'ZTE', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0019E0', NULL, 'TP-Link Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001A11', NULL, 'Google', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001A1E', 'network_device', 'Aruba Networks', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '001A2F', 'network_device', 'Cisco Systems', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '001A64', NULL, 'IBM', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001A70', NULL, 'Linksys', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001A92', NULL, 'ASUSTek Computer', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001AE9', NULL, 'Nintendo', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001B11', NULL, 'D-Link', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001B17', 'firewall', 'Palo Alto Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001B1B', NULL, 'Siemens', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001B21', NULL, 'Intel', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001B24', NULL, 'Hon Hai Precision', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001B2F', NULL, 'NETGEAR', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001B4F', NULL, 'Avaya', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001B63', NULL, 'Apple', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001B78', NULL, 'Hewlett Packard', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001BA9', 'printer', 'Brother Industries', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001C06', NULL, 'Siemens', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001C14', 'virtual_machine', 'VMware', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001C42', 'virtual_machine', 'Parallels', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001C62', NULL, 'LG Electronics', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001C73', 'network_device', 'Arista Networks', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '001C7F', 'firewall', 'Check Point Software', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '001CDF', NULL, 'Belkin International', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001D7D', NULL, 'GIGA-BYTE Technology', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001D7E', NULL, 'Linksys', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001D9C', 'ot_device', 'Rockwell Automation', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '001DB5', 'network_device', 'Juniper Networks', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '001DBA', NULL, 'Sony', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001DD8', NULL, 'Microsoft', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001E10', NULL, 'Huawei Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001E4F', NULL, 'Dell', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001E58', NULL, 'D-Link', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001E64', NULL, 'Intel', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001E68', NULL, 'Hon Hai Precision', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001E73', NULL, 'ZTE', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001E75', NULL, 'LG Electronics', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '001E8F', 'printer', 'Canon', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '002000', 'printer', 'Lexmark', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00204A', NULL, 'Lantronix', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00206B', 'printer', 'Konica Minolta', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '002119', NULL, 'Samsung Electronics', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00211B', 'network_device', 'Cisco Systems', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '002127', NULL, 'TP-Link Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '002129', NULL, 'Linksys', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00216A', NULL, 'Intel', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '002185', NULL, 'Micro-Star International', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00219B', NULL, 'Dell', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0021B7', 'printer', 'Lexmark', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0021BD', NULL, 'Nintendo', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0021FB', NULL, 'LG Electronics', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '002215', NULL, 'ASUSTek Computer', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00223F', NULL, 'NETGEAR', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '002248', NULL, 'Microsoft', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '002258', 'printer', 'Brother Industries', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0022B0', NULL, 'D-Link', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00234D', NULL, 'Hon Hai Precision', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '002368', NULL, 'Zebra Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '002369', NULL, 'Linksys', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00237D', NULL, 'Hewlett Packard', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00239C', 'network_device', 'Juniper Networks', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '0023CD', NULL, 'TP-Link Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0023E9', 'load_balancer', 'F5 Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00246C', 'network_device', 'Aruba Networks', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '0024B2', NULL, 'NETGEAR', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0024D7', NULL, 'Intel', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '002500', NULL, 'Apple', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '002590', NULL, 'Super Micro Computer', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00259C', NULL, 'Linksys', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00259E', NULL, 'Huawei Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0025AE', NULL, 'Microsoft', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00260A', 'network_device', 'Cisco Systems', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '00266C', NULL, 'Toshiba', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '002673', 'printer', 'Ricoh', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0026AB', 'printer', 'Seiko Epson', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '002719', NULL, 'TP-Link Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '002722', NULL, 'Ubiquiti Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '003048', NULL, 'Super Micro Computer', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0030C1', NULL, 'Hewlett Packard', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0030DE', 'ot_device', 'WAGO', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '003A98', 'network_device', 'Cisco Systems', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '00408C', 'iot_device', 'Axis Communications', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '00409D', NULL, 'Digi International', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '005004', NULL, '3Com', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00500B', 'network_device', 'Cisco Systems', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '005043', NULL, 'Marvell Semiconductor', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '005056', 'virtual_machine', 'VMware', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '006016', 'storage_device', 'EMC', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '006097', NULL, '3Com', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00609F', NULL, 'AMX', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '008045', NULL, 'Panasonic', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '008063', 'network_device', 'Hirschmann', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '008077', 'printer', 'Brother Industries', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0080F4', 'ot_device', 'Schneider Electric', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '00907F', 'firewall', 'WatchGuard Technologies', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '0090A9', 'storage_device', 'Western Digital', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '0090E8', NULL, 'Moxa', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00A045', 'ot_device', 'Phoenix Contact', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '00A098', 'storage_device', 'NetApp', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00A0BF', NULL, 'Motorola', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00A0C6', NULL, 'Qualcomm', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00BB3A', NULL, 'Amazon Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00C0B7', NULL, 'American Power Conversion', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00C0EE', 'printer', 'Kyocera', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '00D0C9', NULL, 'Advantech', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00D9D1', NULL, 'Sony Interactive Entertainment', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00E04C', NULL, 'Realtek Semiconductor', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00E086', NULL, 'Avocent', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00E0B1', NULL, 'Alcatel-Lucent', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '00E0FC', NULL, 'Huawei Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0242AC', 'container', 'Docker', NULL, 0.75, 'https://docs.docker.com/engine/network/drivers/bridge/'),
+    ('oui', '0418D6', NULL, 'Ubiquiti Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0452C7', NULL, 'Bose', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '080006', NULL, 'Siemens', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '080009', NULL, 'Hewlett Packard', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '08000F', NULL, 'Mitel', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '080027', 'virtual_machine', 'Oracle VirtualBox', NULL, 0.85, 'https://www.virtualbox.org/manual/ch06.html'),
+    ('oui', '080037', 'printer', 'Fuji Xerox', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '08005A', NULL, 'IBM', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '08306B', 'firewall', 'Palo Alto Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '085B0E', NULL, 'Fortinet', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '08863B', NULL, 'Belkin International', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0896D7', NULL, 'AVM GmbH', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '08DF1F', NULL, 'Bose', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0C1DAF', NULL, 'Xiaomi', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0C47C9', NULL, 'Amazon Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '0CC47A', NULL, 'Super Micro Computer', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '10683F', NULL, 'LG Electronics', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '14CC20', NULL, 'TP-Link Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '14F65A', NULL, 'Xiaomi', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '180373', NULL, 'Dell', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '18B430', NULL, 'Nest Labs', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '18FD74', 'network_device', 'MikroTik', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '18FE34', 'iot_device', 'Espressif', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '1C6F65', NULL, 'GIGA-BYTE Technology', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '1C7EE5', NULL, 'D-Link', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '204E7F', NULL, 'NETGEAR', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '240AC4', 'iot_device', 'Espressif', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '245EBE', 'storage_device', 'QNAP Systems', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '249AD8', NULL, 'Yealink', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '24A43C', NULL, 'Ubiquiti Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '24A937', 'storage_device', 'Pure Storage', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '24B6FD', NULL, 'Dell', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '24DEC6', 'network_device', 'Aruba Networks', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '280DFC', NULL, 'Sony Interactive Entertainment', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '281878', NULL, 'Microsoft', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '286C07', NULL, 'Xiaomi', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '286ED4', NULL, 'Huawei Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '28993A', 'network_device', 'Arista Networks', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '28CDC1', NULL, 'Raspberry Pi', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '28CFDA', NULL, 'Apple', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '28D244', NULL, 'Hon Hai Precision', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '2C2131', 'network_device', 'Juniper Networks', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '2C3033', NULL, 'NETGEAR', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '2C3AE8', 'iot_device', 'Espressif', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '2C41A1', NULL, 'Bose', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '2C56DC', NULL, 'ASUSTek Computer', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '2C9EFC', 'printer', 'Canon', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '2CC81B', 'network_device', 'MikroTik', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '2CCC44', NULL, 'Sony Interactive Entertainment', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '2CCF67', NULL, 'Raspberry Pi', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '2CE6CC', 'network_device', 'Ruckus Wireless', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '30055C', 'printer', 'Brother Industries', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '30AEA4', 'iot_device', 'Espressif', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '30F9ED', NULL, 'Sony', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '3423BA', NULL, 'Samsung Electronics', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '3431C4', NULL, 'AVM GmbH', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '344B50', NULL, 'ZTE', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '347E5C', NULL, 'Sonos', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '34AF2C', NULL, 'Nintendo', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '34D270', NULL, 'Amazon Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '38184C', NULL, 'Bose', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '389D92', 'printer', 'Seiko Epson', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '3C0754', NULL, 'Apple', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '3C4A92', NULL, 'Hewlett Packard', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '3C5AB4', NULL, 'Google', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '3C6104', 'network_device', 'Juniper Networks', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '3C970E', NULL, 'Intel', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '3CBD3E', NULL, 'ARRIS Group', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '3CECEF', NULL, 'Super Micro Computer', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '3CEF8C', 'iot_device', 'Dahua Technology', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '40B4CD', NULL, 'Amazon Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '4419B6', 'iot_device', 'Hikvision', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '444CA8', 'network_device', 'Arista Networks', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '44650D', NULL, 'Amazon Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '44A842', NULL, 'Dell', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '44D9E7', NULL, 'Ubiquiti Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '488F5A', 'network_device', 'MikroTik', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '48A493', NULL, 'Zebra Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '48A6B8', NULL, 'Sonos', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '48F8B3', NULL, 'Linksys', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '4C11BF', 'iot_device', 'Dahua Technology', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '4C1FCC', NULL, 'Huawei Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '4C5E0C', 'network_device', 'MikroTik', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '4CBD8F', 'iot_device', 'Hikvision', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '4CE676', NULL, 'Buffalo', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '50465D', NULL, 'ASUSTek Computer', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '506B8D', NULL, 'Nutanix', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '508F4C', NULL, 'Xiaomi', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '50C7BF', NULL, 'TP-Link Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '50DCE7', NULL, 'Amazon Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '50E549', NULL, 'GIGA-BYTE Technology', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '525400', 'virtual_machine', 'QEMU virtual NIC', NULL, 0.80, 'https://libvirt.org/formatdomain.html'),
+    ('oui', '544249', NULL, 'Sony', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '546009', NULL, 'Google', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '54C415', 'iot_device', 'Hikvision', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '54E6FC', NULL, 'TP-Link Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '583879', 'printer', 'Ricoh', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '58BDA3', NULL, 'Nintendo', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '58C17A', 'network_device', 'Cambium Networks', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '5C0A5B', NULL, 'Samsung Electronics', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '5C514F', NULL, 'Intel', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '5C8816', 'ot_device', 'Rockwell Automation', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '5CAAFD', NULL, 'Sonos', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '5CCF7F', 'iot_device', 'Espressif', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '600194', 'iot_device', 'Espressif', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '60334B', NULL, 'Apple', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '60E327', NULL, 'TP-Link Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '640980', NULL, 'Xiaomi', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '64167F', NULL, 'Polycom', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '6837E9', NULL, 'Amazon Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '687251', NULL, 'Ubiquiti Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '689423', NULL, 'Hon Hai Precision', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '6C3B6B', 'network_device', 'MikroTik', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '6CADF8', NULL, 'Google', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '6CF37F', 'network_device', 'Aruba Networks', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '704CA5', NULL, 'Fortinet', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '709E29', NULL, 'Sony Interactive Entertainment', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '744D28', 'network_device', 'MikroTik', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '7483C2', NULL, 'Ubiquiti Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '7483EF', 'network_device', 'Arista Networks', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '74C246', NULL, 'Amazon Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '7819F7', 'network_device', 'Juniper Networks', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '781FDB', NULL, 'Samsung Electronics', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '788A20', NULL, 'Ubiquiti Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '78A2A0', NULL, 'Nintendo', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '78ACC0', NULL, 'Hewlett Packard', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '7C1E52', NULL, 'Microsoft', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '7C7A91', NULL, 'Intel', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '7CED8D', NULL, 'Microsoft', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '802AA8', NULL, 'Ubiquiti Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '805EC0', NULL, 'Yealink', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '840D8E', 'iot_device', 'Espressif', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '881544', NULL, 'Cisco Meraki', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '888717', 'printer', 'Canon', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '88E0F3', 'network_device', 'Juniper Networks', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', '8C0C90', 'network_device', 'Ruckus Wireless', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '8C705A', NULL, 'Intel', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '8C89A5', NULL, 'Micro-Star International', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '8CBEBE', NULL, 'Xiaomi', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '9002A9', 'iot_device', 'Dahua Technology', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', '901B0E', NULL, 'Fujitsu', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '904CE5', NULL, 'Hon Hai Precision', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '906CAC', NULL, 'Fortinet', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '9094E4', NULL, 'D-Link', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '94103E', NULL, 'Belkin International', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '941882', NULL, 'Hewlett Packard', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '94B40F', 'network_device', 'Aruba Networks', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', '94DE80', NULL, 'GIGA-BYTE Technology', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '94EB2C', NULL, 'Google', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', '98B6E9', NULL, 'Nintendo', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'A002DC', NULL, 'Amazon Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'A020A6', 'iot_device', 'Espressif', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', 'A040A0', NULL, 'NETGEAR', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'A08869', NULL, 'Intel', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'A0F3C1', NULL, 'TP-Link Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'A47733', NULL, 'Google', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'A4EE57', 'printer', 'Seiko Epson', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', 'A816D0', NULL, 'LG Electronics', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'AC17C8', NULL, 'Cisco Meraki', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'AC1826', 'printer', 'Seiko Epson', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', 'AC1F6B', NULL, 'Super Micro Computer', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'AC220B', NULL, 'ASUSTek Computer', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'AC3FA4', NULL, 'Zebra Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'AC63BE', NULL, 'Amazon Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'AC67B2', 'iot_device', 'Espressif', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', 'ACBC32', NULL, 'Apple', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'ACCC8E', 'iot_device', 'Axis Communications', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', 'ACE215', NULL, 'Huawei Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'ACF1DF', NULL, 'D-Link', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'B0A737', NULL, 'Roku', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'B40C25', 'firewall', 'Palo Alto Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'B4B017', NULL, 'Avaya', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'B4E62D', 'iot_device', 'Espressif', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', 'B4FBE4', NULL, 'Ubiquiti Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'B827EB', NULL, 'Raspberry Pi', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'B82A72', NULL, 'Dell', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'B83E59', NULL, 'Roku', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'B8A44F', 'iot_device', 'Axis Communications', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', 'B8E937', NULL, 'Sonos', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'BC60A7', NULL, 'Sony Interactive Entertainment', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'BCAD28', 'iot_device', 'Hikvision', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', 'BCAEC5', NULL, 'ASUSTek Computer', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'BCDDC2', 'iot_device', 'Espressif', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', 'C03F0E', NULL, 'NETGEAR', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'C05627', NULL, 'Linksys', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'C056E3', 'iot_device', 'Hikvision', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', 'C074AD', NULL, 'Grandstream Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'C0C520', 'network_device', 'Ruckus Wireless', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', 'C44F33', 'iot_device', 'Espressif', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', 'C80E14', NULL, 'AVM GmbH', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'C8BE19', NULL, 'D-Link', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'CC2DE0', 'network_device', 'MikroTik', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', 'CC50E3', 'iot_device', 'Espressif', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', 'CC6DA0', NULL, 'Roku', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'CC9E00', NULL, 'Nintendo', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'CCFA00', NULL, 'LG Electronics', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'D023DB', NULL, 'Apple', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'D4AE52', NULL, 'Dell', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'D4F4BE', 'firewall', 'Palo Alto Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'D83134', NULL, 'Roku', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'D83ADD', NULL, 'Raspberry Pi', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'D8C7C8', 'network_device', 'Aruba Networks', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', 'D8CB8A', NULL, 'Micro-Star International', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'DC3A5E', NULL, 'Roku', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'DC4F22', 'iot_device', 'Espressif', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', 'DC5360', NULL, 'Intel', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'DC9FDB', NULL, 'Ubiquiti Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'DCA632', NULL, 'Raspberry Pi', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'E0508B', 'iot_device', 'Dahua Technology', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', 'E063DA', NULL, 'Ubiquiti Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'E0CBBC', NULL, 'Cisco Meraki', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'E45F01', NULL, 'Raspberry Pi', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'E82725', 'iot_device', 'Axis Communications', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', 'E8508B', NULL, 'Samsung Electronics', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'E8DE27', NULL, 'TP-Link Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'EC1A59', NULL, 'Belkin International', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'ECB1D7', NULL, 'Hewlett Packard', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'ECB5FA', NULL, 'Philips Lighting', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'ECFABC', 'iot_device', 'Espressif', NULL, 0.75, 'https://standards-oui.ieee.org/'),
+    ('oui', 'F01C2D', 'network_device', 'Juniper Networks', NULL, 0.70, 'https://standards-oui.ieee.org/'),
+    ('oui', 'F0272D', NULL, 'Amazon Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'F09FC2', NULL, 'Ubiquiti Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'F0B429', NULL, 'Xiaomi', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'F0B479', NULL, 'Apple', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'F48139', 'printer', 'Canon', NULL, 0.80, 'https://standards-oui.ieee.org/'),
+    ('oui', 'F4F26D', NULL, 'TP-Link Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'F4F5D8', NULL, 'Google', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'F4F5E8', NULL, 'Google', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'F81654', NULL, 'Intel', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'F8461C', NULL, 'Sony Interactive Entertainment', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'F8BC12', NULL, 'Dell', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'FA163E', 'virtual_machine', 'OpenStack', NULL, 0.75, 'https://docs.openstack.org/neutron/latest/configuration/neutron.html'),
+    ('oui', 'FC0FE6', NULL, 'Sony', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'FC65DE', NULL, 'Amazon Technologies', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('oui', 'FCECDA', NULL, 'Ubiquiti Networks', NULL, 0.85, 'https://standards-oui.ieee.org/'),
+    ('sysobjectid', '1.3.6.1.4.1.11', NULL, 'Hewlett Packard', NULL, 0.85, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.12356', NULL, 'Fortinet', NULL, 0.85, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.14988', 'network_device', 'MikroTik', NULL, 0.70, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.171', 'network_device', 'D-Link', NULL, 0.70, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.1916', 'network_device', 'Extreme Networks', NULL, 0.70, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.1991', 'network_device', 'Brocade', NULL, 0.70, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.2011', NULL, 'Huawei Technologies', NULL, 0.85, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.207', 'network_device', 'Allied Telesis', NULL, 0.70, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.20916', 'iot_device', 'Hikvision', NULL, 0.75, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.25461', 'firewall', 'Palo Alto Networks', NULL, 0.80, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.25506', 'network_device', 'H3C', NULL, 0.70, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.2636', 'network_device', 'Juniper Networks', NULL, 0.70, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.30065', 'network_device', 'Arista Networks', NULL, 0.70, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.318', NULL, 'American Power Conversion', NULL, 0.85, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.3375', 'load_balancer', 'F5 Networks', NULL, 0.80, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.41112', 'network_device', 'Ubiquiti Networks', NULL, 0.70, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.43', NULL, '3Com', NULL, 0.85, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.4526', 'network_device', 'NETGEAR', NULL, 0.70, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.5951', 'load_balancer', 'Citrix', NULL, 0.75, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.674', NULL, 'Dell', NULL, 0.85, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.6876', NULL, 'VMware', NULL, 0.85, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.789', 'storage_device', 'NetApp', NULL, 0.80, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.890', 'network_device', 'Zyxel', NULL, 0.70, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('sysobjectid', '1.3.6.1.4.1.9', 'network_device', 'Cisco Systems', NULL, 0.70, 'https://www.iana.org/assignments/enterprise-numbers/'),
+    ('enip', '1', 'ot_device', 'Rockwell Automation', NULL, 0.80, 'https://www.odva.org/subscriptions-services/vendor-id-list/'),
+    ('cloud_type', 'aws_alb', 'cloud_load_balancer', NULL, NULL, 0.95, 'https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html'),
+    ('cloud_type', 'aws_api_gateway', 'api_gateway', NULL, NULL, 0.95, 'https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html'),
+    ('cloud_type', 'aws_cloudfront', 'cdn_distribution', NULL, NULL, 0.95, 'https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Introduction.html'),
+    ('cloud_type', 'aws_elb', 'cloud_load_balancer', NULL, NULL, 0.95, 'https://docs.aws.amazon.com/elasticloadbalancing/latest/classic/introduction.html'),
+    ('cloud_type', 'aws_kms', 'key_store', NULL, NULL, 0.95, 'https://docs.aws.amazon.com/kms/latest/developerguide/overview.html'),
+    ('cloud_type', 'aws_nlb', 'cloud_load_balancer', NULL, NULL, 0.95, 'https://docs.aws.amazon.com/elasticloadbalancing/latest/network/introduction.html'),
+    ('cloud_type', 'aws_rds_instance', 'managed_database', NULL, NULL, 0.95, 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Welcome.html'),
+    ('cloud_type', 'aws_s3_bucket', 'object_storage', NULL, NULL, 0.95, 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html'),
+    ('cloud_type', 'azure_application_gateway', 'cloud_load_balancer', NULL, NULL, 0.95, 'https://learn.microsoft.com/azure/application-gateway/overview'),
+    ('cloud_type', 'azure_keyvault_key', 'key_store', NULL, NULL, 0.95, 'https://learn.microsoft.com/azure/key-vault/general/overview'),
+    ('cloud_type', 'azure_load_balancer', 'cloud_load_balancer', NULL, NULL, 0.95, 'https://learn.microsoft.com/azure/load-balancer/load-balancer-overview'),
+    ('cloud_type', 'azure_sql_database', 'managed_database', NULL, NULL, 0.95, 'https://learn.microsoft.com/azure/azure-sql/database/sql-database-paas-overview'),
+    ('cloud_type', 'azure_storage_account', 'object_storage', NULL, NULL, 0.95, 'https://learn.microsoft.com/azure/storage/common/storage-account-overview'),
+    ('cloud_type', 'gcp_cloudsql_instance', 'managed_database', NULL, NULL, 0.95, 'https://cloud.google.com/sql/docs/introduction'),
+    ('cloud_type', 'gcp_https_load_balancer', 'cloud_load_balancer', NULL, NULL, 0.95, 'https://cloud.google.com/load-balancing/docs/https'),
+    ('cloud_type', 'gcp_kms_crypto_key', 'key_store', NULL, NULL, 0.95, 'https://cloud.google.com/kms/docs/key-management-service'),
+    ('cloud_type', 'gcp_ssl_proxy', 'cloud_load_balancer', NULL, NULL, 0.95, 'https://cloud.google.com/load-balancing/docs/ssl'),
+    ('cloud_type', 'gcp_storage_bucket', 'object_storage', NULL, NULL, 0.95, 'https://cloud.google.com/storage/docs/buckets'),
+    ('banner', '(?i)^server:\s*(?:openresty|litespeed)(?:[/ ]|$)', 'web_application', NULL, NULL, 0.65, 'https://openresty.org/en/'),
+    ('banner', '(?i)^server:\s*apache(?:[/ ]|$)', 'web_application', NULL, NULL, 0.65, 'https://httpd.apache.org/docs/current/mod/core.html#servertokens'),
+    ('banner', '(?i)^server:\s*apache-coyote(?:[/ ]|$)', 'web_application', NULL, NULL, 0.65, 'https://tomcat.apache.org/tomcat-10.1-doc/config/http.html'),
+    ('banner', '(?i)^server:\s*gunicorn(?:[/ ]|$)', 'web_application', NULL, NULL, 0.65, 'https://docs.gunicorn.org/en/stable/settings.html'),
+    ('banner', '(?i)^server:\s*jetty(?:[/( ]|$)', 'web_application', NULL, NULL, 0.65, 'https://jetty.org/docs/jetty/12/operations-guide/server/index.html'),
+    ('banner', '(?i)^server:\s*kestrel(?:[/ ]|$)', 'web_application', NULL, NULL, 0.65, 'https://learn.microsoft.com/aspnet/core/fundamentals/servers/kestrel'),
+    ('banner', '(?i)^server:\s*microsoft-iis(?:[/ ]|$)', 'web_application', NULL, NULL, 0.65, 'https://learn.microsoft.com/iis/get-started/introduction-to-iis/introduction-to-iis-architecture'),
+    ('banner', '(?i)^server:\s*nginx(?:[/ ]|$)', 'web_application', NULL, NULL, 0.65, 'https://nginx.org/en/docs/http/ngx_http_core_module.html#server_tokens'),
+    ('port_profile', '515,9100', 'printer', NULL, NULL, 0.75, 'https://datatracker.ietf.org/doc/html/rfc1179'),
+    ('port_profile', '631,9100', 'printer', NULL, NULL, 0.80, 'https://www.pwg.org/ipp/everywhere.html'),
+    ('model', 'AIR-', 'access_point', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/wireless/access-points/index.html'),
+    ('model', 'AIR-CT', 'wireless_controller', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/wireless/index.html'),
+    ('model', 'ASA', 'firewall', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/security/adaptive-security-appliance-asa-software/index.html'),
+    ('model', 'ASR', 'router', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/routers/index.html'),
+    ('model', 'C1111', 'router', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/routers/1000-series-integrated-services-routers-isr/index.html'),
+    ('model', 'C1121', 'router', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/routers/1000-series-integrated-services-routers-isr/index.html'),
+    ('model', 'C8200', 'router', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/routers/catalyst-8200-series-edge-platforms/index.html'),
+    ('model', 'C8300', 'router', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/routers/catalyst-8300-series-edge-platforms/index.html'),
+    ('model', 'C8500', 'router', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/routers/catalyst-8500-series-edge-platforms/index.html'),
+    ('model', 'C9200', 'switch', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/switches/catalyst-9200-series-switches/index.html'),
+    ('model', 'C9300', 'switch', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/switches/catalyst-9300-series-switches/index.html'),
+    ('model', 'C9400', 'switch', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/switches/catalyst-9400-series-switches/index.html'),
+    ('model', 'C9500', 'switch', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/switches/catalyst-9500-series-switches/index.html'),
+    ('model', 'C9600', 'switch', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/switches/catalyst-9600-series-switches/index.html'),
+    ('model', 'C9800', 'wireless_controller', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/wireless/catalyst-9800-series-wireless-controllers/index.html'),
+    ('model', 'CISCO29', 'router', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/routers/index.html'),
+    ('model', 'CISCO39', 'router', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/routers/index.html'),
+    ('model', 'FPR', 'firewall', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/security/firewalls/index.html'),
+    ('model', 'IE-', 'switch', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/switches/industrial-ethernet-switches/index.html'),
+    ('model', 'ISR', 'router', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/routers/index.html'),
+    ('model', 'N2K-', 'switch', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/switches/nexus-2000-series-fabric-extenders/index.html'),
+    ('model', 'N3K-', 'switch', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/switches/nexus-3000-series-switches/index.html'),
+    ('model', 'N5K-', 'switch', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/switches/nexus-5000-series-switches/index.html'),
+    ('model', 'N7K-', 'switch', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/switches/nexus-7000-series-switches/index.html'),
+    ('model', 'N9K-', 'switch', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/switches/nexus-9000-series-switches/index.html'),
+    ('model', 'WS-C', 'switch', 'Cisco Systems', NULL, 0.85, 'https://www.cisco.com/c/en/us/products/switches/index.html'),
+    ('model', 'uap', 'access_point', 'Ubiquiti Networks', NULL, 0.85, 'https://help.ui.com/hc/en-us/articles/360012192813'),
+    ('model', 'uck', 'wireless_controller', 'Ubiquiti Networks', NULL, 0.85, 'https://help.ui.com/hc/en-us/articles/360012192813'),
+    ('model', 'udm', 'router', 'Ubiquiti Networks', NULL, 0.80, 'https://help.ui.com/hc/en-us/articles/360012192813'),
+    ('model', 'ugw', 'router', 'Ubiquiti Networks', NULL, 0.85, 'https://help.ui.com/hc/en-us/articles/360012192813'),
+    ('model', 'usw', 'switch', 'Ubiquiti Networks', NULL, 0.85, 'https://help.ui.com/hc/en-us/articles/360012192813'),
+    ('model', 'uxg', 'router', 'Ubiquiti Networks', NULL, 0.85, 'https://help.ui.com/hc/en-us/articles/360012192813'),
+    ('platform', 'cisco_asa', 'firewall', 'Cisco Systems', NULL, 0.70, 'https://www.cisco.com/c/en/us/products/security/adaptive-security-appliance-asa-software/index.html'),
+    ('platform', 'cisco_router', 'router', 'Cisco Systems', NULL, 0.70, 'https://www.cisco.com/c/en/us/products/routers/index.html'),
+    ('platform', 'cisco_switch', 'switch', 'Cisco Systems', NULL, 0.70, 'https://www.cisco.com/c/en/us/products/switches/index.html'),
+    ('platform', 'fortios', 'firewall', 'Fortinet', NULL, 0.80, 'https://docs.fortinet.com/document/fortigate/7.4.0/administration-guide'),
+    ('platform', 'icontrol', 'load_balancer', 'F5 Networks', NULL, 0.80, 'https://clouddocs.f5.com/api/icontrol-rest/'),
+    ('platform', 'panos', 'firewall', 'Palo Alto Networks', NULL, 0.80, 'https://docs.paloaltonetworks.com/pan-os/11-1/pan-os-panorama-api'),
+    ('platform', 'unifi_controller', 'wireless_controller', 'Ubiquiti Networks', NULL, 0.80, 'https://help.ui.com/hc/en-us/articles/360012192813'),
+    ('cdp_capabilities', 'router', 'router', NULL, NULL, 0.65, 'https://www.cisco.com/c/en/us/support/docs/network-management/discovery-protocol-cdp/13414-103.html'),
+    ('cdp_capabilities', 'router,switch', 'network_device', NULL, NULL, 0.70, 'https://www.cisco.com/c/en/us/support/docs/network-management/discovery-protocol-cdp/13414-103.html'),
+    ('cdp_capabilities', 'switch', 'switch', NULL, NULL, 0.65, 'https://www.cisco.com/c/en/us/support/docs/network-management/discovery-protocol-cdp/13414-103.html'),
+    ('lldp_capability', 'bridge,router', 'network_device', NULL, NULL, 0.70, 'https://standards.ieee.org/ieee/802.1AB/7514/'),
+    ('lldp_capability', 'router', 'router', NULL, NULL, 0.65, 'https://standards.ieee.org/ieee/802.1AB/7514/'),
+    ('lldp_capability', 'wlan_access_point', 'access_point', NULL, NULL, 0.75, 'https://standards.ieee.org/ieee/802.1AB/7514/'),
+    ('mdns_service', '_ipp._tcp', 'printer', NULL, NULL, 0.75, 'https://www.rfc-editor.org/rfc/rfc8011.html'),
+    ('mdns_service', '_ipps._tcp', 'printer', NULL, NULL, 0.75, 'https://www.rfc-editor.org/rfc/rfc8010.html'),
+    ('mdns_service', '_pdl-datastream._tcp', 'printer', NULL, NULL, 0.70, 'https://www.pwg.org/ipp/everywhere.html'),
+    ('mdns_service', '_printer._tcp', 'printer', NULL, NULL, 0.75, 'https://datatracker.ietf.org/doc/html/rfc1179')
+ON CONFLICT (rule_kind, pattern) DO UPDATE SET
+    class_key  = EXCLUDED.class_key,
+    vendor     = EXCLUDED.vendor,
+    model      = EXCLUDED.model,
+    confidence = EXCLUDED.confidence,
+    source_url = EXCLUDED.source_url,
+    updated_at = now();
+-- END GENERATED: classification rules

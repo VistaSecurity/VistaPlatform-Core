@@ -37,8 +37,8 @@ func TestIntegration_ActivitySummary_UnreachableTrackerReportsUnknownNotAnEstima
 	// clearly non-zero number (3 assets → at least 6).
 	for i := 0; i < 3; i++ {
 		if _, err := db.Exec(`
-			INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-			VALUES ($1,$2,$3,'server','monitoring',NOW(),NOW(),NOW(),NOW())`,
+			INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`,
 			uuid.New(), tenant, "activity-summary-"+uuid.NewString()[:8]+".example.test"); err != nil {
 			t.Fatalf("insert asset: %v", err)
 		}

@@ -17,11 +17,20 @@ import (
 // TEST_DATABASE_URL points at a schema-loaded Postgres (nightly + `make
 // test-integration-db`); otherwise they skip.
 //
-// api_format_preferences is the probe table: it carries a plain tenant_id, a
-// uuid-defaulted PK, and otherwise-nullable columns, so a row needs only a
-// tenant_id. It has the canonical tenant_isolation policy (USING + WITH CHECK).
+// tenant_resource_usage is the probe table: it carries a plain tenant_id, a
+// uuid-defaulted PK, and otherwise-defaulted columns, so a row needs only a
+// tenant_id. It has the canonical tenant_isolation policy (USING + WITH CHECK),
+// and its tenant_id FK is ON DELETE CASCADE, so testdb.NewTenant's cleanup takes
+// the probe rows with it.
+//
+// The probe was api_format_preferences until that table was dropped as one of
+// the 31 reader-less/writer-less tables retired in, which took this test
+// with it ("relation does not exist") every night for three weeks. Pick a table
+// with REAL readers and writers — tenant_resource_usage is resource-tracker's
+// live usage table — so the probe cannot be swept up by the next dead-table
+// audit. A schema-shaped probe is not the same as a load-bearing one.
 
-const probeTable = "public.api_format_preferences"
+const probeTable = "public.tenant_resource_usage"
 
 // TestIntegration_RLS_Enforcement proves that under the non-owner app role the
 // policies deny cross-tenant reads, deny cross-tenant writes (WITH CHECK), allow

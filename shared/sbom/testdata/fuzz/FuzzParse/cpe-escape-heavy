@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.6\",\"components\":[{\"name\":\"a\",\"cpe\":\"cpe:2.3:a:v:p\\\\:q:1:*:*:*:*:*:*:*\"}]}")

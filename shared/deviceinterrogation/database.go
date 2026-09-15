@@ -8,6 +8,8 @@ import (
 	"time"
 
 	_ "github.com/lib/pq" // postgres driver, registered for sql.Open("postgres", ...)
+
+	"github.com/vistasecurity/vistaplatform/shared/redact"
 )
 
 // DatabaseInterrogator interrogates PostgreSQL and MySQL instances for their
@@ -59,6 +61,20 @@ type DatabaseEncryptionFinding struct {
 	RawConfig map[string]interface{}
 }
 
+// dbInterrogatePostgres and dbInterrogateMy are the per-engine interrogations,
+// behind vars so a test can drive [InterrogateDatabase] end to end without a
+// live engine.
+//
+// That seam exists for one assertion in particular: that the REDACTION at the
+// tail of InterrogateDatabase actually runs. Calling redact.Map in a test
+// proves redact.Map works; it proves nothing about whether this function calls
+// it, and "the helper is tested, the call site is not" is how a fix ships
+// inert.
+var (
+	dbInterrogatePostgres = dbInterrogatePostgreSQL
+	dbInterrogateMy       = dbInterrogateMySQL
+)
+
 // InterrogateDatabase builds a DSN from the (already-decrypted, plaintext)
 // device credentials, dispatches on device.DeviceType to the per-engine
 // interrogation, computes the risk score, and returns the finding with
@@ -73,9 +89,9 @@ func InterrogateDatabase(ctx context.Context, device DeviceInfo, creds Credentia
 	var finding *DatabaseEncryptionFinding
 	switch device.DeviceType {
 	case "postgresql":
-		finding, err = dbInterrogatePostgreSQL(ctx, connStr)
+		finding, err = dbInterrogatePostgres(ctx, connStr)
 	case "mysql":
-		finding, err = dbInterrogateMySQL(ctx, connStr)
+		finding, err = dbInterrogateMy(ctx, connStr)
 	default:
 		return nil, fmt.Errorf("unsupported database type: %s", device.DeviceType)
 	}
@@ -89,6 +105,22 @@ func InterrogateDatabase(ctx context.Context, device DeviceInfo, creds Credentia
 	finding.Port = port
 
 	finding.RiskScore = dbCalculateRiskScore(finding)
+
+	// REDACT before returning, not at the Registry.
+	//
+	// Every other collector's output is scrubbed by the sanitizing wrapper
+	// Registry.Get returns, which walks an *InterrogateResult. This function
+	// returns a TYPED finding instead, and the service wrapper persists that
+	// finding's RawConfig straight into `database_encryption_states.raw_config`
+	// without ever building an InterrogateResult — so the wrapper could not
+	// reach it and nothing scrubbed it. RawConfig is an engine's whole settings
+	// bag (`SHOW VARIABLES`, `pg_settings`), which on MySQL includes
+	// `master_ssl_*` and on PostgreSQL the `ssl_key_file` path and anything an
+	// operator added: exactly the "collect posture, never key material" rule.
+	//
+	// Doing it HERE rather than in the caller is what makes it unskippable:
+	// the standalone Interrogation Agent calls this function too.
+	finding.RawConfig = redact.Map(finding.RawConfig)
 
 	return finding, nil
 }

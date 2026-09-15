@@ -9,6 +9,7 @@ package cbom
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -16,17 +17,17 @@ import (
 	"github.com/google/uuid"
 )
 
-// TestContract_GenerateCBOMArtifact_422OnUnsupportedPredicate covers the refusal
-// path added with the scope-evaluation fix. A predicate the generator cannot
-// evaluate must not produce an artifact: the row would be dated, hashed and
-// possibly signed while covering more than the scope it names.
-func TestContract_GenerateCBOMArtifact_422OnUnsupportedPredicate(t *testing.T) {
+// TestContract_GenerateCBOMArtifact_422OnInvalidScopeQuery covers the refusal
+// path. A scope whose stored query no longer validates must not produce an
+// artifact: the row would be dated, hashed and possibly signed while covering
+// something other than the scope it names.
+func TestContract_GenerateCBOMArtifact_422OnInvalidScopeQuery(t *testing.T) {
 	sv := loadSpec(t)
 	scope := sampleScope()
 	eng := newEngine(handlerDeps{
 		artifacts: &stubArtifactStore{},
 		scopes:    &stubScopeGetter{result: scope},
-		builder:   &stubBuilder{err: &UnsupportedPredicateError{Fields: []string{"ip_subnet_cidr"}}},
+		builder:   &stubBuilder{err: &InvalidScopeQueryError{Query: "ip_subnet_cidr:10.0.0.0/8", Err: errors.New("unknown_field")}},
 		persister: &stubPersister{},
 		features:  &stubFeatureChecker{allowed: false},
 	})
@@ -35,9 +36,9 @@ func TestContract_GenerateCBOMArtifact_422OnUnsupportedPredicate(t *testing.T) {
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422; body=%s", w.Code, w.Body.String())
 	}
-	sv.assertConforms(t, "UnsupportedPredicateError", w.Body.Bytes())
+	sv.assertConforms(t, "InvalidScopeQueryError", w.Body.Bytes())
 	if !strings.Contains(w.Body.String(), "ip_subnet_cidr") {
-		t.Errorf("response should name the offending field: %s", w.Body.String())
+		t.Errorf("response should echo the offending query: %s", w.Body.String())
 	}
 }
 
@@ -113,7 +114,8 @@ type limitCapturingStore struct {
 	limit int
 }
 
-func (s *limitCapturingStore) List(_ context.Context, _ uuid.UUID, _ *uuid.UUID, limit int) ([]Artifact, error) {
+func (s *limitCapturingStore) List(_ context.Context, _ uuid.UUID, _ *uuid.UUID, kind ArtifactKind, limit int) ([]Artifact, error) {
 	s.limit = limit
+	s.lastKindFilter = kind
 	return nil, nil
 }

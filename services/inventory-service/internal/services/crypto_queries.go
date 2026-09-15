@@ -154,7 +154,7 @@ const keyDeploymentCountSubquery = `
 	(SELECT COUNT(DISTINCT ci.asset_id)
 	   FROM implementation_keys ik
 	   JOIN crypto_implementations ci ON ci.id = ik.implementation_id
-	   JOIN network_assets na ON na.id = ci.asset_id
+	   JOIN assets na ON na.tenant_id = ci.tenant_id AND na.id = ci.asset_id
 	  WHERE ik.key_id = keys.id
 	    AND ci.tenant_id = keys.tenant_id
 	    AND ci.deleted_at IS NULL
@@ -165,7 +165,7 @@ func (s *AssetService) ListKeys(tenantID uuid.UUID) ([]models.Key, error) {
 	query := `SELECT ` + keyColumns + `, ` + keyDeploymentCountSubquery + ` FROM keys` + keyJoin + ` WHERE keys.tenant_id = $1 ORDER BY keys.expires_at ASC NULLS LAST, keys.created_at DESC NULLS LAST`
 	var rows []keyListRow
 	// RLS-scoped read over keys (LEFT JOIN algorithms; deployment_count subquery over
-	// implementation_keys / crypto_implementations / network_assets).
+	// implementation_keys / crypto_implementations / assets).
 	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		return tx.Select(&rows, query, tenantID)
 	}); err != nil {
@@ -268,14 +268,14 @@ func (s *AssetService) GetKeyImplementations(tenantID, keyID uuid.UUID) ([]model
 		       ci.protocol::text AS protocol, ci.protocol_version
 		  FROM implementation_keys ik
 		  JOIN crypto_implementations ci ON ci.id = ik.implementation_id
-		  JOIN network_assets na ON na.id = ci.asset_id
+		  JOIN assets na ON na.tenant_id = ci.tenant_id AND na.id = ci.asset_id
 		 WHERE ik.key_id = $1
 		   AND ci.tenant_id = $2
 		   AND ci.deleted_at IS NULL
 		   AND na.deleted_at IS NULL
 		 ORDER BY na.hostname ASC NULLS LAST`
 	var impls []models.KeyImplementation
-	// RLS-scoped read over crypto_implementations / network_assets (JOIN implementation_keys).
+	// RLS-scoped read over crypto_implementations / assets (JOIN implementation_keys).
 	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		return tx.Select(&impls, query, keyID, tenantID)
 	}); err != nil {

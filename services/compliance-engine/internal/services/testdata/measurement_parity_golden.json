@@ -1,0 +1,111 @@
+{
+  "cert_algorithm": [
+    "cert_algorithm | ec-leaf | ecdsa-with-SHA384(string) | certificate | common_name=parity-ec.example.test(string) key_size=256(int64)",
+    "cert_algorithm | expired-leaf | RSA(string) | certificate | common_name=parity-expired.example.test(string) key_size=1024(int64)",
+    "cert_algorithm | pqc-leaf | ML-DSA-65(string) | certificate | common_name=parity-pqc.example.test(string) key_size=1952(int64)",
+    "cert_algorithm | rsa-leaf | RSA(string) | certificate | common_name=parity-rsa.example.test(string) key_size=2048(int64)"
+  ],
+  "cert_expiration_days": [
+    "cert_expiration_days | ec-leaf | 200(int) | certificate | algorithm=ecdsa-with-SHA384(string) common_name=parity-ec.example.test(string) key_size=256(int64) not_after=+4812h",
+    "cert_expiration_days | expired-leaf | -11(int) | certificate | algorithm=RSA(string) common_name=parity-expired.example.test(string) key_size=1024(int64) not_after=-252h",
+    "cert_expiration_days | pqc-leaf | 90(int) | certificate | algorithm=ML-DSA-65(string) common_name=parity-pqc.example.test(string) key_size=1952(int64) not_after=+2172h",
+    "cert_expiration_days | rsa-leaf | 45(int) | certificate | algorithm=RSA(string) common_name=parity-rsa.example.test(string) key_size=2048(int64) not_after=+1092h",
+    "cert_expiration_days | unknown-key-leaf | 30(int) | certificate | common_name=parity-unknown.example.test(string) not_after=+732h"
+  ],
+  "cert_pqc_status": [
+    "cert_pqc_status | ec-leaf | quantum_vulnerable(string) | certificate | algorithm=ecdsa-with-SHA384(string) common_name=parity-ec.example.test(string)",
+    "cert_pqc_status | expired-leaf | quantum_vulnerable(string) | certificate | algorithm=RSA(string) common_name=parity-expired.example.test(string)",
+    "cert_pqc_status | pqc-leaf | quantum_safe(string) | certificate | algorithm=ML-DSA-65(string) common_name=parity-pqc.example.test(string)",
+    "cert_pqc_status | rsa-leaf | quantum_vulnerable(string) | certificate | algorithm=RSA(string) common_name=parity-rsa.example.test(string)",
+    "cert_pqc_status | unknown-key-leaf | quantum_vulnerable(string) | certificate | common_name=parity-unknown.example.test(string)"
+  ],
+  "cert_sig_pqc_status": [
+    "cert_sig_pqc_status | ec-leaf | quantum_vulnerable(string) | certificate | common_name=parity-ec.example.test(string) signature_algorithm=ecdsa-with-SHA384(string)",
+    "cert_sig_pqc_status | expired-leaf | quantum_vulnerable(string) | certificate | common_name=parity-expired.example.test(string) signature_algorithm=sha1WithRSAEncryption(string)",
+    "cert_sig_pqc_status | pqc-leaf | quantum_safe(string) | certificate | common_name=parity-pqc.example.test(string) signature_algorithm=ML-DSA-65(string)",
+    "cert_sig_pqc_status | rsa-leaf | quantum_vulnerable(string) | certificate | common_name=parity-rsa.example.test(string) signature_algorithm=sha256WithRSAEncryption(string)"
+  ],
+  "cert_validity_days": [
+    "cert_validity_days | ec-leaf | 211(int) | certificate | common_name=parity-ec.example.test(string)",
+    "cert_validity_days | expired-leaf | 390(int) | certificate | common_name=parity-expired.example.test(string)",
+    "cert_validity_days | pqc-leaf | 92(int) | certificate | common_name=parity-pqc.example.test(string)",
+    "cert_validity_days | rsa-leaf | 76(int) | certificate | common_name=parity-rsa.example.test(string)",
+    "cert_validity_days | unknown-key-leaf | 36(int) | certificate | common_name=parity-unknown.example.test(string)"
+  ],
+  "certificate_chain_valid": [
+    "certificate_chain_valid | ec-leaf | false(bool) | certificate | common_name=parity-ec.example.test(string) issuer_dn=CN=parity-ec.example.test(string)",
+    "certificate_chain_valid | expired-leaf | true(bool) | certificate | common_name=parity-expired.example.test(string) issuer_dn=CN=Parity Test CA(string)",
+    "certificate_chain_valid | pqc-leaf | true(bool) | certificate | common_name=parity-pqc.example.test(string) issuer_dn=CN=Parity Test CA(string)",
+    "certificate_chain_valid | rsa-leaf | true(bool) | certificate | common_name=parity-rsa.example.test(string) issuer_dn=CN=Parity Test CA(string)",
+    "certificate_chain_valid | unknown-key-leaf | true(bool) | certificate | common_name=parity-unknown.example.test(string) issuer_dn=CN=Parity Test CA(string)"
+  ],
+  "cipher_suite_name": [
+    "cipher_suite_name | parity-edge.example.test | TLS_AES_256_GCM_SHA384(string) | asset | crypto_implementation_ids=[parity-edge.example.test/TLSTLS1.3] endpoint_fqdn=parity-vhost.example.test(string) hostname=parity-edge.example.test(string) port=8443(int64)",
+    "cipher_suite_name | parity-ot.example.test | TLS_AES_128_GCM_SHA256(string) | asset | crypto_implementation_ids=[parity-ot.example.test/BACnet_SC] hostname=parity-ot.example.test(string) ip_address=192.0.2.12(string)",
+    "cipher_suite_name | parity-web.example.test | TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256(string) | asset | crypto_implementation_ids=[parity-web.example.test/TLSTLS1.2] hostname=parity-web.example.test(string) ip_address=192.0.2.20(string) port=443(int64)",
+    "cipher_suite_name | parity-web.example.test | TLS_RSA_WITH_3DES_EDE_CBC_SHA(string) | asset | crypto_implementation_ids=[parity-web.example.test/TLSTLS1.0] hostname=parity-web.example.test(string) ip_address=192.0.2.10(string)"
+  ],
+  "config_kex_pqc_status": [
+    "config_kex_pqc_status | parity-edge.example.test | quantum_safe(string) | asset | algorithm=X25519MLKEM768(string) cipher_suite=TLS_AES_256_GCM_SHA384(string) crypto_implementation_ids=[parity-edge.example.test/TLSTLS1.3] endpoint_fqdn=parity-vhost.example.test(string) hostname=parity-edge.example.test(string) port=8443(int64)",
+    "config_kex_pqc_status | parity-pending.example.test | quantum_vulnerable(string) | asset | algorithm=ECDHE(string) crypto_implementation_ids=[parity-pending.example.test/TLSTLS1.2] hostname=parity-pending.example.test(string) ip_address=192.0.2.14(string)",
+    "config_kex_pqc_status | parity-web.example.test | quantum_vulnerable(string) | asset | algorithm=ECDHE(string) cipher_suite=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256(string) crypto_implementation_ids=[parity-web.example.test/TLSTLS1.2] hostname=parity-web.example.test(string) ip_address=192.0.2.20(string) port=443(int64)",
+    "config_kex_pqc_status | parity-web.example.test | quantum_vulnerable(string) | asset | algorithm=RSA(string) cipher_suite=TLS_RSA_WITH_3DES_EDE_CBC_SHA(string) crypto_implementation_ids=[parity-web.example.test/TLSTLS1.0] hostname=parity-web.example.test(string) ip_address=192.0.2.10(string)"
+  ],
+  "config_sig_pqc_status": [
+    "config_sig_pqc_status | parity-edge.example.test | quantum_safe(string) | asset | algorithm=ML-DSA-65(string) cipher_suite=TLS_AES_256_GCM_SHA384(string) crypto_implementation_ids=[parity-edge.example.test/TLSTLS1.3] endpoint_fqdn=parity-vhost.example.test(string) hostname=parity-edge.example.test(string) port=8443(int64)",
+    "config_sig_pqc_status | parity-web.example.test | quantum_vulnerable(string) | asset | algorithm=RSA(string) cipher_suite=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256(string) crypto_implementation_ids=[parity-web.example.test/TLSTLS1.2] hostname=parity-web.example.test(string) ip_address=192.0.2.20(string) port=443(int64)",
+    "config_sig_pqc_status | parity-web.example.test | quantum_vulnerable(string) | asset | algorithm=RSA(string) cipher_suite=TLS_RSA_WITH_3DES_EDE_CBC_SHA(string) crypto_implementation_ids=[parity-web.example.test/TLSTLS1.0] hostname=parity-web.example.test(string) ip_address=192.0.2.10(string)"
+  ],
+  "config_sym_strength": [
+    "config_sym_strength | parity-edge.example.test | quantum_safe(string) | asset | cipher_suite=TLS_AES_256_GCM_SHA384(string) crypto_implementation_ids=[parity-edge.example.test/TLSTLS1.3] endpoint_fqdn=parity-vhost.example.test(string) hostname=parity-edge.example.test(string) port=8443(int64) symmetric_encryption=AES-256-GCM(string)",
+    "config_sym_strength | parity-ot.example.test | quantum_marginal(string) | asset | cipher_suite=TLS_AES_128_GCM_SHA256(string) crypto_implementation_ids=[parity-ot.example.test/BACnet_SC] hostname=parity-ot.example.test(string) ip_address=192.0.2.12(string) symmetric_encryption=AES-128-GCM(string)",
+    "config_sym_strength | parity-pending.example.test | quantum_safe(string) | asset | crypto_implementation_ids=[parity-pending.example.test/TLSTLS1.2] hostname=parity-pending.example.test(string) ip_address=192.0.2.14(string) symmetric_encryption=AES-256-GCM(string)",
+    "config_sym_strength | parity-web.example.test | quantum_marginal(string) | asset | cipher_suite=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256(string) crypto_implementation_ids=[parity-web.example.test/TLSTLS1.2] hostname=parity-web.example.test(string) ip_address=192.0.2.20(string) port=443(int64) symmetric_encryption=AES-128-GCM(string)",
+    "config_sym_strength | parity-web.example.test | quantum_marginal(string) | asset | cipher_suite=TLS_RSA_WITH_3DES_EDE_CBC_SHA(string) crypto_implementation_ids=[parity-web.example.test/TLSTLS1.0] hostname=parity-web.example.test(string) ip_address=192.0.2.10(string) symmetric_encryption=3DES(string)"
+  ],
+  "hash_algorithm": [
+    "hash_algorithm | parity-edge.example.test | SHA384(string) | asset | cipher_suite=TLS_AES_256_GCM_SHA384(string) crypto_implementation_ids=[parity-edge.example.test/TLSTLS1.3] endpoint_fqdn=parity-vhost.example.test(string) hostname=parity-edge.example.test(string) port=8443(int64)",
+    "hash_algorithm | parity-pending.example.test | SHA384(string) | asset | crypto_implementation_ids=[parity-pending.example.test/TLSTLS1.2] hostname=parity-pending.example.test(string) ip_address=192.0.2.14(string)",
+    "hash_algorithm | parity-web.example.test | SHA1(string) | asset | cipher_suite=TLS_RSA_WITH_3DES_EDE_CBC_SHA(string) crypto_implementation_ids=[parity-web.example.test/TLSTLS1.0] hostname=parity-web.example.test(string) ip_address=192.0.2.10(string)",
+    "hash_algorithm | parity-web.example.test | SHA256(string) | asset | cipher_suite=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256(string) crypto_implementation_ids=[parity-web.example.test/TLSTLS1.2] hostname=parity-web.example.test(string) ip_address=192.0.2.20(string) port=443(int64)"
+  ],
+  "key_exchange_algorithm": [
+    "key_exchange_algorithm | parity-edge.example.test | X25519MLKEM768(string) | asset | cipher_suite=TLS_AES_256_GCM_SHA384(string) crypto_implementation_ids=[parity-edge.example.test/TLSTLS1.3] endpoint_fqdn=parity-vhost.example.test(string) hostname=parity-edge.example.test(string) port=8443(int64)",
+    "key_exchange_algorithm | parity-pending.example.test | ECDHE(string) | asset | crypto_implementation_ids=[parity-pending.example.test/TLSTLS1.2] hostname=parity-pending.example.test(string) ip_address=192.0.2.14(string)",
+    "key_exchange_algorithm | parity-web.example.test | ECDHE(string) | asset | cipher_suite=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256(string) crypto_implementation_ids=[parity-web.example.test/TLSTLS1.2] hostname=parity-web.example.test(string) ip_address=192.0.2.20(string) port=443(int64)",
+    "key_exchange_algorithm | parity-web.example.test | RSA(string) | asset | cipher_suite=TLS_RSA_WITH_3DES_EDE_CBC_SHA(string) crypto_implementation_ids=[parity-web.example.test/TLSTLS1.0] hostname=parity-web.example.test(string) ip_address=192.0.2.10(string)"
+  ],
+  "key_size": [
+    "key_size | expired-leaf | 1024(int) | certificate | algorithm=RSA(string) common_name=parity-expired.example.test(string) key_family=finite_field(string)",
+    "key_size | rsa-leaf | 2048(int) | certificate | algorithm=RSA(string) common_name=parity-rsa.example.test(string) key_family=finite_field(string)"
+  ],
+  "key_size_ec": [
+    "key_size_ec | ec-leaf | 256(int) | certificate | algorithm=ecdsa-with-SHA384(string) common_name=parity-ec.example.test(string) key_family=elliptic_curve(string)"
+  ],
+  "ot_protocol_encryption": [
+    "ot_protocol_encryption | parity-ot.example.test | absent(string) | asset | crypto_implementation_ids=[parity-ot.example.test/Modbus] hostname=parity-ot.example.test(string) ip_address=192.0.2.12(string) protocol=Modbus(string)",
+    "ot_protocol_encryption | parity-ot.example.test | present(string) | asset | cipher_suite=TLS_AES_128_GCM_SHA256(string) crypto_implementation_ids=[parity-ot.example.test/BACnet_SC] hostname=parity-ot.example.test(string) ip_address=192.0.2.12(string) protocol=BACnet_SC(string)"
+  ],
+  "pfs_support": [
+    "pfs_support | parity-edge.example.test | false(bool) | asset | crypto_implementation_ids=[parity-edge.example.test/TLSTLS1.3] endpoint_fqdn=parity-vhost.example.test(string) hostname=parity-edge.example.test(string) key_exchange_algorithm=X25519MLKEM768(string) port=8443(int64)",
+    "pfs_support | parity-pending.example.test | true(bool) | asset | crypto_implementation_ids=[parity-pending.example.test/TLSTLS1.2] hostname=parity-pending.example.test(string) ip_address=192.0.2.14(string) key_exchange_algorithm=ECDHE(string)",
+    "pfs_support | parity-web.example.test | false(bool) | asset | crypto_implementation_ids=[parity-web.example.test/TLSTLS1.0] hostname=parity-web.example.test(string) ip_address=192.0.2.10(string) key_exchange_algorithm=RSA(string)",
+    "pfs_support | parity-web.example.test | true(bool) | asset | crypto_implementation_ids=[parity-web.example.test/TLSTLS1.2] hostname=parity-web.example.test(string) ip_address=192.0.2.20(string) key_exchange_algorithm=ECDHE(string) port=443(int64)"
+  ],
+  "symmetric_encryption": [
+    "symmetric_encryption | parity-edge.example.test | AES-256-GCM(string) | asset | cipher_suite=TLS_AES_256_GCM_SHA384(string) crypto_implementation_ids=[parity-edge.example.test/TLSTLS1.3] endpoint_fqdn=parity-vhost.example.test(string) hostname=parity-edge.example.test(string) port=8443(int64)",
+    "symmetric_encryption | parity-ot.example.test | AES-128-GCM(string) | asset | cipher_suite=TLS_AES_128_GCM_SHA256(string) crypto_implementation_ids=[parity-ot.example.test/BACnet_SC] hostname=parity-ot.example.test(string) ip_address=192.0.2.12(string)",
+    "symmetric_encryption | parity-pending.example.test | AES-256-GCM(string) | asset | crypto_implementation_ids=[parity-pending.example.test/TLSTLS1.2] hostname=parity-pending.example.test(string) ip_address=192.0.2.14(string)",
+    "symmetric_encryption | parity-web.example.test | 3DES(string) | asset | cipher_suite=TLS_RSA_WITH_3DES_EDE_CBC_SHA(string) crypto_implementation_ids=[parity-web.example.test/TLSTLS1.0] hostname=parity-web.example.test(string) ip_address=192.0.2.10(string)",
+    "symmetric_encryption | parity-web.example.test | AES-128-GCM(string) | asset | cipher_suite=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256(string) crypto_implementation_ids=[parity-web.example.test/TLSTLS1.2] hostname=parity-web.example.test(string) ip_address=192.0.2.20(string) port=443(int64)"
+  ],
+  "tls_compression_enabled": [
+    "tls_compression_enabled | parity-web.example.test | false(bool) | asset | crypto_implementation_ids=[parity-web.example.test/TLSTLS1.2] hostname=parity-web.example.test(string) ip_address=192.0.2.20(string) port=443(int64)"
+  ],
+  "tls_version": [
+    "tls_version | parity-edge.example.test | TLS1.3(string) | asset | crypto_implementation_ids=[parity-edge.example.test/TLSTLS1.3] endpoint_fqdn=parity-vhost.example.test(string) hostname=parity-edge.example.test(string) port=8443(int64)",
+    "tls_version | parity-pending.example.test | TLS1.2(string) | asset | crypto_implementation_ids=[parity-pending.example.test/TLSTLS1.2] hostname=parity-pending.example.test(string) ip_address=192.0.2.14(string)",
+    "tls_version | parity-web.example.test | TLS1.0(string) | asset | crypto_implementation_ids=[parity-web.example.test/TLSTLS1.0] hostname=parity-web.example.test(string) ip_address=192.0.2.10(string)",
+    "tls_version | parity-web.example.test | TLS1.2(string) | asset | crypto_implementation_ids=[parity-web.example.test/TLSTLS1.2] hostname=parity-web.example.test(string) ip_address=192.0.2.20(string) port=443(int64)"
+  ]
+}

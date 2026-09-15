@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 )
 
@@ -27,14 +28,22 @@ const (
 	SeverityLow WeakCryptoSeverity = "low"
 )
 
-// Key-size floors, in bits. Single source for every classifier that judges a
-// key by its length: the detector below and the Crypto Risks classifier in
-// crypto_risks_service.go. RSA/DSA/DH per NIST SP 800-131A Rev 2 (112-bit
-// security ⇒ 2048-bit modulus); EC per the same table (256-bit curve).
-const (
-	minRSAKeySizeBits = 2048
-	minECCKeySizeBits = 256
-)
+// The key-size floors are cryptoparse.MinRSAKeySizeBits and
+// cryptoparse.MinECCKeySizeBits, referenced by that name at every site that
+// needs them — the SQL predicates below and the Crypto Risks classifier in
+// crypto_risks_service.go.
+//
+// They used to be re-declared here as package-local aliases (minRSAKeySizeBits
+// / minECCKeySizeBits) of exactly those constants. Two names for one floor is
+// how a floor comes to be raised in one place and not the other: a reader
+// grepping for "2048" finds cryptoparse, a reader grepping for the local name
+// finds this file, and neither sees the other. The same reasoning retired the
+// detector's per-instance minimum-key-size FIELDS (see the struct below), and
+// the aliases were the last surviving copy of that mistake.
+//
+// RSA/DSA/DH per NIST SP 800-131A Rev 2 (112-bit security => 2048-bit modulus);
+// EC per the same table (256-bit curve). cryptoparse.WeakKeySizeSeverity is the
+// Go-side application of both, shared with the `crypto` finding producer.
 
 // WeakCryptoCategory represents the category of a weak crypto issue
 type WeakCryptoCategory string
@@ -70,9 +79,12 @@ type WeakCryptoDetector struct {
 	// Weak/deprecated algorithms
 	criticalAlgorithms []string
 	highRiskAlgorithms []string
-	// Minimum acceptable key sizes
-	minRSAKeySize int
-	minECCKeySize int
+	// No minimum-key-size fields: the floors are cryptoparse.MinRSAKeySizeBits
+	// and MinECCKeySizeBits, applied by cryptoparse.WeakKeySizeSeverity, which
+	// the `crypto` finding producer measures a certificate's key against too.
+	// They were instance fields set from the same constants and read nowhere
+	// after that call moved out, and a per-instance threshold nothing can change
+	// reads as configurable when it is not.
 	// Event publisher for notifications
 	eventPublisher *EventPublisherService
 }
@@ -100,9 +112,6 @@ func NewWeakCryptoDetector(eventPublisher *EventPublisherService) *WeakCryptoDet
 			"3DES", "SHA1", "SHA-1",
 			"IDEA", "RC2",
 		},
-		// Minimum key sizes (NIST recommendations)
-		minRSAKeySize:  minRSAKeySizeBits,
-		minECCKeySize:  minECCKeySizeBits,
 		eventPublisher: eventPublisher,
 	}
 }
@@ -212,12 +221,13 @@ func (d *WeakCryptoDetector) AnalyzeCryptoImplementation(tenantID, assetID uuid.
 		}
 	}
 
-	// Check hash algorithm
+	// Check hash algorithm. The MD/SHA-1 classification itself is
+	// cryptoparse.WeakHashSeverity — the `crypto` finding producer asks exactly
+	// the same question of a CERTIFICATE's signature algorithm, and two copies
+	// of "which hashes are broken" is how the two would come to disagree.
 	if impl.HashAlgorithm != nil && *impl.HashAlgorithm != "" {
-		hashAlgo := strings.ToUpper(*impl.HashAlgorithm)
-
-		// Critical hash algorithms
-		if strings.Contains(hashAlgo, "MD5") || strings.Contains(hashAlgo, "MD4") || strings.Contains(hashAlgo, "MD2") {
+		switch cryptoparse.WeakHashSeverity(*impl.HashAlgorithm) {
+		case cryptoparse.SeverityCritical:
 			issues = append(issues, WeakCryptoIssue{
 				ID:                     uuid.New(),
 				TenantID:               tenantID,
@@ -231,7 +241,7 @@ func (d *WeakCryptoDetector) AnalyzeCryptoImplementation(tenantID, assetID uuid.
 				Recommendation:         "Use SHA-256 or SHA-384 for hashing",
 				DetectedAt:             now,
 			})
-		} else if strings.Contains(hashAlgo, "SHA1") || strings.Contains(hashAlgo, "SHA-1") {
+		case cryptoparse.SeverityHigh:
 			issues = append(issues, WeakCryptoIssue{
 				ID:                     uuid.New(),
 				TenantID:               tenantID,
@@ -261,61 +271,52 @@ func (d *WeakCryptoDetector) AnalyzeCryptoImplementation(tenantID, assetID uuid.
 		// That penalised exactly the modern and post-quantum configurations the
 		// product should be rewarding, and it was the single largest source of
 		// false Criticals in a realistic dataset.
-		family := keyExchangeFamily(impl.KeyExchangeAlgorithm)
-		switch family {
-		case kexFamilyUnknown, kexFamilyPostQuantum:
-			// Unknown: a bare 256 could be an EC key (healthy) or an RSA modulus
-			// (catastrophic), and guessing wrong in either direction is worse than
-			// staying quiet — a genuinely weak RSA key exchange is still caught by
-			// its catalogue entry (RSA-512, RSA-1024) when one is reported.
-			// Post-quantum: key sizes are not comparable to either floor.
-		case kexFamilyEllipticCurve:
-			if keySize < d.minECCKeySize {
-				issues = append(issues, WeakCryptoIssue{
-					ID:                     uuid.New(),
-					TenantID:               tenantID,
-					AssetID:                assetID,
-					CryptoImplementationID: impl.ID,
-					Severity:               SeverityHigh,
-					Category:               CategoryKeySize,
-					IssueType:              "weak_key_size",
-					CurrentValue:           strconv.Itoa(keySize),
-					Description:            "ECC key size is below recommended minimum (256 bits)",
-					Recommendation:         "Use at least 256-bit ECC keys",
-					DetectedAt:             now,
-				})
+		// The floor comparison itself is cryptoparse.WeakKeySizeSeverity, which
+		// answers "" for an unknown or post-quantum family: a bare 256 could be an
+		// EC key (healthy) or an RSA modulus (catastrophic), and guessing wrong in
+		// either direction is worse than staying quiet — a genuinely weak RSA key
+		// exchange is still caught by its catalogue entry (RSA-512, RSA-1024) when
+		// one is reported. The `crypto` producer measures a certificate's public
+		// key against the same call.
+		kex := ""
+		if impl.KeyExchangeAlgorithm != nil {
+			kex = *impl.KeyExchangeAlgorithm
+		}
+		family := cryptoparse.KeyAlgorithmFamily(kex)
+		switch cryptoparse.WeakKeySizeSeverity(kex, keySize) {
+		case cryptoparse.SeverityHigh:
+			issue := WeakCryptoIssue{
+				ID:                     uuid.New(),
+				TenantID:               tenantID,
+				AssetID:                assetID,
+				CryptoImplementationID: impl.ID,
+				Severity:               SeverityHigh,
+				Category:               CategoryKeySize,
+				IssueType:              "weak_key_size",
+				CurrentValue:           strconv.Itoa(keySize),
+				Description:            "RSA key size is below recommended minimum (2048 bits)",
+				Recommendation:         "Use at least 2048-bit RSA keys, preferably 3072 or 4096 bits",
+				DetectedAt:             now,
 			}
-		case kexFamilyFiniteField:
-			// RSA/DSA/DH moduli
-			if keySize < 1024 {
-				issues = append(issues, WeakCryptoIssue{
-					ID:                     uuid.New(),
-					TenantID:               tenantID,
-					AssetID:                assetID,
-					CryptoImplementationID: impl.ID,
-					Severity:               SeverityCritical,
-					Category:               CategoryKeySize,
-					IssueType:              "critically_weak_key_size",
-					CurrentValue:           strconv.Itoa(keySize),
-					Description:            "RSA key size is critically weak (below 1024 bits)",
-					Recommendation:         "Use at least 2048-bit RSA keys, preferably 3072 or 4096 bits",
-					DetectedAt:             now,
-				})
-			} else if keySize < d.minRSAKeySize {
-				issues = append(issues, WeakCryptoIssue{
-					ID:                     uuid.New(),
-					TenantID:               tenantID,
-					AssetID:                assetID,
-					CryptoImplementationID: impl.ID,
-					Severity:               SeverityHigh,
-					Category:               CategoryKeySize,
-					IssueType:              "weak_key_size",
-					CurrentValue:           strconv.Itoa(keySize),
-					Description:            "RSA key size is below recommended minimum (2048 bits)",
-					Recommendation:         "Use at least 2048-bit RSA keys, preferably 3072 or 4096 bits",
-					DetectedAt:             now,
-				})
+			if family == cryptoparse.KexFamilyEllipticCurve {
+				issue.Description = "ECC key size is below recommended minimum (256 bits)"
+				issue.Recommendation = "Use at least 256-bit ECC keys"
 			}
+			issues = append(issues, issue)
+		case cryptoparse.SeverityCritical:
+			issues = append(issues, WeakCryptoIssue{
+				ID:                     uuid.New(),
+				TenantID:               tenantID,
+				AssetID:                assetID,
+				CryptoImplementationID: impl.ID,
+				Severity:               SeverityCritical,
+				Category:               CategoryKeySize,
+				IssueType:              "critically_weak_key_size",
+				CurrentValue:           strconv.Itoa(keySize),
+				Description:            "RSA key size is critically weak (below 1024 bits)",
+				Recommendation:         "Use at least 2048-bit RSA keys, preferably 3072 or 4096 bits",
+				DetectedAt:             now,
+			})
 		}
 	}
 
@@ -369,54 +370,37 @@ func isSingleDES(cipherSuite string) bool {
 	return true
 }
 
-// keyExchangeFamily buckets a key-exchange algorithm by the kind of size floor
-// that applies to it. Finite-field (RSA/DSA/DH) moduli are measured in thousands
-// of bits, elliptic-curve keys in hundreds, and post-quantum key sizes are not
-// comparable to either.
-type kexFamily int
+// The key-algorithm family classifier moved to shared/cryptoparse, and this
+// file forwards to it.
+//
+// It moved because the `crypto` finding producer needs exactly this
+// classification for a CERTIFICATE's public key — same floors, same tokens, same
+// post-quantum-first precedence — and it lived in an `internal` package one
+// directory away that the producer could not import. A rule only one package can
+// reach is a rule the other packages will re-invent, which is the failure this
+// classifier was itself written to fix. Everything below is a forwarding
+// declaration: no call site in this service changes, so the move cannot have
+// altered a single verdict by accident.
+type kexFamily = cryptoparse.KexFamily
 
 const (
-	kexFamilyUnknown kexFamily = iota
-	kexFamilyFiniteField
-	kexFamilyEllipticCurve
-	kexFamilyPostQuantum
+	kexFamilyUnknown       = cryptoparse.KexFamilyUnknown
+	kexFamilyFiniteField   = cryptoparse.KexFamilyFiniteField
+	kexFamilyEllipticCurve = cryptoparse.KexFamilyEllipticCurve
+	kexFamilyPostQuantum   = cryptoparse.KexFamilyPostQuantum
 )
 
-// Family tokens. Package-level so the SQL predicates below are generated from
-// the SAME lists the Go classifier uses — the two ran on hand-written,
-// divergent rules before, and the list view disagreed with the facet filter
-// that was supposed to select it.
 var (
-	kexPostQuantumTokens   = []string{"ML-KEM", "MLKEM", "HQC", "ML-DSA", "MLDSA", "SLH-DSA", "FN-DSA", "KYBER", "DILITHIUM"}
-	kexEllipticCurveTokens = []string{"ECDH", "ECDSA", "X25519", "X448", "CURVE25519", "SECP", "DH-ECP", "PRIME256", "ED25519", "ED448"}
-	kexFiniteFieldTokens   = []string{"RSA", "DSA", "DH", "DHE"}
+	kexPostQuantumTokens   = cryptoparse.KexPostQuantumTokens
+	kexEllipticCurveTokens = cryptoparse.KexEllipticCurveTokens
+	kexFiniteFieldTokens   = cryptoparse.KexFiniteFieldTokens
 )
-
-func containsAnyToken(k string, tokens []string) bool {
-	for _, p := range tokens {
-		if strings.Contains(k, p) {
-			return true
-		}
-	}
-	return false
-}
 
 func keyExchangeFamily(kex *string) kexFamily {
-	if kex == nil || *kex == "" {
+	if kex == nil {
 		return kexFamilyUnknown
 	}
-	k := strings.ToUpper(strings.TrimSpace(*kex))
-	// Post-quantum first: SecP256r1MLKEM768 contains both "EC" and "MLKEM", and
-	// the post-quantum reading is the correct one.
-	switch {
-	case containsAnyToken(k, kexPostQuantumTokens):
-		return kexFamilyPostQuantum
-	case containsAnyToken(k, kexEllipticCurveTokens):
-		return kexFamilyEllipticCurve
-	case containsAnyToken(k, kexFiniteFieldTokens):
-		return kexFamilyFiniteField
-	}
-	return kexFamilyUnknown
+	return cryptoparse.KeyAlgorithmFamily(*kex)
 }
 
 // kexFamilyTokenSQL renders "column matches any of these tokens" for SQL.
@@ -457,8 +441,8 @@ func criticallyWeakKeySizeSQL(keySizeCol, kexCol string) string {
 
 func highRiskKeySizeSQL(keySizeCol, kexCol string) string {
 	return fmt.Sprintf("((%s IS NOT NULL AND %s >= 1024 AND %s < %d AND %s) OR (%s IS NOT NULL AND %s < %d AND %s))",
-		keySizeCol, keySizeCol, keySizeCol, minRSAKeySizeBits, kexFamilySQL(kexCol, kexFamilyFiniteField),
-		keySizeCol, keySizeCol, minECCKeySizeBits, kexFamilySQL(kexCol, kexFamilyEllipticCurve))
+		keySizeCol, keySizeCol, keySizeCol, cryptoparse.MinRSAKeySizeBits, kexFamilySQL(kexCol, kexFamilyFiniteField),
+		keySizeCol, keySizeCol, cryptoparse.MinECCKeySizeBits, kexFamilySQL(kexCol, kexFamilyEllipticCurve))
 }
 
 // singleDESSQL is the SQL twin of isSingleDES: matches broken single DES while
@@ -582,20 +566,13 @@ func (d *WeakCryptoDetector) CalculateRiskScore(issues []WeakCryptoIssue) int {
 		return 0
 	}
 
+	// The severity -> score mapping is cryptoparse.WeakCryptoSeverityScore. The
+	// `crypto` finding producer scores a certificate's key size and signature on
+	// the same scale, and the catalogue-vs-detector "worse of the two wins"
+	// comparison only means anything while both sides measure in the same units.
 	maxScore := 0
 	for _, issue := range issues {
-		score := 0
-		switch issue.Severity {
-		case SeverityCritical:
-			score = 90
-		case SeverityHigh:
-			score = 70
-		case SeverityMedium:
-			score = 50
-		case SeverityLow:
-			score = 20
-		}
-		if score > maxScore {
+		if score := cryptoparse.WeakCryptoSeverityScore(string(issue.Severity)); score > maxScore {
 			maxScore = score
 		}
 	}

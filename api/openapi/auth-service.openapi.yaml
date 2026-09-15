@@ -299,6 +299,109 @@ paths:
         - "limits.compliance_frameworks.limit is `null` (not absent) when the tier is unlimited."
         - "Per-feature failure is silent: if `CheckFeatureAccess(feature)` returns an error, that one feature is set to `false` (the safe default) and the call still succeeds with the other features populated."
 
+  /tenant/ai:
+    get:
+      operationId: getTenantAISettings
+      tags: [ai]
+      summary: Settings → AI assistant — provider status, live seams, tenant controls
+      description: >
+        What this deployment has turned on for AI, and the two switches the
+        tenant owns. Drives `frontend-v2` Settings → AI assistant.
+
+
+        The page is **Core**: it exists in every edition and explains the
+        edition rather than being gated by it.
+
+
+        **GET needs authentication only** — no permission. It carries no
+        credential and no endpoint address, and it is the answer to "why is
+        there no written summary here", which any member of the tenant can end
+        up asking in front of any surface a generative capability would have
+        appeared on. `PUT` requires `settings.update` (tenant admin), because
+        the two switches change what every capability does for everyone in the
+        organization. The Settings rail entry is on `settings.update`, so the
+        page itself is still the administrator's.
+
+
+        `seams` carries one row per AI seam (ADR-0008 D1), with the
+        deterministic behaviour that answers when no model does. `live` means
+        something can actually answer through the seam here: for a classical
+        seam that a deterministic implementation ships; for a generative one
+        that this build links the Enterprise providers AND `AI_PROVIDER` names a
+        reachable one. A seam no edition implements yet reports `live: false`
+        whatever the provider says.
+
+
+        **No credential and no endpoint ever crosses.** `provider_name` is the
+        provider KIND; the base URL and the name of the variable holding the API
+        key are deliberately absent, and `ai.ProviderConfig` has no key field at
+        all.
+      responses:
+        "200":
+          description: The deployment's AI status and this tenant's controls.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantAIStatus"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "The deployment half (provider, edition, per-seam `live`) is resolved ONCE at router-wiring time: neither the environment nor the build tags can change without a pod restart, and ai.NewFromEnv logs a warning for a misconfigured AI_PROVIDER that a per-request call would turn into a log flood."
+        - "`tenant.authoring_disabled` is READ-ONLY and is not a tenant decision: it is the interim, deployment-wide disable of custom-policy authoring (#1439). PUT ignores it."
+        - "`provider_name` and `model_id` are OMITTED (not present-but-empty) when nothing is configured, and `model_id` is omitted when the operator left the model to the provider's default."
+    put:
+      operationId: updateTenantAISettings
+      tags: [ai]
+      summary: Update the tenant's AI assistant controls
+      description: >
+        Sets `assistant_disabled` (the tenant kill switch — every generative
+        seam call made for this tenant is refused while it is on) and
+        `record_questions` (ADR-0008 D4.7's opt-in: the audit trail stores the
+        text a user typed only when this is on; the prompt HASH is recorded
+        either way).
+
+
+        Both fields are optional and an omitted one is left unchanged — a
+        read-modify-write, so a client sending one switch does not reset the
+        other. At least one must be present. The write merges into
+        `tenant_admin_settings.config`, so the tenant's unrelated settings are
+        preserved and the `log_tenant_admin_settings_change` trigger records the
+        change against the acting user.
+
+
+        Returns the same body as GET, so a client can replace its state from the
+        response rather than re-fetching.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantAIControlsUpdate"
+      responses:
+        "200":
+          description: The saved controls, with the deployment status alongside.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantAIStatus"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "A body with neither field is 400 (`No settings to update`), not a no-op 200: a save that changed nothing and said it succeeded is indistinguishable from one that worked."
+        - "A request with no resolvable userID is 401: the settings-audit trigger records `updated_by`, and an unattributed settings change is not recorded as one."
+
   /auth/register:
     post:
       operationId: register
@@ -1626,7 +1729,6 @@ paths:
         Public password-path acceptance: creates the member with the invited
         role and signs them in (sets httpOnly cookies). SSO acceptance instead
         rides the token through /auth/sso/{provider}/authorize?invitation_token=.
-.
       requestBody:
         required: true
         content:
@@ -1753,6 +1855,7 @@ paths:
   /platform/sso-providers:
     get:
       operationId: listPlatformSsoProviders
+      x-edition: enterprise
       tags: [auth]
       summary: List enabled platform SSO providers (public)
       description: "Vista's own Google/Microsoft OAuth apps for social signup, for the /signup page to render 'Sign up with …' buttons. Public; only safe fields. #895."
@@ -1768,6 +1871,7 @@ paths:
   /auth/sso/platform/register/complete:
     post:
       operationId: completePlatformSsoRegistration
+      x-edition: enterprise
       tags: [auth]
       summary: Finish a social-signup registration (public)
       description: "After the IdP callback stashes a pending registration, the org-name step posts the sso_token + tenant_name here to create the tenant + founder and sign in (sets cookies). #895."
@@ -1797,6 +1901,7 @@ paths:
   /auth/sso/unlink:
     delete:
       operationId: unlinkSSO
+      x-edition: enterprise
       tags: [profile]
       summary: Unlink an SSO provider from the current user
       description: >
@@ -1830,6 +1935,7 @@ paths:
   /tenant/sso/providers:
     get:
       operationId: listSSOProviders
+      x-edition: enterprise
       tags:
         - tenant-sso
       summary: List the tenant's SSO providers
@@ -1847,6 +1953,7 @@ paths:
           $ref: "#/components/responses/LegacyServerError"
     post:
       operationId: createSSOProvider
+      x-edition: enterprise
       tags:
         - tenant-sso
       summary: Create an SSO provider
@@ -1881,6 +1988,7 @@ paths:
           format: uuid
     put:
       operationId: updateSSOProvider
+      x-edition: enterprise
       tags:
         - tenant-sso
       summary: Update an SSO provider (partial)
@@ -1910,6 +2018,7 @@ paths:
           $ref: "#/components/responses/LegacyServerError"
     delete:
       operationId: deleteSSOProvider
+      x-edition: enterprise
       tags:
         - tenant-sso
       summary: Delete an SSO provider
@@ -1942,6 +2051,7 @@ paths:
           format: uuid
     post:
       operationId: testSSOProvider
+      x-edition: enterprise
       tags:
         - tenant-sso
       summary: Test an SSO provider's configuration
@@ -1964,6 +2074,7 @@ paths:
   /tenant/sso/authentication-policy:
     get:
       operationId: getAuthenticationPolicy
+      x-edition: enterprise
       tags:
         - tenant-sso
       summary: Get the tenant's authentication policy
@@ -1982,6 +2093,7 @@ paths:
           $ref: "#/components/responses/LegacyServerError"
     put:
       operationId: updateAuthenticationPolicy
+      x-edition: enterprise
       tags:
         - tenant-sso
       summary: Update the tenant's authentication policy
@@ -3092,6 +3204,130 @@ components:
         limits:
           $ref: "#/components/schemas/UsageLimits"
 
+    TenantAIStatus:
+      type: object
+      additionalProperties: false
+      description: >
+        The deployment's AI status plus the calling tenant's own controls.
+        Response body of both `GET` and `PUT /tenant/ai`.
+      required: [provider_configured, edition_linked, seams, tenant]
+      properties:
+        provider_configured:
+          type: boolean
+          description: >
+            A model endpoint is configured AND this build can construct it.
+            False in Core even when `AI_PROVIDER` names one — a Core build has
+            no provider implementations, which is the honest answer and a
+            different one from "nobody configured anything".
+        provider_name:
+          type: string
+          enum: [anthropic, openai_compat]
+          description: >
+            The provider KIND. Absent when nothing is configured. Never the base
+            URL and never the name of the environment variable holding the
+            credential.
+        model_id:
+          type: string
+          description: >
+            The configured model id. Absent when the operator left it to the
+            provider's default.
+        edition_linked:
+          type: boolean
+          description: >
+            Whether this build links the Enterprise generative providers at all.
+            It is what lets the page say "not part of this edition" rather than
+            "nobody configured this" — different problems, different fixes, and
+            only one of them is the reader's.
+        seams:
+          type: array
+          description: One row per AI seam (ADR-0008 D1), sorted by key.
+          items:
+            $ref: "#/components/schemas/TenantAISeam"
+        tenant:
+          $ref: "#/components/schemas/TenantAIControls"
+
+    TenantAISeam:
+      type: object
+      additionalProperties: false
+      required: [key, live, built, edition_required, family, rule_default]
+      properties:
+        key:
+          type: string
+          enum: [matcher, classifier, drift_detector, enricher, narrator, query, author, remediator]
+        live:
+          type: boolean
+          description: >
+            Something can actually answer through this seam here. For a
+            classical seam that means a deterministic implementation ships; for
+            a generative one it additionally means the build links the
+            Enterprise providers and `AI_PROVIDER` names a reachable one. A seam
+            nothing implements yet is always false.
+        built:
+          type: boolean
+          description: >
+            An implementation a user can reach exists in the product at all, in
+            ANY edition — independent of this build's edition and of whether a
+            provider is configured. It is beside `live` because the two reasons
+            `live` can be false are "your edition does not have it" and "nobody
+            has written it yet", and those need different answers from the
+            reader. Without it a Core build labelled an unbuilt seam
+            "Enterprise", which is a capability claim nothing backs.
+        edition_required:
+          type: string
+          enum: [core, enterprise]
+        family:
+          type: string
+          enum: [classical, generative]
+          description: >
+            Only `generative` seams send anything to a provider. ADR-0008 D2.
+        surface:
+          type: string
+          description: >
+            Where a user meets this seam. Absent when nothing consumes it yet.
+        rule_default:
+          type: string
+          description: >
+            What answers when no model does. Never empty — it is the product's
+            central claim, stated per seam.
+
+    TenantAIControls:
+      type: object
+      additionalProperties: false
+      required: [record_questions, assistant_disabled, authoring_disabled]
+      properties:
+        record_questions:
+          type: boolean
+          description: >
+            ADR-0008 D4.7's opt-in. When on, the audit trail stores the text a
+            user typed alongside the call; when off (the default) it stores the
+            prompt HASH and the platform's own derived artefacts only.
+        assistant_disabled:
+          type: boolean
+          description: >
+            The tenant kill switch. While on, every generative seam call made
+            for this tenant is refused — at the call site, and again at the
+            provider boundary.
+        authoring_disabled:
+          type: boolean
+          description: >
+            READ-ONLY, and NOT a tenant decision: the interim, deployment-wide
+            disable of custom-policy authoring (#1439). Reported here so the
+            page can give one honest list of what is switched off; `PUT` ignores
+            it.
+
+    TenantAIControlsUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: >
+        The writable half. Both fields optional; an omitted one is left
+        unchanged. At least one must be present.
+      properties:
+        assistant_disabled:
+          type: boolean
+        record_questions:
+          type: boolean
+
     FeatureFlags:
       type: object
       additionalProperties: false
@@ -3108,6 +3344,7 @@ components:
         - sso_saml
         - custom_branding
         - cmdb_sync
+        - connector_netbox
         - siem_export
         - billing_portal
       properties:
@@ -3142,6 +3379,13 @@ components:
         cmdb_sync:
           type: boolean
           description: Tenant may sync inventory to an external CMDB/ITSM (ServiceNow, Device42, SolarWinds).
+        connector_netbox:
+          type: boolean
+          description: >
+            Tenant may connect a NetBox network source of truth and pull its
+            sites, prefixes, VLANs, device types and devices, and see the drift
+            between NetBox and discovered inventory. Pull only: the platform
+            never writes to NetBox.
         siem_export:
           type: boolean
           description: Tenant may forward audit events to an external SIEM (Splunk, Datadog, Elastic, webhook).

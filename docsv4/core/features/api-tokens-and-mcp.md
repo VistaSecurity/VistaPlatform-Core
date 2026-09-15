@@ -8,11 +8,14 @@ scoped to your tenant and role, read-only.
 
 ## What your assistant can do
 
-Once connected, your assistant has 14 tools including:
+Once connected, your assistant has 18 tools:
 
-- **Inventory** — search assets, certificates (by expiry, issuer, key
-  algorithm), crypto configurations, and the platform's authoritative algorithm
-  assessments.
+- **Inventory** — search your assets with the [query language](./query.md),
+  count them by any facet, read one asset in full (its class, identifiers,
+  endpoints, attributes and risk), read its change history, and browse the
+  asset class tree.
+- **Crypto** — certificates (by expiry, issuer, key algorithm), crypto
+  configurations, and the platform's authoritative algorithm assessments.
 - **Risk & PQC** — your risk summary and post-quantum readiness breakdown.
 - **Compliance** — frameworks and scores, per-framework evaluation, and
   drill-down into a failing control's findings.
@@ -21,6 +24,46 @@ Once connected, your assistant has 14 tools including:
 
 Everything is read-only. The assistant cannot change anything in your tenant
 through this connection.
+
+### Your assistant speaks the same query language you do
+
+The asset tools take a `query` — the same one line of text the Inventory filter
+rail writes and a saved view stores. Ask in English; the assistant writes the
+query. For example:
+
+| You ask | Your assistant sends |
+|---|---|
+| "production servers nobody owns" | `environment:production class:hardware.computer.server not exists(owner_email)` |
+| "what has a certificate expiring this month?" | `cert:(not_after < now+30d)` |
+| "high-risk things we've seen this week" | `risk >= high and last_seen > now-7d` |
+| "deprecated crypto outside dev" | `crypto:(algorithm.deprecated:true) and environment in (production, staging)` |
+| "hardware nobody has scored yet" | `risk:not_assessed and class:hardware` |
+| "what's waiting for approval?" | `status:pending_approval` |
+
+Two things follow from this, and both are deliberate.
+
+**The assistant can show you the query it ran.** Every asset answer comes back
+with the query attached — and it is the query the platform *actually ran*, not
+the one the assistant composed. Those differ: the platform adds your default
+scope (approved inventory only). Ask "what query did you run?" and you can paste
+the answer straight into the Inventory search box to see the same rows yourself.
+
+**A query it gets wrong is refused, not guessed at.** The assistant gets back
+the exact problem, where in the query it is, and usually the fix — so it corrects
+itself and retries rather than quietly answering a different question.
+
+By default the assistant sees your **approved inventory** — the same set the
+Inventory page shows. Ask about something outside it and it can look: "what's
+waiting for approval?" works, because naming `status` in the query sets the
+default aside. The query it shows you tells you which set it read.
+
+### What a zero means
+
+Where an answer includes a risk score, the platform distinguishes **"we looked,
+and it's clean"** from **"nobody has looked"** — a score of 0 with an empty
+`risk_assessed_by` is *not assessed*. The tools carry that distinction through,
+and the tool descriptions tell the assistant never to report the second as "no
+risk". If an answer sounds too clean, ask what has not been assessed.
 
 ## Connect a GUI assistant (Claude.ai, ChatGPT, Gemini)
 
@@ -58,11 +101,14 @@ shown to you; you can revoke it at any time from **Settings → API Tokens**.
 
 Good starting points:
 
-- "Give me a risk summary of my crypto inventory."
+- "Give me a risk summary of my inventory."
+- "How many assets do I have, broken down by class and environment?"
+- "Which production servers have no owner? Show me the query you ran."
 - "Which certificates expire in the next 30 days, and which assets do they live on?"
 - "What's blocking my PCI-DSS score? Show me the worst control's findings."
 - "Compare my two most recent CBOM artifacts and tell me what regressed."
 - "How post-quantum ready are we? What should we migrate first?"
+- "When did this asset last change, and what changed?"
 
 ## Connect Claude Code (CLI)
 
@@ -96,7 +142,7 @@ Go to **Settings → API Tokens → New token**:
 
 1. Name it for where it will live (e.g. "CI pipeline").
 2. Pick permissions — the default set (`assets.read`, `compliance.read`,
-   `reports.read`) covers all 14 MCP tools.
+   `reports.read`) covers all 18 MCP tools.
 3. Pick an expiry (default 90 days, max 1 year).
 4. **Copy the token immediately.** It is shown exactly once. Treat it like a
    password and store it in a secret manager.

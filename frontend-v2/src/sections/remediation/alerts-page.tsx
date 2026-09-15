@@ -6,6 +6,7 @@ import type { complianceEngineComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { DrawerCloseBtn, DrawerShell, Icon, MetaRow, Modal, Pill, SectionLabel } from '../../components/ui';
 import { relTime } from '../settings/kit';
+import { alertSubjectHref, alertSubjectText } from './alert-subject-link';
 
 // Remediation → Alerts. The stateful-alerts work surface: lifecycle
 // active → acknowledged → snoozed → resolved, with an append-only evidence
@@ -34,6 +35,32 @@ const EVENT_META: Record<string, { icon: string; label: string }> = {
   ticket_linked: { icon: 'ticket', label: 'Ticket linked' },
   resolved: { icon: 'check-check', label: 'Resolved' },
 };
+
+/**
+ * The icon and label for one timeline event.
+ *
+ * `severity_changed` is the one event type that goes BOTH ways, and the flat
+ * table above gave every one of them a `trending-up` arrow and the neutral
+ * label "Severity changed". Since the engine started lowering an open alert to
+ * the rung its findings actually reach (`direction: 'lowered'`), that rendered a
+ * de-escalation as an upward arrow — a picture saying the opposite of what
+ * happened, on the one row a person reads to find out which way it went. The
+ * from → to pills underneath were right all along, which is exactly what makes
+ * a wrong arrow above them worth fixing rather than ignoring.
+ *
+ * An event with no `direction` (every escalation written before the field
+ * existed) keeps the old arrow and the neutral label: the details block still
+ * shows from → to, and guessing a direction from two severities the renderer
+ * would have to re-rank is a second opinion about something the writer knows.
+ */
+export function eventMeta(ev: Pick<AlertEvent, 'event_type' | 'details'>): { icon: string; label: string } {
+  if (ev.event_type === 'severity_changed') {
+    const direction = ev.details?.direction;
+    if (direction === 'lowered') return { icon: 'trending-down', label: 'Severity lowered' };
+    if (direction === 'raised') return { icon: 'trending-up', label: 'Severity raised' };
+  }
+  return EVENT_META[ev.event_type] || { icon: 'circle-dot', label: ev.event_type.replace(/_/g, ' ') };
+}
 
 type Tab = AlertStatus | 'all';
 const TABS: { key: Tab; label: string }[] = [
@@ -97,7 +124,7 @@ export function AlertsPage() {
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['alerts'] });
   const onError = (e: unknown) => setActionError(e instanceof Error ? e.message : 'Action failed');
-  const onOk = () => { setActionError(null); invalidate(); };
+  const onOk = () => { setActionError(null); void invalidate(); };
 
   const ack = useMutation({
     mutationFn: async (id: string) => {
@@ -204,7 +231,7 @@ export function AlertsPage() {
                 <div style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.title}</div>
                 {a.message && <div style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.message}</div>}
               </div>
-              <span style={{ fontSize: 11.5, color: 'var(--app-t2)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.subject_label || '—'}</span>
+              <SubjectCell alert={a} />
               <div style={{ minWidth: 0 }}>
                 <div className="mono" style={{ fontSize: 11, color: 'var(--app-t2)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.source}</div>
                 <div className="mono" style={{ fontSize: 10, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.alert_type}</div>
@@ -263,6 +290,36 @@ export function AlertsPage() {
       )}
       {detailId && <AlertDetailDrawer id={detailId} onClose={() => setDetailId(null)} />}
     </div>
+  );
+}
+
+// SubjectCell is the Subject column. The subject is what a person acts on, so
+// it drills through to the object wherever the alert carries an id something
+// is addressable by — and stays plain text where it does not, because a link
+// that lands on an empty page reads as "nothing wrong here". See
+// alert-subject-link.ts for the mapping and the gaps.
+export function SubjectCell({ alert }: { alert: Alert }) {
+  const href = alertSubjectHref(alert);
+  const text = alertSubjectText(alert);
+  const style = { fontSize: 11.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } as const;
+  if (!href) return <span style={{ ...style, color: 'var(--app-t2)' }}>{text}</span>;
+  return (
+    <Link to={href} onClick={(e) => e.stopPropagation()} title={`Open ${alert.subject_type ?? 'subject'}`}
+      style={{ ...style, color: 'var(--info)', textDecoration: 'none' }}>
+      {text}
+    </Link>
+  );
+}
+
+// SubjectValue is the same link inside the detail drawer's Details block.
+export function SubjectValue({ alert }: { alert: Alert }) {
+  const href = alertSubjectHref(alert);
+  const text = alertSubjectText(alert);
+  if (!href) return <>{text}</>;
+  return (
+    <Link to={href} style={{ color: 'var(--info)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+      {text}<Icon name="arrow-up-right" size={11} />
+    </Link>
   );
 }
 
@@ -498,7 +555,7 @@ function AlertDetailDrawer({ id, onClose }: { id: string; onClose: () => void })
             )}
 
             <SectionLabel icon="circle-alert">Details</SectionLabel>
-            <MetaRow k="Subject" v={a.subject_label || a.subject_id} />
+            <MetaRow k="Subject" v={<SubjectValue alert={a} />} />
             {a.subject_type && <MetaRow k="Subject type" v={a.subject_type} />}
             <MetaRow k="First raised" v={new Date(a.first_raised_at).toLocaleString()} mono />
             <MetaRow k="Last activity" v={`${relTime(a.last_event_at)} · ${new Date(a.last_event_at).toLocaleString()}`} mono />
@@ -531,7 +588,7 @@ function AlertDetailDrawer({ id, onClose }: { id: string; onClose: () => void })
               <div style={{ position: 'relative', paddingLeft: 34, marginTop: 6 }}>
                 <div style={{ position: 'absolute', left: 11, top: 10, bottom: 10, width: 1, background: 'var(--app-border2)' }} />
                 {events.map((ev) => {
-                  const meta = EVENT_META[ev.event_type] || { icon: 'circle-dot', label: ev.event_type.replace(/_/g, ' ') };
+                  const meta = eventMeta(ev);
                   return (
                     <div key={ev.id} style={{ position: 'relative', padding: '9px 0' }}>
                       <span style={{ position: 'absolute', left: -34, top: 9, width: 22, height: 22, borderRadius: 50, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--app-panel2)', border: '1px solid var(--app-border2)', color: ev.event_type === 'resolved' ? 'var(--ok)' : ev.event_type === 'opened' ? 'var(--warn-strong)' : 'var(--app-t2)' }}>

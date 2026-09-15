@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -404,6 +405,93 @@ func (s *RemediationPlanService) Delete(tenantID, planID uuid.UUID) error {
 	return nil
 }
 
+// ErrItemAlreadyInPlan is returned when a finding is already an item of the
+// plan it is being added to (the unique_plan_finding constraint).
+//
+// A sentinel rather than a string match on the driver error, because the accept
+// path has to map it onto 409 and a `strings.Contains` on an error text is a
+// mapping that breaks silently when the constraint is renamed.
+var ErrItemAlreadyInPlan = errors.New("finding already in plan")
+
+// AddDraftedItem adds a finding to a plan carrying the provenance of a plan a
+// person ACCEPTED from the Remediator seam (ADR-0008 D4.1, D5).
+//
+// It is a separate method from [RemediationPlanService.AddItem] rather than two
+// more fields on models.AddPlanItemInput, and that is deliberate: the input
+// struct is bound straight from an HTTP body, so a provenance field on it would
+// let any client claim its hand-typed note was drafted by a model. The only way
+// to write `inferred` here is through this method, and the only caller is the
+// accept endpoint — which has just called the seam and holds the model id it is
+// recording.
+//
+// addedBy is the acting user and is the D5 half: a seam proposes, a human
+// approves. There is no path that writes one of the two without the other.
+func (s *RemediationPlanService) AddDraftedItem(
+	tenantID, planID, addedBy, findingID uuid.UUID, notes, sourceKind, sourceRef string,
+) (*models.RemediationPlanItem, error) {
+	tx, err := s.db.BeginTxx(context.Background(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := shareddatabase.SetTenantContext(context.Background(), tx.Tx, tenantID); err != nil {
+		return nil, err
+	}
+
+	// Plan and finding are both re-verified inside the tenant transaction. RLS
+	// is the isolation; these two answer "does it exist for you" with a 404
+	// rather than with a foreign-key error, which is the difference between a
+	// message a user can act on and a 500.
+	var exists bool
+	if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM remediation_plans WHERE id = $1 AND tenant_id = $2)", planID, tenantID).Scan(&exists); err != nil {
+		return nil, fmt.Errorf("failed to verify plan: %w", err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("plan not found")
+	}
+	//
+	// NOT producer-scoped, deliberately, and this is the one place it differs
+	// from AddItem beside it.
+	//
+	// AddItem carries complianceProducerScope because every read surface in this
+	// service does: the Plans page and the Findings page were built when
+	// `findings` held one producer's rows. The remediator is producer-GENERAL —
+	// all 21 kinds in standards/findings-registry.yaml carry guidance, and the
+	// seam drafts from any of them — so re-imposing that scope here would build a
+	// door that has to be widened again the moment the Findings page shows a
+	// crypto or an end-of-life finding (workstreams 3.7 /).
+	//
+	// Nothing downstream minds: ListItems, GetProgress and the ticket back-link
+	// all join `findings` with no producer predicate, so a non-compliance item
+	// renders and counts like any other. The scope that DOES still apply is RLS,
+	// and it applies to this statement like every other one in the transaction.
+	if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM findings WHERE id = $1 AND tenant_id = $2)", findingID, tenantID).Scan(&exists); err != nil {
+		return nil, fmt.Errorf("failed to verify finding: %w", err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("finding not found")
+	}
+
+	var result models.RemediationPlanItem
+	err = tx.QueryRow(`
+		INSERT INTO remediation_plan_items (id, plan_id, finding_id, notes, added_at, added_by, source_kind, source_ref)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		RETURNING id, plan_id, finding_id, ticket_id, notes, added_at, added_by, source_kind, source_ref`,
+		uuid.New(), planID, findingID, notes, time.Now(), addedBy, sourceKind, sourceRef,
+	).Scan(&result.ID, &result.PlanID, &result.FindingID, &result.TicketID, &result.Notes,
+		&result.AddedAt, &result.AddedBy, &result.SourceKind, &result.SourceRef)
+	if err != nil {
+		if strings.Contains(err.Error(), "unique_plan_finding") {
+			return nil, ErrItemAlreadyInPlan
+		}
+		return nil, fmt.Errorf("failed to add drafted item to plan: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+	return &result, nil
+}
+
 // AddItem adds a finding to a plan
 func (s *RemediationPlanService) AddItem(tenantID, planID, addedBy uuid.UUID, input models.AddPlanItemInput) (*models.RemediationPlanItem, error) {
 	tx, err := s.db.BeginTxx(context.Background(), nil)
@@ -430,7 +518,7 @@ func (s *RemediationPlanService) AddItem(tenantID, planID, addedBy uuid.UUID, in
 	}
 
 	// Verify finding exists and belongs to tenant
-	if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM compliance_findings WHERE id = $1 AND tenant_id = $2)", findingID, tenantID).Scan(&exists); err != nil {
+	if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM findings WHERE id = $1 AND tenant_id = $2 AND "+complianceProducerScope("findings")+")", findingID, tenantID).Scan(&exists); err != nil {
 		return nil, fmt.Errorf("failed to verify finding: %w", err)
 	}
 	if !exists {
@@ -518,7 +606,7 @@ func (s *RemediationPlanService) AddItemsBulk(tenantID, planID, addedBy uuid.UUI
 
 	// Verify all finding IDs belong to the tenant
 	verifyQuery, verifyArgs, err := sqlx.In(
-		`SELECT id FROM compliance_findings WHERE tenant_id = ? AND id IN (?)`,
+		`SELECT id FROM findings WHERE tenant_id = ? AND `+complianceProducerScope("findings")+` AND id IN (?)`,
 		tenantID, findingIDs,
 	)
 	if err != nil {
@@ -627,14 +715,14 @@ func (s *RemediationPlanService) ListItems(tenantID, planID uuid.UUID) ([]models
 	query := `
 		SELECT
 			rpi.id, rpi.plan_id, rpi.finding_id, rpi.ticket_id, rpi.notes, rpi.added_at, rpi.added_by,
-			cf.severity, cf.summary, cf.workflow_status, cf.asset_type, cf.asset_id,
+			rpi.source_kind, rpi.source_ref,
+			cf.severity, cf.summary, cf.workflow_status, cf.subject_type, cf.subject_id,
 			t.status, t.title
 		FROM remediation_plan_items rpi
-		JOIN compliance_findings cf ON cf.id = rpi.finding_id
+		JOIN findings cf ON cf.id = rpi.finding_id
 		LEFT JOIN tickets t ON t.id = rpi.ticket_id
 		WHERE rpi.plan_id = $1
-		ORDER BY
-			CASE cf.severity WHEN 'Critical' THEN 0 WHEN 'High' THEN 1 WHEN 'Med' THEN 2 WHEN 'Low' THEN 3 END,
+		ORDER BY ` + severityRankSQL("cf.severity") + ` DESC,
 			rpi.added_at DESC`
 
 	rows, err := tx.Query(query, planID)
@@ -648,7 +736,8 @@ func (s *RemediationPlanService) ListItems(tenantID, planID uuid.UUID) ([]models
 		var item models.RemediationPlanItem
 		if err := rows.Scan(
 			&item.ID, &item.PlanID, &item.FindingID, &item.TicketID, &item.Notes, &item.AddedAt, &item.AddedBy,
-			&item.FindingSeverity, &item.FindingSummary, &item.FindingWorkflowStatus, &item.FindingAssetType, &item.FindingAssetID,
+			&item.SourceKind, &item.SourceRef,
+			&item.FindingSeverity, &item.FindingSummary, &item.FindingWorkflowStatus, &item.FindingSubjectType, &item.FindingSubjectID,
 			&item.TicketStatus, &item.TicketTitle,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan plan item: %w", err)
@@ -793,7 +882,7 @@ func (s *RemediationPlanService) GetProgress(tenantID, planID uuid.UUID) (*model
 	rows, err := tx.Query(`
 		SELECT cf.workflow_status, COUNT(*)
 		FROM remediation_plan_items rpi
-		JOIN compliance_findings cf ON cf.id = rpi.finding_id
+		JOIN findings cf ON cf.id = rpi.finding_id
 		WHERE rpi.plan_id = $1
 		GROUP BY cf.workflow_status`, planID)
 	if err != nil {
@@ -834,7 +923,7 @@ func (s *RemediationPlanService) GetProgress(tenantID, planID uuid.UUID) (*model
 	rows3, err := tx.Query(`
 		SELECT cf.severity, COUNT(*)
 		FROM remediation_plan_items rpi
-		JOIN compliance_findings cf ON cf.id = rpi.finding_id
+		JOIN findings cf ON cf.id = rpi.finding_id
 		WHERE rpi.plan_id = $1
 		GROUP BY cf.severity`, planID)
 	if err != nil {
@@ -881,7 +970,7 @@ func (s *RemediationPlanService) computePlanProgress(p *models.RemediationPlan) 
 			COUNT(*),
 			COUNT(*) FILTER (WHERE cf.workflow_status = 'RESOLVED')
 		FROM remediation_plan_items rpi
-		JOIN compliance_findings cf ON cf.id = rpi.finding_id
+		JOIN findings cf ON cf.id = rpi.finding_id
 		WHERE rpi.plan_id = $1`, p.ID).Scan(&total, &resolved)
 	if err != nil {
 		return

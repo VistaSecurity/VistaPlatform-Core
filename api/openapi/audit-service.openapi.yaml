@@ -617,10 +617,17 @@ paths:
   # ===========================================================================
   # SIEM integrations (admin-ui audit SIEM). The /test endpoint's network probe
   # lives in the service, so the handler is testable behind the service interface.
+  #
+  # Every operation below is x-edition: enterprise — the routes are registered
+  # from services/audit-service/ee/siemexport, which the public-tree export
+  # deletes, so a Core build has no handler for any of them. See api/README.md
+  # for the convention and shared/api/spectest for the test that enforces it in
+  # both directions.
   # ===========================================================================
   /siem/types:
     get:
       operationId: getSiemTypes
+      x-edition: enterprise
       tags:
       - siem
       summary: List supported SIEM integration types
@@ -634,6 +641,7 @@ paths:
   /siem/integrations:
     get:
       operationId: getSiemIntegrations
+      x-edition: enterprise
       tags:
       - siem
       summary: List SIEM integrations
@@ -647,6 +655,7 @@ paths:
                 $ref: '#/components/schemas/SIEMIntegrationListResponse'
     post:
       operationId: createSiemIntegration
+      x-edition: enterprise
       tags:
       - siem
       summary: Create a SIEM integration
@@ -670,6 +679,7 @@ paths:
   /siem/integrations/test:
     post:
       operationId: testSiemIntegration
+      x-edition: enterprise
       tags:
       - siem
       summary: Test a SIEM integration
@@ -700,6 +710,7 @@ paths:
         format: uuid
     put:
       operationId: updateSiemIntegration
+      x-edition: enterprise
       tags:
       - siem
       summary: Update a SIEM integration
@@ -722,6 +733,7 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
     delete:
       operationId: deleteSiemIntegration
+      x-edition: enterprise
       tags:
       - siem
       summary: Delete a SIEM integration

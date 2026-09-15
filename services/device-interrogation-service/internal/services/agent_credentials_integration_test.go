@@ -51,7 +51,7 @@ func TestIntegration_GetNextJob_SealsCredentialsForClaimingAgent(t *testing.T) {
 	job, err := jobQueue.CreateJob(ctx, models.CreateDeviceJobRequest{
 		TenantID: tenant,
 		JobType:  models.JobTypeDeviceInterrogation,
-		DeviceID: &dev.ID,
+		AssetID:  &dev.ID,
 		AgentID:  &agentID,
 		Credentials: map[string]interface{}{
 			"username":    "admin",

@@ -44,15 +44,30 @@ func TestSchemaClaimedAtAlterPrecedesSensorDiscoveriesView(t *testing.T) {
 	}
 }
 
-func TestSchemaRepairsInvalidNetworkAssetParentPrimaryKey(t *testing.T) {
+// TestSchemaDeclaresAssetsPrimaryKeyBeforeItsCompositeFKs is the successor to
+// the network_assets_partitioned pkey-repair guard.
+//
+// The property is unchanged and is what the old guard was really about: a
+// composite foreign key can only reference a unique key that already exists and
+// is VALID. On the old table that took a repair block, because an earlier
+// release had created the parent pkey with `ALTER TABLE ONLY` — invalid, with no
+// attached partition indexes, and therefore not a usable FK target.
+//
+// `assets` cannot land in that state: its PRIMARY KEY (tenant_id, id) is
+// declared IN the CREATE TABLE, which is recursive by construction. What still
+// has to hold is the ORDER — the table, with its key, before anything
+// references it — so that is what this asserts. The old table, its partitions
+// and the repair block are gone (phase 1, ADR-0007 D2).
+func TestSchemaDeclaresAssetsPrimaryKeyBeforeItsCompositeFKs(t *testing.T) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
 
-	const repairMarker = "ALTER INDEX public.network_assets_partitioned_pkey ATTACH PARTITION public.network_assets_part_%s_pkey"
-	const compositeFK = "REFERENCES public.network_assets_partitioned(tenant_id, id)"
+	const pkey = "CONSTRAINT assets_pkey PRIMARY KEY (tenant_id, id)"
+	const compositeFK = "REFERENCES public.assets(tenant_id, id)"
+	const retired = "network_assets_partitioned("
 
 	for _, rel := range []string{
 		"scripts/database/schema.sql",
@@ -64,16 +79,21 @@ func TestSchemaRepairsInvalidNetworkAssetParentPrimaryKey(t *testing.T) {
 				t.Fatalf("read schema: %v", err)
 			}
 			sql := string(body)
-			repairIdx := strings.Index(sql, repairMarker)
-			if repairIdx < 0 {
-				t.Fatalf("missing invalid network_assets_partitioned_pkey repair in %s", rel)
+			pkeyIdx := strings.Index(sql, pkey)
+			if pkeyIdx < 0 {
+				t.Fatalf("missing composite primary key on assets in %s — without it no child table can reference an asset", rel)
 			}
 			fkIdx := strings.Index(sql, compositeFK)
 			if fkIdx < 0 {
-				t.Fatalf("missing tenant-scoped network_assets_partitioned FK in %s", rel)
+				t.Fatalf("nothing references assets(tenant_id, id) in %s: the child tables lost their asset link", rel)
 			}
-			if repairIdx > fkIdx {
-				t.Fatalf("invalid parent pkey repair must run before composite network_assets_partitioned FKs in %s", rel)
+			if pkeyIdx > fkIdx {
+				t.Fatalf("assets must be created with its composite primary key BEFORE anything references it in %s", rel)
+			}
+			// The old table is dropped in POST-MIGRATIONS, so the name may
+			// still appear there; what must not survive is a REFERENCE to it.
+			if strings.Contains(sql, "REFERENCES public."+retired) {
+				t.Fatalf("%s still has a foreign key referencing network_assets_partitioned, which phase 1 drops", rel)
 			}
 		})
 	}

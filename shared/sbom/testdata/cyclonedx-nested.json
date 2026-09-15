@@ -1,0 +1,53 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:0c9c9a4e-2222-4a2b-9f77-6d3b2f1c8e44",
+  "version": 1,
+  "metadata": {
+    "component": {
+      "type": "application",
+      "bom-ref": "ear-root",
+      "name": "payments-ear",
+      "version": "9.1"
+    }
+  },
+  "components": [
+    {
+      "type": "application",
+      "bom-ref": "war-payments",
+      "name": "payments-war",
+      "version": "9.1",
+      "components": [
+        {
+          "type": "library",
+          "bom-ref": "jar-jackson",
+          "group": "com.fasterxml.jackson.core",
+          "name": "jackson-databind",
+          "version": "2.17.1",
+          "purl": "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.17.1",
+          "components": [
+            {
+              "type": "library",
+              "bom-ref": "jar-jackson-annotations",
+              "group": "com.fasterxml.jackson.core",
+              "name": "jackson-annotations",
+              "version": "2.17.1"
+            }
+          ]
+        },
+        {
+          "type": "library",
+          "bom-ref": "jar-slf4j",
+          "name": "slf4j-api",
+          "version": "2.0.13"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "jar-top-level",
+      "name": "guava",
+      "version": "33.2.0-jre"
+    }
+  ]
+}

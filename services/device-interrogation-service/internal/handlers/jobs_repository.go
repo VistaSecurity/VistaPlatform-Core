@@ -73,13 +73,19 @@ func newJobRepository(db, bypassDB *sql.DB) *jobRepository {
 
 const jobSelectColumns = `
 	SELECT dj.id, dj.tenant_id, dj.job_type, dj.status,
-		   dj.device_id, d.hostname as device_name, d.device_type,
+		   dj.asset_id, d.hostname as device_name, d.metadata->>'device_type' AS device_type,
 		   dj.integration_id, pi.integration_name, pi.integration_type as cloud_provider,
 		   dj.started_at, dj.completed_at, dj.error_message,
-		   dj.results, dj.created_at, dj.deleted_at as updated_at,
+		   -- updated_at, not deleted_at. The tenant list selected the
+		   -- soft-delete column under the updated_at alias, so every LIVE job
+		   -- (deleted_at IS NULL, which the WHERE requires) reported a NULL
+		   -- updated_at: "last changed" was blank on every row, and sorting or
+		   -- filtering on it matched nothing. device_jobs has a real
+		   -- updated_at, maintained by trigger_device_jobs_updated_at.
+		   dj.results, dj.created_at, dj.updated_at,
 		   dj.agent_id, da.name as agent_name
 	FROM device_jobs dj
-	LEFT JOIN devices d ON dj.device_id = d.id
+	LEFT JOIN public.assets d ON d.tenant_id = dj.tenant_id AND d.id = dj.asset_id
 	LEFT JOIN platform_integrations pi ON dj.integration_id = pi.id
 	LEFT JOIN device_agents da ON dj.agent_id = da.id
 	WHERE dj.tenant_id = $1 AND dj.deleted_at IS NULL
@@ -106,8 +112,8 @@ func (r *jobRepository) ListJobs(ctx context.Context, tenantID uuid.UUID, f JobL
 		argNum++
 	}
 	if f.DeviceID != "" {
-		query += " AND dj.device_id = $" + strconv.Itoa(argNum)
-		countQuery += " AND device_id = $" + strconv.Itoa(argNum)
+		query += " AND dj.asset_id = $" + strconv.Itoa(argNum)
+		countQuery += " AND asset_id = $" + strconv.Itoa(argNum)
 		args = append(args, f.DeviceID)
 		argNum++
 	}
@@ -144,7 +150,7 @@ func (r *jobRepository) ListJobs(ctx context.Context, tenantID uuid.UUID, f JobL
 
 			if scanErr := rows.Scan(
 				&job.ID, &job.TenantID, &job.JobType, &job.Status,
-				&job.DeviceID, &job.DeviceName, &job.DeviceType,
+				&job.AssetID, &job.DeviceName, &job.DeviceType,
 				&job.IntegrationID, &job.IntegrationName, &job.CloudProvider,
 				&job.StartedAt, &job.CompletedAt, &job.ErrorMessage,
 				&resultsRaw, &job.CreatedAt, &updatedAt,
@@ -164,7 +170,10 @@ func (r *jobRepository) ListJobs(ctx context.Context, tenantID uuid.UUID, f JobL
 			}
 			if len(resultsRaw) > 0 {
 				job.AssetsDiscovered = assetsDiscoveredFromResults(string(resultsRaw))
+				job.Enumeration = enumerationFromResults(string(resultsRaw))
+				job.HostInventory = hostInventoryFromResults(string(resultsRaw))
 			}
+			job.DeviceID = job.AssetID // deprecated alias, same value
 			job.Executor = executorLabel(job.AgentID, agentName)
 			jobs = append(jobs, job)
 		}
@@ -185,14 +194,14 @@ func (r *jobRepository) ListAdminJobs(ctx context.Context, f JobListFilters) ([]
 	query := `
 		SELECT dj.id, dj.tenant_id, t.name AS tenant_name, t.slug AS tenant_slug,
 			   dj.job_type, dj.status,
-			   dj.device_id, d.hostname as device_name, d.device_type,
+			   dj.asset_id, d.hostname as device_name, d.metadata->>'device_type' AS device_type,
 			   dj.integration_id, pi.integration_name, pi.integration_type as cloud_provider,
 			   dj.agent_id AS worker,
 			   dj.started_at, dj.completed_at, dj.error_message,
 			   dj.results, dj.created_at, dj.updated_at
 		FROM device_jobs dj
 		LEFT JOIN tenants t ON t.id = dj.tenant_id
-		LEFT JOIN devices d ON dj.device_id = d.id
+		LEFT JOIN public.assets d ON d.tenant_id = dj.tenant_id AND d.id = dj.asset_id
 		LEFT JOIN platform_integrations pi ON dj.integration_id = pi.id
 		WHERE dj.deleted_at IS NULL
 	`
@@ -213,8 +222,8 @@ func (r *jobRepository) ListAdminJobs(ctx context.Context, f JobListFilters) ([]
 		argNum++
 	}
 	if f.DeviceID != "" {
-		query += " AND dj.device_id = $" + strconv.Itoa(argNum)
-		countQuery += " AND device_id = $" + strconv.Itoa(argNum)
+		query += " AND dj.asset_id = $" + strconv.Itoa(argNum)
+		countQuery += " AND asset_id = $" + strconv.Itoa(argNum)
 		args = append(args, f.DeviceID)
 		argNum++
 	}
@@ -258,7 +267,7 @@ func (r *jobRepository) ListAdminJobs(ctx context.Context, f JobListFilters) ([]
 		if err := rows.Scan(
 			&job.ID, &job.TenantID, &tenantName, &tenantSlug,
 			&job.JobType, &job.Status,
-			&job.DeviceID, &job.DeviceName, &job.DeviceType,
+			&job.AssetID, &job.DeviceName, &job.DeviceType,
 			&job.IntegrationID, &job.IntegrationName, &job.CloudProvider,
 			&job.Worker,
 			&job.StartedAt, &job.CompletedAt, &job.ErrorMessage,
@@ -281,6 +290,7 @@ func (r *jobRepository) ListAdminJobs(ctx context.Context, f JobListFilters) ([]
 		if len(resultsRaw) > 0 {
 			job.AssetsDiscovered = assetsDiscoveredFromResults(string(resultsRaw))
 		}
+		job.DeviceID = job.AssetID // deprecated alias, same value
 		jobs = append(jobs, job)
 	}
 	return jobs, total, nil
@@ -289,13 +299,13 @@ func (r *jobRepository) ListAdminJobs(ctx context.Context, f JobListFilters) ([]
 func (r *jobRepository) GetJob(ctx context.Context, tenantID, jobID uuid.UUID) (*InterrogationJob, error) {
 	query := `
 		SELECT dj.id, dj.tenant_id, dj.job_type, dj.status,
-			   dj.device_id, d.hostname as device_name, d.device_type,
+			   dj.asset_id, d.hostname as device_name, d.metadata->>'device_type' AS device_type,
 			   dj.integration_id, pi.integration_name, pi.integration_type as cloud_provider,
 			   dj.started_at, dj.completed_at, dj.error_message,
 			   dj.results, dj.created_at,
 			   dj.agent_id, da.name as agent_name
 		FROM device_jobs dj
-		LEFT JOIN devices d ON dj.device_id = d.id
+		LEFT JOIN public.assets d ON d.tenant_id = dj.tenant_id AND d.id = dj.asset_id
 		LEFT JOIN platform_integrations pi ON dj.integration_id = pi.id
 		LEFT JOIN device_agents da ON dj.agent_id = da.id
 		WHERE dj.id = $1 AND dj.tenant_id = $2 AND dj.deleted_at IS NULL
@@ -308,7 +318,7 @@ func (r *jobRepository) GetJob(ctx context.Context, tenantID, jobID uuid.UUID) (
 	err := shareddatabase.WithTenantTx(ctx, r.db, tenantID, func(tx *sql.Tx) error {
 		scanErr := tx.QueryRowContext(ctx, query, jobID, tenantID).Scan(
 			&job.ID, &job.TenantID, &job.JobType, &job.Status,
-			&job.DeviceID, &job.DeviceName, &job.DeviceType,
+			&job.AssetID, &job.DeviceName, &job.DeviceType,
 			&job.IntegrationID, &job.IntegrationName, &job.CloudProvider,
 			&job.StartedAt, &job.CompletedAt, &job.ErrorMessage,
 			&resultsRaw, &job.CreatedAt,
@@ -333,7 +343,10 @@ func (r *jobRepository) GetJob(ctx context.Context, tenantID, jobID uuid.UUID) (
 	job.UpdatedAt = job.CreatedAt
 	if len(resultsRaw) > 0 {
 		job.AssetsDiscovered = assetsDiscoveredFromResults(string(resultsRaw))
+		job.Enumeration = enumerationFromResults(string(resultsRaw))
+		job.HostInventory = hostInventoryFromResults(string(resultsRaw))
 	}
+	job.DeviceID = job.AssetID // deprecated alias, same value
 	job.Executor = executorLabel(job.AgentID, agentName)
 	return &job, nil
 }
@@ -373,11 +386,11 @@ func (r *jobRepository) GetJobStats(ctx context.Context, tenantID uuid.UUID) (Jo
 func (r *jobRepository) GetActiveJobs(ctx context.Context, tenantID uuid.UUID) ([]InterrogationJob, error) {
 	query := `
 		SELECT dj.id, dj.tenant_id, dj.job_type, dj.status,
-			   dj.device_id, d.hostname as device_name, d.device_type,
+			   dj.asset_id, d.hostname as device_name, d.metadata->>'device_type' AS device_type,
 			   dj.integration_id, pi.integration_name, pi.integration_type as cloud_provider,
 			   dj.started_at, dj.created_at
 		FROM device_jobs dj
-		LEFT JOIN devices d ON dj.device_id = d.id
+		LEFT JOIN public.assets d ON d.tenant_id = dj.tenant_id AND d.id = dj.asset_id
 		LEFT JOIN platform_integrations pi ON dj.integration_id = pi.id
 		WHERE dj.tenant_id = $1
 		  AND dj.status IN ('pending', 'assigned', 'in_progress')
@@ -398,13 +411,14 @@ func (r *jobRepository) GetActiveJobs(ctx context.Context, tenantID uuid.UUID) (
 			var job InterrogationJob
 			if scanErr := rows.Scan(
 				&job.ID, &job.TenantID, &job.JobType, &job.Status,
-				&job.DeviceID, &job.DeviceName, &job.DeviceType,
+				&job.AssetID, &job.DeviceName, &job.DeviceType,
 				&job.IntegrationID, &job.IntegrationName, &job.CloudProvider,
 				&job.StartedAt, &job.CreatedAt,
 			); scanErr != nil {
 				continue
 			}
 			job.UpdatedAt = job.CreatedAt
+			job.DeviceID = job.AssetID // deprecated alias, same value
 			jobs = append(jobs, job)
 		}
 		return rows.Err()

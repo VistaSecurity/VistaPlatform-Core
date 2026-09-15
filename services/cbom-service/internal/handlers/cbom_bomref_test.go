@@ -86,8 +86,8 @@ func emitCBOM(t *testing.T, assets, cryptos, certs []map[string]interface{}) []b
 	handler := &CBOMReportHandler{}
 	components, _ := handler.assembleComponents(
 		assets, cryptos, certs,
-		nil, // algorithmLookup — nil triggers the heuristic fallback
-		compilePredicate(AssetPredicate{}),
+		nil,   // algorithmLookup — nil triggers the heuristic fallback
+		false, // no scope: the All boundary
 		true, true, true, true, true,
 	)
 

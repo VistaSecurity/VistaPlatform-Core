@@ -282,7 +282,7 @@ func TestIntegration_ScheduleOutcome_IgnoresAdHocJobs(t *testing.T) {
 	adHoc, err := jobQueue.CreateJob(ctx, models.CreateDeviceJobRequest{
 		TenantID: tenantID,
 		JobType:  models.JobTypeDeviceInterrogation,
-		DeviceID: &dev.ID,
+		AssetID:  &dev.ID,
 	})
 	if err != nil {
 		t.Fatalf("CreateJob: %v", err)

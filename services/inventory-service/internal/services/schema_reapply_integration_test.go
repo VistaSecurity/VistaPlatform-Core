@@ -22,6 +22,7 @@ package services
 // test-integration-db).
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -42,8 +43,8 @@ func TestIntegration_Schema_ReappliesOverPopulatedJunctions(t *testing.T) {
 	// then break the next re-apply once the FK was dropped but still re-added.
 	assetID, implID := uuid.New(), uuid.New()
 	mustExec(t, db, `
-		INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,'schema-reapply.example.test','server','monitoring',NOW(),NOW(),NOW(),NOW())`, assetID, tenant)
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, 'schema-reapply.example.test', 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`, assetID, tenant)
 	mustExec(t, db, `
 		INSERT INTO crypto_implementations (id, tenant_id, asset_id, protocol, discovery_method, created_at, updated_at)
 		VALUES ($1,$2,$3,'TLS','passive',NOW(),NOW())`, implID, tenant, assetID)
@@ -64,10 +65,11 @@ func TestIntegration_Schema_ReappliesOverPopulatedJunctions(t *testing.T) {
 	mustExec(t, db, `
 		INSERT INTO certificates (id, tenant_id, serial_number, subject_dn, issuer_dn, fingerprint_sha256, not_before, not_after, created_at, updated_at)
 		VALUES ($1,$2,'01','CN=a','CN=b',encode(gen_random_bytes(32),'hex'),NOW(),NOW()+interval '1 year',NOW(),NOW())`, certID, tenant)
-	// role 'leaf' deliberately: it is what LinkCertificateToImplementation writes
-	// for the primary certificate, and the original valid_certificate_role CHECK
-	// did not allow it — every leaf-cert junction insert failed silently while
-	// chain certs linked fine. This pins the widened CHECK.
+	// role 'leaf' deliberately: it is what ingest writes for the primary
+	// certificate (linkLeafCertificateSQL, and LinkCertificateToImplementation
+	// for a caller that names the role), and the original valid_certificate_role
+	// CHECK did not allow it — every leaf-cert junction insert failed silently
+	// while chain certs linked fine. This pins the widened CHECK.
 	mustExec(t, db, `INSERT INTO crypto_implementation_certificates (crypto_implementation_id, certificate_id, certificate_role) VALUES ($1,$2,'leaf')`, implID, certID)
 
 	libID := uuid.New()
@@ -75,12 +77,37 @@ func TestIntegration_Schema_ReappliesOverPopulatedJunctions(t *testing.T) {
 	mustExec(t, db, `INSERT INTO implementation_libraries (implementation_id, library_id) VALUES ($1,$2)`, implID, libID)
 
 	// Now re-apply the schema exactly as the migration Job does.
+	//
+	// Under the advisory lock testdb's own applier uses (key 889), as the
+	// aws_cost_data and matview guards already do. `go test ./...` runs this
+	// module's packages in PARALLEL, and internal/handlers, internal/jobs and
+	// ee/cmdbsync all call testdb.ApplySchemaAndSeed against the same database;
+	// an applier that skips the lock removes the mutual exclusion for everyone
+	// and both sides start failing with "tuple concurrently updated" /
+	// "deadlock detected" on the blanket GRANT block at the end of the file.
+	// This was the last unlocked applier on the shared test database.
+	//
+	// Deliberately NOT testdb.ApplySchema: that helper classifies "violates
+	// foreign key constraint" as a transient race and retries it, which is
+	// exactly the failure THIS guard exists to report — immediately, and with
+	// the message below rather than a generic apply error.
 	schemaPath := filepath.Join(testdb.RepoRoot(t), "scripts", "database", "schema.sql")
 	body, err := os.ReadFile(schemaPath)
 	if err != nil {
 		t.Fatalf("read schema: %v", err)
 	}
-	if _, err := db.Exec(string(body)); err != nil {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire connection: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock(889)`); err != nil {
+		t.Fatalf("pg_advisory_lock: %v", err)
+	}
+	defer func() { _, _ = conn.ExecContext(ctx, `SELECT pg_advisory_unlock(889)`) }()
+
+	if _, err := conn.ExecContext(ctx, string(body)); err != nil {
 		t.Fatalf("schema.sql is not re-appliable once the junctions have rows — "+
 			"the migration Job would abort on the next helm upgrade: %v", err)
 	}

@@ -34,6 +34,23 @@ func (c *SensorDiscoveryConverter) ToIngestFinding(discovery interface{}) (*Inge
 		metadata = make(map[string]interface{})
 	}
 
+	// A host observation is NOT a crypto finding and must not be made into one.
+	// It has no protocol version, no cipher suite, no key size and no port; the
+	// crypto extraction below would find none of them and produce a finding
+	// asserting an asset whose cryptography came back empty — which reads
+	// downstream as "we looked and found nothing" rather than "this is not
+	// that kind of row". So it takes its own early exit: a distinct KIND,
+	// passed through whole for the inventory ingest to turn into identifiers
+	// and facts.
+	//
+	// No asset is created here. Identification is the consumer's job — it owns
+	// the engine that resolves a MAC or a name to an existing asset, and a
+	// converter guessing at that would create exactly the duplicates the
+	// engine exists to prevent.
+	if discoveryTypeOf(metadata) == KindHostObservation {
+		return hostObservationFinding(sd, metadata), nil
+	}
+
 	// Extract fields from metadata
 	var protocolVersion *string
 	var cipherSuite *string
@@ -136,14 +153,6 @@ func (c *SensorDiscoveryConverter) ToIngestFinding(discovery interface{}) (*Inge
 		}
 	}
 
-	// Extract device_id for cloud discoveries
-	var deviceID *string
-	if isCloudDiscovery {
-		if did, ok := metadata["device_id"].(string); ok && did != "" {
-			deviceID = &did
-		}
-	}
-
 	finding := &IngestFinding{
 		Hostname:             sd.Hostname,
 		IPAddress:            &ipAddress,
@@ -156,7 +165,6 @@ func (c *SensorDiscoveryConverter) ToIngestFinding(discovery interface{}) (*Inge
 		KeySize:              keySize,
 		HashAlgorithm:        hashAlgorithm,
 		SourceSensorID:       sourceSensorID,
-		DeviceID:             deviceID,
 		RawData:              rawData,
 	}
 

@@ -43,7 +43,7 @@ func (s *AgentService) resolveJobCredentials(ctx context.Context, tenantID uuid.
 	if len(job.Credentials) > 0 {
 		return nil
 	}
-	if job.DeviceID == nil {
+	if job.AssetID == nil {
 		return ErrJobHasNoCredentials
 	}
 
@@ -54,14 +54,16 @@ func (s *AgentService) resolveJobCredentials(ctx context.Context, tenantID uuid.
 	var credentialID, username, password, managementURL, deviceType sql.NullString
 	var insecureSkipVerify sql.NullBool
 	err := s.bypassDB.QueryRowContext(ctx,
-		`SELECT credential_id, username, password, management_url, device_type,
-		        tls_insecure_skip_verify
-		   FROM devices
-		  WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
-		*job.DeviceID, tenantID,
+		`SELECT c.credential_id, c.username, c.password_enc, m.management_url,
+		        a.metadata->>'device_type', m.tls_insecure_skip_verify
+		   FROM public.assets a
+		   JOIN public.asset_management m ON m.tenant_id = a.tenant_id AND m.asset_id = a.id
+		   LEFT JOIN public.asset_credentials c ON c.tenant_id = a.tenant_id AND c.asset_id = a.id
+		  WHERE a.id = $1 AND a.tenant_id = $2 AND a.deleted_at IS NULL`,
+		*job.AssetID, tenantID,
 	).Scan(&credentialID, &username, &password, &managementURL, &deviceType, &insecureSkipVerify)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("device %s not found", *job.DeviceID)
+		return fmt.Errorf("device %s not found", *job.AssetID)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to resolve device credentials: %w", err)
@@ -75,7 +77,7 @@ func (s *AgentService) resolveJobCredentials(ctx context.Context, tenantID uuid.
 	if credentialID.Valid && credentialID.String != "" {
 		credID, parseErr := uuid.Parse(credentialID.String)
 		if parseErr != nil {
-			return fmt.Errorf("device %s has an unparseable credential_id: %w", *job.DeviceID, parseErr)
+			return fmt.Errorf("device %s has an unparseable credential_id: %w", *job.AssetID, parseErr)
 		}
 		creds, credErr := s.credentialsFromIntegration(ctx, tenantID, credID)
 		if credErr != nil {

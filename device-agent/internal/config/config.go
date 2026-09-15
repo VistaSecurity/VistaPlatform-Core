@@ -17,6 +17,21 @@ import (
 // detector uses, with room for several consecutive failures.
 const DefaultHeartbeatInterval = 60 * time.Second
 
+// Local host-inventory cadence (asset-inventory ADR-0004 D3).
+const (
+	// DefaultHostInventoryInterval is how often an agent re-describes the host
+	// it runs on. A day, because the things it collects — the OS release, the
+	// package list, the hardware serial — change on the scale of a patch
+	// window, and because the collection walks the whole package database.
+	DefaultHostInventoryInterval = 24 * time.Hour
+	// MinHostInventoryInterval is the floor. An operator who asks for a
+	// one-minute interval gets an hour, with a log line saying so: a package
+	// enumeration every minute is a self-inflicted denial of service on the
+	// customer's own host, and silently honouring it would be worse than
+	// silently ignoring it.
+	MinHostInventoryInterval = 1 * time.Hour
+)
+
 // Config holds all configuration for the device agent
 type Config struct {
 	PlatformURL       string        `yaml:"platform_url" env:"PLATFORM_URL"`
@@ -29,8 +44,16 @@ type Config struct {
 	// the command-line default, so this is three-state: nil means "the config
 	// says nothing, leave the default alone", and only an explicit `verbose:`
 	// key (or the VERBOSE env var) turns it off or pins it on.
-	Verbose  *bool          `yaml:"verbose" env:"VERBOSE"`
-	Security SecurityConfig `yaml:"security"`
+	Verbose *bool `yaml:"verbose" env:"VERBOSE"`
+	// HostInventoryEnabled turns on the LOCAL host-inventory schedule — the
+	// agent describing the machine it is installed on. Off by default: an
+	// agent installed to interrogate network devices should not start
+	// enumerating its own host's software because it was upgraded.
+	HostInventoryEnabled bool `yaml:"host_inventory_enabled" env:"HOST_INVENTORY_ENABLED"`
+	// HostInventoryInterval is the local collection cadence. Below
+	// MinHostInventoryInterval it is raised to the floor, with a log line.
+	HostInventoryInterval time.Duration  `yaml:"host_inventory_interval" env:"HOST_INVENTORY_INTERVAL"`
+	Security              SecurityConfig `yaml:"security"`
 }
 
 // SecurityConfig represents security configuration
@@ -69,8 +92,35 @@ func Load() *Config {
 	}
 
 	cfg.HeartbeatInterval = parseHeartbeatInterval(sharedconfig.GetEnv("HEARTBEAT_INTERVAL", ""))
+	cfg.HostInventoryEnabled = sharedconfig.GetEnvAsBool("HOST_INVENTORY_ENABLED", false)
+	cfg.HostInventoryInterval = ParseHostInventoryInterval(sharedconfig.GetEnv("HOST_INVENTORY_INTERVAL", ""))
 
 	return cfg
+}
+
+// ParseHostInventoryInterval turns a duration string into a usable local
+// host-inventory cadence.
+//
+// Empty, unparseable or non-positive gives the default. A value below the floor
+// is RAISED to the floor and logged, rather than honoured or rejected: an
+// operator who typed "5m" wants frequent collection, and the right answer is
+// the most frequent one that is safe for their host plus a line telling them
+// what happened. Silently honouring it would have the agent walk the whole
+// package database twelve times an hour.
+func ParseHostInventoryInterval(s string) time.Duration {
+	if s == "" {
+		return DefaultHostInventoryInterval
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		log.Printf("⚠️  Invalid HOST_INVENTORY_INTERVAL %q — using %s", s, DefaultHostInventoryInterval)
+		return DefaultHostInventoryInterval
+	}
+	if d < MinHostInventoryInterval {
+		log.Printf("⚠️  HOST_INVENTORY_INTERVAL %s is below the %s floor — using %s", d, MinHostInventoryInterval, MinHostInventoryInterval)
+		return MinHostInventoryInterval
+	}
+	return d
 }
 
 // boolEnvPtr returns a pointer to the parsed boolean env var, or nil when the
@@ -121,6 +171,13 @@ func LoadFromFile(path string) (*Config, error) {
 	if cfg.HeartbeatInterval <= 0 {
 		cfg.HeartbeatInterval = DefaultHeartbeatInterval
 	}
+	if cfg.HostInventoryInterval <= 0 {
+		cfg.HostInventoryInterval = DefaultHostInventoryInterval
+	} else if cfg.HostInventoryInterval < MinHostInventoryInterval {
+		log.Printf("⚠️  host_inventory_interval %s is below the %s floor — using %s",
+			cfg.HostInventoryInterval, MinHostInventoryInterval, MinHostInventoryInterval)
+		cfg.HostInventoryInterval = MinHostInventoryInterval
+	}
 
 	// Override with environment variables if set. Once the agent has enrolled,
 	// the saved mTLS endpoint is identity state; a stale bootstrap env URL must
@@ -151,6 +208,12 @@ func LoadFromFile(path string) (*Config, error) {
 	}
 	if hb := os.Getenv("HEARTBEAT_INTERVAL"); hb != "" {
 		cfg.HeartbeatInterval = parseHeartbeatInterval(hb)
+	}
+	if hi := os.Getenv("HOST_INVENTORY_ENABLED"); hi != "" {
+		cfg.HostInventoryEnabled = sharedconfig.GetEnvAsBool("HOST_INVENTORY_ENABLED", false)
+	}
+	if hi := os.Getenv("HOST_INVENTORY_INTERVAL"); hi != "" {
+		cfg.HostInventoryInterval = ParseHostInventoryInterval(hi)
 	}
 	if dataPath := os.Getenv("DATA_PATH"); dataPath != "" {
 		cfg.DataPath = dataPath

@@ -220,7 +220,7 @@ func TestIntegration_ProcessJobResults_ReusesStampedDiscoveryJob(t *testing.T) {
 	deviceID := seedDevice(t, owner, tenantID)
 	deviceJobID := uuid.New()
 	if _, err := owner.Exec(
-		`INSERT INTO device_jobs (id, tenant_id, job_type, device_id, status)
+		`INSERT INTO device_jobs (id, tenant_id, job_type, asset_id, status)
 		 VALUES ($1, $2, 'device_interrogation', $3, 'in_progress')`,
 		deviceJobID, tenantID, deviceID); err != nil {
 		t.Fatalf("seed device_job: %v", err)
@@ -315,7 +315,7 @@ func TestIntegration_ProcessJobResults_UnusableStampIsNotAForeignKey(t *testing.
 	deviceID := seedDevice(t, owner, tenantID)
 	deviceJobID := uuid.New()
 	if _, err := owner.Exec(
-		`INSERT INTO device_jobs (id, tenant_id, job_type, device_id, status, parameters)
+		`INSERT INTO device_jobs (id, tenant_id, job_type, asset_id, status, parameters)
 		 VALUES ($1, $2, 'device_interrogation', $3, 'in_progress', '{"discovery_job_id": "not-a-uuid"}'::jsonb)`,
 		deviceJobID, tenantID, deviceID); err != nil {
 		t.Fatalf("seed device_job: %v", err)

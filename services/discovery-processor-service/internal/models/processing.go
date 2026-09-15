@@ -50,9 +50,19 @@ type NetworkClassification = approval.Classification
 
 // ApprovalInput projects the fields the shared auto-approval evaluator reads.
 func (d *SensorDiscovery) ApprovalInput() approval.Discovery {
-	return approval.Discovery{
-		TenantID:   d.TenantID,
-		Confidence: d.Confidence,
-		Metadata:   d.Metadata,
+	// Address is the DESTINATION — the thing that was discovered. SourceIP is
+	// the other end of the observed connection and is carried only for external
+	// connection visibility; projecting it here would have a rule match on the
+	// address of whatever was talking TO the asset.
+	hostname := ""
+	if d.Hostname != nil {
+		hostname = *d.Hostname
 	}
+	return approval.Discovery{
+		TenantID:  d.TenantID,
+		Metadata:  d.Metadata,
+		Hostname:  hostname,
+		Address:   d.DestIP,
+		FirstSeen: d.Timestamp,
+	}.WithConfidence(d.Confidence)
 }

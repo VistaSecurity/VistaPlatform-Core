@@ -309,6 +309,53 @@
     "appConfig": {
       "type": "object"
     },
+    "ai": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Generative AI provider (ADR-0008). Off by default; every AI capability has a rule-based default that answers without one. Only the Enterprise image line carries the provider clients.",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "",
+            "none",
+            "anthropic",
+            "openai_compat"
+          ],
+          "description": "A typo here would otherwise be silent in the worst direction: ai.NewFromEnv logs a warning and degrades to no provider, so an operator who wrote 'antropic' would see a settings page saying nothing is configured and have no reason to suspect the spelling. The enum turns it into an install-time failure that names the field."
+        },
+        "baseUrl": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "allowPrivateEndpoints": {
+          "type": "boolean"
+        },
+        "maxTokens": {
+          "type": "string"
+        },
+        "timeout": {
+          "type": "string"
+        },
+        "apiKey": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "envVar": {
+              "type": "string"
+            },
+            "existingSecret": {
+              "type": "string"
+            },
+            "existingSecretKey": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
     "backends": {
       "type": "object",
       "minProperties": 1,

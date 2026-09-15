@@ -13,30 +13,40 @@ Every tenant starts with three default scopes auto-created the first time you op
 | Scope | What it matches | Typical use |
 |---|---|---|
 | **All** | Every asset in your tenant | Internal review, baseline reporting |
-| **Production** | Assets with `environment = production` (or `prod`) | Customer/auditor submissions where production-only is the boundary |
-| **Non-Dev/Test** | Everything except assets with environment `dev`/`development`/`test`/`testing` OR carrying a `dev`/`test` tag | Compliance evaluations that include staging but exclude developer sandboxes |
+| **Production** | `environment:production` | Customer/auditor submissions where production-only is the boundary |
+| **Non-Dev/Test** | `(not exists(environment) or not environment in (development, test)) and not (tag:dev or tag:test)` | Compliance evaluations that include staging but exclude developer sandboxes |
 
-You can edit any default scope (rename, change predicate) but you can't delete it — existing CBOM artifacts may reference it by ID.
+You can edit any default scope (rename, change the query) but you can't delete it — existing CBOM artifacts may reference it by ID.
+
+**Why Non-Dev/Test names "no environment" explicitly.** A query about a value
+that was never recorded matches nothing — not the term, and not its negation
+either (that is the "not assessed stays not assessed" rule the platform applies
+everywhere). Without the `not exists(environment)` half, an asset nobody has
+labelled with an environment would be dropped from the scope, and on a freshly
+discovered inventory that is most of them. Non-Dev/Test promises to exclude dev
+and test, not to exclude everything unlabelled, so the query says so.
+
+If you write your own exclusion scope, do the same: `not environment:X` keeps
+only assets you *know* are not X. Add `not exists(environment) or …` when you
+want the unlabelled ones in as well.
 
 ## Creating a custom scope
 
 1. Settings → Scopes → **New Scope**
 2. Name the scope (must be unique within your tenant). The name is what appears in audit reports and the scope picker, so make it meaningful: "PCI Production In-Scope," "EU Customer-Facing," "ACME Vendor Submission."
-3. Define the predicate by combining **Include** rules (assets that must match at least one) and **Exclude** rules (assets that get removed). Both clauses can filter by:
-   - Environment (production, staging, dev, …)
-   - Asset type (server, load balancer, network device, …)
-   - Ownership (internal / third-party)
-   - Asset status (monitoring, active, archived)
-   - Business unit
-   - Location region
-   - Risk level
-   - Tags (matches assets that carry any of the listed tag values)
-4. Use the **Preview** button to see how many assets currently match. Adjust until the number looks right.
-5. Save.
+3. Write the boundary as a [query](./query.md) — the same one-line form the Inventory filter rail uses, so anything you can filter to on Inventory you can make a scope of:
+
+   ```
+   environment:production and not tag:pci-out-of-scope
+   ```
+
+   An **empty** query means every asset, which is what the `All` scope is.
+4. Use the **Preview** button to see how many assets currently match. Adjust until the number looks right. The count comes from the same place the CBOM will: your inventory, answering the same query — so the number you tune against is the number of assets the artifact will cover. (You can also paste the query into Inventory's search and read the count off the list; it is the same query and the same answer.)
+5. Save. The query is checked as you save it: a scope that would fail when a CBOM is generated is refused now — with the offending part of the query pointed at — rather than producing evidence with a boundary nobody verified.
 
 ## How scopes change over time
 
-A scope's *definition* is versioned. When you edit a scope, the prior version is recorded in an audit trail (who changed it, when, what was the predicate before). This matters because:
+A scope's *definition* is versioned. When you edit a scope, the prior version is recorded in an audit trail (who changed it, when, what the query was before). This matters because:
 
 - A CBOM you generated last quarter is locked to the scope version that was in force at that moment. Re-running the same scope today may produce a different artifact (and that's the point — the comparison view shows what changed).
 - Auditors can trace exactly what boundary was attested to in any given submission.
@@ -53,10 +63,12 @@ A scope's *definition* is versioned. When you edit a scope, the prior version is
 No — scopes are tenant-local by design. Cross-tenant data sharing requires explicit platform-admin support (not in this version).
 
 **Can a scope reference another scope?**
-No, scopes are flat. If you need a complex nested boundary, express it as a single richer predicate. If that's impossible, it's a sign the boundary needs an explicit asset attribute (tag, business unit) rather than predicate gymnastics.
+No, scopes are flat. If you need a complex nested boundary, express it as a single richer query — `and`, `or`, `not` and parentheses are all available. If that's impossible, it's a sign the boundary needs an explicit asset attribute (tag, business unit) rather than query gymnastics.
+
+A scope referencing another scope would also make its meaning non-local, and a CBOM has to be readable at the exact version it was generated against.
 
 **What happens if I delete a tag that a scope filters on?**
 The scope continues to work — it now matches zero assets on that field. No CBOM artifacts are corrupted (they're frozen snapshots), but future CBOMs generated against the scope will produce a smaller (or empty) result.
 
 **How is this different from the Inventory page filters?**
-Inventory filters are ephemeral — you set them, look at data, move on. Scopes are persisted definitions used to generate evidence artifacts. The Settings → Scopes editor uses the same filter dimensions as Inventory, so what you know from there transfers directly.
+Inventory filters are ephemeral — you set them, look at data, move on. Scopes are persisted definitions used to generate evidence artifacts. They are written in exactly the same [query](./query.md) language, and the platform runs the scope's query against inventory the same way the Inventory page does, so what you see on Inventory is what the artifact will cover.

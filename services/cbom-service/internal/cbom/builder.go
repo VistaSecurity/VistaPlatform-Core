@@ -5,10 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"reflect"
-	"sort"
-	"strings"
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/cbom-service/internal/formatters"
@@ -24,13 +22,43 @@ import (
 // that logic in place and add the artifact-shaped wrapper around it.
 type Builder struct {
 	cbomHandler *handlers.CBOMReportHandler
+	xbom        KindAssembler
+}
+
+// KindAssembler builds the non-crypto bills of materials — sbom, hbom and
+// inventory — from the scope's asset set. Implemented by internal/xbom.
+//
+// It is an interface, and Builder tolerates a nil one, for the same reason
+// every other seam here does: the assembler needs a database handle that the
+// contract test (which drives the real router with an in-memory store) has no
+// reason to stand up. A nil assembler refuses the three kinds explicitly
+// rather than producing an empty document for them.
+type KindAssembler interface {
+	Assemble(ctx context.Context, kind ArtifactKind, scope *scopes.Scope, assetIDs []uuid.UUID) (*BuildOutput, error)
 }
 
 // NewBuilder constructs a Builder that delegates inventory fetching and
 // CBOM assembly to the existing CBOMReportHandler.
+//
+// The `cbom` kind is all this can build. Call SetKindAssembler to add the
+// other three.
 func NewBuilder(h *handlers.CBOMReportHandler) *Builder {
 	return &Builder{cbomHandler: h}
 }
+
+// SetKindAssembler wires the asset-first assembler used by the sbom, hbom and
+// inventory kinds. Leaving it unset keeps `cbom` working and makes the other
+// three answer with a clear error rather than an empty bill of materials.
+func (b *Builder) SetKindAssembler(a KindAssembler) { b.xbom = a }
+
+// ErrKindUnavailable reports a kind this build cannot assemble because the
+// asset-first assembler was never wired. The HTTP layer turns it into 501.
+//
+// It is NOT the same as an unknown kind (400): the name is one this build
+// recognises, the deployment simply cannot serve it. Collapsing the two would
+// tell an operator their request was malformed when it was their wiring that
+// was incomplete.
+var ErrKindUnavailable = errors.New("cbom builder: this deployment cannot assemble that artifact kind")
 
 // BuildOutput is the result of a Build() call: the canonical bytes for
 // hashing/storage, plus the structured metadata we record on the artifact row.
@@ -60,8 +88,12 @@ type BuildOutput struct {
 	CycloneDXSpecVersion string
 	// AssetIDs is the deduplicated set of asset UUIDs referenced by
 	// components in the BOM. Used by the Phase 4 compliance-attestation
-	// layer to scope its compliance_findings query.
+	// layer to scope its findings query.
 	AssetIDs []uuid.UUID
+	// Kind is which bill of materials these bytes are. Set by Build, carried
+	// to the row by Persist — see the note there on why it travels with the
+	// bytes rather than alongside them.
+	Kind ArtifactKind
 }
 
 // Build snapshots inventory matching the given Scope as of now and emits a
@@ -70,18 +102,32 @@ type BuildOutput struct {
 // `authToken` is the JWT to use for service-to-service calls to
 // inventory-service. `tenantID` is duplicated on QueryParams.TenantID so the
 // internal-call HMAC path can verify against inventory-service (Phase 0 fix).
-func (b *Builder) Build(ctx context.Context, scope *scopes.Scope, authToken string) (*BuildOutput, error) {
+// `kind` selects which bill of materials to assemble. `cbom` walks the crypto
+// pipeline below; the other three go to the asset-first assembler, which starts
+// from the SAME scope-resolved asset set so a CBOM and an inventory snapshot of
+// one scope always describe the same boundary.
+func (b *Builder) Build(ctx context.Context, kind ArtifactKind, scope *scopes.Scope, authToken string) (*BuildOutput, error) {
 	if scope == nil {
 		return nil, fmt.Errorf("cbom builder: scope cannot be nil")
 	}
+	if !kind.IsValid() {
+		return nil, fmt.Errorf("cbom builder: unknown artifact kind %q", kind)
+	}
+	if kind != KindCBOM {
+		return b.buildNonCrypto(ctx, kind, scope, authToken)
+	}
 
-	// Translate the scope predicate into the asset-selection rule the assembly
-	// applies. Every field the predicate can express is enforced; a field the
-	// translator does not know how to enforce is an error, not a silent
-	// widening — see ErrUnsupportedPredicate.
-	params, unsupported := predicateToParams(scope.Predicate)
-	if len(unsupported) > 0 {
-		return nil, &UnsupportedPredicateError{Fields: unsupported}
+	// The scope's query goes to inventory-service, which selects the assets in
+	// SQL through the query language. cbom-service does NOT re-implement the
+	// boundary: it used to translate a jsonb predicate into its own in-memory
+	// matcher, which is a second opinion about what a scope means, and the
+	// failure mode was an artifact covering more than the scope said.
+	//
+	// The query is validated here rather than assumed valid, because a scope
+	// row predates this call: the language may have moved under it.
+	params, err := scopeToParams(scope)
+	if err != nil {
+		return nil, err
 	}
 
 	cbomData, err := b.cbomHandler.GenerateCBOMData(ctx, params, authToken, scope.TenantID.String())
@@ -112,7 +158,7 @@ func (b *Builder) Build(ctx context.Context, scope *scopes.Scope, authToken stri
 	sum := sha256.Sum256(bytes)
 
 	// Collect distinct asset IDs referenced by components. The attestation
-	// layer (Phase 4) uses this to scope its compliance_findings query. Some
+	// layer (Phase 4) uses this to scope its findings query. Some
 	// components — shared algorithms, for example — have no asset_id; those
 	// are skipped silently.
 	seen := make(map[uuid.UUID]struct{}, len(cbomData.Components))
@@ -139,59 +185,74 @@ func (b *Builder) Build(ctx context.Context, scope *scopes.Scope, authToken stri
 		ComponentCount:       len(cbomData.Components),
 		CycloneDXSpecVersion: firstNonEmpty(cbomData.SpecVersion, formatters.SpecVersion),
 		AssetIDs:             assetIDs,
+		Kind:                 KindCBOM,
 	}, nil
 }
 
-// UnsupportedPredicateError reports scope predicate fields the generator cannot
-// enforce. The HTTP layer turns it into 422.
+// buildNonCrypto resolves the scope to its asset set and hands it to the
+// asset-first assembler.
+//
+// The asset set is resolved HERE, through inventory-service, rather than in the
+// assembler: the assembler reads the inventory tables directly (a join per
+// asset-id set, not a second opinion about the boundary), and if it also chose
+// WHICH assets, cbom-service would be back to two implementations of what a
+// scope means — the exact thing the query-language pipeline removed.
+func (b *Builder) buildNonCrypto(ctx context.Context, kind ArtifactKind, scope *scopes.Scope, authToken string) (*BuildOutput, error) {
+	if b.xbom == nil {
+		return nil, fmt.Errorf("%w: %s", ErrKindUnavailable, kind)
+	}
+
+	// Validated, not assumed valid — a scope row predates this call and the
+	// language may have moved under it. Same refusal as the CBOM path: an
+	// artifact whose contents are wider than its stated boundary is worse than
+	// no artifact.
+	canonical, err := scopes.ValidateQuery(scope.Query)
+	if err != nil {
+		return nil, &InvalidScopeQueryError{Query: scope.Query, Err: err}
+	}
+
+	assetIDs, err := b.cbomHandler.QueryScopeAssetIDs(ctx, canonical, authToken, scope.TenantID.String())
+	if err != nil {
+		return nil, fmt.Errorf("cbom builder: resolve scope assets: %w", err)
+	}
+
+	out, err := b.xbom.Assemble(ctx, kind, scope, assetIDs)
+	if err != nil {
+		return nil, err
+	}
+	out.Kind = kind
+	return out, nil
+}
+
+// InvalidScopeQueryError reports a scope whose stored query no longer
+// validates. The HTTP layer turns it into 422.
 //
 // It exists because the failure mode it replaces is invisible: a scope naming a
 // field the pipeline ignored produced a CBOM covering MORE than the scope said,
 // signed and dated, with nothing anywhere to say so. Refusing is the only
 // answer that keeps an artifact's boundary claim true.
-type UnsupportedPredicateError struct {
-	Fields []string
+type InvalidScopeQueryError struct {
+	Query string
+	Err   error
 }
 
-func (e *UnsupportedPredicateError) Error() string {
-	return fmt.Sprintf("scope predicate uses fields this deployment cannot evaluate: %s",
-		strings.Join(e.Fields, ", "))
+func (e *InvalidScopeQueryError) Error() string {
+	return fmt.Sprintf("scope query %q does not validate: %v", e.Query, e.Err)
 }
 
-// clauseTranslators maps every JSON field of scopes.PredicateClause to the
-// AssetClause field that enforces it.
-//
-// Keying by the JSON tag and walking the struct reflectively (rather than
-// listing fields by hand) is what makes the unsupported-field check able to
-// fail: add a field to scopes.PredicateClause and forget to wire it here, and
-// any scope using it is rejected at generate time instead of quietly ignored.
-// TestPredicateTranslation_CoversEveryPredicateField fails at the same moment,
-// so the gap surfaces in CI rather than in a customer's evidence.
-var clauseTranslators = map[string]func(*handlers.AssetClause, []string){
-	"environment":     func(c *handlers.AssetClause, v []string) { c.Environment = v },
-	"asset_type":      func(c *handlers.AssetClause, v []string) { c.AssetType = v },
-	"asset_ownership": func(c *handlers.AssetClause, v []string) { c.AssetOwnership = v },
-	"asset_status":    func(c *handlers.AssetClause, v []string) { c.AssetStatus = v },
-	"business_unit":   func(c *handlers.AssetClause, v []string) { c.BusinessUnit = v },
-	"location_region": func(c *handlers.AssetClause, v []string) { c.LocationRegion = v },
-	"risk_level":      func(c *handlers.AssetClause, v []string) { c.RiskLevel = v },
-	"tags_any_of":     func(c *handlers.AssetClause, v []string) { c.TagsAnyOf = v },
-}
+func (e *InvalidScopeQueryError) Unwrap() error { return e.Err }
 
-// predicateToParams flattens a scope Predicate into the params map shape
-// understood by CBOMReportHandler.GenerateCBOMData, and reports any populated
-// predicate field it could not translate.
+// scopeToParams turns a Scope into the params map GenerateCBOMData reads.
 //
-// Both clauses are carried through. Exclude used to be dropped entirely, which
-// made the seeded "Non-Dev/Test" scope — whose whole definition is an exclude —
-// produce byte-for-byte the same artifact as "All". So did AssetType and the
-// five other fields a tenant can set through POST /scopes.
-//
-// Spec: docsv4/internal/developer/architecture/cbom/scope-predicate-shape.md.
-func predicateToParams(p scopes.Predicate) (map[string]interface{}, []string) {
-	include, unsupportedInclude := translateClause(p.Include)
-	exclude, unsupportedExclude := translateClause(p.Exclude)
-
+// The whole boundary is one string. What used to be eight predicate fields, a
+// reflective translator, a per-field "can this deployment enforce it?" check
+// and an in-memory matcher is now: validate, pass through, let the database
+// answer.
+func scopeToParams(scope *scopes.Scope) (map[string]interface{}, error) {
+	canonical, err := scopes.ValidateQuery(scope.Query)
+	if err != nil {
+		return nil, &InvalidScopeQueryError{Query: scope.Query, Err: err}
+	}
 	out := map[string]interface{}{
 		"includeAlgorithms":   true,
 		"includeCertificates": true,
@@ -199,80 +260,10 @@ func predicateToParams(p scopes.Predicate) (map[string]interface{}, []string) {
 		"includeKeys":         true,
 		"includeLibraries":    true,
 	}
-	predicate := handlers.AssetPredicate{Include: include, Exclude: exclude}
-	if !predicate.IsEmpty() {
-		out[handlers.ParamAssetPredicate] = predicate
+	if canonical != "" {
+		out[handlers.ParamAssetQuery] = canonical
 	}
-	return out, uniqueSorted(append(unsupportedInclude, unsupportedExclude...))
-}
-
-func translateClause(clause *scopes.PredicateClause) (*handlers.AssetClause, []string) {
-	if clause == nil {
-		return nil, nil
-	}
-
-	var (
-		out         handlers.AssetClause
-		unsupported []string
-		populated   bool
-	)
-
-	v := reflect.ValueOf(*clause)
-	t := v.Type()
-	for i := 0; i < t.NumField(); i++ {
-		field := v.Field(i)
-		if field.Kind() != reflect.Slice || field.Len() == 0 {
-			continue
-		}
-		values, ok := field.Interface().([]string)
-		if !ok || len(values) == 0 {
-			continue
-		}
-		name := jsonFieldName(t.Field(i))
-		apply, known := clauseTranslators[name]
-		if !known {
-			unsupported = append(unsupported, name)
-			continue
-		}
-		apply(&out, values)
-		populated = true
-	}
-
-	if !populated {
-		return nil, unsupported
-	}
-	return &out, unsupported
-}
-
-func jsonFieldName(f reflect.StructField) string {
-	tag := f.Tag.Get("json")
-	if tag == "" {
-		return f.Name
-	}
-	if idx := strings.Index(tag, ","); idx >= 0 {
-		tag = tag[:idx]
-	}
-	if tag == "" || tag == "-" {
-		return f.Name
-	}
-	return tag
-}
-
-func uniqueSorted(in []string) []string {
-	if len(in) == 0 {
-		return nil
-	}
-	seen := make(map[string]bool, len(in))
-	out := make([]string, 0, len(in))
-	for _, v := range in {
-		if seen[v] {
-			continue
-		}
-		seen[v] = true
-		out = append(out, v)
-	}
-	sort.Strings(out)
-	return out
+	return out, nil
 }
 
 func firstNonEmpty(values ...string) string {

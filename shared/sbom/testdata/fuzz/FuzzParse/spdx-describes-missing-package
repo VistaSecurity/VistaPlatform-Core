@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{\"spdxVersion\":\"SPDX-2.2\",\"documentDescribes\":[\"SPDXRef-ghost\"],\"packages\":[]}")

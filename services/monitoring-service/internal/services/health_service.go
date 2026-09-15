@@ -704,12 +704,20 @@ func (s *HealthService) GetTenantStatuses() ([]models.TenantStatus, error) {
 			COALESCE(COUNT(DISTINCT u.id), 0) as user_count,
 			COALESCE(COUNT(DISTINCT a.id), 0) as asset_count,
 			COALESCE(MAX(u.last_login_at), t.created_at) as last_activity
-		-- network_assets, not "assets": no relation named "assets" has ever
-		-- existed, so this query aborted on every call (B-41). The asset spine is
-		-- the network_assets view over network_assets_partitioned.
+		-- The asset spine is the assets table (ADR-0002 D1). This query used
+		-- to name a relation that did not exist and aborted on every call
+		-- (B-41).
+		--
+		-- asset_count counts ASSETS. Two things make that true and both are
+		-- load-bearing. COUNT(DISTINCT a.id) rather than COUNT(*), because the
+		-- users join multiplies every asset row by the tenant's user count; and
+		-- the assets table rather than a join through asset_endpoints, because
+		-- since phase 1 a host exposing five services is one asset with five
+		-- endpoints, and counting the faces would restore the inflation the old
+		-- port-as-asset model had.
 		FROM tenants t
 		LEFT JOIN users u ON t.id = u.tenant_id
-		LEFT JOIN network_assets a ON t.id = a.tenant_id AND a.deleted_at IS NULL
+		LEFT JOIN assets a ON t.id = a.tenant_id AND a.deleted_at IS NULL
 		GROUP BY t.id, t.name, t.created_at
 		ORDER BY last_activity DESC
 	`

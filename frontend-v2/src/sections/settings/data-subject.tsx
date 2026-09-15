@@ -38,7 +38,7 @@ export function ExportMyDataButton() {
       if (err || !data) throw new Error('Could not build your data export.');
       downloadJson('my-vista-platform-data.json', data);
     },
-    onError: (e) => setError((e as Error).message),
+    onError: (e) => setError(e.message),
     onSuccess: () => setError(null),
   });
 
@@ -133,10 +133,10 @@ export function EraseMemberModal({
       return data;
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['settings', 'members', tenantId] });
+      void qc.invalidateQueries({ queryKey: ['settings', 'members', tenantId] });
       onClose();
     },
-    onError: (e) => setError((e as Error).message),
+    onError: (e) => setError(e.message),
   });
 
   return (

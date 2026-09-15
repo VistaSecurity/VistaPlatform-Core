@@ -167,12 +167,13 @@ func TestIntegration_NewlyModelledProtocols_LandOnTheDecidedEnumValue(t *testing
 // TestIntegration_SSLVPN_IsVisibleToTheTLSMeasurements is the reason SSL VPN was
 // mapped to TLS rather than to VPN, asserted rather than asserted-in-a-comment.
 //
-// compliance-engine's GetTLSVersion and GetTLSCompression both filter
-// `ci.protocol = 'TLS'`. Under a VPN mapping a FortiGate portal negotiating
-// TLS 1.0 would be a real, correctly-measured weak-TLS endpoint that no TLS
-// control could see. This mirrors the extractor's WHERE clause from
-// inventory-service, which is as close as a single-service test can get to the
-// cross-service query without importing it.
+// compliance-engine's `tls_version` and `tls_compression_enabled` measurement
+// types both carry `where: protocol:TLS` in standards/measurement-types.yaml,
+// which compiles to a `ci.protocol = 'TLS'` filter. Under a VPN mapping a
+// FortiGate portal negotiating TLS 1.0 would be a real, correctly-measured
+// weak-TLS endpoint that no TLS control could see. This mirrors that filter
+// from inventory-service, which is as close as a single-service test can get to
+// the cross-service query without importing it.
 func TestIntegration_SSLVPN_IsVisibleToTheTLSMeasurements(t *testing.T) {
 	raw := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, raw)
@@ -201,13 +202,13 @@ func TestIntegration_SSLVPN_IsVisibleToTheTLSMeasurements(t *testing.T) {
 	if err := raw.QueryRow(`
 		SELECT COUNT(*)
 		FROM crypto_implementations ci
-		JOIN network_assets na ON ci.asset_id = na.id
+		JOIN assets na ON ci.asset_id = na.id
 		WHERE ci.tenant_id = $1
 		  AND na.deleted_at IS NULL
 		  AND ci.deleted_at IS NULL
 		  AND ci.protocol = 'TLS'
 		  AND ci.protocol_version IS NOT NULL`, tenant).Scan(&seen); err != nil {
-		t.Fatalf("GetTLSVersion-shaped query: %v", err)
+		t.Fatalf("tls_version-shaped query: %v", err)
 	}
 	if seen != 1 {
 		t.Fatalf("the TLS-version measurement sees %d row(s) for a TLS 1.0 SSL-VPN portal, want 1 "+

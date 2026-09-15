@@ -22,8 +22,9 @@ Vista Platform in one step:
 - **Validation before import** — rows are checked client-side (for example, a malformed
   CIDR or a missing required field) and flagged so you can fix them. Invalid rows are
   skipped, never imported.
-- **Duplicate-safe** — rows that match something already in your inventory (by hostname/
-  IP for assets, or by value for segments) are skipped rather than duplicated.
+- **Duplicate-safe** — rows that match something already in your inventory (by any of
+  the identifiers you mapped for assets, or by value for segments) are skipped rather
+  than duplicated.
 - **Up to 1000 rows per import.**
 
 ## Where to find it
@@ -62,12 +63,44 @@ Use this when your spreadsheet is a list of known servers/devices rather than ne
 
 1. Open the wizard and choose **Infrastructure assets**.
 2. Upload your file and map columns:
-   - **Asset type** *(required)* — map a column or choose a default (e.g. `server`).
-   - **Hostname** and/or **IP address** — at least one is required per row.
-   - Optionally map **Environment**, **Operating system**, **Business unit**,
-     **Owner email**, **Description**.
+   - **Class** *(required)* — map a column or choose a single default for the whole
+     file. The list is the platform's class taxonomy (Server, Workstation, Switch,
+     Firewall, Object storage, Web application, Business service, …) — the same
+     taxonomy the Inventory class facet uses, so an imported asset lands in the class
+     you'd expect to find it under. A column whose value isn't a known class is
+     flagged in the preview with the offending value quoted, and that row is skipped.
+   - **Identifiers** — **FQDN**, **Hostname**, **IP address**, **MAC address** and
+     **Serial number**. At least one is required per row, and the wizard auto-maps
+     them from the obvious headers ("Host Name", "Service Tag", …).
+   - Optionally map **Display name**, **Environment**, **Operating system**,
+     **Support group**, **Business unit**, **Owner email**, **Description**.
 3. Review and import. Assets are created in `pending_approval` and appear in your
    inventory; subsequent discovery enriches them with cryptographic detail.
+
+### Why identifiers, and not just a hostname column
+
+The identifier columns are the part worth getting right. They are what let the
+platform recognise a machine it has seen before rather than create a second copy of
+it: a row carrying a serial number will match the same physical server whether a
+sensor saw it by hostname, your CMDB exported it by `sys_id`, or you imported it
+again next quarter from a different spreadsheet.
+
+Map as many as your sheet has. A file with only a hostname column still imports
+fine — it just gives the platform less to match on later. Where a match is
+plausible but not certain, you get a **merge proposal** in Discovery → Approvals
+rather than a silent decision either way.
+
+### Operating system
+
+**Operating system** is a property of the *class*, not of every asset: a server has
+one, a switch does not. Map the column if your sheet has it — rows whose class has
+no operating-system field simply ignore it rather than failing.
+
+### Services
+
+A row whose class is under **Service** (Business service, Technical service) needs a
+**Display name** instead of an identifier. A service has no address or serial to be
+known by; its name is its identity.
 
 > **Note on plan limits.** Importing infrastructure assets counts against your
 > subscription's asset limit. If an import would exceed your limit, the whole import is

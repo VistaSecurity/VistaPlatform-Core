@@ -38,8 +38,16 @@ type StaleAsset struct {
 // StaleAssetFilters defines parameters for filtering stale asset searches
 type StaleAssetFilters struct {
 	StaleStatus []string `json:"stale_status" form:"stale_status"` // 'warning', 'archived'
-	Page        int      `json:"page" form:"page"`
-	PageSize    int      `json:"page_size" form:"page_size"`
-	SortBy      string   `json:"sort_by" form:"sort_by"`
-	SortOrder   string   `json:"sort_order" form:"sort_order"`
+	// Query is the same `?query=` the asset list takes, compiled by the same
+	// translator against the same catalogue.
+	//
+	// The stale list used to be a SECOND hand-written WHERE builder that
+	// ignored it entirely: a saved view, a facet click or a typed query carried
+	// over from Inventory silently selected the whole stale set. Two builders
+	// over one table is the shape this workstream exists to end.
+	Query     string `json:"query" form:"query"`
+	Page      int    `json:"page" form:"page"`
+	PageSize  int    `json:"page_size" form:"page_size"`
+	SortBy    string `json:"sort_by" form:"sort_by"`
+	SortOrder string `json:"sort_order" form:"sort_order"`
 }

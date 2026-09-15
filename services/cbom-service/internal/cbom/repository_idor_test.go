@@ -56,7 +56,7 @@ func TestIDOR_ListArtifactsTenantScoped(t *testing.T) {
 		}))
 	mock.ExpectCommit()
 
-	artifacts, err := repo.List(context.Background(), callerTenant, nil, 50)
+	artifacts, err := repo.List(context.Background(), callerTenant, nil, "", 50)
 	if err != nil {
 		t.Fatalf("List tenant-scoped = %v", err)
 	}

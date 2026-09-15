@@ -137,8 +137,8 @@ func (f *licenseScopeFixture) writeFinding(t *testing.T, controlID uuid.UUID) uu
 	t.Helper()
 	findingID := uuid.New()
 	if _, err := f.db.Exec(`
-		INSERT INTO compliance_findings (id, tenant_id, control_id, asset_id, asset_type, severity, summary, detection_state, workflow_status)
-		VALUES ($1, $2, $3, $4, 'network_asset', 'Critical', 'lic scope fixture', 'ACTIVE', 'NEW')`,
+		INSERT INTO findings (id, tenant_id, producer, kind, control_id, subject_id, subject_type, severity, summary, detection_state, workflow_status)
+		VALUES ($1, $2, 'compliance', 'control_noncompliant', $3, $4, 'asset', 'critical', 'lic scope fixture', 'ACTIVE', 'NEW')`,
 		findingID, f.tenant, controlID, f.assetID); err != nil {
 		t.Fatalf("seed finding for control %s: %v", controlID, err)
 	}
@@ -239,7 +239,7 @@ func TestIntegration_Findings_DirectMutationsRequireActivatedFramework(t *testin
 	}
 
 	var status string
-	if err := f.db.Get(&status, `SELECT workflow_status FROM compliance_findings WHERE id = $1`, f.unlicensedFinding); err != nil {
+	if err := f.db.Get(&status, `SELECT workflow_status FROM findings WHERE id = $1`, f.unlicensedFinding); err != nil {
 		t.Fatalf("read workflow status: %v", err)
 	}
 	if status != "NEW" {

@@ -198,6 +198,7 @@ admin_plane:
     - /monitoring-service/trends/
     - /monitoring-service/gateway/
     - /monitoring-service/admin/
+    - /monitoring-service/tenant/
     # inventory-service — the algorithm-catalogue writes. The catalogue
     # is global platform data; its GETs stay on the public host under
     # /inventory-service/algorithms because the tenant UI reads them. Only the

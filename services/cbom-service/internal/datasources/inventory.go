@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vistasecurity/vistaplatform/shared/assetclass"
+
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 )
@@ -233,19 +235,54 @@ func (i *InventoryDataSource) IsAvailable(ctx context.Context) bool {
 // QueryCryptoImplementations retrieves all crypto configurations from the inventory service.
 // It returns the raw slice of map objects from the service response.
 func (i *InventoryDataSource) QueryCryptoImplementations(ctx context.Context, authToken, tenantID string) ([]map[string]interface{}, error) {
-	return i.queryAllListEndpoint(ctx, "/api/v1/inventory-service/crypto-implementations", authToken, tenantID)
+	return i.queryAllListEndpoint(ctx, "/api/v1/inventory-service/crypto-implementations", authToken, tenantID, "")
 }
 
 // QueryCertificates retrieves all certificates from the inventory service.
 // It returns the raw slice of map objects from the service response.
 func (i *InventoryDataSource) QueryCertificates(ctx context.Context, authToken, tenantID string) ([]map[string]interface{}, error) {
-	return i.queryAllListEndpoint(ctx, "/api/v1/inventory-service/certificates", authToken, tenantID)
+	return i.queryAllListEndpoint(ctx, "/api/v1/inventory-service/certificates", authToken, tenantID, "")
 }
 
-// QueryAssets retrieves all assets from the inventory service.
-// It returns the raw slice of map objects from the service response.
-func (i *InventoryDataSource) QueryAssets(ctx context.Context, authToken, tenantID string) ([]map[string]interface{}, error) {
-	return i.queryAllListEndpoint(ctx, "/api/v1/inventory-service/assets", authToken, tenantID)
+// QueryAssets retrieves the assets matching a query-language predicate.
+//
+// An EMPTY query is every asset the tenant may see — the `All` scope. The query
+// is applied by inventory-service, in SQL: cbom-service does not filter assets
+// in memory, because a second implementation of what a scope means is how an
+// artifact comes to cover more than its boundary says.
+func (i *InventoryDataSource) QueryAssets(ctx context.Context, authToken, tenantID, assetQuery string) ([]map[string]interface{}, error) {
+	return i.queryAllListEndpoint(ctx, "/api/v1/inventory-service/assets", authToken, tenantID, assetQuery)
+}
+
+// CountAssets returns how many assets match a query-language predicate, without
+// fetching any of them.
+//
+// It asks for a single-row page and reads `pagination.total`, which the list
+// endpoint already computes with its own `COUNT(*)` over the same compiled
+// predicate. That is the point: the count a scope's preview shows and the rows a
+// CBOM would contain come from ONE predicate compiled ONCE by inventory-service,
+// so a preview cannot promise a number the generation then disagrees with. A
+// dedicated count endpoint would be a second query to keep in step for no
+// additional information.
+//
+// An empty query counts every asset the tenant may see — the `All` scope.
+func (i *InventoryDataSource) CountAssets(ctx context.Context, authToken, tenantID, assetQuery string) (int64, error) {
+	raw, err := i.queryEndpointPage(ctx, "/api/v1/inventory-service/assets", authToken, tenantID, assetQuery, 1, 1)
+	if err != nil {
+		return 0, err
+	}
+	pagination, ok := extractPagination(raw)
+	if !ok {
+		return 0, fmt.Errorf("inventory service returned no pagination metadata for an asset count")
+	}
+	total, ok := pagination["total"].(float64)
+	if !ok {
+		// A missing total is NOT zero. Reporting it as zero would tell a
+		// customer their scope matches nothing, which is the worst possible
+		// wrong answer for an attestation boundary.
+		return 0, fmt.Errorf("inventory service returned no total for an asset count")
+	}
+	return int64(total), nil
 }
 
 // QueryAlgorithms retrieves all algorithms from the inventory service.
@@ -253,7 +290,7 @@ func (i *InventoryDataSource) QueryAssets(ctx context.Context, authToken, tenant
 // PQC status, and migration guidance — the CBOM handler uses this to enrich
 // algorithm components instead of re-inferring these attributes.
 func (i *InventoryDataSource) QueryAlgorithms(ctx context.Context, authToken, tenantID string) ([]map[string]interface{}, error) {
-	return i.queryAllListEndpoint(ctx, "/api/v1/inventory-service/algorithms", authToken, tenantID)
+	return i.queryAllListEndpoint(ctx, "/api/v1/inventory-service/algorithms", authToken, tenantID, "")
 }
 
 // QueryFindings retrieves security findings and vulnerabilities from the inventory service.
@@ -268,12 +305,12 @@ func (i *InventoryDataSource) QueryFindings(ctx context.Context, authToken, tena
 // queryListEndpoint is a shared helper that GETs a paginated list endpoint and returns
 // the items array from the response. It handles both {"items": [...]} and top-level array
 // response shapes.
-func (i *InventoryDataSource) queryAllListEndpoint(ctx context.Context, path, authToken, tenantID string) ([]map[string]interface{}, error) {
+func (i *InventoryDataSource) queryAllListEndpoint(ctx context.Context, path, authToken, tenantID, assetQuery string) ([]map[string]interface{}, error) {
 	const pageSize = 1000
 
 	var results []map[string]interface{}
 	for page := 1; ; page++ {
-		raw, err := i.queryEndpointPage(ctx, path, authToken, tenantID, page, pageSize)
+		raw, err := i.queryEndpointPage(ctx, path, authToken, tenantID, assetQuery, page, pageSize)
 		if err != nil {
 			return nil, err
 		}
@@ -300,8 +337,14 @@ func (i *InventoryDataSource) queryAllListEndpoint(ctx context.Context, path, au
 	return results, nil
 }
 
-func (i *InventoryDataSource) queryEndpointPage(ctx context.Context, path, authToken, tenantID string, page, pageSize int) (interface{}, error) {
+func (i *InventoryDataSource) queryEndpointPage(ctx context.Context, path, authToken, tenantID, assetQuery string, page, pageSize int) (interface{}, error) {
 	fullURL := fmt.Sprintf("%s%s?page=%d&page_size=%d", i.baseURL, path, page, pageSize)
+	if assetQuery != "" {
+		// url.QueryEscape, not string concatenation: a query carries quotes,
+		// parentheses, spaces and `&`, every one of which would otherwise end
+		// the parameter early and send a SHORTER predicate than the scope said.
+		fullURL += "&query=" + url.QueryEscape(assetQuery)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", fullURL, nil)
 	if err != nil {
@@ -429,25 +472,26 @@ func (i *InventoryDataSource) getFieldDefinitions() []FieldDefinition {
 			Aggregatable: false,
 		},
 		{
-			Name:         "type",
-			Label:        "Asset Type",
-			Type:         FieldTypeEnum,
-			Description:  "Type of asset (server, network_device, application, etc.)",
+			Name:  "class_key",
+			Label: "Asset Class",
+			Type:  FieldTypeEnum,
+			Description: "The asset's class, from the registry (ADR-0002 D2). " +
+				"Replaces the retired four-value `asset_type`.",
 			Required:     true,
 			Indexed:      true,
 			Searchable:   false,
 			Sortable:     true,
 			Filterable:   true,
 			Aggregatable: true,
-			Options: []FieldOption{
-				{Value: "server", Label: "Server"},
-				{Value: "network_device", Label: "Network Device"},
-				{Value: "application", Label: "Application"},
-				{Value: "database", Label: "Database"},
-				{Value: "load_balancer", Label: "Load Balancer"},
-				{Value: "firewall", Label: "Firewall"},
-				{Value: "other", Label: "Other"},
-			},
+			// GENERATED from the class registry, not hand-listed.
+			//
+			// The hand-written list offered `database`, `load_balancer`,
+			// `firewall`, `other` — and `database` and `other` are not class
+			// keys at all, so picking either produced a filter the asset list
+			// answers 400 for. A report builder that offers a value the server
+			// refuses is a builder that cannot be trusted with the values that
+			// DO work.
+			Options: assetClassFieldOptions(),
 		},
 		{
 			Name:         "environment",
@@ -958,4 +1002,20 @@ func (i *InventoryDataSource) isValidSortField(field string) bool {
 		}
 	}
 	return false
+}
+
+// assetClassFieldOptions is the class vocabulary the report builder offers,
+// derived from the generated registry so it cannot drift from what the asset
+// list will accept.
+//
+// Every class, not just the leaves: the class filter matches a SUBTREE, so
+// offering `hardware` is offering "every kind of hardware", which is usually
+// what a report wants.
+func assetClassFieldOptions() []FieldOption {
+	classes := assetclass.All
+	out := make([]FieldOption, 0, len(classes))
+	for _, c := range classes {
+		out = append(out, FieldOption{Value: string(c.Key), Label: c.Label})
+	}
+	return out
 }

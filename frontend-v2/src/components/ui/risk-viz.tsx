@@ -1,12 +1,41 @@
 import type { CSSProperties } from 'react';
 import { LEVEL_ABBR, LEVELS, riskColor, levelFromScore, type RiskLevel } from './risk';
 
+/**
+ * What a risk chip shows.
+ *
+ * An asset nobody has assessed is NOT an Informational one, and the chip must
+ * not say it is: `assetRisk` reports `level: 'Informational'` for an unassessed
+ * asset so the colour stays neutral, and the list rendered that as the same "I"
+ * a genuinely-assessed, nothing-found asset wears. The two facts — "we looked
+ * and found nothing" and "nobody has looked" — then became one glyph, which is
+ * exactly the collapse the risk model exists to prevent.
+ */
+export function riskChipGlyph(level: string, assessed = true): string {
+  if (!assessed) return '—';
+  return LEVEL_ABBR[level as RiskLevel] ?? '?';
+}
+
 /** Square level chip with abbreviation. */
-export function RiskChip({ level, size = 24 }: { level: string; size?: number }) {
-  const col = riskColor(level);
+/**
+ * `title` overrides the default (the band name) so a caller can say WHY the
+ * chip reads the way it does — most importantly "not assessed", where a grey
+ * Informational chip would otherwise be read as a clean bill of health.
+ *
+ * `assessed={false}` is that case made visible rather than only hoverable: an
+ * em dash on a dashed outline, which is the same "—" the row's score column
+ * shows and the same distinction the asset page draws with its "Not assessed"
+ * pill.
+ */
+export function RiskChip({ level, size = 24, title, assessed = true }: { level: string; size?: number; title?: string; assessed?: boolean }) {
+  const col = assessed ? riskColor(level) : 'var(--app-t3)';
   return (
-    <span title={level} style={{ width: size, height: size, borderRadius: 7, flex: 'none', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'var(--font-head)', fontWeight: 800, fontSize: size * 0.5, color: col, background: `color-mix(in srgb, ${col} 12%, transparent)`, border: `1px solid color-mix(in srgb, ${col} 33%, transparent)` }}>
-      {LEVEL_ABBR[level as RiskLevel] ?? '?'}
+    <span
+      title={title ?? (assessed ? level : 'Not assessed')}
+      aria-label={assessed ? level : 'Not assessed'}
+      style={{ width: size, height: size, borderRadius: 7, flex: 'none', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'var(--font-head)', fontWeight: 800, fontSize: size * 0.5, color: col, background: assessed ? `color-mix(in srgb, ${col} 12%, transparent)` : 'transparent', border: `1px ${assessed ? 'solid' : 'dashed'} color-mix(in srgb, ${col} ${assessed ? 33 : 55}%, transparent)` }}
+    >
+      {riskChipGlyph(level, assessed)}
     </span>
   );
 }

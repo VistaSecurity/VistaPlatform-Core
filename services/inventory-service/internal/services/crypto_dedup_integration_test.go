@@ -45,8 +45,8 @@ func newDedupFixture(t *testing.T) (svc *AssetService, tenant, approved, pending
 	insertAsset := func(host, status string) uuid.UUID {
 		id := uuid.New()
 		if _, err := db.Exec(`
-			INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-			VALUES ($1,$2,$3,'server',$4,NOW(),NOW(),NOW(),NOW())`, id, tenant, host, status); err != nil {
+			INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, 'server', 'hardware.computer.server', $4, NOW(), NOW(), NOW(), NOW())`, id, tenant, host, status); err != nil {
 			t.Fatalf("insert %s asset: %v", status, err)
 		}
 		return id
@@ -230,7 +230,7 @@ func deferredFindings(t *testing.T, svc *AssetService, tenant, asset uuid.UUID) 
 	t.Helper()
 	var metadataJSON []byte
 	if err := svc.db.QueryRow(
-		`SELECT COALESCE(metadata->'deferred_findings', '[]'::jsonb) FROM network_assets WHERE id = $1 AND tenant_id = $2`,
+		`SELECT COALESCE(metadata->'deferred_findings', '[]'::jsonb) FROM assets WHERE id = $1 AND tenant_id = $2`,
 		asset, tenant).Scan(&metadataJSON); err != nil {
 		t.Fatalf("read deferred findings: %v", err)
 	}
@@ -271,7 +271,7 @@ func TestIntegration_DeferredFindings_DedupBeforeAppend(t *testing.T) {
 
 	// Approving materializes one configuration per distinct deferred finding —
 	// not one per observation — and clears the array.
-	if err := svc.ApproveAssets(tenant, []uuid.UUID{pending}); err != nil {
+	if err := svc.ApproveAssets(tenant, []uuid.UUID{pending}, uuid.Nil); err != nil {
 		t.Fatalf("ApproveAssets: %v", err)
 	}
 	if got := countImplementations(t, svc, tenant, pending); got != 2 {

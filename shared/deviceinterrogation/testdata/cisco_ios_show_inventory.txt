@@ -1,0 +1,8 @@
+NAME: "1", DESCR: "WS-C3750X-48P-S"
+PID: WS-C3750X-48P-S   , VID: V06  , SN: FDO1734X0AB
+
+NAME: "Switch 1 - Power Supply 0", DESCR: "FRU Power Supply"
+PID: C3KX-PWR-715WAC   , VID: V01  , SN: DTN1733A0GH
+
+NAME: "TenGigabitEthernet1/1/1", DESCR: "10GE SFP+ SR"
+PID: SFP-10G-SR        , VID: V03  , SN: AVD1729Z0JK

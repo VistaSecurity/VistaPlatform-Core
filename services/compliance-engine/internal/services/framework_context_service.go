@@ -223,16 +223,17 @@ func (s *FrameworkContextService) GetFrameworkContext(tenantID, userID uuid.UUID
 // (framework_score.go) while the UI still gets a truthful "has findings" signal.
 func (s *FrameworkContextService) countControlsWithOpenFindings(tenantID, frameworkID uuid.UUID) int {
 	var count int
-	// RLS: compliance_findings — must run inside a tenant tx with app.tenant_id
+	// RLS: findings — must run inside a tenant tx with app.tenant_id
 	// set, or the plain pool returns zero rows silently (no error).
 	err := shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenantID, func(tx *sql.Tx) error {
 		return tx.QueryRow(`
 			SELECT COUNT(DISTINCT cf.control_id)
-			FROM compliance_findings cf
+			FROM findings cf
 			JOIN platform_framework_controls pfc ON pfc.id = cf.control_id
 			WHERE cf.tenant_id = $1
 			  AND pfc.framework_id = $2
 			  AND cf.detection_state = 'ACTIVE'
+			  AND `+complianceProducerScope("cf")+`
 			  AND (cf.workflow_status <> 'SUPPRESSED' OR cf.workflow_status IS NULL)
 		`, tenantID, frameworkID).Scan(&count)
 	})
@@ -377,13 +378,20 @@ type BatchEvaluateResult struct {
 	ControlBreakdown    []BatchControlStatus  `json:"control_breakdown,omitempty"`
 }
 
-// BatchFindingSummary represents a summarized finding
+// BatchFindingSummary represents a summarized finding.
+//
+// `subject_id`/`subject_type`, not `asset_id`: a compliance finding is about an
+// asset, a certificate or a crypto configuration, and on live data only about
+// one in four of them was an asset. The posture grid groups by this id, and
+// calling it an asset id is what made it drop three findings in four into an
+// "unattributed" row (H-9).
 type BatchFindingSummary struct {
-	ID        string `json:"id"`
-	ControlID string `json:"control_id"`
-	AssetID   string `json:"asset_id"`
-	Severity  string `json:"severity"`
-	Summary   string `json:"summary"`
+	ID          string `json:"id"`
+	ControlID   string `json:"control_id"`
+	SubjectID   string `json:"subject_id"`
+	SubjectType string `json:"subject_type"`
+	Severity    string `json:"severity"`
+	Summary     string `json:"summary"`
 }
 
 // BatchControlStatus represents control status in batch evaluation
@@ -442,10 +450,16 @@ func (s *FrameworkContextService) BatchEvaluateFrameworks(tenantID uuid.UUID, re
 
 // evaluateSingleFramework evaluates a single framework and returns the result
 func (s *FrameworkContextService) evaluateSingleFramework(tenantID, frameworkID uuid.UUID, filters models.ScenarioFilters, includeDetails bool) (*BatchEvaluateResult, error) {
-	// Get framework info
+	// Get framework info.
+	//
+	// description/organization are COALESCEd: both are NULLABLE
+	// (scripts/database/schema.sql) but models.PlatformFramework scans them
+	// into plain Go strings, and a NULL fails this Get outright for a
+	// framework somebody created without naming an organization (the same
+	// defect framework_license_service.go was fixed for first).
 	var framework models.PlatformFramework
 	err := s.db.Get(&framework, `
-		SELECT id, code, name, version, description, organization, status,
+		SELECT id, code, name, version, COALESCE(description, '') AS description, COALESCE(organization, '') AS organization, status,
 		       is_platform_default, published_at, published_by, created_by, created_at, updated_at
 		FROM platform_frameworks
 		WHERE id = $1 AND status = 'published'
@@ -484,10 +498,11 @@ func (s *FrameworkContextService) evaluateSingleFramework(tenantID, frameworkID 
 	var findings []BatchFindingSummary
 
 	type controlFinding struct {
-		ID       uuid.UUID
-		AssetID  uuid.UUID
-		Severity string
-		Summary  string
+		ID          uuid.UUID
+		SubjectID   uuid.UUID
+		SubjectType string
+		Severity    string
+		Summary     string
 	}
 
 	// Load every ACTIVE, non-suppressed finding for ALL of the framework's
@@ -495,7 +510,7 @@ func (s *FrameworkContextService) evaluateSingleFramework(tenantID, frameworkID 
 	// A published framework routinely carries 50–150 controls, and this ran a
 	// separate round-trip for each of them on every batch evaluate.
 	//
-	// The read hits the RLS-policied compliance_findings table, so it runs
+	// The read hits the RLS-policied findings table, so it runs
 	// inside a tenant tx that has set app.tenant_id.
 	findingsByControl := make(map[uuid.UUID][]controlFinding, len(controls))
 	controlIDs := make([]string, 0, len(controls))
@@ -507,10 +522,11 @@ func (s *FrameworkContextService) evaluateSingleFramework(tenantID, frameworkID 
 	if len(controlIDs) > 0 {
 		_ = shareddatabase.WithTenantTx(ctx, s.db.DB, tenantID, func(tx *sql.Tx) error {
 			query := `
-				SELECT control_id, id, asset_id, severity, summary
-				FROM compliance_findings
+				SELECT control_id, id, subject_id, subject_type, severity, summary
+				FROM findings
 				WHERE tenant_id = $1 AND control_id = ANY($2::uuid[])
 				  AND detection_state = 'ACTIVE'
+				  AND ` + complianceProducerScope("findings") + `
 				  AND (workflow_status != 'SUPPRESSED' OR workflow_status IS NULL)
 				ORDER BY control_id
 			`
@@ -526,7 +542,7 @@ func (s *FrameworkContextService) evaluateSingleFramework(tenantID, frameworkID 
 			for rows.Next() {
 				var controlID uuid.UUID
 				var f controlFinding
-				if scanErr := rows.Scan(&controlID, &f.ID, &f.AssetID, &f.Severity, &f.Summary); scanErr != nil {
+				if scanErr := rows.Scan(&controlID, &f.ID, &f.SubjectID, &f.SubjectType, &f.Severity, &f.Summary); scanErr != nil {
 					log.Printf("WARN: Failed to scan finding for framework %s: %v", frameworkID, scanErr)
 					continue
 				}
@@ -563,35 +579,28 @@ func (s *FrameworkContextService) evaluateSingleFramework(tenantID, frameworkID 
 			status = statusNotAssessed
 			assessment.Reason = reasonNoMeasurements
 		}
-		severity := "Low"
+		severity := SeverityLow
 
 		if findingCount > 0 {
 			// Any violation fails the control; severity is the badge/weight, not
 			// the verdict.
 			status = statusFail
 			for _, f := range controlFindings {
-				affectedAssetSet[f.AssetID] = true
-				switch f.Severity {
-				case "Critical":
-					severity = "Critical"
-				case "High":
-					if severity != "Critical" {
-						severity = "High"
-					}
-				case "Med":
-					if severity == "Low" {
-						severity = "Med"
-					}
-				}
+				affectedAssetSet[f.SubjectID] = true
+				// worseSeverity, not a hand-written ladder: this one used to be a
+				// switch on Critical/High/Med, so a finding stored as anything
+				// else left the control's badge at Low no matter how bad it was.
+				severity = worseSeverity(severity, f.Severity)
 
 				// Add to findings list if details requested
 				if includeDetails {
 					findings = append(findings, BatchFindingSummary{
-						ID:        f.ID.String(),
-						ControlID: control.ID.String(),
-						AssetID:   f.AssetID.String(),
-						Severity:  f.Severity,
-						Summary:   f.Summary,
+						ID:          f.ID.String(),
+						ControlID:   control.ID.String(),
+						SubjectID:   f.SubjectID.String(),
+						SubjectType: f.SubjectType,
+						Severity:    f.Severity,
+						Summary:     f.Summary,
 					})
 				}
 			}

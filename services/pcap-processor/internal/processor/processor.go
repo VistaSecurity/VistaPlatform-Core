@@ -26,6 +26,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
+	"github.com/vistasecurity/vistaplatform/shared/hostobs"
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 )
@@ -46,6 +47,12 @@ type CryptoDiscovery struct {
 	DiscoveryType   string                         `json:"discovery_type"`
 	Timestamp       time.Time                      `json:"timestamp"`
 	RawMetadata     map[string]string              `json:"raw_metadata,omitempty"`
+	// HostObservation carries a passive host-presence observation
+	// (asset-inventory ADR-0004 D2) when DiscoveryType is "host_observation".
+	// nil on every crypto discovery — RawMetadata is a map[string]string and
+	// cannot hold a structured payload, which is why this is its own field
+	// rather than another metadata key.
+	HostObservation *hostobs.HostObservation `json:"host_observation,omitempty"`
 }
 
 // PcapResult holds the aggregated results of processing a pcap file.
@@ -225,6 +232,11 @@ func (p *Processor) processPcapFile(ctx context.Context, filePath string, sensor
 	// actually parseable. Dedup keeps repeated clients from producing identical
 	// rows while preserving distinct SNI/certificate/negotiated-crypto evidence
 	// behind the same IP:port.
+	// Passive host observation over the same packets (asset-inventory ADR-0004
+	// D2). A capture file is often the only view we get of a segment nobody
+	// will let us put a sensor on.
+	hostObs := newHostObsCollector()
+
 	tlsSeen := make(map[string]bool)
 	tracker := tlsparse.NewTracker(func(s *tlsparse.Session) {
 		key := tlsSessionDedupeKey(s)
@@ -258,6 +270,10 @@ func (p *Processor) processPcapFile(ctx context.Context, filePath string, sensor
 				result.CaptureEndTime = &t
 			}
 		}
+
+		// Host observation runs FIRST, because ARP, LLDP and CDP have no IP
+		// layer at all and the guard below would `continue` past them.
+		hostObs.Offer(packet)
 
 		// Extract IP layer
 		var srcIP, dstIP string
@@ -325,6 +341,25 @@ func (p *Processor) processPcapFile(ctx context.Context, filePath string, sensor
 
 	// Emit handshakes that were still in flight when the capture ended.
 	tracker.Flush()
+
+	// One row per host for the whole file. The coalescing window is longer
+	// than any plausible capture, so this drain is the only thing that emits.
+	for _, d := range hostObs.Discoveries() {
+		result.Discoveries = append(result.Discoveries, d)
+		protocolSet[d.Protocol] = true
+	}
+	// Logged whenever the decoders saw anything, not only when something was
+	// malformed — and the coalescer's drop count is in it.
+	//
+	// The drop count is the part that matters. A capture with more distinct
+	// hosts than the coalescer's capacity sheds the excess, and reading
+	// `decoded` alone would show a healthy-looking number while hosts went
+	// missing from the result. That is the shape this package exists to avoid,
+	// and the sensor already reports the same counter on its heartbeat.
+	if dropped := hostObs.coalescer.Dropped(); hostObs.decoded > 0 || hostObs.malformed > 0 || dropped > 0 {
+		log.Printf("[PCAP] Host observation: %d frames decoded, %d malformed, %d subject(s) dropped at the coalescer capacity of %d",
+			hostObs.decoded, hostObs.malformed, dropped, hostobs.DefaultCoalesceCapacity)
+	}
 
 	if tracker.Evicted > 0 || tracker.Truncated > 0 || tracker.Desynced > 0 {
 		log.Printf("[PCAP] TLS reassembly limits hit (%s): %d flows dropped over the flow cap, %d truncated over the per-direction byte cap, %d abandoned on desynchronised record framing",
@@ -596,6 +631,11 @@ func (p *Processor) insertDiscoveriesIntoPipeline(ctx context.Context, jobID uui
 			if d.SNI != "" {
 				h := d.SNI
 				hostname = &h
+			} else if d.HostObservation != nil {
+				// A host observation has no SNI; its name is the whole point.
+				if h := hostObsBestName(d.HostObservation); h != "" {
+					hostname = &h
+				}
 			}
 
 			_, iErr := tx.ExecContext(ctx, insertQuery,
@@ -606,7 +646,7 @@ func (p *Processor) insertDiscoveriesIntoPipeline(ctx context.Context, jobID uui
 				cryptoparse.NormalizeProtocol(d.Protocol),
 				d.DestIP,
 				d.DestPort,
-				0.85,
+				pipelineConfidence(d),
 				metaJSON,
 				d.Timestamp,
 				sourceIP,
@@ -708,6 +748,16 @@ func buildDiscoveryMetadata(d CryptoDiscovery) map[string]interface{} {
 			})
 		}
 		meta["certificates"] = certs
+	}
+	// The host observation is a structured payload, so it goes in whole. The
+	// consumer reads rawData["host_observation"]; the wire contract
+	// (docsv4/internal/developer/architecture/discovery-host-observation.md)
+	// documents the shape, and it is identical to what the live sensor sends.
+	if d.HostObservation != nil {
+		meta["host_observation"] = d.HostObservation
+		if name := hostObsBestName(d.HostObservation); name != "" {
+			meta["hostname"] = name
+		}
 	}
 	for k, v := range d.RawMetadata {
 		meta[k] = v

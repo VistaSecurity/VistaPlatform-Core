@@ -276,7 +276,7 @@ Supports comprehensive filtering across all entity types.
 ### Data Model
 
 The unified inventory uses a UNION ALL query strategy to combine:
-- **Assets**: From `network_assets` table
+- **Assets**: From the `assets` table (with `asset_endpoints` for their network faces)
 - **Certificates**: From `certificates` table
 - **Relationships**: Through `crypto_implementations` table
 

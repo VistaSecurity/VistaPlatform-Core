@@ -60,7 +60,7 @@ type AttestationBuilder interface {
 	// Build gathers the compliance state for the given assets into a Layer.
 	//
 	// tenantID is part of the contract rather than an ambient property of the
-	// connection: `compliance_findings` is RLS-policied, so an implementation
+	// connection: `findings` is RLS-policied, so an implementation
 	// reading it from an unscoped pooled connection sees zero rows and would
 	// mint an attestation asserting "no findings" for a tenant that has them.
 	// Passing the tenant explicitly makes that impossible to forget.

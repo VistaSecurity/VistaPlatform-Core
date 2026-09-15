@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -19,6 +20,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/services"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/hostinventory"
 	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
 )
 
@@ -84,11 +86,41 @@ func (h *DeviceHandlers) CreateDevice(c *gin.Context) {
 
 	device, err := h.deviceService.CreateDevice(c.Request.Context(), tenantID, req)
 	if err != nil {
+		if writeDeviceIdentityConflict(c, err) {
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
 
 	c.JSON(http.StatusCreated, device)
+}
+
+// writeDeviceIdentityConflict answers 409 when every identifier the operator
+// gave already belongs to another asset, naming the merge proposal that was
+// opened. It returns true when it wrote a response.
+//
+// 409, not 500: nothing broke. The operator has told us two things they thought
+// were separate are one, and the answer is a decision waiting in Approvals —
+// which is only reachable if its id is in the body. A 500 saying "internal
+// server error" for this left them with a device that would not save and no
+// explanation anywhere.
+func writeDeviceIdentityConflict(c *gin.Context, err error) bool {
+	var contested *services.DeviceIdentityContestedError
+	if !errors.As(err, &contested) {
+		return false
+	}
+	body := gin.H{
+		"error": "Device identity is contested",
+		"message": "every identifier for this device already belongs to another asset. " +
+			"A merge proposal is waiting in Approvals so you can say whether these are the same thing.",
+		"candidates": contested.Candidates,
+	}
+	if contested.ProposalID != "" {
+		body["merge_proposal_id"] = contested.ProposalID
+	}
+	c.JSON(http.StatusConflict, body)
+	return true
 }
 
 // DiscoverAndCreateDevice handles POST /devices/discover-and-create
@@ -378,7 +410,34 @@ func (h *DeviceHandlers) DeleteDevice(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Device deleted successfully"})
+	// The wording is the behaviour: the management configuration and the stored
+	// credentials are gone and the device is off this page, but the ASSET stays
+	// in Inventory with its endpoints, certificates and history. Saying
+	// "deleted" would promise an inventory-wide deletion this does not do.
+	c.JSON(http.StatusOK, gin.H{"message": "Device removed; the asset remains in Inventory"})
+}
+
+// InterrogateDeviceRequest is the OPTIONAL body of POST /devices/:id/interrogate.
+//
+// Optional because the endpoint predates it: a request with no body still
+// queues a device_interrogation exactly as it always did, which is what keeps
+// every existing caller working.
+type InterrogateDeviceRequest struct {
+	// JobType selects what to run. Empty means device_interrogation.
+	JobType models.DeviceJobType `json:"job_type"`
+	// Mode applies to host_inventory only and must be "remote". Local
+	// collection is agent-originated: the agent posts it on its own schedule
+	// and there is nothing here to queue, so accepting "local" would create a
+	// job that will never be claimed and never complete.
+	Mode string `json:"mode"`
+	// Transport applies to host_inventory only. "ssh" (the default) reaches
+	// Linux, macOS and Windows-with-OpenSSH; "winrm" is refused with an
+	// explanation (shared/hostinventory/winrm.go).
+	Transport string `json:"transport"`
+	// AgentID names the agent that will run a remote host inventory. Required
+	// for host_inventory: the collection runs FROM an agent that can reach the
+	// target, and device_jobs' valid_job_assignment CHECK requires the column.
+	AgentID *uuid.UUID `json:"agent_id"`
 }
 
 // InterrogateDevice handles POST /devices/:id/interrogate
@@ -388,6 +447,35 @@ func (h *DeviceHandlers) InterrogateDevice(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid device ID"})
 		return
+	}
+
+	// A body is optional, and a MALFORMED one is not the same as an absent one:
+	// binding errors are surfaced rather than swallowed, so a caller who meant
+	// to ask for a host inventory and mistyped it does not silently get a
+	// device interrogation instead.
+	var req InterrogateDeviceRequest
+	if c.Request.Body != nil && c.Request.ContentLength > 0 {
+		if bindErr := c.ShouldBindJSON(&req); bindErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+			return
+		}
+	}
+	if req.JobType == "" {
+		req.JobType = models.JobTypeDeviceInterrogation
+	}
+	if !req.JobType.Valid() {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Unknown job_type %q", req.JobType)})
+		return
+	}
+	if req.JobType == models.JobTypeCloudDiscovery {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cloud discovery is not queued against a device; use /cloud/discover"})
+		return
+	}
+	if req.JobType == models.JobTypeHostInventory {
+		if err := validateHostInventoryRequest(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
 	// Get tenant ID from context
@@ -434,14 +522,29 @@ func (h *DeviceHandlers) InterrogateDevice(c *gin.Context) {
 		return
 	}
 
-	// Create device interrogation job
+	// Create the job. A host inventory carries its mode and transport in the
+	// parameters and names the agent that will run it; a device interrogation
+	// is unchanged — AgentID nil, claimed by the platform worker or by any of
+	// the tenant's agents.
+	var extra map[string]interface{}
+	var agentID *uuid.UUID
+	message := "Device interrogation job created"
+	if req.JobType == models.JobTypeHostInventory {
+		extra = map[string]interface{}{
+			"mode":      string(hostinventory.ModeRemote),
+			"transport": req.Transport,
+		}
+		agentID = req.AgentID
+		message = "Host inventory job created"
+	}
+
 	jobRequest := models.CreateDeviceJobRequest{
 		TenantID:    tenantID,
-		JobType:     models.JobTypeDeviceInterrogation,
-		DeviceID:    &deviceID,
-		AgentID:     nil, // Claimed by the platform worker or a tenant agent
+		JobType:     req.JobType,
+		AssetID:     &deviceID,
+		AgentID:     agentID,
 		Credentials: credentials,
-		Parameters:  buildJobParameters(device, nil),
+		Parameters:  buildJobParameters(device, extra),
 	}
 
 	deviceJob, err := h.jobQueue.CreateJob(c.Request.Context(), jobRequest)
@@ -451,10 +554,42 @@ func (h *DeviceHandlers) InterrogateDevice(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusAccepted, gin.H{
-		"message": "Device interrogation job created",
-		"job_id":  deviceJob.ID.String(),
-		"status":  deviceJob.Status,
+		"message":  message,
+		"job_id":   deviceJob.ID.String(),
+		"job_type": string(deviceJob.JobType),
+		"status":   deviceJob.Status,
 	})
+}
+
+// validateHostInventoryRequest checks what only this endpoint can check.
+//
+// Credentials are NOT checked here: the caller has already been through
+// buildJobCredentials by the time a job is built, and that path answers
+// "Device has no credentials configured" for a device that has none. Repeating
+// the check here would be a second opinion that can drift from the first.
+func validateHostInventoryRequest(req *InterrogateDeviceRequest) error {
+	// Local collection is agent-originated. A queued local job would sit in the
+	// queue forever: no agent claims it, because the agent that would describe
+	// that host posts its inventory on its own schedule instead.
+	if hostinventory.Mode(strings.ToLower(strings.TrimSpace(req.Mode))) != hostinventory.ModeRemote {
+		return fmt.Errorf(`host_inventory requires "mode": "remote"; local collection is agent-originated ` +
+			`(the agent posts it on its own schedule) and cannot be queued as a job`)
+	}
+	// ParseTransport is the single place that knows which transports exist, so
+	// the API and the agent refuse the same values with the same wording.
+	transport, err := hostinventory.ParseTransport(req.Transport)
+	if err != nil {
+		return err
+	}
+	req.Transport = string(transport)
+
+	// The collection runs FROM an agent. Without one there is nothing to run
+	// it, and device_jobs' valid_job_assignment CHECK would reject the row with
+	// a constraint error no operator could act on.
+	if req.AgentID == nil || *req.AgentID == uuid.Nil {
+		return errors.New(`host_inventory requires "agent_id": the collection runs from an agent that can reach the target host`)
+	}
+	return nil
 }
 
 // errNoDeviceCredentials means the device carries neither a credential_id nor
@@ -516,7 +651,11 @@ const masterEncryptedFlagKey = "encrypted"
 func buildJobParameters(device *models.Device, extra map[string]interface{}) map[string]interface{} {
 	params := map[string]interface{}{
 		"device_type": device.DeviceType,
-		"device_id":   device.ID.String(),
+		"asset_id":    device.ID.String(),
+		// Deprecated alias, emitted for one release: an agent older than phase 1
+		// reads `device_id`, and the value is the same — a device's id IS its
+		// asset's id now.
+		"device_id": device.ID.String(),
 	}
 	if device.Hostname != nil && *device.Hostname != "" {
 		params["hostname"] = *device.Hostname
@@ -747,7 +886,7 @@ func (h *DeviceHandlers) BulkInterrogateDevices(c *gin.Context) {
 		jobRequest := models.CreateDeviceJobRequest{
 			TenantID:    tenantID,
 			JobType:     models.JobTypeDeviceInterrogation,
-			DeviceID:    &deviceID,
+			AssetID:     &deviceID,
 			Credentials: credentials,
 			Parameters:  buildJobParameters(device, map[string]interface{}{"bulk": true}),
 		}

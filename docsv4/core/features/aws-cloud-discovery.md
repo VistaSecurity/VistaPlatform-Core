@@ -26,6 +26,118 @@ Each type is either **regional** (scanned once per region you select) or **globa
 | S3 bucket encryption | **Global** | Default server-side encryption per bucket (SSE-S3, SSE-KMS, DSSE-KMS), the KMS key when customer-managed, whether S3 Bucket Keys are enabled, and the bucket's home region. |
 | RDS instance encryption | Regional | Storage-encrypted flag, algorithm, KMS key, engine and version, Multi-AZ, Performance Insights KMS key. |
 
+## What is enumerated
+
+Alongside the cryptographic resources above, a run **inventories the account's
+compute and network estate**: the instances, the networks they sit in, and the
+security groups they belong to. This is inventory rather than cryptography — an
+EC2 instance negotiates no protocol and states no at-rest encryption — and it is
+what makes the rest of a run legible: a TLS listener on a machine that is not in
+your inventory is half an answer.
+
+It is controlled by one switch per integration, **Inventory compute, networks and
+subnets** in Discovery → Cloud → Edit integration. It is **on by default**,
+including for integrations created before this feature existed. Turning it off
+stops all four calls below.
+
+### Exact API calls
+
+| Call | Per | Produces |
+|---|---|---|
+| `ec2:DescribeInstances` | Region, paginated | One asset per non-terminated instance |
+| `ec2:DescribeVpcs` | Region, paginated | One asset per VPC |
+| `ec2:DescribeSubnets` | Region, paginated | One asset per subnet |
+| `ec2:DescribeSecurityGroups` | Region, paginated | Group **membership** on the instances — never the rules |
+
+**Cost.** Four extra calls per selected region per run, each paginated (the AWS
+default page size is 1,000 instances). A run over ten regions is forty extra
+calls plus their pages. Selecting fewer regions is the lever.
+
+### IAM actions to add
+
+```json
+"ec2:DescribeInstances",
+"ec2:DescribeVpcs",
+"ec2:DescribeSubnets",
+"ec2:DescribeSecurityGroups"
+```
+
+All four are in the AWS-managed `AmazonEC2ReadOnlyAccess` and `ReadOnlyAccess`
+policies. If your policy already grants `ec2:Describe*`, nothing is needed.
+
+### What lands in the inventory
+
+| AWS resource | Asset class | Identified by |
+|---|---|---|
+| EC2 instance | Compute instance | `arn:aws:ec2:<region>:<account>:instance/<id>` |
+| VPC | Virtual network | `arn:aws:ec2:<region>:<account>:vpc/<id>` |
+| Subnet | Subnet | the subnet's own `SubnetArn` |
+| Security group | *not an asset* | recorded as membership on the instance |
+
+Each instance carries its private addresses, its interfaces (name, MAC,
+addresses), its instance type and image id, its tags, and the `cloud.*`
+placement facts (provider, account, region, VPC, subnet, security groups). The
+relationships **VPC contains subnet** and **subnet contains instance** are drawn
+from the provider's own placement, and a subnet's CIDR becomes a network segment
+so an instance's private address resolves to the same asset when an agent or a
+sensor sees it from inside.
+
+**Hostname.** EC2 offers two private DNS name formats and only one of them is a
+name. The *resource-name* format (`i-0abc….ec2.internal`) is built from the
+instance id, is unique account-wide, and becomes the asset's hostname. The
+*IP-name* format (`ip-10-0-1-20.ec2.internal`) is built from the private address
+and is unique only inside one VPC — two instances with the same private address,
+in two VPCs whose CIDRs overlap or across a terminated instance and its
+replacement, get identical names — so it is **not** used as a hostname and would
+otherwise merge two machines into one asset. It is still recorded on the
+instance as `private_dns_name`, and the instance's **Name** tag is still its
+display name.
+
+New assets arrive in **Pending approval** like any other discovery. A re-run
+matches on the ARN and updates; it never creates a second asset.
+
+### Two instances that share a private address
+
+A private address is not unique in an AWS account, and the inventory is built so
+that it never has to be.
+
+- **Two VPCs using the same CIDR** — two VPCs created from the same Terraform
+  module both get `10.0.0.0/16`, and their subnets both get `10.0.1.0/24` — are
+  two separate network segments, tagged with the VPC they belong to. Two
+  instances at `10.0.1.20` in two different VPCs are **two assets**, and neither
+  is affected by the other.
+- **An address reused inside one subnet** — EC2 gives a freed private address to
+  the next instance launched — is genuinely the same segment, and the platform
+  cannot tell from outside whether an address that changed hands means a new
+  machine or a rebuilt one. So it does not guess: the new instance is recorded
+  as its own asset in Pending approval, and a **review item appears in
+  Approvals** asking whether it is the machine that used to answer to that
+  address. You decide; nothing is merged on your behalf.
+
+  The previous asset is left exactly as it was, so its history, tags and
+  findings stay with the instance they were recorded against.
+
+### What is deliberately NOT collected
+
+- **User data.** `ec2:DescribeInstanceAttribute` with `userData` is never
+  called. Bootstrap scripts routinely carry database passwords, API tokens and
+  private keys; the platform does not ask for them, so granting the action
+  changes nothing.
+- **Security group rules.** Only a group's id and name are recorded —
+  membership, not policy. A rule set is a map of your network.
+- **Block device mappings, IAM instance profiles, spot requests, licence
+  specifications.** Returned by the API, read by nothing.
+- **Guest operating system.** EC2 states none. `PlatformDetails` is a billing
+  string ("Linux/UNIX") and an image name is a label someone chose; neither is
+  the product the machine runs, so the OS fields stay empty rather than carrying
+  a guess. Guest OS comes from the host agent.
+- **A subnet's "public" flag.** Whether a subnet routes to an internet gateway
+  needs `ec2:DescribeRouteTables`, which is a further grant and a further call.
+  `MapPublicIpOnLaunch` is a different setting and is not used as a stand-in.
+
+**EC2 key pairs** are recorded by **name only**. The name is a label; the
+private half never leaves your account and the public half is not requested.
+
 ### Partitions
 
 Only the **AWS commercial partition** (`aws`) is supported. **GovCloud (`aws-us-gov`) and China (`aws-cn`) are not** — they are separate partitions with separate credentials, separate account namespaces and separate service endpoints, and they are not selectable in the region picker.
@@ -131,7 +243,7 @@ The service creates a discovery job, enumerates and interrogates the resources, 
 
 Cloud-discovered assets appear alongside sensor-discovered ones with hostname, port, protocol, protocol version, cipher suite and certificate detail. They carry `discovery_method = 'cloud_api'` and arrive as `pending_approval` — unless the cloud segment they belong to (the per-region segment created from their `cloud_provider`/`cloud_region`) has auto-approve enabled **with cloud discoveries among its sources**, in which case they go straight to `monitoring`. Cloud coverage is off on every pre-existing segment and is enabled per segment in Settings → Infrastructure; see [Asset Approval](asset-approval.md#which-discoveries-a-segment-auto-approves).
 
-Approved resources appear as Infrastructure Assets with their Crypto Configurations. Cloud device types render with readable names ("AWS S3 bucket", "AWS KMS key") on Discovery → Devices and in the job drawer, and map to CMDB asset types: load balancers to **appliance**, managed services (API Gateway, CloudFront, KMS, S3) to **service**, and RDS instances to **server**.
+Approved resources appear as Infrastructure Assets with their Crypto Configurations. Cloud resource types render with readable names ("AWS S3 bucket", "AWS KMS key") on Discovery → Devices and in the job drawer, and each one is given the **class** that says what it is: an ELB becomes a **Cloud Load Balancer**, an S3 bucket **Object Storage**, a KMS key a **Key Store**, an API Gateway domain an **API Gateway**, a CloudFront distribution a **CDN Distribution**, an RDS instance a **Managed Database** and an EC2 instance a **Compute Instance**. All of them sit under **Cloud Resource** in the class tree, so filtering the Inventory list by that one class shows every cloud thing this integration found, and a resource type the platform has not seen before is filed as a plain Cloud Resource rather than guessed into the wrong family.
 
 ## Crypto Configuration Details
 

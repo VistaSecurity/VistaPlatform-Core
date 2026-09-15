@@ -59,9 +59,10 @@ type componentAccumulator struct {
 	indexByID  map[string]int
 }
 
-// ParamAssetPredicate is the params-map key carrying the compiled Scope
-// predicate. The value is an AssetPredicate.
-const ParamAssetPredicate = "assetPredicate"
+// ParamAssetQuery is the params-map key carrying the Scope's query string,
+// which is passed straight through to inventory-service as `?query=`. It
+// replaced ParamAssetPredicate, whose value was a compiled in-memory matcher.
+const ParamAssetQuery = "assetQuery"
 
 // GenerateCBOMData fetches the inventory datasets needed for CBOM generation and
 // assembles them into a CBOMData ready for serialisation by the CycloneDX or SPDX generator.
@@ -74,7 +75,9 @@ func (h *CBOMReportHandler) GenerateCBOMData(ctx context.Context, params map[str
 		ctx = context.Background()
 	}
 
-	predicate := assetPredicateParam(params)
+	// The scope, as a query string. Empty means the `All` scope: every asset
+	// the tenant may see.
+	scopeQuery := stringParam(params, ParamAssetQuery)
 	includeAlgorithms := boolParam(params, "includeAlgorithms", true)
 	includeCertificates := boolParam(params, "includeCertificates", true)
 	includeProtocols := boolParam(params, "includeProtocols", true)
@@ -96,7 +99,10 @@ func (h *CBOMReportHandler) GenerateCBOMData(ctx context.Context, params map[str
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		data, err := h.inventoryDataSource.QueryAssets(ctx, authToken, tenantID)
+		// The scope is applied HERE, by inventory-service, in SQL. Fetching
+		// every asset and filtering in memory is what this replaces — and the
+		// in-memory matcher was a second implementation of what a scope means.
+		data, err := h.inventoryDataSource.QueryAssets(ctx, authToken, tenantID, scopeQuery)
 		mu.Lock()
 		defer mu.Unlock()
 		if err != nil {
@@ -159,7 +165,7 @@ func (h *CBOMReportHandler) GenerateCBOMData(ctx context.Context, params map[str
 		result.cryptos,
 		result.certs,
 		algorithmLookup,
-		compilePredicate(predicate),
+		scopeQuery != "",
 		includeAlgorithms,
 		includeCertificates,
 		includeProtocols,
@@ -181,10 +187,21 @@ func (h *CBOMReportHandler) GenerateCBOMData(ctx context.Context, params map[str
 	return cbom, nil
 }
 
+// assembleComponents builds the component list from what was fetched.
+//
+// `scoped` says whether a narrowing scope was applied. It is not a filter — the
+// filtering already happened, in inventory-service — it is the answer to the
+// one question the assembly still has to ask: what to do with a crypto
+// configuration or a certificate that names NO asset in the fetched set.
+//
+// Under the `All` scope the answer is "include it": an unattributed certificate
+// a tenant uploaded is part of its cryptographic estate. Under any narrower
+// scope the answer is "exclude it": attributing it by guesswork is the failure
+// being avoided, not a milder version of it.
 func (h *CBOMReportHandler) assembleComponents(
 	assets, cryptos, certs []map[string]interface{},
 	algorithmLookup map[string]map[string]interface{},
-	predicate compiledPredicate,
+	scoped bool,
 	includeAlgorithms, includeCertificates, includeProtocols, includeKeys, includeLibraries bool,
 ) ([]models.CBOMComponent, string) {
 	sortMapSliceByID(assets)
@@ -203,10 +220,14 @@ func (h *CBOMReportHandler) assembleComponents(
 		}
 
 		assetID := strVal(implementation["asset_id"])
-		context := buildAssetContext(assetsByID[assetID], implementation)
-		if !predicate.matches(context) {
+		asset := assetsByID[assetID]
+		// A configuration whose asset is not in the fetched set is out of
+		// scope, because the set IS the scope. Under `All` nothing is missing,
+		// so the check only bites where it should.
+		if scoped && asset == nil {
 			continue
 		}
+		context := buildAssetContext(asset, implementation)
 
 		var dependencyIDs []string
 		if includeKeys {
@@ -258,10 +279,6 @@ func (h *CBOMReportHandler) assembleComponents(
 	if includeCertificates {
 		for _, asset := range assets {
 			context := buildAssetContext(asset, nil)
-			if !predicate.matches(context) {
-				continue
-			}
-
 			certificateID := strVal(asset["certificate_id"])
 			if certificateID == "" || accumulator.Has(certificateComponentID(certificateID)) {
 				continue
@@ -287,7 +304,7 @@ func (h *CBOMReportHandler) assembleComponents(
 		// silently claiming an unattributed certificate is in production is the
 		// failure being fixed, not a milder version of it. A tenant who wants
 		// them scoped should link them to an asset.
-		if predicate.isEmpty() {
+		if !scoped {
 			for _, cert := range certs {
 				certificateID := strVal(cert["id"])
 				if certificateID == "" || accumulator.Has(certificateComponentID(certificateID)) {
@@ -398,7 +415,22 @@ func buildAssetContext(asset, implementation map[string]interface{}) assetContex
 		strVal(fromMap(asset, "ip_address")),
 		context.AssetID,
 	)
+	// The CLASS KEY, under the keys the rows actually carry.
+	//
+	// This read `asset_type` and `type`, and neither key exists any more: the
+	// four-value enum is gone and inventory-service serialises the class as
+	// `asset_class_key` on a crypto configuration and `class_key` on an asset.
+	// So every CBOM component's asset type came out BLANK — a field in an
+	// attestation document, empty on every row, with nothing saying why.
+	//
+	// The retired spellings are kept as the LAST fallbacks rather than deleted:
+	// a stored artifact or an older producer may still carry one, and reading
+	// it is strictly better than the blank this was producing.
 	context.AssetType = firstNonEmpty(
+		strVal(fromMap(implementation, "asset_class_key")),
+		strVal(fromMap(implementation, "class_key")),
+		strVal(fromMap(asset, "class_key")),
+		strVal(fromMap(asset, "asset_class_key")),
 		strVal(fromMap(implementation, "asset_type")),
 		strVal(fromMap(asset, "asset_type")),
 		strVal(fromMap(asset, "type")),
@@ -588,21 +620,15 @@ func resolveRelatedAssets(refs []models.CBOMRelatedCryptoAssetRef, resolve func(
 	return out
 }
 
-// assetPredicateParam reads the compiled Scope predicate out of the params map.
-// Absent means "no constraint" — the params map is also used by callers that
-// pre-date scopes.
-func assetPredicateParam(params map[string]interface{}) AssetPredicate {
-	if raw, ok := params[ParamAssetPredicate]; ok {
-		switch p := raw.(type) {
-		case AssetPredicate:
-			return p
-		case *AssetPredicate:
-			if p != nil {
-				return *p
-			}
+// stringParam reads a string out of the params map. Absent means "no
+// constraint" — the params map is also used by callers that pre-date scopes.
+func stringParam(params map[string]interface{}, key string) string {
+	if raw, ok := params[key]; ok {
+		if v, ok := raw.(string); ok {
+			return v
 		}
 	}
-	return AssetPredicate{}
+	return ""
 }
 
 func buildKeyComponents(implementation map[string]interface{}, context assetContext) ([]models.CBOMComponent, []string) {
@@ -1489,6 +1515,50 @@ func extractTenantID(itemGroups ...[]map[string]interface{}) string {
 		}
 	}
 	return ""
+}
+
+// QueryScopeAssetIDs resolves a scope's query to the set of asset ids it
+// matches, through inventory-service, and returns them SORTED.
+//
+// It exists so the xBOM kinds (sbom, hbom, inventory) resolve their boundary
+// through exactly the client and endpoint a CBOM does. The alternative —
+// letting the assembler select assets itself from the tables it already reads —
+// would put a second implementation of "what a scope means" in the service that
+// deliberately has none.
+//
+// The sort is load-bearing, not tidiness: the asset order decides component
+// order, component order decides the canonical bytes, and the bytes are the
+// content hash. inventory-service's list order is its own business and may
+// change; ours may not.
+//
+// An empty query is the `All` scope — every asset the tenant may see.
+func (h *CBOMReportHandler) QueryScopeAssetIDs(ctx context.Context, scopeQuery, authToken, tenantID string) ([]uuid.UUID, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rows, err := h.inventoryDataSource.QueryAssets(ctx, authToken, tenantID, scopeQuery)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[uuid.UUID]struct{}, len(rows))
+	ids := make([]uuid.UUID, 0, len(rows))
+	for _, row := range rows {
+		raw := strVal(fromMap(row, "id"))
+		if raw == "" {
+			continue
+		}
+		id, parseErr := uuid.Parse(raw)
+		if parseErr != nil {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	return ids, nil
 }
 
 func fromMap(m map[string]interface{}, key string) interface{} {

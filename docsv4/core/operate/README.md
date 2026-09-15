@@ -16,6 +16,7 @@ organization.
 | Stage internal service-mesh mTLS on a production cluster | [Service-mesh mTLS](./security/service-mesh-mtls.md) |
 | Run a production pre-flight | [Production Checklist](./deployment/production-checklist.md) |
 | Operate the platform day-to-day | [Platform Admin Guide](./platform-admin-guide.md) |
+| Keep the end-of-life and vulnerability catalogues current (including air-gapped) | [Platform catalogues and their feeds](./catalogs.md) |
 | Monitor and alert | [Monitoring Setup](./monitoring/setup.md) |
 | Work out which legal documents are yours to write | [Legal documents for operators](./legal/README.md) |
 | Troubleshoot issues | [Common Issues](./troubleshooting/common-issues.md) |
@@ -35,6 +36,7 @@ organization.
 - [Releases](./releases.md) — Release process, versioning, upgrade path
 - [Startup & Shutdown](./startup-shutdown.md) — Service lifecycle management
 - [Container Runtime Images](./container-runtime-images.md) — Source of truth for all runtime images
+- [Platform Catalogues](./catalogs.md) — End-of-life and vulnerability data: the mirror feeds, their rate limits and attribution, and the offline bundle for air-gapped installs
 - [Notification Providers](./operations/notification-providers.md) — Slack, Email, Webhook, PagerDuty
 
 ### Legal
@@ -54,6 +56,7 @@ organization.
 
 ### Configuration
 - [Platform Integrations](./configuration/platform-integrations.md) — AWS, Azure, GCP, SaaS CMDB integrations
+- [Connecting a model provider](./configuration/ai-provider.md) — optional; every AI capability has a rule-based default that runs without one
 
 ### Troubleshooting
 - [Common Issues](./troubleshooting/common-issues.md)

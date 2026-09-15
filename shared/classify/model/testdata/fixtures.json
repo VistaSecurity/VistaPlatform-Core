@@ -1,0 +1,2361 @@
+[
+  {
+    "name": "printer/hp-jetdirect-ews",
+    "class": "printer",
+    "facts": {
+      "macs": [
+        "00:01:e6:11:22:01"
+      ],
+      "open_ports": [
+        80,
+        9100
+      ],
+      "banners": {
+        "http_banner": "Server: HP HTTP Server"
+      }
+    }
+  },
+  {
+    "name": "printer/hp-officejet-scan",
+    "class": "printer",
+    "facts": {
+      "macs": [
+        "00:1b:78:11:22:02"
+      ],
+      "open_ports": [
+        80,
+        9100
+      ],
+      "mdns_services": [
+        "_scanner._tcp",
+        "_uscan._tcp"
+      ]
+    }
+  },
+  {
+    "name": "printer/hp-laserjet-model",
+    "class": "printer",
+    "facts": {
+      "macs": [
+        "3c:4a:92:11:22:03"
+      ],
+      "open_ports": [
+        443,
+        9100
+      ],
+      "model": "LaserJet M404dn"
+    }
+  },
+  {
+    "name": "printer/hp-ews-http-only",
+    "class": "printer",
+    "facts": {
+      "macs": [
+        "00:23:7d:11:22:04"
+      ],
+      "open_ports": [
+        80,
+        9100
+      ],
+      "banners": {
+        "http_banner": "Server: HP HTTP Server"
+      },
+      "mdns_services": [
+        "_http._tcp"
+      ]
+    }
+  },
+  {
+    "name": "printer/zebra-label-9100",
+    "class": "printer",
+    "facts": {
+      "macs": [
+        "00:07:4d:11:22:05"
+      ],
+      "open_ports": [
+        23,
+        9100
+      ],
+      "model": "ZT411"
+    }
+  },
+  {
+    "name": "printer/zebra-zd-series",
+    "class": "printer",
+    "facts": {
+      "macs": [
+        "00:23:68:11:22:06"
+      ],
+      "open_ports": [
+        80,
+        9100
+      ],
+      "model": "ZD621",
+      "banners": {
+        "http_banner": "Server: Zebra Print Server"
+      }
+    }
+  },
+  {
+    "name": "printer/zebra-industrial",
+    "class": "printer",
+    "facts": {
+      "macs": [
+        "48:a4:93:11:22:07"
+      ],
+      "open_ports": [
+        9100
+      ],
+      "model": "ZT231"
+    }
+  },
+  {
+    "name": "printer/brother-mfc-scan",
+    "class": "printer",
+    "facts": {
+      "macs": [
+        "30:05:5c:11:22:08"
+      ],
+      "open_ports": [
+        80,
+        9100
+      ],
+      "mdns_services": [
+        "_scanner._tcp"
+      ],
+      "model": "HL-L2350DW"
+    }
+  },
+  {
+    "name": "printer/kyocera-ews",
+    "class": "printer",
+    "facts": {
+      "macs": [
+        "00:c0:ee:11:22:09"
+      ],
+      "open_ports": [
+        80,
+        9100
+      ],
+      "banners": {
+        "http_banner": "Server: KM-MFP Web Server"
+      }
+    }
+  },
+  {
+    "name": "switch/netgear-gs724t",
+    "class": "switch",
+    "facts": {
+      "macs": [
+        "00:09:5b:22:33:01"
+      ],
+      "open_ports": [
+        22,
+        80,
+        161
+      ],
+      "lldp_capabilities": [
+        "bridge"
+      ],
+      "model": "GS724T"
+    }
+  },
+  {
+    "name": "switch/netgear-gs748t-console",
+    "class": "switch",
+    "facts": {
+      "macs": [
+        "00:0f:b5:22:33:02"
+      ],
+      "open_ports": [
+        23,
+        161
+      ],
+      "lldp_capabilities": [
+        "bridge"
+      ],
+      "model": "GS748T"
+    }
+  },
+  {
+    "name": "switch/netgear-xs708t",
+    "class": "switch",
+    "facts": {
+      "macs": [
+        "00:14:6c:22:33:03"
+      ],
+      "open_ports": [
+        22,
+        161
+      ],
+      "lldp_capabilities": [
+        "bridge"
+      ],
+      "model": "XS708T"
+    }
+  },
+  {
+    "name": "switch/ubiquiti-us-24",
+    "class": "switch",
+    "facts": {
+      "macs": [
+        "24:a4:3c:22:33:04"
+      ],
+      "open_ports": [
+        22,
+        161
+      ],
+      "lldp_capabilities": [
+        "bridge"
+      ],
+      "model": "US-24-250W"
+    }
+  },
+  {
+    "name": "switch/ubiquiti-us-48",
+    "class": "switch",
+    "facts": {
+      "macs": [
+        "44:d9:e7:22:33:05"
+      ],
+      "open_ports": [
+        22,
+        80,
+        161
+      ],
+      "lldp_capabilities": [
+        "bridge"
+      ],
+      "model": "US-48"
+    }
+  },
+  {
+    "name": "switch/ubiquiti-us-8",
+    "class": "switch",
+    "facts": {
+      "macs": [
+        "68:72:51:22:33:06"
+      ],
+      "open_ports": [
+        22,
+        161
+      ],
+      "lldp_capabilities": [
+        "bridge"
+      ],
+      "model": "US-8-60W"
+    }
+  },
+  {
+    "name": "switch/dlink-dgs1210",
+    "class": "switch",
+    "facts": {
+      "macs": [
+        "00:0d:88:22:33:07"
+      ],
+      "open_ports": [
+        23,
+        80,
+        161
+      ],
+      "lldp_capabilities": [
+        "bridge"
+      ],
+      "model": "DGS-1210-24"
+    }
+  },
+  {
+    "name": "switch/dlink-dxs1210",
+    "class": "switch",
+    "facts": {
+      "macs": [
+        "00:11:95:22:33:08"
+      ],
+      "open_ports": [
+        22,
+        161
+      ],
+      "lldp_capabilities": [
+        "bridge"
+      ],
+      "model": "DXS-1210-12TC"
+    }
+  },
+  {
+    "name": "switch/hp-procurve-j9772a",
+    "class": "switch",
+    "facts": {
+      "macs": [
+        "00:30:c1:22:33:09"
+      ],
+      "open_ports": [
+        22,
+        23,
+        161
+      ],
+      "lldp_capabilities": [
+        "bridge"
+      ],
+      "model": "J9772A"
+    }
+  },
+  {
+    "name": "router/tplink-er605",
+    "class": "router",
+    "facts": {
+      "macs": [
+        "00:19:e0:33:44:01"
+      ],
+      "open_ports": [
+        22,
+        53,
+        80,
+        1194
+      ],
+      "model": "ER605"
+    }
+  },
+  {
+    "name": "router/tplink-er7206",
+    "class": "router",
+    "facts": {
+      "macs": [
+        "00:21:27:33:44:02"
+      ],
+      "open_ports": [
+        22,
+        53,
+        443,
+        1723
+      ],
+      "model": "ER7206"
+    }
+  },
+  {
+    "name": "router/tplink-er8411",
+    "class": "router",
+    "facts": {
+      "macs": [
+        "00:23:cd:33:44:03"
+      ],
+      "open_ports": [
+        53,
+        80,
+        1194
+      ],
+      "model": "ER8411"
+    }
+  },
+  {
+    "name": "router/dlink-dsr1000",
+    "class": "router",
+    "facts": {
+      "macs": [
+        "00:15:e9:33:44:04"
+      ],
+      "open_ports": [
+        22,
+        53,
+        443,
+        1723
+      ],
+      "model": "DSR-1000AC"
+    }
+  },
+  {
+    "name": "router/dlink-dir878",
+    "class": "router",
+    "facts": {
+      "macs": [
+        "00:17:9a:33:44:05"
+      ],
+      "open_ports": [
+        53,
+        80,
+        7547
+      ],
+      "model": "DIR-878"
+    }
+  },
+  {
+    "name": "router/linksys-lrt224",
+    "class": "router",
+    "facts": {
+      "macs": [
+        "00:12:17:33:44:06"
+      ],
+      "open_ports": [
+        22,
+        53,
+        443,
+        1194
+      ],
+      "model": "LRT224"
+    }
+  },
+  {
+    "name": "router/linksys-wrt3200",
+    "class": "router",
+    "facts": {
+      "macs": [
+        "00:14:bf:33:44:07"
+      ],
+      "open_ports": [
+        53,
+        80,
+        7547
+      ],
+      "model": "WRT3200ACM"
+    }
+  },
+  {
+    "name": "router/ubiquiti-erlite",
+    "class": "router",
+    "facts": {
+      "macs": [
+        "80:2a:a8:33:44:08"
+      ],
+      "open_ports": [
+        22,
+        53,
+        161
+      ],
+      "model": "ERLite-3"
+    }
+  },
+  {
+    "name": "router/huawei-ar651",
+    "class": "router",
+    "facts": {
+      "macs": [
+        "00:18:82:33:44:09"
+      ],
+      "open_ports": [
+        22,
+        53,
+        161
+      ],
+      "model": "AR651"
+    }
+  },
+  {
+    "name": "firewall/fortigate-60f",
+    "class": "firewall",
+    "facts": {
+      "macs": [
+        "00:09:0f:44:55:01"
+      ],
+      "open_ports": [
+        22,
+        443
+      ],
+      "model": "FG-60F"
+    }
+  },
+  {
+    "name": "firewall/fortigate-100f",
+    "class": "firewall",
+    "facts": {
+      "macs": [
+        "08:5b:0e:44:55:02"
+      ],
+      "open_ports": [
+        22,
+        443,
+        8443
+      ],
+      "model": "FG-100F"
+    }
+  },
+  {
+    "name": "firewall/fortigate-vm64",
+    "class": "firewall",
+    "facts": {
+      "macs": [
+        "70:4c:a5:44:55:03"
+      ],
+      "open_ports": [
+        443,
+        8443
+      ],
+      "model": "FG-VM64"
+    }
+  },
+  {
+    "name": "firewall/fortigate-200e",
+    "class": "firewall",
+    "facts": {
+      "macs": [
+        "90:6c:ac:44:55:04"
+      ],
+      "open_ports": [
+        22,
+        443
+      ],
+      "model": "FG-200E"
+    }
+  },
+  {
+    "name": "firewall/meraki-mx68",
+    "class": "firewall",
+    "facts": {
+      "macs": [
+        "00:18:0a:44:55:05"
+      ],
+      "open_ports": [
+        443,
+        8443
+      ],
+      "model": "MX68"
+    }
+  },
+  {
+    "name": "firewall/meraki-mx250",
+    "class": "firewall",
+    "facts": {
+      "macs": [
+        "88:15:44:44:55:06"
+      ],
+      "open_ports": [
+        22,
+        443
+      ],
+      "model": "MX250"
+    }
+  },
+  {
+    "name": "firewall/meraki-mx105",
+    "class": "firewall",
+    "facts": {
+      "macs": [
+        "ac:17:c8:44:55:07"
+      ],
+      "open_ports": [
+        443,
+        8443
+      ],
+      "model": "MX105"
+    }
+  },
+  {
+    "name": "firewall/sophos-xgs2100",
+    "class": "firewall",
+    "facts": {
+      "open_ports": [
+        22,
+        443,
+        8443
+      ],
+      "model": "XGS-2100"
+    }
+  },
+  {
+    "name": "firewall/sonicwall-tz470",
+    "class": "firewall",
+    "facts": {
+      "macs": [
+        "00:06:b1:44:55:09"
+      ],
+      "open_ports": [
+        22,
+        443
+      ],
+      "model": "TZ470"
+    }
+  },
+  {
+    "name": "lb/f5-bigip-i4800",
+    "class": "load_balancer",
+    "facts": {
+      "macs": [
+        "00:01:d7:55:66:01"
+      ],
+      "open_ports": [
+        22,
+        443
+      ],
+      "model": "BIG-IP i4800"
+    }
+  },
+  {
+    "name": "lb/f5-bigip-10200v",
+    "class": "load_balancer",
+    "facts": {
+      "macs": [
+        "00:01:d7:55:66:02"
+      ],
+      "open_ports": [
+        22,
+        443,
+        8443
+      ],
+      "model": "BIG-IP 10200v"
+    }
+  },
+  {
+    "name": "lb/f5-bigip-ve",
+    "class": "load_balancer",
+    "facts": {
+      "open_ports": [
+        22,
+        443,
+        8443
+      ],
+      "model": "BIG-IP VE",
+      "banners": {
+        "http_banner": "Server: BigIP"
+      }
+    }
+  },
+  {
+    "name": "lb/citrix-netscaler-mpx",
+    "class": "load_balancer",
+    "facts": {
+      "open_ports": [
+        22,
+        443,
+        161
+      ],
+      "model": "NS-MPX-15000",
+      "banners": {
+        "http_banner": "Server: NetScaler"
+      }
+    }
+  },
+  {
+    "name": "lb/citrix-netscaler-vpx",
+    "class": "load_balancer",
+    "facts": {
+      "open_ports": [
+        443,
+        8443
+      ],
+      "model": "NS-VPX-200",
+      "banners": {
+        "http_banner": "Server: NetScaler"
+      }
+    }
+  },
+  {
+    "name": "lb/citrix-netscaler-sdx",
+    "class": "load_balancer",
+    "facts": {
+      "open_ports": [
+        22,
+        443,
+        161
+      ],
+      "model": "NS-SDX-14000",
+      "banners": {
+        "http_banner": "Server: NetScaler"
+      }
+    }
+  },
+  {
+    "name": "lb/kemp-loadmaster-x15",
+    "class": "load_balancer",
+    "facts": {
+      "open_ports": [
+        22,
+        443,
+        8443
+      ],
+      "model": "LM-X15",
+      "banners": {
+        "http_banner": "Server: LoadMaster"
+      }
+    }
+  },
+  {
+    "name": "lb/kemp-virtual-loadmaster",
+    "class": "load_balancer",
+    "facts": {
+      "open_ports": [
+        443,
+        8443
+      ],
+      "model": "LM-VLM",
+      "banners": {
+        "http_banner": "Server: LoadMaster"
+      }
+    }
+  },
+  {
+    "name": "lb/a10-thunder-3030",
+    "class": "load_balancer",
+    "facts": {
+      "open_ports": [
+        22,
+        443
+      ],
+      "model": "TH3030S",
+      "banners": {
+        "http_banner": "Server: A10 Thunder"
+      }
+    }
+  },
+  {
+    "name": "wc/ruckus-zd1200",
+    "class": "wireless_controller",
+    "facts": {
+      "open_ports": [
+        22,
+        443,
+        8443
+      ],
+      "model": "ZD1200"
+    }
+  },
+  {
+    "name": "wc/ruckus-sz100",
+    "class": "wireless_controller",
+    "facts": {
+      "open_ports": [
+        22,
+        443,
+        8443
+      ],
+      "model": "SZ100"
+    }
+  },
+  {
+    "name": "wc/ruckus-sz144",
+    "class": "wireless_controller",
+    "facts": {
+      "open_ports": [
+        22,
+        443
+      ],
+      "model": "SZ144"
+    }
+  },
+  {
+    "name": "wc/ruckus-vsz-essentials",
+    "class": "wireless_controller",
+    "facts": {
+      "open_ports": [
+        443,
+        8443,
+        161
+      ],
+      "model": "SZ-VSZE"
+    }
+  },
+  {
+    "name": "wc/aruba-mc-7030",
+    "class": "wireless_controller",
+    "facts": {
+      "macs": [
+        "00:0b:cd:66:77:05"
+      ],
+      "open_ports": [
+        22,
+        443,
+        8443
+      ],
+      "model": "MC-7030"
+    }
+  },
+  {
+    "name": "wc/aruba-mc-7205",
+    "class": "wireless_controller",
+    "facts": {
+      "macs": [
+        "78:ac:c0:66:77:06"
+      ],
+      "open_ports": [
+        22,
+        443,
+        8443
+      ],
+      "model": "MC-7205"
+    }
+  },
+  {
+    "name": "wc/aruba-mc-va",
+    "class": "wireless_controller",
+    "facts": {
+      "open_ports": [
+        443,
+        8443
+      ],
+      "model": "MC-VA"
+    }
+  },
+  {
+    "name": "wc/extreme-c5210",
+    "class": "wireless_controller",
+    "facts": {
+      "open_ports": [
+        22,
+        443,
+        161
+      ],
+      "model": "C5210"
+    }
+  },
+  {
+    "name": "wc/cambium-cnmaestro",
+    "class": "wireless_controller",
+    "facts": {
+      "open_ports": [
+        443,
+        8443
+      ],
+      "model": "CNM-2000"
+    }
+  },
+  {
+    "name": "ap/ubiquiti-u6-lr",
+    "class": "access_point",
+    "facts": {
+      "macs": [
+        "24:a4:3c:77:88:01"
+      ],
+      "open_ports": [
+        22,
+        80
+      ],
+      "model": "U6-LR"
+    }
+  },
+  {
+    "name": "ap/ubiquiti-u6-pro",
+    "class": "access_point",
+    "facts": {
+      "macs": [
+        "44:d9:e7:77:88:02"
+      ],
+      "open_ports": [
+        22,
+        80,
+        443
+      ],
+      "model": "U6-Pro"
+    }
+  },
+  {
+    "name": "ap/ubiquiti-u7-pro",
+    "class": "access_point",
+    "facts": {
+      "macs": [
+        "68:72:51:77:88:03"
+      ],
+      "open_ports": [
+        22,
+        80
+      ],
+      "model": "U7-Pro"
+    }
+  },
+  {
+    "name": "ap/aruba-ap515",
+    "class": "access_point",
+    "facts": {
+      "macs": [
+        "00:01:e6:77:88:04"
+      ],
+      "open_ports": [
+        22,
+        443
+      ],
+      "model": "AP-515"
+    }
+  },
+  {
+    "name": "ap/aruba-ap635",
+    "class": "access_point",
+    "facts": {
+      "macs": [
+        "00:1b:78:77:88:05"
+      ],
+      "open_ports": [
+        22,
+        80,
+        443
+      ],
+      "model": "AP-635"
+    }
+  },
+  {
+    "name": "ap/ruckus-r750",
+    "class": "access_point",
+    "facts": {
+      "open_ports": [
+        22,
+        80,
+        443
+      ],
+      "model": "R750"
+    }
+  },
+  {
+    "name": "ap/ruckus-r650",
+    "class": "access_point",
+    "facts": {
+      "open_ports": [
+        22,
+        80
+      ],
+      "model": "R650"
+    }
+  },
+  {
+    "name": "ap/extreme-ap410c",
+    "class": "access_point",
+    "facts": {
+      "open_ports": [
+        22,
+        80,
+        443
+      ],
+      "model": "AP410C"
+    }
+  },
+  {
+    "name": "ap/cambium-e410",
+    "class": "access_point",
+    "facts": {
+      "open_ports": [
+        22,
+        80
+      ],
+      "model": "E410"
+    }
+  },
+  {
+    "name": "storage/qnap-ts873a",
+    "class": "storage_device",
+    "facts": {
+      "macs": [
+        "00:08:9b:88:99:01"
+      ],
+      "open_ports": [
+        445,
+        2049,
+        8080
+      ],
+      "model": "TS-873A"
+    }
+  },
+  {
+    "name": "storage/synology-ds920",
+    "class": "storage_device",
+    "facts": {
+      "macs": [
+        "00:11:32:88:99:02"
+      ],
+      "open_ports": [
+        445,
+        5000,
+        548
+      ],
+      "model": "DS920+"
+    }
+  },
+  {
+    "name": "storage/netapp-fas2750",
+    "class": "storage_device",
+    "facts": {
+      "macs": [
+        "00:a0:98:88:99:03"
+      ],
+      "open_ports": [
+        22,
+        445,
+        2049
+      ],
+      "model": "FAS2750"
+    }
+  },
+  {
+    "name": "storage/generic-nas-smb",
+    "class": "storage_device",
+    "facts": {
+      "macs": [
+        "00:25:90:88:99:04"
+      ],
+      "open_ports": [
+        445,
+        2049,
+        873
+      ],
+      "mdns_services": [
+        "_smb._tcp"
+      ]
+    }
+  },
+  {
+    "name": "storage/generic-nas-afp",
+    "class": "storage_device",
+    "facts": {
+      "macs": [
+        "00:30:48:88:99:05"
+      ],
+      "open_ports": [
+        445,
+        548
+      ],
+      "mdns_services": [
+        "_afpovertcp._tcp",
+        "_smb._tcp"
+      ]
+    }
+  },
+  {
+    "name": "storage/iscsi-target",
+    "class": "storage_device",
+    "facts": {
+      "macs": [
+        "0c:c4:7a:88:99:06"
+      ],
+      "open_ports": [
+        22,
+        3260,
+        445
+      ]
+    }
+  },
+  {
+    "name": "storage/truenas-array",
+    "class": "storage_device",
+    "facts": {
+      "macs": [
+        "3c:ec:ef:88:99:07"
+      ],
+      "open_ports": [
+        22,
+        445,
+        2049,
+        3260
+      ]
+    }
+  },
+  {
+    "name": "storage/ceph-rgw-node",
+    "class": "storage_device",
+    "facts": {
+      "macs": [
+        "ac:1f:6b:88:99:08"
+      ],
+      "open_ports": [
+        22,
+        445,
+        873,
+        2049
+      ]
+    }
+  },
+  {
+    "name": "storage/backup-appliance",
+    "class": "storage_device",
+    "facts": {
+      "macs": [
+        "00:14:22:88:99:09"
+      ],
+      "open_ports": [
+        445,
+        2049,
+        3260
+      ]
+    }
+  },
+  {
+    "name": "vm/vmware-linux-guest",
+    "class": "virtual_machine",
+    "facts": {
+      "macs": [
+        "00:50:56:99:aa:01"
+      ],
+      "open_ports": [
+        22,
+        80
+      ]
+    }
+  },
+  {
+    "name": "vm/vmware-windows-guest",
+    "class": "virtual_machine",
+    "facts": {
+      "macs": [
+        "00:0c:29:99:aa:02"
+      ],
+      "open_ports": [
+        135,
+        139,
+        445,
+        3389
+      ]
+    }
+  },
+  {
+    "name": "vm/hyperv-windows-guest",
+    "class": "virtual_machine",
+    "facts": {
+      "macs": [
+        "00:15:5d:99:aa:03"
+      ],
+      "open_ports": [
+        135,
+        445,
+        3389,
+        5985
+      ]
+    }
+  },
+  {
+    "name": "vm/kvm-linux-guest",
+    "class": "virtual_machine",
+    "facts": {
+      "macs": [
+        "52:54:00:99:aa:04"
+      ],
+      "open_ports": [
+        22,
+        443
+      ]
+    }
+  },
+  {
+    "name": "vm/xen-instance",
+    "class": "virtual_machine",
+    "facts": {
+      "macs": [
+        "00:16:3e:99:aa:05"
+      ],
+      "open_ports": [
+        22,
+        80,
+        443
+      ]
+    }
+  },
+  {
+    "name": "vm/virtualbox-lab-guest",
+    "class": "virtual_machine",
+    "facts": {
+      "macs": [
+        "08:00:27:99:aa:06"
+      ],
+      "open_ports": [
+        22,
+        5900
+      ]
+    }
+  },
+  {
+    "name": "vm/openstack-instance",
+    "class": "virtual_machine",
+    "facts": {
+      "macs": [
+        "fa:16:3e:99:aa:07"
+      ],
+      "open_ports": [
+        22,
+        80,
+        8080
+      ]
+    }
+  },
+  {
+    "name": "vm/parallels-desktop-guest",
+    "class": "virtual_machine",
+    "facts": {
+      "macs": [
+        "00:1c:42:99:aa:08"
+      ],
+      "open_ports": [
+        22,
+        5900
+      ]
+    }
+  },
+  {
+    "name": "vm/vmware-nfs-client",
+    "class": "virtual_machine",
+    "facts": {
+      "macs": [
+        "00:1c:14:99:aa:09"
+      ],
+      "open_ports": [
+        22,
+        111,
+        2049
+      ]
+    }
+  },
+  {
+    "name": "container/docker-http-api",
+    "class": "container",
+    "facts": {
+      "macs": [
+        "02:42:ac:aa:bb:01"
+      ],
+      "open_ports": [
+        8080
+      ]
+    }
+  },
+  {
+    "name": "container/docker-redis",
+    "class": "container",
+    "facts": {
+      "macs": [
+        "02:42:ac:aa:bb:02"
+      ],
+      "open_ports": [
+        6379
+      ]
+    }
+  },
+  {
+    "name": "container/docker-elasticsearch",
+    "class": "container",
+    "facts": {
+      "macs": [
+        "02:42:ac:aa:bb:03"
+      ],
+      "open_ports": [
+        9200
+      ]
+    }
+  },
+  {
+    "name": "container/docker-postgres",
+    "class": "container",
+    "facts": {
+      "macs": [
+        "02:42:ac:aa:bb:04"
+      ],
+      "open_ports": [
+        5432
+      ]
+    }
+  },
+  {
+    "name": "container/docker-memcached",
+    "class": "container",
+    "facts": {
+      "macs": [
+        "02:42:ac:aa:bb:05"
+      ],
+      "open_ports": [
+        11211
+      ]
+    }
+  },
+  {
+    "name": "container/docker-node-app",
+    "class": "container",
+    "facts": {
+      "macs": [
+        "02:42:ac:aa:bb:06"
+      ],
+      "open_ports": [
+        8000
+      ]
+    }
+  },
+  {
+    "name": "container/docker-mongo",
+    "class": "container",
+    "facts": {
+      "macs": [
+        "02:42:ac:aa:bb:07"
+      ],
+      "open_ports": [
+        27017
+      ]
+    }
+  },
+  {
+    "name": "container/docker-mqtt-bridge",
+    "class": "container",
+    "facts": {
+      "macs": [
+        "02:42:ac:aa:bb:08"
+      ],
+      "open_ports": [
+        8883
+      ]
+    }
+  },
+  {
+    "name": "container/docker-edge-proxy",
+    "class": "container",
+    "facts": {
+      "macs": [
+        "02:42:ac:aa:bb:09"
+      ],
+      "open_ports": [
+        8080,
+        8443
+      ]
+    }
+  },
+  {
+    "name": "iot/amazon-echo",
+    "class": "iot_device",
+    "facts": {
+      "macs": [
+        "00:bb:3a:bb:cc:01"
+      ],
+      "open_ports": [
+        80,
+        443,
+        8883
+      ],
+      "mdns_services": [
+        "_amzn-wplay._tcp"
+      ]
+    }
+  },
+  {
+    "name": "iot/amazon-fire-tv",
+    "class": "iot_device",
+    "facts": {
+      "macs": [
+        "0c:47:c9:bb:cc:02"
+      ],
+      "open_ports": [
+        80,
+        1900
+      ],
+      "mdns_services": [
+        "_airplay._tcp"
+      ]
+    }
+  },
+  {
+    "name": "iot/google-nest-hub",
+    "class": "iot_device",
+    "facts": {
+      "macs": [
+        "00:1a:11:bb:cc:03"
+      ],
+      "open_ports": [
+        80,
+        8443
+      ],
+      "mdns_services": [
+        "_googlecast._tcp"
+      ]
+    }
+  },
+  {
+    "name": "iot/google-chromecast",
+    "class": "iot_device",
+    "facts": {
+      "macs": [
+        "3c:5a:b4:bb:cc:04"
+      ],
+      "open_ports": [
+        80
+      ],
+      "mdns_services": [
+        "_googlecast._tcp"
+      ]
+    }
+  },
+  {
+    "name": "iot/sonos-speaker",
+    "class": "iot_device",
+    "facts": {
+      "macs": [
+        "00:0e:58:bb:cc:05"
+      ],
+      "open_ports": [
+        80,
+        1900
+      ],
+      "mdns_services": [
+        "_sonos._tcp"
+      ]
+    }
+  },
+  {
+    "name": "iot/roku-player",
+    "class": "iot_device",
+    "facts": {
+      "macs": [
+        "b0:a7:37:bb:cc:06"
+      ],
+      "open_ports": [
+        80,
+        1900
+      ],
+      "mdns_services": [
+        "_roku._tcp"
+      ]
+    }
+  },
+  {
+    "name": "iot/espressif-sensor",
+    "class": "iot_device",
+    "facts": {
+      "macs": [
+        "18:fe:34:bb:cc:07"
+      ],
+      "open_ports": [
+        80,
+        1883
+      ]
+    }
+  },
+  {
+    "name": "iot/hikvision-camera",
+    "class": "iot_device",
+    "facts": {
+      "macs": [
+        "44:19:b6:bb:cc:08"
+      ],
+      "open_ports": [
+        80,
+        554
+      ],
+      "sysobjectid": "1.3.6.1.4.1.20916.1.1.1"
+    }
+  },
+  {
+    "name": "iot/axis-camera",
+    "class": "iot_device",
+    "facts": {
+      "macs": [
+        "00:40:8c:bb:cc:09"
+      ],
+      "open_ports": [
+        80,
+        554
+      ]
+    }
+  },
+  {
+    "name": "web/nginx-public-site",
+    "class": "web_application",
+    "facts": {
+      "open_ports": [
+        80,
+        443
+      ],
+      "banners": {
+        "http_banner": "Server: nginx/1.24.0"
+      }
+    }
+  },
+  {
+    "name": "web/apache-intranet",
+    "class": "web_application",
+    "facts": {
+      "open_ports": [
+        80,
+        443
+      ],
+      "banners": {
+        "http_banner": "Server: Apache/2.4.57 (Ubuntu)"
+      }
+    }
+  },
+  {
+    "name": "web/iis-portal",
+    "class": "web_application",
+    "facts": {
+      "open_ports": [
+        80,
+        443
+      ],
+      "banners": {
+        "http_banner": "Server: Microsoft-IIS/10.0"
+      }
+    }
+  },
+  {
+    "name": "web/caddy-site",
+    "class": "web_application",
+    "facts": {
+      "open_ports": [
+        80,
+        443
+      ],
+      "banners": {
+        "http_banner": "Server: Caddy"
+      }
+    }
+  },
+  {
+    "name": "web/caddy-staging",
+    "class": "web_application",
+    "facts": {
+      "open_ports": [
+        8080,
+        8443
+      ],
+      "banners": {
+        "http_banner": "Server: Caddy"
+      }
+    }
+  },
+  {
+    "name": "web/tengine-site",
+    "class": "web_application",
+    "facts": {
+      "open_ports": [
+        80,
+        443
+      ],
+      "banners": {
+        "http_banner": "Server: Tengine/2.3.3"
+      }
+    }
+  },
+  {
+    "name": "web/envoy-edge",
+    "class": "web_application",
+    "facts": {
+      "open_ports": [
+        80,
+        443,
+        8443
+      ],
+      "banners": {
+        "http_banner": "Server: envoy"
+      }
+    }
+  },
+  {
+    "name": "web/werkzeug-internal-app",
+    "class": "web_application",
+    "facts": {
+      "open_ports": [
+        8000,
+        8080
+      ],
+      "banners": {
+        "http_banner": "Server: Werkzeug/2.3.7 Python/3.11"
+      }
+    }
+  },
+  {
+    "name": "web/cowboy-api",
+    "class": "web_application",
+    "facts": {
+      "open_ports": [
+        443,
+        8080
+      ],
+      "banners": {
+        "http_banner": "Server: Cowboy"
+      }
+    }
+  },
+  {
+    "name": "db/aws-rds-postgres",
+    "class": "managed_database",
+    "facts": {
+      "cloud_resource_type": "aws_rds_instance",
+      "open_ports": [
+        5432
+      ]
+    }
+  },
+  {
+    "name": "db/azure-sql-database",
+    "class": "managed_database",
+    "facts": {
+      "cloud_resource_type": "azure_sql_database",
+      "open_ports": [
+        1433
+      ]
+    }
+  },
+  {
+    "name": "db/gcp-cloudsql-mysql",
+    "class": "managed_database",
+    "facts": {
+      "cloud_resource_type": "gcp_cloudsql_instance",
+      "open_ports": [
+        3306
+      ]
+    }
+  },
+  {
+    "name": "db/aws-aurora-mysql",
+    "class": "managed_database",
+    "facts": {
+      "cloud_resource_type": "aws_aurora_cluster",
+      "open_ports": [
+        3306
+      ]
+    }
+  },
+  {
+    "name": "db/aws-aurora-postgres",
+    "class": "managed_database",
+    "facts": {
+      "cloud_resource_type": "aws_aurora_cluster",
+      "open_ports": [
+        5432
+      ]
+    }
+  },
+  {
+    "name": "db/aws-documentdb",
+    "class": "managed_database",
+    "facts": {
+      "cloud_resource_type": "aws_documentdb_cluster",
+      "open_ports": [
+        27017
+      ]
+    }
+  },
+  {
+    "name": "db/azure-cosmos-account",
+    "class": "managed_database",
+    "facts": {
+      "cloud_resource_type": "azure_cosmos_database_account",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "db/azure-postgres-flexible",
+    "class": "managed_database",
+    "facts": {
+      "cloud_resource_type": "azure_postgresql_flexible_server",
+      "open_ports": [
+        5432
+      ]
+    }
+  },
+  {
+    "name": "db/gcp-spanner-instance",
+    "class": "managed_database",
+    "facts": {
+      "cloud_resource_type": "gcp_spanner_database_instance",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "os/aws-s3-bucket",
+    "class": "object_storage",
+    "facts": {
+      "cloud_resource_type": "aws_s3_bucket"
+    }
+  },
+  {
+    "name": "os/azure-storage-account",
+    "class": "object_storage",
+    "facts": {
+      "cloud_resource_type": "azure_storage_account"
+    }
+  },
+  {
+    "name": "os/gcp-storage-bucket",
+    "class": "object_storage",
+    "facts": {
+      "cloud_resource_type": "gcp_storage_bucket"
+    }
+  },
+  {
+    "name": "os/aws-s3-directory-bucket",
+    "class": "object_storage",
+    "facts": {
+      "cloud_resource_type": "aws_s3_directory_bucket"
+    }
+  },
+  {
+    "name": "os/aws-s3-express-bucket",
+    "class": "object_storage",
+    "facts": {
+      "cloud_resource_type": "aws_s3_express_bucket"
+    }
+  },
+  {
+    "name": "os/azure-blob-container",
+    "class": "object_storage",
+    "facts": {
+      "cloud_resource_type": "azure_blob_storage_container"
+    }
+  },
+  {
+    "name": "os/azure-datalake-store",
+    "class": "object_storage",
+    "facts": {
+      "cloud_resource_type": "azure_data_lake_storage_account"
+    }
+  },
+  {
+    "name": "os/gcp-dual-region-bucket",
+    "class": "object_storage",
+    "facts": {
+      "cloud_resource_type": "gcp_storage_dual_region_bucket"
+    }
+  },
+  {
+    "name": "os/minio-bucket",
+    "class": "object_storage",
+    "facts": {
+      "cloud_resource_type": "minio_storage_bucket",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "ks/aws-kms-key",
+    "class": "key_store",
+    "facts": {
+      "cloud_resource_type": "aws_kms"
+    }
+  },
+  {
+    "name": "ks/azure-keyvault-key",
+    "class": "key_store",
+    "facts": {
+      "cloud_resource_type": "azure_keyvault_key"
+    }
+  },
+  {
+    "name": "ks/gcp-kms-crypto-key",
+    "class": "key_store",
+    "facts": {
+      "cloud_resource_type": "gcp_kms_crypto_key"
+    }
+  },
+  {
+    "name": "ks/aws-kms-alias",
+    "class": "key_store",
+    "facts": {
+      "cloud_resource_type": "aws_kms_alias"
+    }
+  },
+  {
+    "name": "ks/aws-cloudhsm-cluster",
+    "class": "key_store",
+    "facts": {
+      "cloud_resource_type": "aws_cloudhsm_cluster"
+    }
+  },
+  {
+    "name": "ks/azure-managed-hsm",
+    "class": "key_store",
+    "facts": {
+      "cloud_resource_type": "azure_managed_hsm"
+    }
+  },
+  {
+    "name": "ks/azure-keyvault-secret",
+    "class": "key_store",
+    "facts": {
+      "cloud_resource_type": "azure_keyvault_secret"
+    }
+  },
+  {
+    "name": "ks/gcp-kms-key-ring",
+    "class": "key_store",
+    "facts": {
+      "cloud_resource_type": "gcp_kms_key_ring"
+    }
+  },
+  {
+    "name": "ks/vault-transit-key",
+    "class": "key_store",
+    "facts": {
+      "cloud_resource_type": "hashicorp_vault_transit_key"
+    }
+  },
+  {
+    "name": "clb/aws-alb",
+    "class": "cloud_load_balancer",
+    "facts": {
+      "cloud_resource_type": "aws_alb",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "clb/aws-nlb",
+    "class": "cloud_load_balancer",
+    "facts": {
+      "cloud_resource_type": "aws_nlb",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "clb/azure-load-balancer",
+    "class": "cloud_load_balancer",
+    "facts": {
+      "cloud_resource_type": "azure_load_balancer",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "clb/aws-gateway-lb",
+    "class": "cloud_load_balancer",
+    "facts": {
+      "cloud_resource_type": "aws_gateway_load_balancer",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "clb/aws-elbv2-target-group",
+    "class": "cloud_load_balancer",
+    "facts": {
+      "cloud_resource_type": "aws_elbv2_target_group",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "clb/azure-gateway-lb",
+    "class": "cloud_load_balancer",
+    "facts": {
+      "cloud_resource_type": "azure_gateway_load_balancer",
+      "open_ports": [
+        443,
+        80
+      ]
+    }
+  },
+  {
+    "name": "clb/azure-traffic-manager",
+    "class": "cloud_load_balancer",
+    "facts": {
+      "cloud_resource_type": "azure_traffic_manager_profile",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "clb/gcp-tcp-proxy",
+    "class": "cloud_load_balancer",
+    "facts": {
+      "cloud_resource_type": "gcp_tcp_proxy_load_balancer",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "clb/gcp-internal-lb",
+    "class": "cloud_load_balancer",
+    "facts": {
+      "cloud_resource_type": "gcp_internal_load_balancer",
+      "open_ports": [
+        443,
+        80
+      ]
+    }
+  },
+  {
+    "name": "agw/aws-api-gateway",
+    "class": "api_gateway",
+    "facts": {
+      "cloud_resource_type": "aws_api_gateway",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "agw/aws-api-gateway-v2",
+    "class": "api_gateway",
+    "facts": {
+      "cloud_resource_type": "aws_api_gateway_v2",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "agw/aws-appsync-api",
+    "class": "api_gateway",
+    "facts": {
+      "cloud_resource_type": "aws_appsync_graphql_api",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "agw/azure-api-management",
+    "class": "api_gateway",
+    "facts": {
+      "cloud_resource_type": "azure_api_management",
+      "open_ports": [
+        443,
+        80
+      ]
+    }
+  },
+  {
+    "name": "agw/azure-apim-gateway",
+    "class": "api_gateway",
+    "facts": {
+      "cloud_resource_type": "azure_api_management_gateway",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "agw/gcp-api-gateway",
+    "class": "api_gateway",
+    "facts": {
+      "cloud_resource_type": "gcp_api_gateway",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "agw/gcp-cloud-endpoints",
+    "class": "api_gateway",
+    "facts": {
+      "cloud_resource_type": "gcp_cloud_endpoints_api",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "agw/gcp-apigee-proxy",
+    "class": "api_gateway",
+    "facts": {
+      "cloud_resource_type": "gcp_apigee_api_proxy",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "agw/kong-gateway",
+    "class": "api_gateway",
+    "facts": {
+      "cloud_resource_type": "kong_api_gateway",
+      "open_ports": [
+        8000,
+        8443
+      ]
+    }
+  },
+  {
+    "name": "cdn/aws-cloudfront",
+    "class": "cdn_distribution",
+    "facts": {
+      "cloud_resource_type": "aws_cloudfront",
+      "open_ports": [
+        443,
+        80
+      ]
+    }
+  },
+  {
+    "name": "cdn/aws-cloudfront-dist",
+    "class": "cdn_distribution",
+    "facts": {
+      "cloud_resource_type": "aws_cloudfront_distribution",
+      "open_ports": [
+        443,
+        80
+      ]
+    }
+  },
+  {
+    "name": "cdn/azure-cdn-endpoint",
+    "class": "cdn_distribution",
+    "facts": {
+      "cloud_resource_type": "azure_cdn_endpoint",
+      "open_ports": [
+        443,
+        80
+      ]
+    }
+  },
+  {
+    "name": "cdn/azure-cdn-profile",
+    "class": "cdn_distribution",
+    "facts": {
+      "cloud_resource_type": "azure_cdn_profile",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "cdn/azure-front-door",
+    "class": "cdn_distribution",
+    "facts": {
+      "cloud_resource_type": "azure_front_door_cdn_profile",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "cdn/gcp-cloud-cdn",
+    "class": "cdn_distribution",
+    "facts": {
+      "cloud_resource_type": "gcp_cloud_cdn",
+      "open_ports": [
+        443,
+        80
+      ]
+    }
+  },
+  {
+    "name": "cdn/gcp-backend-bucket-cdn",
+    "class": "cdn_distribution",
+    "facts": {
+      "cloud_resource_type": "gcp_backend_bucket_cdn",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "cdn/fastly-service",
+    "class": "cdn_distribution",
+    "facts": {
+      "cloud_resource_type": "fastly_cdn_service",
+      "open_ports": [
+        443,
+        80
+      ]
+    }
+  },
+  {
+    "name": "cdn/akamai-property",
+    "class": "cdn_distribution",
+    "facts": {
+      "cloud_resource_type": "akamai_cdn_property",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "trap/vm-with-a-cisco-product-id",
+    "class": "virtual_machine",
+    "facts": {
+      "macs": [
+        "00:50:56:cc:dd:01"
+      ],
+      "model": "C9300v",
+      "open_ports": [
+        22,
+        443
+      ]
+    }
+  },
+  {
+    "name": "trap/vm-with-a-cisco-router-product-id",
+    "class": "virtual_machine",
+    "facts": {
+      "macs": [
+        "00:0c:29:cc:dd:02"
+      ],
+      "model": "ISRv",
+      "open_ports": [
+        22,
+        161
+      ]
+    }
+  },
+  {
+    "name": "trap/printer-serving-apache",
+    "class": "printer",
+    "facts": {
+      "macs": [
+        "00:01:e6:cc:dd:03"
+      ],
+      "open_ports": [
+        80,
+        9100
+      ],
+      "banners": {
+        "http_banner": "Server: Apache/2.4.6"
+      },
+      "mdns_services": [
+        "_pdl-datastream._tcp"
+      ]
+    }
+  },
+  {
+    "name": "trap/printer-serving-nginx",
+    "class": "printer",
+    "facts": {
+      "macs": [
+        "00:07:4d:cc:dd:04"
+      ],
+      "open_ports": [
+        80,
+        9100
+      ],
+      "banners": {
+        "http_banner": "Server: nginx/1.20.1"
+      },
+      "mdns_services": [
+        "_pdl-datastream._tcp"
+      ]
+    }
+  },
+  {
+    "name": "trap/ubiquiti-oui-is-an-access-point",
+    "class": "access_point",
+    "facts": {
+      "macs": [
+        "24:a4:3c:cc:dd:05"
+      ],
+      "open_ports": [
+        22,
+        80
+      ],
+      "model": "U6-Mesh"
+    }
+  },
+  {
+    "name": "trap/ubiquiti-oui-is-a-switch",
+    "class": "switch",
+    "facts": {
+      "macs": [
+        "24:a4:3c:cc:dd:06"
+      ],
+      "open_ports": [
+        22,
+        161
+      ],
+      "lldp_capabilities": [
+        "bridge"
+      ],
+      "model": "US-16-150W"
+    }
+  },
+  {
+    "name": "trap/hp-oui-is-a-printer",
+    "class": "printer",
+    "facts": {
+      "macs": [
+        "94:18:82:cc:dd:07"
+      ],
+      "open_ports": [
+        80,
+        9100
+      ],
+      "banners": {
+        "http_banner": "Server: HP HTTP Server"
+      }
+    }
+  },
+  {
+    "name": "trap/hp-oui-is-a-wireless-controller",
+    "class": "wireless_controller",
+    "facts": {
+      "macs": [
+        "94:18:82:cc:dd:08"
+      ],
+      "open_ports": [
+        22,
+        443,
+        8443
+      ],
+      "model": "MC-7010"
+    }
+  },
+  {
+    "name": "trap/docker-oui-with-a-database-port",
+    "class": "container",
+    "facts": {
+      "macs": [
+        "02:42:ac:cc:dd:09"
+      ],
+      "open_ports": [
+        1433
+      ]
+    }
+  },
+  {
+    "name": "trap/web-server-on-a-storage-appliance",
+    "class": "storage_device",
+    "facts": {
+      "macs": [
+        "00:25:90:cc:dd:10"
+      ],
+      "open_ports": [
+        443,
+        445,
+        2049
+      ],
+      "banners": {
+        "http_banner": "Server: Apache/2.4.6"
+      },
+      "mdns_services": [
+        "_smb._tcp"
+      ]
+    }
+  },
+  {
+    "name": "trap/kms-shaped-name-is-object-storage",
+    "class": "object_storage",
+    "facts": {
+      "cloud_resource_type": "aws_s3_bucket_key_encryption"
+    }
+  },
+  {
+    "name": "trap/lb-shaped-name-is-an-api-gateway",
+    "class": "api_gateway",
+    "facts": {
+      "cloud_resource_type": "aws_api_gateway_load_balanced_stage",
+      "open_ports": [
+        443
+      ]
+    }
+  },
+  {
+    "name": "rejected/not-a-printer-just-jetdirect-proxy",
+    "class": "printer",
+    "negative": true,
+    "facts": {
+      "macs": [
+        "00:65:5b:dd:ee:01"
+      ],
+      "open_ports": [
+        9100,
+        22
+      ],
+      "model": "PowerEdge R750"
+    }
+  },
+  {
+    "name": "rejected/not-a-switch-just-a-bridging-host",
+    "class": "switch",
+    "negative": true,
+    "facts": {
+      "macs": [
+        "00:1e:4f:dd:ee:02"
+      ],
+      "open_ports": [
+        22,
+        445
+      ],
+      "lldp_capabilities": [
+        "bridge"
+      ]
+    }
+  },
+  {
+    "name": "rejected/not-an-access-point-a-wall-plate",
+    "class": "access_point",
+    "negative": true,
+    "facts": {
+      "macs": [
+        "00:21:9b:dd:ee:03"
+      ],
+      "open_ports": [
+        80
+      ],
+      "model": "AP-CONSOLE-ADAPTER"
+    }
+  },
+  {
+    "name": "rejected/not-a-web-application-a-mgmt-page",
+    "class": "web_application",
+    "negative": true,
+    "facts": {
+      "macs": [
+        "18:03:73:dd:ee:04"
+      ],
+      "open_ports": [
+        443
+      ],
+      "banners": {
+        "http_banner": "Server: Apache/2.4.6"
+      },
+      "model": "iDRAC9"
+    }
+  },
+  {
+    "name": "rejected/not-a-firewall-a-vpn-concentrator",
+    "class": "firewall",
+    "negative": true,
+    "facts": {
+      "open_ports": [
+        443,
+        1194
+      ],
+      "model": "VPN-3000"
+    }
+  },
+  {
+    "name": "rejected/not-a-container-a-bridged-host",
+    "class": "container",
+    "negative": true,
+    "facts": {
+      "macs": [
+        "24:b6:fd:dd:ee:06"
+      ],
+      "open_ports": [
+        8080,
+        22
+      ]
+    }
+  },
+  {
+    "name": "rejected/not-object-storage-a-backup-job",
+    "class": "object_storage",
+    "negative": true,
+    "facts": {
+      "cloud_resource_type": "aws_backup_vault_storage_plan"
+    }
+  },
+  {
+    "name": "rejected/not-a-key-store-an-iam-role",
+    "class": "key_store",
+    "negative": true,
+    "facts": {
+      "cloud_resource_type": "aws_iam_role_kms_policy"
+    }
+  },
+  {
+    "name": "rejected/not-a-router-a-dhcp-relay",
+    "class": "router",
+    "negative": true,
+    "facts": {
+      "macs": [
+        "44:a8:42:dd:ee:09"
+      ],
+      "open_ports": [
+        53,
+        67
+      ]
+    }
+  },
+  {
+    "name": "rejected/not-a-storage-device-a-print-share",
+    "class": "storage_device",
+    "negative": true,
+    "facts": {
+      "macs": [
+        "00:23:7d:dd:ee:10"
+      ],
+      "open_ports": [
+        445,
+        9100
+      ],
+      "mdns_services": [
+        "_smb._tcp"
+      ]
+    }
+  }
+]

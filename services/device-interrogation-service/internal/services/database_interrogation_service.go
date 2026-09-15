@@ -44,10 +44,16 @@ func (s *DatabaseInterrogationService) InterrogateMySQL(ctx context.Context, con
 
 // StoreDatabaseEncryptionFinding persists a database encryption finding to the
 // database_encryption_states table.
+//
+// The link column is `asset_id`. It used to be `device_id`, beside a separate
+// `asset_id` that pointed at the retired network_assets — two links to what was
+// the same host, which is ADR-0002's "the devices table is a second asset
+// table" in one row. Phase 1 dropped device_id; the device and the asset are
+// now the same thing, so there is one link.
 func (s *DatabaseInterrogationService) StoreDatabaseEncryptionFinding(
 	ctx context.Context,
 	tenantID uuid.UUID,
-	deviceID *uuid.UUID,
+	assetID *uuid.UUID,
 	finding *DatabaseEncryptionFinding,
 ) error {
 	rawConfigJSON, err := json.Marshal(finding.RawConfig)
@@ -57,7 +63,7 @@ func (s *DatabaseInterrogationService) StoreDatabaseEncryptionFinding(
 
 	query := `
 		INSERT INTO database_encryption_states (
-			tenant_id, device_id, db_engine, db_version,
+			tenant_id, asset_id, db_engine, db_version,
 			hostname, port,
 			ssl_enabled, ssl_version, ssl_cipher, ssl_enforced,
 			encryption_at_rest_enabled, encryption_method, encryption_algorithm,
@@ -80,7 +86,7 @@ func (s *DatabaseInterrogationService) StoreDatabaseEncryptionFinding(
 	// RLS-scoped write on `database_encryption_states`: tenantID is an input → WithTenantTx.
 	err = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
 		_, e := tx.ExecContext(ctx, query,
-			tenantID, deviceID, finding.Engine, finding.Version,
+			tenantID, assetID, finding.Engine, finding.Version,
 			finding.Hostname, finding.Port,
 			finding.SSLEnabled, finding.SSLVersion, finding.SSLCipher, finding.SSLEnforced,
 			finding.EncryptionAtRestEnabled, finding.EncryptionMethod, finding.EncryptionAlgorithm,

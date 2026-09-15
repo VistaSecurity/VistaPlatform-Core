@@ -15,6 +15,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	sharedfindings "github.com/vistasecurity/vistaplatform/shared/findings"
 )
 
 // RuleEvaluator evaluates compliance controls dynamically based on measurement mappings
@@ -658,17 +659,27 @@ func (s *RuleEvaluator) createFinding(tenantID, controlID uuid.UUID, value Measu
 	}
 
 	return models.ComplianceFinding{
-		ID:        uuid.New(),
-		TenantID:  tenantID,
-		ControlID: controlID,
-		AssetID:   value.AssetID,
-		AssetType: value.AssetType,
-		Severity:  severity,
-		Summary:   summary,
-		Evidence:  evidence,
-		FirstSeen: value.MeasuredAt,
-		LastSeen:  value.MeasuredAt,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		ID:       uuid.New(),
+		TenantID: tenantID,
+		// Producer and Kind are constants for this writer, and are set here
+		// rather than only in the INSERT so an in-memory finding (the reconcile
+		// carries one per pair before it is written) already says which producer
+		// it belongs to.
+		Producer:    sharedfindings.ProducerCompliance,
+		Kind:        sharedfindings.KindControlNoncompliant,
+		ControlID:   controlID,
+		SubjectID:   value.SubjectID,
+		SubjectType: value.SubjectType,
+		// Stamped from the metadata the extractor already collected, so a
+		// finding whose subject has since been archived still reads as a name
+		// rather than a UUID. nil, never "", when nothing names it.
+		SubjectLabel: subjectLabelFrom(normalizeSubjectType(value.SubjectType), value.Metadata),
+		Severity:     normalizeSeverity(severity),
+		Summary:      summary,
+		Evidence:     evidence,
+		FirstSeen:    value.MeasuredAt,
+		LastSeen:     value.MeasuredAt,
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
 	}
 }

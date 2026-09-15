@@ -50,6 +50,20 @@ type PlatformFramework struct {
 	Controls []PlatformFrameworkControl `json:"controls,omitempty" db:"-"`
 }
 
+// FrameworkControlColumns is the canonical SELECT list for a framework control
+// row. The platform and tenant control tables have identical shapes, so both
+// reads use it and cannot drift apart on which columns are COALESCEd.
+//
+// source_kind / source_ref are NULL on every row created before those columns
+// existed, and NULL does not scan into a string — so they are COALESCEd to "",
+// which is also how the API reports "this control carries no provenance".
+const FrameworkControlColumns = `id, framework_id, family_id, control_id, title,
+	       COALESCE(description, '') AS description,
+	       baseline_severity, crypto_relevant,
+	       COALESCE(source_kind, '') AS source_kind,
+	       COALESCE(source_ref, '') AS source_ref,
+	       created_at, updated_at`
+
 // PlatformFrameworkControl represents a control within a platform framework
 type PlatformFrameworkControl struct {
 	ID               uuid.UUID  `json:"id" db:"id"`
@@ -60,8 +74,15 @@ type PlatformFrameworkControl struct {
 	Description      string     `json:"description" db:"description"`
 	BaselineSeverity string     `json:"baseline_severity" db:"baseline_severity"`
 	CryptoRelevant   bool       `json:"crypto_relevant" db:"crypto_relevant"`
-	CreatedAt        time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at" db:"updated_at"`
+
+	// SourceKind / SourceRef are ADR-0008 D4.1 provenance: where this control
+	// came from. Empty means the row predates the columns — NOT that a person
+	// wrote it. See the schema comment; the distinction is the point.
+	SourceKind string `json:"source_kind,omitempty" db:"source_kind"`
+	SourceRef  string `json:"source_ref,omitempty" db:"source_ref"`
+
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 
 	// Joined fields
 	Family       *Family              `json:"family,omitempty" db:"-"`
@@ -91,6 +112,22 @@ type PlatformFrameworkControlInput struct {
 	Description      string     `json:"description"`
 	BaselineSeverity string     `json:"baseline_severity" binding:"required,oneof=Low Med High Critical"`
 	CryptoRelevant   bool       `json:"crypto_relevant"`
+
+	// SourceKind / SourceRef record where this control came from, and are read
+	// ON CREATE ONLY. Omitted, they default to "declared" — a person filled in
+	// the authoring form. A client accepting a draft from the Author seam sends
+	// "inferred" and the model that drafted it.
+	//
+	// Update ignores them deliberately: provenance says where a row CAME FROM,
+	// which editing does not change. `updated_at` is what records the edit, and
+	// a reviewer who tightens a drafted predicate has not turned it into a
+	// control they wrote from scratch.
+	//
+	// Only the two values an authoring API can honestly produce are accepted.
+	// "measured" and "imported" are in the column's CHECK because they are in
+	// the shared vocabulary, but nothing here can legitimately claim either.
+	SourceKind string `json:"source_kind,omitempty" binding:"omitempty,oneof=declared inferred"`
+	SourceRef  string `json:"source_ref,omitempty" binding:"omitempty,max=200"`
 }
 
 // PublishedFrameworkWithLicense represents a published framework with license status for a tenant

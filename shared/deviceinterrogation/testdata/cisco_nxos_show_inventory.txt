@@ -1,0 +1,11 @@
+NAME: "Chassis",  DESCR: "Nexus9000 C93180YC-EX chassis"
+PID: N9K-C93180YC-EX   ,  VID: V02 ,  SN: FDO21120U5D
+
+NAME: "Slot 1",  DESCR: "48x10/25G/32x100G Ethernet Module"
+PID: N9K-C93180YC-EX   ,  VID: V02 ,  SN: FDO21120U5E
+
+NAME: "Power Supply 1",  DESCR: "Nexus9000 C93180YC-EX chassis Power Supply"
+PID: NXA-PAC-650W-PE   ,  VID: V01 ,  SN: LIT21050ABC
+
+NAME: "Fan 1",  DESCR: "Nexus9000 C93180YC-EX chassis Fan Module"
+PID: NXA-FAN-30CFM-F   ,  VID: V01 ,  SN: N/A

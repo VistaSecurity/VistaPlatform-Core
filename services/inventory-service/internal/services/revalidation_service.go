@@ -40,12 +40,26 @@ func NewRevalidationService(
 // Assets with neither an IP nor a hostname are omitted, so the caller can tell
 // which assets it is actually able to scan.
 func (s *RevalidationService) resolveActiveScanAssets(tenantID uuid.UUID, assetIDs []uuid.UUID) ([]activeScanAsset, error) {
+	// One row per ENDPOINT, not per asset. Scan coordinates are (address, port),
+	// and that is what an endpoint is; a host exposing three ports is one asset
+	// with three endpoints and must be probed on all three. (Under the old
+	// port-as-asset model the same host was three assets, so "one row per asset"
+	// happened to mean the same thing — it does not any more.)
+	//
+	// An asset with NO endpoint still yields one row, with a NULL port: an
+	// at-rest cloud resource has nothing to connect to, and the caller skips it
+	// for want of an address rather than probing a fabricated port.
 	const assetQuery = `
-		SELECT id, hostname, ip_address, port
-		FROM network_assets
-		WHERE tenant_id = $1
-		  AND id = ANY($2)
-		  AND deleted_at IS NULL
+		SELECT a.id,
+		       a.hostname,
+		       COALESCE(host(e.address), host(a.primary_address)) AS address,
+		       e.port
+		FROM assets a
+		LEFT JOIN asset_endpoints e
+		       ON e.tenant_id = a.tenant_id AND e.asset_id = a.id AND e.status <> 'closed'
+		WHERE a.tenant_id = $1
+		  AND a.id = ANY($2)
+		  AND a.deleted_at IS NULL
 	`
 	// Protocols already observed on this asset — the best signal for what to
 	// probe it with (an SSH host must not be probed for TLS only).
@@ -59,7 +73,7 @@ func (s *RevalidationService) resolveActiveScanAssets(tenantID uuid.UUID, assetI
 	`
 
 	var assets []activeScanAsset
-	// RLS-scoped reads over network_assets / crypto_implementations.
+	// RLS-scoped reads over assets / crypto_implementations.
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		protocols := make(map[uuid.UUID][]string)
 		protoRows, e := tx.Query(protocolQuery, tenantID, pq.Array(assetIDs))
@@ -261,18 +275,25 @@ func logBatchDispatchFailure(tenantID uuid.UUID, batch activeScanBatch, err erro
 		tenantID, batch.ports, batch.protocols, len(batch.assetIDs), batch.assetIDs, err)
 }
 
-// stampScanning approves the given assets, stamps scan freshness, and returns
-// each asset's PRIOR last_scanned_at so a failed dispatch can put it back
-// exactly as it was. The read and the write share one transaction, so the
-// captured value is the one this statement overwrote.
-// RLS-scoped read+write over network_assets_partitioned.
+// stampScanning approves the given assets, stamps scan freshness on their
+// endpoints, and returns each ENDPOINT's PRIOR last_scanned_at so a failed
+// dispatch can put it back exactly as it was. The read and the write share one
+// transaction, so the captured value is the one this statement overwrote.
+//
+// Scan freshness is endpoint-level (DATA_MODEL §2): a scan probes a socket, and
+// "when was this last scanned" about an asset with three endpoints, two of them
+// scanned, has no single true answer. Approval stays on the asset — it is a
+// decision about the thing, not about one of its faces.
+//
+// RLS-scoped read+write over assets and asset_endpoints.
 func (s *RevalidationService) stampScanning(tenantID uuid.UUID, assetIDs []uuid.UUID) ([]scanStamp, error) {
 	var prior []scanStamp
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		rows, e := tx.Query(`
-			SELECT id, last_scanned_at
-			FROM network_assets_partitioned
-			WHERE tenant_id = $1 AND id = ANY($2) AND deleted_at IS NULL
+			SELECT e.id, e.last_scanned_at
+			FROM asset_endpoints e
+			JOIN assets a ON a.tenant_id = e.tenant_id AND a.id = e.asset_id AND a.deleted_at IS NULL
+			WHERE e.tenant_id = $1 AND e.asset_id = ANY($2)
 		`, tenantID, pq.Array(assetIDs))
 		if e != nil {
 			return e
@@ -291,13 +312,21 @@ func (s *RevalidationService) stampScanning(tenantID uuid.UUID, assetIDs []uuid.
 		}
 		_ = rows.Close()
 
+		if _, e := tx.Exec(`
+			UPDATE assets
+			SET asset_status = 'monitoring',
+			    updated_at   = now()
+			WHERE tenant_id = $1 AND id = ANY($2) AND deleted_at IS NULL
+		`, tenantID, pq.Array(assetIDs)); e != nil {
+			return e
+		}
+
 		_, e = tx.Exec(`
-			UPDATE network_assets_partitioned
-			SET asset_status     = 'monitoring',
-			    last_scanned_at  = now(),
+			UPDATE asset_endpoints
+			SET last_scanned_at  = now(),
 			    last_scan_status = 'scanning',
 			    updated_at       = now()
-			WHERE tenant_id = $1 AND id = ANY($2) AND deleted_at IS NULL
+			WHERE tenant_id = $1 AND asset_id = ANY($2)
 		`, tenantID, pq.Array(assetIDs))
 		return e
 	})
@@ -342,15 +371,16 @@ func (s *RevalidationService) stampScanFailed(tenantID uuid.UUID, prior []scanSt
 	})
 }
 
-// scanStampTable is the table the freshness stamp lives on.
-const scanStampTable = "network_assets_partitioned"
+// scanStampTable is the table the freshness stamp lives on. Scan freshness is
+// a property of the endpoint that was probed, not of the asset (DATA_MODEL §2).
+const scanStampTable = "asset_endpoints"
 
 // The two restore statements are built by these helpers rather than inlined so
 // the live SQL check (stamp_restore_sqlcheck_test.go) runs the SAME statements
 // against a real Postgres, pointed at a probe table. Inlining them would let the
 // production SQL drift away from the only thing that verifies it works.
 
-// restoreNullStampSQL returns assets that were genuinely never scanned to NULL.
+// restoreNullStampSQL returns endpoints that were genuinely never scanned to NULL.
 func restoreNullStampSQL(table string) string {
 	return fmt.Sprintf(`
 		UPDATE %s
@@ -360,7 +390,7 @@ func restoreNullStampSQL(table string) string {
 		WHERE tenant_id = $1 AND id = ANY($2)`, table)
 }
 
-// restoreTimestampStampSQL restores each asset's exact prior last_scanned_at.
+// restoreTimestampStampSQL restores each endpoint's exact prior last_scanned_at.
 // The parallel uuid[]/timestamptz[] arrays are unnested into a join so one
 // statement restores many distinct instants.
 func restoreTimestampStampSQL(table string) string {

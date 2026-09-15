@@ -23,6 +23,7 @@ package services
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -157,16 +158,70 @@ func seedControlMeasurement(t *testing.T, db *sqlx.DB, controlID uuid.UUID) {
 	}
 }
 
-// seedTenantInventory gives the tenant one crypto implementation, which is what
-// loadControlAssessments' "is anything in scope?" implication reads. Without it
-// every control is NOT_ASSESSED(nothing_in_scope) and the framework has no score
-// — correct behaviour, but not the shape these scoring tests are about.
+// seedTenantInventory gives the tenant one asset and one crypto implementation
+// ON that asset, which is what loadControlAssessments' "is anything in scope?"
+// implication reads. Without it every control is NOT_ASSESSED(nothing_in_scope)
+// and the framework has no score — correct behaviour, but not the shape these
+// scoring tests are about.
+//
+// The ASSET row is not optional padding. The scope probe — like all ten
+// extractors in measurement_extractor.go — reads
+// `crypto_implementations JOIN assets ON asset_id`, so an
+// implementation pointing at an asset_id that does not exist is invisible to
+// every one of them. This fixture used to insert exactly that (asset_id =
+// uuid.New(), no matching asset), which only worked while the probe was the
+// looser `EXISTS (SELECT 1 FROM crypto_implementations)`. When tightened
+// it to ignore deleted inventory, all eleven scoring tests flipped to
+// NOT_ASSESSED(nothing_in_scope) — not a regression in the production code,
+// which is right, but a fixture that had never described a state the ingest
+// path can actually produce (ingest always writes the asset first).
+//
+// The CERTIFICATE row is the same lesson a second time. These controls measure
+// `cert_expiration_days`, whose shape reads `certificates` and nothing else, and
+// the fixture gave the tenant a TLS configuration and no certificate at all.
+// That passed only while the scope probe was one tenant-wide "has this tenant
+// any crypto OR any certificate" question; once it became per SHAPE (the Gate 3
+// fix — a `fact`-shaped Lifecycle control was reporting PASS over a fact nobody
+// had written), a certificate measurement over a tenant with no certificates is
+// correctly NOT ASSESSED. Again: not a regression in the production code, a
+// fixture describing a tenant the ingest path does not produce.
 func seedTenantInventory(t *testing.T, db *sqlx.DB, tenant uuid.UUID) {
 	t.Helper()
+	asset := uuid.New()
+	if _, err := db.Exec(`
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path)
+		VALUES ($1, $2, 'scope-probe.example.test', 'server', 'hardware.computer.server')`, asset, tenant); err != nil {
+		t.Fatalf("seed tenant asset: %v", err)
+	}
 	if _, err := db.Exec(`
 		INSERT INTO crypto_implementations_partitioned (tenant_id, asset_id, protocol, discovery_method)
-		VALUES ($1, $2, 'TLS', 'passive')`, tenant, uuid.New()); err != nil {
+		VALUES ($1, $2, 'TLS', 'passive')`, tenant, asset); err != nil {
 		t.Fatalf("seed tenant inventory: %v", err)
+	}
+	seedTenantCertificate(t, db, tenant)
+}
+
+// seedTenantCertificate gives the tenant one certificate, so a measurement of
+// the `certificate` shape has something to read. `not_after` is comfortably in
+// the future: the fixtures' predicate is `expiration_days >= 0`, which must be
+// SATISFIED so the certificate produces no finding of its own — every test here
+// drives its violations explicitly.
+func seedTenantCertificate(t *testing.T, db *sqlx.DB, tenant uuid.UUID) {
+	t.Helper()
+	id := uuid.New()
+	// The fingerprint is unique per certificate, so it is derived from the id
+	// rather than fixed: several of these fixtures seed more than one tenant in
+	// one database.
+	fingerprint := strings.ReplaceAll(id.String(), "-", "")
+	if _, err := db.Exec(`
+		INSERT INTO certificates (id, tenant_id, subject_dn, issuer_dn, common_name,
+			fingerprint_sha256, public_key_algorithm, public_key_size,
+			signature_algorithm, not_before, not_after)
+		VALUES ($1, $2, 'CN=scope-probe.example.test', 'CN=Fixture CA', 'scope-probe.example.test',
+			$3, 'RSA', 4096,
+			'SHA256withRSA', now() - interval '30 days', now() + interval '365 days')`,
+		id, tenant, fingerprint+fingerprint); err != nil {
+		t.Fatalf("seed tenant certificate: %v", err)
 	}
 }
 
@@ -175,9 +230,9 @@ func seedTenantInventory(t *testing.T, db *sqlx.DB, tenant uuid.UUID) {
 func (f *evalFixture) failCritical(t *testing.T) {
 	t.Helper()
 	_, err := f.db.Exec(`
-		INSERT INTO compliance_findings
-			(id, tenant_id, control_id, asset_id, asset_type, severity, summary, detection_state, workflow_status)
-		VALUES ($1, $2, $3, $4, 'certificate', 'Critical', 'RSA-2048 in a PQC-required scope', 'ACTIVE', 'NEW')`,
+		INSERT INTO findings
+			(id, tenant_id, producer, kind, control_id, subject_id, subject_type, severity, summary, detection_state, workflow_status)
+		VALUES ($1, $2, 'compliance', 'control_noncompliant', $3, $4, 'certificate', 'critical', 'RSA-2048 in a PQC-required scope', 'ACTIVE', 'NEW')`,
 		uuid.New(), f.tenant, f.critical, uuid.New())
 	if err != nil {
 		t.Fatalf("seed finding: %v", err)
@@ -266,9 +321,9 @@ func TestIntegration_FrameworkScore_MaterializedMatchesLive(t *testing.T) {
 func TestIntegration_ControlStatus_LowSeverityFindingFails(t *testing.T) {
 	f := newEvalFixture(t)
 	if _, err := f.db.Exec(`
-		INSERT INTO compliance_findings
-			(id, tenant_id, control_id, asset_id, asset_type, severity, summary, detection_state, workflow_status)
-		VALUES ($1, $2, $3, $4, 'certificate', 'Low', 'expires in 80 days', 'ACTIVE', 'NEW')`,
+		INSERT INTO findings
+			(id, tenant_id, producer, kind, control_id, subject_id, subject_type, severity, summary, detection_state, workflow_status)
+		VALUES ($1, $2, 'compliance', 'control_noncompliant', $3, $4, 'certificate', 'low', 'expires in 80 days', 'ACTIVE', 'NEW')`,
 		uuid.New(), f.tenant, f.low, uuid.New()); err != nil {
 		t.Fatalf("seed Low finding: %v", err)
 	}
@@ -308,8 +363,16 @@ func TestIntegration_ControlStatus_LowSeverityFindingFails(t *testing.T) {
 // can be assessed and the framework has NO score. It used to report 100.
 func TestIntegration_FrameworkScore_ZeroAssessedHasNoScore(t *testing.T) {
 	f := newEvalFixture(t)
+	// EVERYTHING a measurement could read, not just the crypto configurations:
+	// the scope probe is per measurement SHAPE now, and these controls measure
+	// `cert_expiration_days`, so leaving the certificate behind would leave them
+	// genuinely assessable and the test would be asserting the opposite of its
+	// own name.
 	if _, err := f.db.Exec(`DELETE FROM crypto_implementations_partitioned WHERE tenant_id = $1`, f.tenant); err != nil {
 		t.Fatalf("empty the tenant inventory: %v", err)
+	}
+	if _, err := f.db.Exec(`DELETE FROM certificates WHERE tenant_id = $1`, f.tenant); err != nil {
+		t.Fatalf("empty the tenant certificates: %v", err)
 	}
 
 	summary, err := NewEvaluationService(f.db).EvaluateFramework(f.tenant, f.frameworkID, "1.0", models.ScenarioFilters{}, nil)
@@ -490,9 +553,9 @@ func TestIntegration_EvaluateAsset_RollupForFullyPassingFramework(t *testing.T) 
 func TestIntegration_FrameworkScore_SuppressedFindingsIgnored(t *testing.T) {
 	f := newEvalFixture(t)
 	if _, err := f.db.Exec(`
-		INSERT INTO compliance_findings
-			(id, tenant_id, control_id, asset_id, asset_type, severity, summary, detection_state, workflow_status)
-		VALUES ($1, $2, $3, $4, 'certificate', 'Critical', 'accepted risk', 'ACTIVE', 'SUPPRESSED')`,
+		INSERT INTO findings
+			(id, tenant_id, producer, kind, control_id, subject_id, subject_type, severity, summary, detection_state, workflow_status)
+		VALUES ($1, $2, 'compliance', 'control_noncompliant', $3, $4, 'certificate', 'critical', 'accepted risk', 'ACTIVE', 'SUPPRESSED')`,
 		uuid.New(), f.tenant, f.critical, uuid.New()); err != nil {
 		t.Fatalf("seed suppressed finding: %v", err)
 	}

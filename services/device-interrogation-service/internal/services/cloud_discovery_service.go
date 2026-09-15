@@ -26,6 +26,8 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/discovery"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
+	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 )
 
 // CloudDiscoveryService handles cloud resource discovery
@@ -38,6 +40,12 @@ type CloudDiscoveryService struct {
 	// resolves to the same connection as db.
 	bypassDB  *sql.DB
 	masterKey string
+	// devices is the managed-asset store. Cloud discovery no longer writes
+	// rows of its own: every resource it finds goes through the same
+	// identification engine and the same asset_management upsert the Devices
+	// page uses, so a bucket found here and the same bucket named anywhere else
+	// resolve to one asset.
+	devices *DeviceService
 }
 
 // NewCloudDiscoveryService creates a new cloud discovery service. db is the
@@ -50,6 +58,7 @@ func NewCloudDiscoveryService(db, bypassDB *sql.DB, masterKey string) *CloudDisc
 		db:        db,
 		bypassDB:  bypassDB,
 		masterKey: masterKey,
+		devices:   NewDeviceServiceWithKey(db, masterKey),
 	}
 }
 
@@ -301,20 +310,11 @@ func (s *CloudDiscoveryService) discoverLoadBalancers(ctx context.Context, tenan
 					UpdatedAt:        time.Now(),
 				}
 
-				// Check if device already exists
-				existing, err := s.findExistingDevice(ctx, tenantID, deviceType, hostname, metadata["arn"].(string))
-				if err == nil && existing != nil {
-					// Update existing device
-					device.ID = existing.ID
-					device.UpdatedAt = time.Now()
-					if err := s.updateDevice(ctx, &device); err != nil {
-						continue
-					}
-				} else {
-					// Insert new device
-					if err := s.insertDevice(ctx, &device); err != nil {
-						continue
-					}
+				// Resolve to an asset (creating a pending one if this load
+				// balancer is new) and configure management on it.
+				if err := s.upsertDeviceAsset(ctx, &device, getStringFromMap(metadata, "arn")); err != nil {
+					log.Printf("Warning: failed to record %s %s: %v", deviceType, hostname, err)
+					continue
 				}
 
 				devices = append(devices, device)
@@ -464,17 +464,9 @@ func (s *CloudDiscoveryService) discoverAPIGateways(ctx context.Context, tenantI
 					UpdatedAt:        time.Now(),
 				}
 
-				existing, err := s.findExistingDevice(ctx, tenantID, "aws_api_gateway", hostname, metadata["api_id"].(string))
-				if err == nil && existing != nil {
-					device.ID = existing.ID
-					device.UpdatedAt = time.Now()
-					if err := s.updateDevice(ctx, &device); err != nil {
-						continue
-					}
-				} else {
-					if err := s.insertDevice(ctx, &device); err != nil {
-						continue
-					}
+				if err := s.upsertDeviceAsset(ctx, &device, getStringFromMap(metadata, "api_id")); err != nil {
+					log.Printf("Warning: failed to record aws_api_gateway %s: %v", hostname, err)
+					continue
 				}
 
 				devices = append(devices, device)
@@ -595,17 +587,9 @@ func (s *CloudDiscoveryService) discoverCloudFrontDistributions(ctx context.Cont
 				UpdatedAt:        time.Now(),
 			}
 
-			existing, err := s.findExistingDevice(ctx, tenantID, "aws_cloudfront", hostname, metadata["distribution_id"].(string))
-			if err == nil && existing != nil {
-				device.ID = existing.ID
-				device.UpdatedAt = time.Now()
-				if err := s.updateDevice(ctx, &device); err != nil {
-					continue
-				}
-			} else {
-				if err := s.insertDevice(ctx, &device); err != nil {
-					continue
-				}
+			if err := s.upsertDeviceAsset(ctx, &device, getStringFromMap(metadata, "distribution_id")); err != nil {
+				log.Printf("Warning: failed to record aws_cloudfront %s: %v", hostname, err)
+				continue
 			}
 
 			devices = append(devices, device)
@@ -648,6 +632,17 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 	now := time.Now()
 
 	for _, device := range devices {
+		// An ENUMERATED resource is inventory, not a crypto finding. It
+		// negotiated no protocol and states no at-rest encryption, so the
+		// crypto-config-less fallback below would write it as a TLS endpoint on
+		// port 443 with no version and no cipher suite — the phantom-endpoint
+		// fabrication this file already documents twice. It is skipped here and
+		// nowhere else: the identification engine has already recorded it as an
+		// asset (cloud_enumeration.go), which is the whole of what it is.
+		if inventoryOnlyDeviceTypes[device.DeviceType] {
+			continue
+		}
+
 		// Extract crypto configs from device metadata.
 		cryptoConfigs := extractCryptoConfigs(device.Metadata)
 
@@ -694,13 +689,23 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 					cfgHostname = h
 				}
 
-				// Build metadata JSONB
+				// Build metadata JSONB.
+				//
+				// There is deliberately NO asset_id / device_id here. The
+				// `device` a cloud collector builds is a value it invented for
+				// this run — its ID is a fresh uuid.New() per row — so those
+				// keys named an asset that has never existed, sitting beside
+				// the REAL asset ids the interrogable collectors emit under the
+				// same names. Identity for a cloud resource comes from
+				// cloud_resource_id (the arn / resource id / self link), which
+				// the identification engine reads from raw_metadata; a
+				// fabricated uuid could only ever be a wrong answer that looks
+				// like a right one.
 				metadata := map[string]interface{}{
 					"discovery_method": "cloud_api",
 					"cloud_provider":   cloudProvider,
 					"cloud_region":     cloudRegion,
 					"device_type":      device.DeviceType,
-					"device_id":        device.ID.String(),
 					"integration_id":   integrationID.String(),
 					"version":          getStringFromMap(cfg, "protocol_version"),
 					"cipher_suite":     getStringFromMap(cfg, "cipher_suite"),
@@ -793,13 +798,13 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 				inserted++
 			}
 		} else {
-			// No crypto configs - create a single default entry
+			// No crypto configs - create a single default entry. No asset_id /
+			// device_id, for the reason stated above.
 			metadata := map[string]interface{}{
 				"discovery_method": "cloud_api",
 				"cloud_provider":   cloudProvider,
 				"cloud_region":     cloudRegion,
 				"device_type":      device.DeviceType,
-				"device_id":        device.ID.String(),
 				"integration_id":   integrationID.String(),
 				"raw_metadata":     device.Metadata,
 			}
@@ -817,21 +822,26 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 			// endpoint on port 443 with no version and no cipher suite. A
 			// bucket is not a TLS endpoint; the invented protocol is worse
 			// than no protocol, because the UI renders it as a measurement.
-			// At-rest resources therefore carry the at-rest protocol marker
-			// and no port. They still arrive as assets: identity for these
-			// rows is the per-resource hostname plus device_id, and the
-			// unspecified dest_ip keeps them on inventory-service's
-			// isCloudManagedPlaceholder path exactly as before.
-			protocol, port := atRestProtocolPort(device.DeviceType)
+			// An at-rest resource therefore carries NO protocol, no port, and
+			// an explicit at_rest flag the ingest path reads to mean "this
+			// finding describes no endpoint" (DATA_MODEL §2: such an asset
+			// simply has no asset_endpoints row).
+			protocol, port, atRest := atRestDiscoveryShape(device.DeviceType)
+			if atRest {
+				metadata["at_rest"] = true
+				var remarshalErr error
+				metadataJSON, remarshalErr = json.Marshal(metadata)
+				if remarshalErr != nil {
+					log.Printf("Warning: failed to marshal metadata for device %s: %v", device.ID, remarshalErr)
+					continue
+				}
+			}
 
 			err = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
 				_, e := tx.ExecContext(ctx, insertQuery,
 					uuid.New(), systemSensorID, tenantID, batchID,
-					// Canonical protocol_type spelling. NOTE the at-rest marker
-					// is NOT a protocol_type value and is deliberately left
-					// alone — NormalizeProtocol passes an unrecognised value
-					// through unchanged, which is what keeps isAtRestProtocol
-					// working downstream.
+					// Canonical protocol_type spelling; empty stays empty, which
+					// is what an at-rest resource honestly has.
 					cryptoparse.NormalizeProtocol(protocol), destIP, port,
 					0.8, metadataJSON, stringPtr(hostname),
 					now, now,
@@ -858,6 +868,33 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 // Listed explicitly per provider rather than inferred, because getting this
 // wrong in the other direction (marking a real endpoint as at-rest) would
 // suppress a genuine TLS measurement.
+// inventoryOnlyDeviceTypes are the enumerated resource kinds that make NO
+// cryptographic statement at all — neither a negotiated protocol nor an at-rest
+// encryption setting.
+//
+// They are distinct from atRestDeviceTypes below, and the distinction matters.
+// An at-rest resource HAS a cryptographic posture (a bucket's default
+// encryption, an RDS instance's storage key) and belongs in the findings
+// pipeline carrying `at_rest: true`; it simply has no endpoint. An EC2
+// instance, a VPC and a subnet have neither. Putting them through the findings
+// pipeline would produce a row per resource that describes no measurement, and
+// the pipeline's only honest reading of a protocol-less, at-rest-less row is
+// the TLS:443 default, which is a fabrication.
+//
+// Their inventory identity is written by the identification engine instead
+// (cloud_enumeration.go), which is where an asset that is only an asset belongs.
+var inventoryOnlyDeviceTypes = map[string]bool{
+	DeviceTypeAWSEC2Instance:     true,
+	DeviceTypeAWSVPC:             true,
+	DeviceTypeAWSSubnet:          true,
+	DeviceTypeAzureVM:            true,
+	DeviceTypeAzureVNet:          true,
+	DeviceTypeAzureSubnet:        true,
+	DeviceTypeGCPComputeInstance: true,
+	DeviceTypeGCPNetwork:         true,
+	DeviceTypeGCPSubnetwork:      true,
+}
+
 var atRestDeviceTypes = map[string]bool{
 	"aws_s3_bucket":         true,
 	"aws_rds_instance":      true,
@@ -870,33 +907,38 @@ var atRestDeviceTypes = map[string]bool{
 	"gcp_kms_crypto_key":    true,
 }
 
-// atRestProtocolPort returns the protocol marker and port to record for a
-// device with no crypto configuration. At-rest resources get the "AT-REST"
-// marker and port 0 (no listening port); everything else keeps the historical
-// TLS:443 fallback.
+// atRestDiscoveryShape returns the protocol, port and at-rest flag to record for
+// a device with no crypto configuration.
 //
-// "AT-REST" is deliberately NOT a protocol. inventory-service must never
-// materialize it as one — see isAtRestProtocol in inventory-service's
-// asset_service.go, which short-circuits on this exact sentinel. Its
-// resolveProtocol is a second line of defence: an unrecognised protocol yields
-// no protocol at all rather than defaulting to "TLS", which is what used to
-// turn this sentinel into a phantom TLS endpoint.
+// An at-rest resource gets NO PROTOCOL, no port, and an explicit `at_rest: true`
+// in the discovery metadata. Everything else keeps the historical TLS:443
+// fallback.
 //
-// B-22: this comment used to assert that inventory-service "routes these
-// findings to crypto_applications by their resource_type before protocol
-// normalization is ever reached." That is true only for the six device types
-// whose collectors write a resource_type metadata key (s3_bucket,
+// The "AT-REST" string this used to write in the protocol column is gone
+// (phase 1, sub-task C). It was a sentinel in a column typed for protocols —
+// "deliberately NOT a protocol", as its own comment had to keep insisting — and
+// every consumer had to know the magic word to avoid materialising a phantom
+// TLS endpoint from it. An explicit boolean says the same thing in a field
+// whose type matches its meaning, and an empty protocol is independently
+// correct: nothing was negotiated, so there is no protocol to name.
+// inventory-service still recognises the old string for rows queued before this
+// release (findingIsAtRest).
+//
+// B-22 history, worth keeping: the old comment asserted that inventory-service
+// "routes these findings to crypto_applications by their resource_type before
+// protocol normalization is ever reached." That is true only for the six device
+// types whose collectors write a resource_type metadata key (s3_bucket,
 // storage_account, gcs_bucket, rds_instance, sql_database, cloudsql_instance).
 // The three key stores below write none, so they fell through to the TLS
 // default and were materialized as phantom TLS endpoints. They are now dropped
 // rather than fabricated; giving key stores a first-class at-rest posture is
 // separate work (crypto_applications models whether a resource's DATA is
 // encrypted and whose key, which does not describe a resource that IS the key).
-func atRestProtocolPort(deviceType string) (string, int) {
+func atRestDiscoveryShape(deviceType string) (protocol string, port int, atRest bool) {
 	if atRestDeviceTypes[deviceType] {
-		return "AT-REST", 0
+		return "", 0, true
 	}
-	return "TLS", 443
+	return "TLS", 443, false
 }
 
 // canonicalCertPEMs extracts the certificate PEMs from a canonical "certificates"
@@ -1023,82 +1065,143 @@ func stringPtr(s string) *string {
 	return &s
 }
 
-func (s *CloudDiscoveryService) findExistingDevice(ctx context.Context, tenantID uuid.UUID, deviceType, hostname, identifier string) (*models.Device, error) {
-	query := `
-		SELECT id, tenant_id, device_type, hostname, metadata
-		FROM devices
-		WHERE tenant_id = $1 AND device_type = $2 AND deleted_at IS NULL
-		AND (hostname = $3 OR metadata->>'arn' = $4 OR metadata->>'api_id' = $4 OR metadata->>'distribution_id' = $4 OR metadata->>'gcp_resource_id' = $4)
-		LIMIT 1
-	`
+// upsertDeviceAsset resolves a discovered cloud resource to an asset and
+// configures management on it, replacing the old
+// findExistingDevice/insertDevice/updateDevice trio.
+//
+// Those three were the fourth of the four ad hoc dedupe keys ADR-0002 D3
+// catalogues: they matched on `device_type` AND (hostname OR one of four
+// metadata id fields), a key nothing else in the platform used. A bucket the
+// cloud collector found and the same bucket named in a CMDB pull could never
+// resolve to one row, and neither could a load balancer the sensor also saw on
+// the wire.
+//
+// The engine's key is the provider's own resource id (cloud_resource_id), which
+// is the strongest identifier a cloud resource ever has and sits at the top of
+// the precedence list for every cloud class. resourceID is the collector's
+// ARN / self-link / api id / distribution id; the device's metadata is searched
+// as a fallback.
+//
+// On return device.ID is the ASSET id, so the caller's devices slice — which
+// WriteSensorDiscoveries and the job result both read — carries asset ids.
+func (s *CloudDiscoveryService) upsertDeviceAsset(ctx context.Context, device *models.Device, resourceID string) error {
+	// No cloud network ref: the crypto/at-rest collectors record buckets, key
+	// stores and load balancers, none of which the address-scoping question is
+	// asked about. Enumeration is the one path that has one.
+	return s.upsertDeviceAssetWith(ctx, device, resourceID, "", nil)
+}
 
-	var device models.Device
-	found := false
-	err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		scanErr := tx.QueryRowContext(ctx, query, tenantID, deviceType, hostname, identifier).Scan(
-			&device.ID, &device.TenantID, &device.DeviceType, &device.Hostname, &device.Metadata,
-		)
-		if scanErr == sql.ErrNoRows {
-			return nil
-		}
-		if scanErr != nil {
-			return scanErr
-		}
-		found = true
-		return nil
+// upsertDeviceAssetWith is upsertDeviceAsset with one more thing to do inside
+// the SAME transaction as the resolution.
+//
+// `extra` is where an enumerated resource's facts and class attributes are
+// written (cloud_enumeration.go). They belong in this transaction and not a
+// later one: an asset created here whose facts landed separately and failed
+// would keep its identity and lose its placement, and no later run would repair
+// that — the next observation MATCHES the asset that exists and never takes the
+// create path again.
+//
+// `extra` is NOT called on the contested outcome, because there is no asset to
+// write about.
+func (s *CloudDiscoveryService) upsertDeviceAssetWith(
+	ctx context.Context,
+	device *models.Device,
+	resourceID string,
+	cloudNetworkRef string,
+	extra func(r *pgidentity.Repository, assetID uuid.UUID) error,
+) error {
+	now := time.Now().UTC()
+	obs, err := s.devices.deviceObservation(ctx, device.TenantID, deviceObservationInput{
+		DeviceType:      device.DeviceType,
+		Hostname:        derefStr(device.Hostname),
+		IPAddress:       derefStr(device.IPAddress),
+		ManagementURL:   derefStr(device.ManagementURL),
+		SerialNumber:    derefStr(device.SerialNumber),
+		CloudResourceID: firstNonEmpty(resourceID, cloudResourceIDFromMetadata(device.Metadata)),
+		CloudNetworkRef: cloudNetworkRef,
+		DiscoveryMethod: device.DiscoveryMethod,
+		Source:          cloudSource(device.Vendor),
+		ObservedAt:      now,
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if !found {
-		return nil, nil
+
+	// Every cloud resource reached through an integration IS managed: its posture
+	// is read over the provider API with that integration's credentials, which is
+	// exactly what asset_management records. So it gets a management row and stays
+	// on the Devices page, at-rest resources included. What an at-rest resource
+	// does NOT get is an ENDPOINT — the observation above carries none, and
+	// DATA_MODEL §2 says such an asset simply has no asset_endpoints row.
+	fields := deviceFieldUpdate{
+		DeviceType:       device.DeviceType,
+		Hostname:         device.Hostname,
+		IPAddress:        device.IPAddress,
+		ManagementURL:    device.ManagementURL,
+		Vendor:           device.Vendor,
+		Model:            device.Model,
+		FirmwareVersion:  device.FirmwareVersion,
+		SerialNumber:     device.SerialNumber,
+		ConnectionStatus: nonEmptyPtr(device.ConnectionStatus),
+		CredentialID:     device.CredentialID,
+		Metadata:         device.Metadata,
+		Tags:             device.Tags,
+		DiscoveryMethod:  device.DiscoveryMethod,
+		CreateManagement: true,
 	}
-	return &device, nil
+
+	res, err := s.devices.resolveObservation(ctx, obs, func(r *pgidentity.Repository, res identity.Resolution) error {
+		if res.Asset.Zero() {
+			// Every identifier this resource carries belongs to another asset.
+			// A merge proposal is waiting in Approvals; creating a third asset
+			// to hang the management row off would be the auto-merge ADR-0002
+			// D5 forbids, from the other side.
+			//
+			// nil, NOT an error — see DeviceIdentityContestedError. The proposal
+			// was written in this transaction and an error here would erase it.
+			return nil
+		}
+		assetID, parseErr := uuid.Parse(res.Asset.ID)
+		if parseErr != nil {
+			return fmt.Errorf("identification returned an unusable asset id %q: %w", res.Asset.ID, parseErr)
+		}
+		device.ID = assetID
+		if err := s.devices.applyDeviceFields(ctx, r, device.TenantID, assetID, fields); err != nil {
+			return err
+		}
+		if extra == nil {
+			return nil
+		}
+		return extra(r, assetID)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to record cloud resource: %w", err)
+	}
+	if res.Asset.Zero() {
+		return contestedFrom(res)
+	}
+	return nil
 }
 
-func (s *CloudDiscoveryService) insertDevice(ctx context.Context, device *models.Device) error {
-	metadataJSON, _ := json.Marshal(device.Metadata)
-	tagsJSON, _ := json.Marshal(device.Tags)
-
-	query := `
-		INSERT INTO devices (
-			id, tenant_id, device_type, vendor, model, hostname, ip_address,
-			management_url, serial_number, firmware_version, discovery_method,
-			credential_id, connection_status, metadata, tags, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-	`
-
-	// RLS-scoped write on `devices` under device.TenantID (set by the discovery flow).
-	return shareddatabase.WithTenantTx(ctx, s.db, device.TenantID, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, query,
-			device.ID, device.TenantID, device.DeviceType, device.Vendor, device.Model,
-			device.Hostname, device.IPAddress, device.ManagementURL, device.SerialNumber,
-			device.FirmwareVersion, device.DiscoveryMethod, device.CredentialID,
-			device.ConnectionStatus, metadataJSON, tagsJSON, device.CreatedAt, device.UpdatedAt,
-		)
-		return err
-	})
+// cloudSource is the provenance of a cloud collector's observation: an ACTIVE
+// measurement, because the provider's API answered about its own resource.
+// `cloud:<provider>` is the producer shape ADR-0003 D3 names and the string the
+// `observation` query target's `source` facet matches on.
+func cloudSource(vendor *string) identity.Source {
+	ref := "cloud"
+	if v := strings.ToLower(strings.TrimSpace(derefStr(vendor))); v != "" {
+		ref = "cloud:" + v
+	}
+	return identity.Source{Kind: identity.SourceMeasured, Ref: ref, Mode: identity.ModeActive}
 }
 
-func (s *CloudDiscoveryService) updateDevice(ctx context.Context, device *models.Device) error {
-	metadataJSON, _ := json.Marshal(device.Metadata)
-	tagsJSON, _ := json.Marshal(device.Tags)
-
-	query := `
-		UPDATE devices SET
-			vendor = $1, model = $2, hostname = $3, ip_address = $4,
-			management_url = $5, metadata = $6, tags = $7, updated_at = $8
-		WHERE id = $9 AND tenant_id = $10
-	`
-
-	// RLS-scoped write on `devices` under device.TenantID.
-	return shareddatabase.WithTenantTx(ctx, s.db, device.TenantID, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, query,
-			device.Vendor, device.Model, device.Hostname, device.IPAddress,
-			device.ManagementURL, metadataJSON, tagsJSON, device.UpdatedAt, device.ID, device.TenantID,
-		)
-		return err
-	})
+// nonEmptyPtr returns a pointer to s, or nil when s is empty — the difference
+// between "set this column" and "this call is not about that column".
+func nonEmptyPtr(s string) *string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	return &s
 }
 
 // DiscoverAzureResources discovers Azure resources and creates devices
@@ -1346,17 +1449,9 @@ func (s *CloudDiscoveryService) discoverApplicationGateways(ctx context.Context,
 				UpdatedAt:        time.Now(),
 			}
 
-			existing, err := s.findExistingDevice(ctx, tenantID, "azure_application_gateway", hostname, *gw.ID)
-			if err == nil && existing != nil {
-				device.ID = existing.ID
-				device.UpdatedAt = time.Now()
-				if err := s.updateDevice(ctx, &device); err != nil {
-					continue
-				}
-			} else {
-				if err := s.insertDevice(ctx, &device); err != nil {
-					continue
-				}
+			if err := s.upsertDeviceAsset(ctx, &device, *gw.ID); err != nil {
+				log.Printf("Warning: failed to record azure_application_gateway %s: %v", hostname, err)
+				continue
 			}
 
 			devices = append(devices, device)
@@ -1465,17 +1560,9 @@ func (s *CloudDiscoveryService) discoverAzureLoadBalancers(ctx context.Context, 
 				UpdatedAt:        time.Now(),
 			}
 
-			existing, err := s.findExistingDevice(ctx, tenantID, "azure_load_balancer", hostname, *lb.ID)
-			if err == nil && existing != nil {
-				device.ID = existing.ID
-				device.UpdatedAt = time.Now()
-				if err := s.updateDevice(ctx, &device); err != nil {
-					continue
-				}
-			} else {
-				if err := s.insertDevice(ctx, &device); err != nil {
-					continue
-				}
+			if err := s.upsertDeviceAsset(ctx, &device, *lb.ID); err != nil {
+				log.Printf("Warning: failed to record azure_load_balancer %s: %v", hostname, err)
+				continue
 			}
 
 			devices = append(devices, device)
@@ -1782,17 +1869,8 @@ func (s *CloudDiscoveryService) processGCPHTTPSProxy(
 		UpdatedAt:        time.Now(),
 	}
 
-	existing, err := s.findExistingDevice(ctx, tenantID, "gcp_https_load_balancer", hostname, proxy.SelfLink)
-	if err == nil && existing != nil {
-		device.ID = existing.ID
-		device.UpdatedAt = time.Now()
-		if err := s.updateDevice(ctx, &device); err != nil {
-			return nil, fmt.Errorf("failed to update device: %w", err)
-		}
-	} else {
-		if err := s.insertDevice(ctx, &device); err != nil {
-			return nil, fmt.Errorf("failed to insert device: %w", err)
-		}
+	if err := s.upsertDeviceAsset(ctx, &device, proxy.SelfLink); err != nil {
+		return nil, fmt.Errorf("failed to record gcp_https_load_balancer: %w", err)
 	}
 
 	return &device, nil
@@ -1890,17 +1968,8 @@ func (s *CloudDiscoveryService) processGCPSSLProxy(
 		UpdatedAt:        time.Now(),
 	}
 
-	existing, err := s.findExistingDevice(ctx, tenantID, "gcp_ssl_proxy", hostname, proxy.SelfLink)
-	if err == nil && existing != nil {
-		device.ID = existing.ID
-		device.UpdatedAt = time.Now()
-		if err := s.updateDevice(ctx, &device); err != nil {
-			return nil, fmt.Errorf("failed to update device: %w", err)
-		}
-	} else {
-		if err := s.insertDevice(ctx, &device); err != nil {
-			return nil, fmt.Errorf("failed to insert device: %w", err)
-		}
+	if err := s.upsertDeviceAsset(ctx, &device, proxy.SelfLink); err != nil {
+		return nil, fmt.Errorf("failed to record gcp_ssl_proxy: %w", err)
 	}
 
 	return &device, nil

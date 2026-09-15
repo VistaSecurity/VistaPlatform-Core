@@ -73,17 +73,48 @@ func (s *EventPublisherService) PublishBulkAssetChanged(ctx context.Context, ten
 }
 
 // PublishAssetDiscovered publishes asset.discovered (new asset from discovery).
-func (s *EventPublisherService) PublishAssetDiscovered(ctx context.Context, tenantID, assetID uuid.UUID, hostname, ipAddress *string, port *int, source string) error {
+//
+// classKey travels with the id so a subscriber can route on what appeared
+// without re-reading the asset; empty means the intake path had no opinion,
+// which is honest and is not the same as "unknown_host".
+func (s *EventPublisherService) PublishAssetDiscovered(ctx context.Context, tenantID, assetID uuid.UUID, classKey string, hostname, ipAddress *string, port *int, source string) error {
 	if s.lifecycle == nil {
 		return nil
 	}
 	return s.lifecycle.Publish(ctx, invevents.EventTypeAssetDiscovered, tenantID, source, &invevents.AssetDiscoveredPayload{
 		AssetID:   assetID,
+		ClassKey:  classKey,
 		Hostname:  hostname,
 		IPAddress: ipAddress,
 		Port:      port,
 		Source:    source,
 	})
+}
+
+// PublishAssetMerged publishes asset.merged, so a downstream cache holding the
+// merged-away id learns which asset to point at now.
+func (s *EventPublisherService) PublishAssetMerged(ctx context.Context, tenantID uuid.UUID, payload *invevents.AssetMergedPayload, source string) error {
+	if s.lifecycle == nil {
+		return nil
+	}
+	return s.lifecycle.Publish(ctx, invevents.EventTypeAssetMerged, tenantID, source, payload)
+}
+
+// PublishAssetLifecycle publishes asset.approved / asset.denied /
+// asset.archived.
+//
+// Nothing consumes these today, deliberately: the edge promotion and the
+// deferred-finding materialisation that approval triggers are IN-PROCESS and
+// stay that way — an approval that depended on a subscriber would be an
+// approval that silently did nothing when NATS was down. The event exists so a
+// cache or an external system CAN learn the decision, and so that the three
+// acts a human performs in Approvals are as visible on the bus as the merge
+// and the discovery already were.
+func (s *EventPublisherService) PublishAssetLifecycle(ctx context.Context, tenantID uuid.UUID, eventType string, payload *invevents.AssetLifecyclePayload, source string) error {
+	if s.lifecycle == nil {
+		return nil
+	}
+	return s.lifecycle.Publish(ctx, eventType, tenantID, source, payload)
 }
 
 // PublishAssetEnriched publishes asset.enriched (location/segment/service set or updated).

@@ -5,7 +5,7 @@ import { DTable, CellMono, CellTxt, PageWrap, queryNote, sensorOnline, relTime }
 import { useSensors, useDiscoveryCounts, useDeviceAgents } from './queries';
 import { RegisterSensorModal, DeleteSensorModal, DeleteAgentModal, PendingRegistrationsSection } from './sensor-modals';
 import { SensorDetailDrawer } from './sensor-detail-drawer';
-import { profileLabel, jobsSummary, hostSummary, addressTooltip, isPlatformManaged } from './agent-fleet';
+import { profileLabel, jobsSummary, hostSummary, addressTooltip, isPlatformManaged, hostInventorySummary } from './agent-fleet';
 
 // Discovery → Sensors & Agents. TWO tables, because a sensor and a discovery
 // agent are two different things:
@@ -171,6 +171,15 @@ export function SensorsPage() {
                       <div style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                         {[a.description, a.platform].filter(Boolean).join(' · ') || '—'}
                       </div>
+                      {/* What the agent found out about its OWN host, which the
+                          jobs column cannot say: a host inventory is not work
+                          anybody queued. Omitted entirely when the agent has
+                          never reported one — see hostInventorySummary. */}
+                      {hostInventorySummary(a) && (
+                        <div style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {hostInventorySummary(a)}
+                        </div>
+                      )}
                     </div>
                   </div>
                   {/* The cell shows the primary and a count; the tooltip carries

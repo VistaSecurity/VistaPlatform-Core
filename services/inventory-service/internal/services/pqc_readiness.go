@@ -13,35 +13,38 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/cryptoassess"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 )
 
-// pqcComponentRoles are the crypto_implementation_algorithms.algorithm_type
-// values that name a real cryptographic component.
+// The component roles and the Shor-breakable primitive denylist moved to
+// internal/cryptoassess, and these forward to them.
 //
-// 'protocol_version' and 'cipher_suite' are deliberately EXCLUDED: ingest links
-// those as container rows (a TLS version, a whole suite string) whose catalogue
-// entries carry primitive 'other' or NULL. Counting them would mark essentially
-// every implementation unclassified, since almost all of them link one.
-var pqcComponentRoles = []string{"key_exchange", "signature", "symmetric", "hash"}
+// They moved because the `crypto` finding producer classifies the SAME
+// configurations against the SAME denylist, one package away, to decide whether
+// to raise `crypto/pqc_vulnerable`. Two copies of a denylist is how one
+// classification silently starts answering two different questions.
+var pqcComponentRoles = cryptoassess.PQCComponentRoles
 
-// quantumVulnerablePrimitives are the CycloneDX primitives whose classical
-// constructions Shor's algorithm breaks: public-key encryption, key
-// establishment, and digital signatures.
+var quantumVulnerablePrimitives = cryptoassess.QuantumVulnerablePrimitives
+
+// MonitoredConfigurationsSQL selects the configurations every tenant-wide
+// crypto number is computed over: live configurations on a live, monitoring
+// asset.
 //
-// This is a DENYLIST on purpose. The previous implementation used an allowlist
-// of "quantum-safe" primitives ({ae, hash, mac}) and therefore silently treated
-// everything it forgot as needing migration — against the shipped catalogue that
-// misclassified 11 algorithms, including plain AES128 and AES256
-// (primitive 'block-cipher'), RC4 ('stream-cipher') and the SHAKE functions
-// ('xof'). The set of Shor-breakable primitives is closed and small, so a
-// denylist cannot rot the same way as the CycloneDX primitive enum grows.
-//
-// Authority: NIST IR 8547 (Transition to Post-Quantum Cryptography Standards)
-// names RSA, ECDSA, EdDSA, DH and ECDH as the quantum-vulnerable algorithms,
-// deprecated after 2030 and disallowed after 2035. Symmetric ciphers and hashes
-// are weakened (Grover) but not broken, and are not migration targets.
-var quantumVulnerablePrimitives = []string{"signature", "kem", "key-agree", "pke"}
+// It is a named constant because the population is the thing the numbers
+// disagreed about. This classifier once counted every non-deleted
+// crypto_implementations row regardless of whether its asset still existed or
+// was still pending approval — a strictly broader set than crypto-configurations
+// and risk/summary used — which is what let /pqc/progress's
+// total_implementations disagree with the Dashboard's "Configs" count and the
+// Inventory Configuration lens total for the same tenant (M-1).
+const MonitoredConfigurationsSQL = `
+    SELECT ci.id, ci.tenant_id
+      FROM crypto_implementations ci
+      INNER JOIN assets na ON na.tenant_id = ci.tenant_id AND na.id = ci.asset_id
+            AND na.deleted_at IS NULL AND na.asset_status = 'monitoring'
+     WHERE ci.tenant_id = $1 AND ci.deleted_at IS NULL`
 
 // pqcCounts is a per-tenant classification of crypto implementations into four
 // mutually exclusive, collectively exhaustive categories. Because they
@@ -81,7 +84,7 @@ func (c pqcCounts) ReadyPercent() float64 {
 // denominator, so one implementation contributed to several families at once
 // and the readiness percentage could exceed 100%.
 func classifyTenantImplementationsPQC(db *database.DB, tenantID uuid.UUID) (pqcCounts, error) {
-	// INNER JOIN network_assets (na), scoped to asset_status = 'monitoring':
+	// INNER JOIN assets (na), scoped to asset_status = 'monitoring':
 	// without it this classifier's Total counted every non-deleted
 	// crypto_implementations row regardless of whether its asset still exists
 	// or is still pending approval — a strictly broader population than
@@ -91,27 +94,8 @@ func classifyTenantImplementationsPQC(db *database.DB, tenantID uuid.UUID) (pqcC
 	// "Configs" count and the Inventory Configuration lens total for the same
 	// tenant (M-1). All three now share one definition: implementations on a
 	// live, monitoring asset.
-	const query = `
-		WITH impl_component AS (
-			SELECT ci.id AS impl_id, a.is_pqc, a.primitive
-			  FROM crypto_implementations ci
-			  INNER JOIN network_assets na ON na.id = ci.asset_id
-			        AND na.deleted_at IS NULL AND na.asset_status = 'monitoring'
-			  LEFT JOIN crypto_implementation_algorithms cia
-			         ON cia.crypto_implementation_id = ci.id
-			        AND cia.algorithm_type = ANY($2)
-			  LEFT JOIN algorithms a ON a.id = cia.algorithm_id
-			 WHERE ci.tenant_id = $1 AND ci.deleted_at IS NULL
-		),
-		impl_class AS (
-			SELECT impl_id,
-			       COALESCE(bool_or(NOT COALESCE(is_pqc, false) AND primitive = ANY($3)), false) AS vulnerable,
-			       COALESCE(bool_or(COALESCE(is_pqc, false)), false)                             AS has_pqc,
-			       COUNT(*) FILTER (WHERE primitive IS NOT NULL AND primitive <> 'other')        AS known,
-			       COUNT(*) FILTER (WHERE primitive IS NULL OR primitive = 'other')              AS unknown
-			  FROM impl_component
-			 GROUP BY impl_id
-		)
+	query := `
+		WITH ` + cryptoassess.PQCClassCTE(MonitoredConfigurationsSQL, "$2", "$3") + `
 		SELECT
 			COUNT(*)                                                                                  AS total,
 			COUNT(*) FILTER (WHERE vulnerable)                                                        AS needs_migration,

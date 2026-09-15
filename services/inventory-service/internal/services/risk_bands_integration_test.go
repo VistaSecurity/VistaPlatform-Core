@@ -150,11 +150,20 @@ func TestIntegration_RiskSummary_BucketsAreExclusiveAndExhaustive(t *testing.T) 
 			t.Fatalf("%s: GetRiskLevel(max=%d) = %q, want %q", sc.name, worst, got, sc.wantBand)
 		}
 
+		// `assets.risk_score` is seeded with the asset's worst score — what
+		// recomputeAssetRisk writes on ingest. GetRiskSummary READS that rollup
+		// rather than recomputing MAX(ci.risk_score), so the badge, the facets
+		// and this summary cannot band the same asset differently. The
+		// implementations below still go in: critical_findings counts THEM, and
+		// the rollup has to be seeded from something real.
 		assetID := uuid.New()
 		if _, err := db.Exec(`
-			INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-			VALUES ($1,$2,$3,'server','monitoring',NOW(),NOW(),NOW(),NOW())`,
-			assetID, tenant, sc.name+".example.test"); err != nil {
+			INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status,
+			                    risk_score, risk_assessed_by,
+			                    last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, 'server', 'hardware.computer.server', 'monitoring',
+			        $4, ARRAY['crypto']::text[], NOW(), NOW(), NOW(), NOW())`,
+			assetID, tenant, sc.name+".example.test", worst); err != nil {
 			t.Fatalf("insert asset %s: %v", sc.name, err)
 		}
 		for _, score := range sc.scores {
@@ -172,11 +181,15 @@ func TestIntegration_RiskSummary_BucketsAreExclusiveAndExhaustive(t *testing.T) 
 		t.Fatalf("GetRiskSummary: %v", err)
 	}
 
-	sum := got.HighRisk + got.MediumRisk + got.LowRisk + got.UnknownRisk
+	// FIVE buckets, not four. `informational` (assessed and clean) split out of
+	// `unknown_risk` (nobody has looked) in gate 1 A3: they used to be one
+	// number, so a tenant that had never been scanned read as clean. The sum
+	// still has to be exhaustive and exclusive, which is what this asserts.
+	sum := got.HighRisk + got.MediumRisk + got.LowRisk + got.Informational + got.UnknownRisk
 	if sum != got.TotalAssets {
-		t.Errorf("buckets sum to %d but total_assets = %d (high=%d medium=%d low=%d unknown=%d) — "+
-			"an asset is being counted in more than one band",
-			sum, got.TotalAssets, got.HighRisk, got.MediumRisk, got.LowRisk, got.UnknownRisk)
+		t.Errorf("buckets sum to %d but total_assets = %d (high=%d medium=%d low=%d informational=%d unknown=%d) — "+
+			"an asset is being counted in more than one band, or in none",
+			sum, got.TotalAssets, got.HighRisk, got.MediumRisk, got.LowRisk, got.Informational, got.UnknownRisk)
 	}
 	if got.TotalAssets != len(scenarios) {
 		t.Fatalf("total_assets = %d, want %d", got.TotalAssets, len(scenarios))
@@ -193,8 +206,18 @@ func TestIntegration_RiskSummary_BucketsAreExclusiveAndExhaustive(t *testing.T) 
 	if got.LowRisk != 1 {
 		t.Errorf("low_risk = %d, want 1 (only the 20-max asset; mixed-band assets must NOT appear here)", got.LowRisk)
 	}
-	if got.UnknownRisk != 2 {
-		t.Errorf("unknown_risk = %d, want 2 (zero-scored and no-implementation assets)", got.UnknownRisk)
+	// Both of these assets carry `risk_assessed_by = {crypto}` — the fixture
+	// stamps it on every row — so both were ASSESSED, and both scored 0. That
+	// is `informational`, and it is a different answer from "nobody looked".
+	// Before A3 they were reported as `unknown_risk`, which is what made a
+	// scanned-and-clean tenant indistinguishable from an unscanned one.
+	if got.Informational != 2 {
+		t.Errorf("informational = %d, want 2 (the zero-scored and no-implementation assets, both assessed)",
+			got.Informational)
+	}
+	if got.UnknownRisk != 0 {
+		t.Errorf("unknown_risk = %d, want 0 — every asset in this fixture has a producer in "+
+			"risk_assessed_by, so none of them is unassessed", got.UnknownRisk)
 	}
 
 	// critical_findings is implementation-scoped, not asset-scoped: exactly the

@@ -2,20 +2,20 @@ package deviceinterrogation
 
 import (
 	"context"
-	"strings"
+
+	"github.com/vistasecurity/vistaplatform/shared/redact"
 )
 
 // Secret material must never leave the interrogated device.
 //
-// We inventory cryptographic POSTURE — which algorithms, key sizes, protocol
-// versions and certificates a device uses. We have no need for the key material
-// itself, and storing it would make our database a more attractive target than
-// the devices it describes. A UniFi interrogation was persisting the
-// controller's mesh PSK, per-device auth keys and syslog keys verbatim into
-// device_jobs.results and discovery_findings.details, because collectors
-// assigned whole vendor API response objects into Metadata.
+// The rule, the field-name lists and the crypto-posture allowlist now live in
+// shared/redact, because four more boundaries need exactly the same decisions
+// about exactly the same field names: the host agent, the SBOM parser, the
+// CMDB connectors, and the AI provider boundary (ADR-0004 D4, ADR-0008 D4.5).
+// One list, one set of mutation-tested guards. This file is what interrogation
+// adds on top: the structural chokepoint.
 //
-// Two independent defences, deliberately:
+// Two independent defences remain, deliberately:
 //
 //  1. Collectors project vendor responses onto an explicit allowlist of fields
 //     we actually use, so secrets are never collected in the first place. That
@@ -24,162 +24,135 @@ import (
 //     field name still looks like a secret. This is the backstop for the next
 //     collector someone writes, and for vendor fields we have not seen yet.
 //
-// Defence 2 exists BECAUSE defence 1 depends on a human remembering. A redacted
-// value is replaced with redactedMarker rather than dropped, so that when the
-// backstop fires it is visible in the payload and in tests — a scrubber whose
-// effect you cannot observe is a scrubber you cannot trust.
-
-// redactedMarker replaces any value whose field name indicates secret material.
-const redactedMarker = "[redacted]"
-
-// secretNameFragments mark a field as secret material wherever they appear in
-// the field name. Matched case-insensitively against the whole name.
-var secretNameFragments = []string{
-	"password", "passwd", "passphrase",
-	"secret", "credential",
-	"psk", "preshared", "pre_shared",
-	"token", "bearer", "cookie",
-	// An `authorization` field is a header value — "Bearer …", "Basic …" — and
-	// is the single likeliest key name for an integration whose auth_type is a
-	// header. Deliberately NOT the bare fragment "auth": that would swallow
-	// authentication_algorithm / authmethod, which are crypto posture and are
-	// exactly what we are in business to collect. A bare field named `auth` is
-	// handled by exactSecretNames instead.
-	"authorization",
-	// Webhook URLs (Slack, Teams, generic SIEM sinks) carry their credential
-	// inside the URL path, so the URL IS the secret. Redacted whole rather than
-	// split: there is no vendor-independent way to say which path segment is the
-	// token, and a half-shown URL invites the reader to believe the rest is safe
-	// to display. Matches webhook_url, webhook_uri, slack_webhook, ….
-	"webhook",
-	"apikey", "api_key",
-	"privatekey", "private_key",
-	"x_authkey", "authkey", "auth_key",
-	"sessionkey", "session_key",
-	"masterkey", "master_key",
-	"sharedkey", "shared_key",
-	"signingkey", "signing_key",
-	"encryptionkey", "encryption_key",
-}
-
-// exactSecretNames are field names that carry secret material as the WHOLE name
-// but whose text is too common to use as a fragment. `auth` is the case that
-// forced this: an integration's auth block is often stored under a bare `auth`
-// key, while "auth" as a substring appears throughout legitimate crypto posture
-// (authentication_algorithm, authmethod, authenticated). Matched after
-// safeFieldNames, on the normalized whole name only.
-var exactSecretNames = map[string]bool{
-	"auth": true,
-}
-
-// safeFieldNames are the cryptographic-posture fields whose names contain "key"
-// but which carry no secret material — they are exactly what we are in business
-// to inventory. Checked before the "ends in key" rule below, so describing a key
-// stays possible while storing one does not.
-var safeFieldNames = map[string]bool{
-	"key_algorithm":          true,
-	"key_size":               true,
-	"key_length":             true,
-	"key_strength":           true,
-	"key_exchange":           true,
-	"key_exchange_algorithm": true,
-	"key_types":              true,
-	"key_usage":              true,
-	"extended_key_usage":     true,
-	"key_agreement":          true,
-	"key_id":                 true,
-	"keyid":                  true,
-	"public_key":             true,
-	"public_key_algorithm":   true,
-	"host_key_type":          true,
-	"host_key_fingerprint":   true,
-}
-
-// normalizeFieldName lowercases and folds separators so one fragment matches
-// every spelling a vendor might use. FortiOS returns `private-key`, PAN-OS
-// returns `private_key`, and some APIs return `privateKey` — without folding,
-// a fragment list would have to enumerate all three and would silently miss the
-// fourth.
-var fieldNameSeparators = strings.NewReplacer("-", "_", " ", "_", ".", "_")
-
-func normalizeFieldName(name string) string {
-	return fieldNameSeparators.Replace(strings.ToLower(strings.TrimSpace(name)))
-}
-
-// isSecretFieldName reports whether a field name indicates secret material.
-func isSecretFieldName(name string) bool {
-	lower := normalizeFieldName(name)
-	if lower == "" {
-		return false
-	}
-	if safeFieldNames[lower] {
-		return false
-	}
-	if exactSecretNames[lower] {
-		return true
-	}
-	for _, frag := range secretNameFragments {
-		if strings.Contains(lower, frag) {
-			return true
-		}
-	}
-	// Catch-all for the vendor-specific key fields we cannot enumerate ahead of
-	// time (x_vwirekey, syslog_key, x_mesh_key, …). Anything whose name ends in
-	// "key" and is not an explicitly safe posture field is treated as material.
-	return strings.HasSuffix(lower, "key")
-}
-
-// redactValue recursively sanitizes an arbitrary decoded-JSON value.
-func redactValue(v interface{}) interface{} {
-	switch typed := v.(type) {
-	case map[string]interface{}:
-		return RedactMap(typed)
-	case []interface{}:
-		out := make([]interface{}, len(typed))
-		for i, item := range typed {
-			out[i] = redactValue(item)
-		}
-		return out
-	case []map[string]interface{}:
-		out := make([]map[string]interface{}, len(typed))
-		for i, item := range typed {
-			out[i] = RedactMap(item)
-		}
-		return out
-	default:
-		return v
-	}
-}
+// Defence 2 exists BECAUSE defence 1 depends on a human remembering.
 
 // RedactMap returns a copy of m with every secret-looking field replaced by
-// redactedMarker, recursing through nested maps and slices. The input is not
+// redact.Marker, recursing through nested maps and slices. The input is not
 // mutated. A nil map returns nil.
+//
+// Kept as this package's exported entry point because callers outside it
+// (inventory-service's integration list, device-interrogation-service's job
+// results) already read as "redact this the way interrogation does".
 func RedactMap(m map[string]interface{}) map[string]interface{} {
-	if m == nil {
-		return nil
-	}
-	out := make(map[string]interface{}, len(m))
-	for k, v := range m {
-		if isSecretFieldName(k) {
-			out[k] = redactedMarker
-			continue
-		}
-		out[k] = redactValue(v)
-	}
-	return out
+	return redact.Map(m)
 }
 
 // Sanitize scrubs secret material from an interrogation result in place. It is
 // applied by the Registry to every interrogator's output, so no collector can
 // skip it and no new collector has to remember it.
+//
+// Every place a result can carry collector-controlled data must be walked here.
+// That list grows: ops facts and observed relationships (ADR-0004 D1) added two
+// more, and a fact value is `any`, which is the widest hole of the lot.
+// TestSanitize_CoversEveryCollectedMapInTheResultType walks the result TYPE by
+// reflection and fails if a new map[string]any, []map[string]any or `any` field
+// appears anywhere in it without a line below — the gap the 0.5 review flagged,
+// where a new field would have shipped unredacted and nothing would have said
+// so.
+//
+// That walker covers the MAP-shaped sites. The string-shaped ones are covered
+// by hand ([sanitizeIdentity], [sanitizePeer]) and are not structurally
+// guarded, because a redactor that walked arbitrary strings by reflection is
+// the heuristic shared/redact deliberately refuses. A new free-text string
+// field on a collected type therefore still needs a line here.
 func Sanitize(result *InterrogateResult) {
 	if result == nil {
 		return
 	}
-	result.DeviceInfo = RedactMap(result.DeviceInfo)
+	result.DeviceInfo = redact.Map(result.DeviceInfo)
 	for i := range result.Assets {
-		result.Assets[i].Metadata = RedactMap(result.Assets[i].Metadata)
+		result.Assets[i].Metadata = redact.Map(result.Assets[i].Metadata)
+		sanitizeServiceHints(result.Assets[i].ServiceHints)
 	}
+	for i := range result.Facts {
+		// redact.Any handles the shapes a fact value actually takes —
+		// map[string]any, []map[string]any, []any, []string and string — and
+		// returns anything else unchanged. That is why array-valued facts are
+		// built as []map[string]any and never as typed structs: a struct would
+		// pass through here untouched.
+		result.Facts[i].Value = redact.Any(result.Facts[i].Value)
+		sanitizePeer(&result.Facts[i].Subject)
+	}
+	for i := range result.Relationships {
+		result.Relationships[i].Attributes = redact.Map(result.Relationships[i].Attributes)
+		sanitizePeer(&result.Relationships[i].Subject)
+		sanitizePeer(&result.Relationships[i].Peer)
+	}
+	sanitizeIdentity(result.DeviceIdentity)
+}
+
+// sanitizePeer masks PEM private-key blocks in a peer reference's free-text
+// fields, by the same rule and for the same reason as [sanitizeIdentity].
+//
+// A peer's display name is the least trusted string in the whole result: it is
+// whatever an LLDP neighbour advertised as its system name, or whatever an
+// operator typed into a controller as a device label. The identical string
+// reaches the result twice — once as `remote_name` inside the net.neighbors
+// fact value, where [redact.Any] masks it, and once here, where nothing did.
+// One string masked in one field and verbatim in the next is not a defensible
+// boundary.
+//
+// Identifier values are covered too. Normalisation already rejects anything
+// with a control character, so a multi-line PEM can never reach a MAC, an
+// address or a DNS name — but `serial_number` is deliberately opaque
+// (a serial's punctuation is the vendor's), so it is the one kind that would
+// carry a single-line block through.
+func sanitizePeer(peer *PeerRef) {
+	if peer == nil {
+		return
+	}
+	peer.DisplayName = redact.TextPEM(peer.DisplayName)
+	// The advertised posture, by the same rule. Both are projections of an LLDP
+	// system description or a CDP banner — free text from a device we do not
+	// control — and a projection that keeps the product segment would keep a
+	// single-line PEM block pasted where the product should be.
+	peer.Platform = redact.TextPEM(peer.Platform)
+	peer.SoftwareVersion = redact.TextPEM(peer.SoftwareVersion)
+	// The capability lists are NOT walked: every element comes from a closed
+	// vocabulary (lldpCapabilityNames drops anything else), so there is no
+	// value in them that did not originate here.
+	for i := range peer.Identifiers {
+		peer.Identifiers[i].Value = redact.TextPEM(peer.Identifiers[i].Value)
+	}
+}
+
+// sanitizeServiceHints masks PEM private-key blocks in an asset's identified
+// service name and version.
+//
+// Same rule and same reason as [sanitizeIdentity]: name-based redaction cannot
+// help on fields called `service_name` and `service_version`, and both hold
+// free text whose ORIGIN is outside our control. The HTTP and TLS probers fill
+// them from a server banner; host inventory (shared/hostinventory) fills the
+// name from the process holding a listening socket, which is whatever the host
+// called the binary. A host with a pasted key in a process name is absurd, and
+// so was a device with one in its SNMP sysDescr until we found one.
+func sanitizeServiceHints(hints *ServiceHints) {
+	if hints == nil {
+		return
+	}
+	hints.ServiceName = redact.TextPEM(hints.ServiceName)
+	hints.ServiceVersion = redact.TextPEM(hints.ServiceVersion)
+}
+
+// sanitizeIdentity masks PEM private-key blocks in the device identity's string
+// fields.
+//
+// Name-based redaction cannot help here — these fields are named `vendor` and
+// `os_version` — and the values are vendor free text a collector copied
+// verbatim. The concrete case is SNMP: sysDescr is a whole banner, it is the
+// identity's OSVersion, and a device whose banner contains a pasted key would
+// have carried it into the inventory with nothing to catch it. [redact.TextPEM]
+// is the value-shaped rule that exists for exactly this, and applying it costs
+// nothing on the version strings that are all these fields normally hold.
+func sanitizeIdentity(identity *DeviceIdentity) {
+	if identity == nil {
+		return
+	}
+	identity.Vendor = redact.TextPEM(identity.Vendor)
+	identity.Model = redact.TextPEM(identity.Model)
+	identity.FirmwareVersion = redact.TextPEM(identity.FirmwareVersion)
+	identity.SerialNumber = redact.TextPEM(identity.SerialNumber)
+	identity.OSVersion = redact.TextPEM(identity.OSVersion)
 }
 
 // sanitizingInterrogator decorates a DeviceInterrogator so its result is

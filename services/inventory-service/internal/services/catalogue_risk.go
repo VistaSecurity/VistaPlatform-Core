@@ -21,19 +21,18 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
+
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/cryptoassess"
 )
 
-// catalogueRiskRoles are the junction algorithm_type values that contribute to
-// an implementation's risk.
+// catalogueRiskRoles moved to internal/cryptoassess and this forwards to it.
 //
-// Unlike the PQC classifier (which considers only real cryptographic
-// primitives), risk DOES include the container rows: an obsolete protocol
-// version is one of the strongest risk signals there is — TLS 1.0 carries
-// catalogue risk 75, and RFC 8996 says it MUST NOT be used — and whole-suite
-// entries carry their own assessment.
-var catalogueRiskRoles = []string{
-	"protocol_version", "cipher_suite", "key_exchange", "signature", "symmetric", "hash",
-}
+// It moved for the `crypto` finding producer (workstream 3.2), which scores the
+// SAME configurations from the SAME junction rows to raise
+// `crypto/weak_configuration`. A second list would be a second answer to "which
+// components count", and the producer's score and the ingest score would drift
+// apart with nothing to notice.
+var catalogueRiskRoles = cryptoassess.CatalogueRiskRoles
 
 // catalogueRiskContribution is one algorithm's contribution to an
 // implementation's risk, carrying enough context to explain the number.

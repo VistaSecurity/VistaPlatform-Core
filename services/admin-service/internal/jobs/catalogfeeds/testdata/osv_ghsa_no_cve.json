@@ -1,0 +1,13 @@
+{
+  "id": "GHSA-xxxx-yyyy-zzzz",
+  "aliases": ["GO-2024-1234"],
+  "modified": "2024-06-01T00:00:00Z",
+  "published": "2024-05-30T00:00:00Z",
+  "summary": "An advisory with no CVE assigned",
+  "affected": [
+    {
+      "package": { "ecosystem": "Go", "name": "example.com/mod", "purl": "pkg:golang/example.com/mod" },
+      "ranges": [{ "type": "SEMVER", "events": [{ "introduced": "0" }, { "fixed": "1.2.3" }] }]
+    }
+  ]
+}

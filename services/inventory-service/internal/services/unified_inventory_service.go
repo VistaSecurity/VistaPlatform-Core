@@ -14,8 +14,21 @@ import (
 	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 )
 
+// The unified inventory is an ENTITY list — assets and certificates in one
+// stream — so an asset appears once, with its primary endpoint for the address
+// and port a row has room for.
+//
+// Its asset branch reads the PERSISTED per-asset risk rollup, like every other
+// asset reader; it used to aggregate `MAX(ci.risk_score)` of its own, which is a
+// second opinion about a number recomputeAssetRisk already writes. The filter
+// and the badge therefore came from the same aggregate as each other but a
+// different one from the Inventory list beside them.
+//
+// The entity model here still predates classes and relationships; widening it is
+// phase 2/3 work (the Software lens, the map), not this slice.
 type UnifiedInventoryService struct {
 	db *database.DB
 }
@@ -91,7 +104,10 @@ func (s *UnifiedInventoryService) buildUnifiedQuery(
 
 	// Build asset query if needed
 	if filters.EntityType == "assets" || filters.EntityType == "both" {
-		assetQuery, assetArgs, assetArgCount := s.buildAssetQuery(filters, argCount, sharedArgPositions)
+		assetQuery, assetArgs, assetArgCount, buildErr := s.buildAssetQuery(filters, argCount, sharedArgPositions)
+		if buildErr != nil {
+			return nil, 0, buildErr
+		}
 		// Adjust placeholder numbers in the query to match combined args array positions
 		// The query was built with placeholders starting from argCount, but we need them
 		// relative to the combined args array. The assetArgs will be appended at position len(args),
@@ -200,7 +216,7 @@ func (s *UnifiedInventoryService) buildUnifiedQuery(
 	countQuery = strings.TrimSpace(countQuery)
 	countArgs := args[:len(args)-2] // Remove LIMIT and OFFSET args
 
-	// RLS-scoped reads over network_assets / certificates / crypto_implementations
+	// RLS-scoped reads over assets / certificates / crypto_implementations
 	// (every UNION branch filters on tenant_id = $1) — page rows, per-row hydration,
 	// and the wrapped count all run in one tenant tx (sets app.tenant_id).
 	var total int
@@ -302,17 +318,29 @@ func (s *UnifiedInventoryService) buildAssetQuery(
 	filters models.UnifiedInventoryFilters,
 	startArgCount int,
 	sharedArgPositions map[string]int,
-) (string, []interface{}, int) {
+) (string, []interface{}, int, error) {
 	argCount := startArgCount
 	args := []interface{}{}
 	// tenantID is $1 in the combined query
 	whereConditions := []string{"a.tenant_id = $1", "a.deleted_at IS NULL"}
 
-	// Apply asset filters
+	// Apply asset filters. The values are TRANSLATED and VALIDATED first.
+	//
+	// This compared `a.class_key` against the caller's raw strings, and the
+	// caller's strings are the four values of the retired `asset_type` enum —
+	// which is what every existing client, saved link and doc example still
+	// sends. `server` happens to be a class key; `appliance`, `endpoint` and
+	// `service` are not, so those returned 200 with an empty list. A filter
+	// that silently matches nothing is the worst possible answer: it looks like
+	// "you have none of those" rather than "I did not understand you".
 	if len(filters.AssetType) > 0 {
+		keys, err := resolveAssetTypeFilter(filters.AssetType)
+		if err != nil {
+			return "", nil, argCount, err
+		}
 		argCount++
-		whereConditions = append(whereConditions, fmt.Sprintf(`a.asset_type = ANY($%d)`, argCount))
-		args = append(args, pq.Array(filters.AssetType))
+		whereConditions = append(whereConditions, fmt.Sprintf(`a.class_key = ANY($%d)`, argCount))
+		args = append(args, pq.Array(keys))
 	}
 
 	// Use shared argument position if environment filter is shared, otherwise create new one
@@ -396,19 +424,19 @@ func (s *UnifiedInventoryService) buildAssetQuery(
 		args = append(args, *filters.KeySizeMin)
 	}
 
-	// Risk level filter - must use HAVING since it uses aggregate functions
-	havingConditions := []string{}
+	// The risk band is a WHERE, not a HAVING: the score is a column on the asset
+	// now, not an aggregate over its configurations. Predicates still come from
+	// the canonical ladder, so the filter cannot select a different range than
+	// the badge displays.
 	if len(filters.RiskLevel) > 0 {
 		riskConditions := []string{}
 		for _, level := range filters.RiskLevel {
-			// Exact-band predicates from the canonical ladder, so the filter can
-			// never select a different range than the badge displays.
-			if cond, ok := models.RiskBandSQL("COALESCE(MAX(ci.risk_score), 0)", level); ok {
+			if cond, ok := models.RiskBandSQL("a.risk_score", level); ok {
 				riskConditions = append(riskConditions, cond)
 			}
 		}
 		if len(riskConditions) > 0 {
-			havingConditions = append(havingConditions, "("+strings.Join(riskConditions, " OR ")+")")
+			whereConditions = append(whereConditions, "("+strings.Join(riskConditions, " OR ")+")")
 		}
 	}
 
@@ -416,27 +444,22 @@ func (s *UnifiedInventoryService) buildAssetQuery(
 		SELECT
 			'asset' as entity_type,
 			a.id::text as entity_id,
-			COALESCE(MAX(ci.risk_score), 0) as risk_score,
-			`+models.RiskLevelCaseSQL("COALESCE(MAX(ci.risk_score), 0)")+` as risk_level,
+			a.risk_score as risk_score,
+			`+models.RiskLevelCaseSQL("a.risk_score")+` as risk_level,
 			COUNT(DISTINCT c.id) as certificate_count,
 			NULL::bigint as asset_count,
 			COUNT(DISTINCT ci.id) as crypto_implementation_count,
 			NULL::bigint as days_until_expiration,
 			a.created_at as created_at,
 			NULL::timestamp as not_after
-		FROM network_assets a
+		FROM assets a
 		LEFT JOIN crypto_implementations ci ON a.id = ci.asset_id AND ci.deleted_at IS NULL
 		LEFT JOIN certificates c ON ci.certificate_id = c.id
 		WHERE %s
-		GROUP BY a.id, a.created_at
+		GROUP BY a.id, a.risk_score, a.created_at
 	`, strings.Join(whereConditions, " AND "))
 
-	// Add HAVING clause if we have risk level filters
-	if len(havingConditions) > 0 {
-		query += " HAVING " + strings.Join(havingConditions, " AND ")
-	}
-
-	return query, args, argCount
+	return query, args, argCount, nil
 }
 
 func (s *UnifiedInventoryService) buildCertificateQuery(
@@ -485,7 +508,7 @@ func (s *UnifiedInventoryService) buildCertificateQuery(
 		if pos, shared := sharedArgPositions["environment"]; shared {
 			whereConditions = append(whereConditions, fmt.Sprintf(`EXISTS (
 				SELECT 1 FROM crypto_implementations ci
-				JOIN network_assets a ON ci.asset_id = a.id
+				JOIN assets a ON a.tenant_id = ci.tenant_id AND a.id = ci.asset_id
 				WHERE ci.certificate_id = c.id
 				AND a.environment = ANY($%d)
 				AND a.deleted_at IS NULL
@@ -496,7 +519,7 @@ func (s *UnifiedInventoryService) buildCertificateQuery(
 			argCount++
 			whereConditions = append(whereConditions, fmt.Sprintf(`EXISTS (
 				SELECT 1 FROM crypto_implementations ci
-				JOIN network_assets a ON ci.asset_id = a.id
+				JOIN assets a ON a.tenant_id = ci.tenant_id AND a.id = ci.asset_id
 				WHERE ci.certificate_id = c.id
 				AND a.environment = ANY($%d)
 				AND a.deleted_at IS NULL
@@ -536,7 +559,7 @@ func (s *UnifiedInventoryService) buildCertificateQuery(
 			c.not_after as not_after
 		FROM certificates c
 		LEFT JOIN crypto_implementations ci ON c.id = ci.certificate_id AND ci.deleted_at IS NULL
-		LEFT JOIN network_assets a ON ci.asset_id = a.id AND a.deleted_at IS NULL
+		LEFT JOIN assets a ON a.tenant_id = ci.tenant_id AND a.id = ci.asset_id AND a.deleted_at IS NULL
 		WHERE %s
 		GROUP BY c.id, c.created_at, c.not_after
 	`, strings.Join(whereConditions, " AND "))
@@ -550,25 +573,27 @@ func (s *UnifiedInventoryService) buildCertificateQuery(
 }
 
 // loadAssetTx hydrates a single asset inside an existing tenant tx (RLS already
-// set by the caller's WithTenantTx). network_assets is RLS-scoped.
+// set by the caller's WithTenantTx). assets is RLS-scoped.
 func (s *UnifiedInventoryService) loadAssetTx(tx *sqlx.Tx, tenantID, assetID uuid.UUID) (*models.Asset, error) {
 	query := `
 		SELECT
-			id, tenant_id, hostname, ip_address, port, asset_type,
-			operating_system, environment, business_unit, owner_email,
-			description, tags::text, metadata::text, asset_ownership, asset_status,
-			first_discovered_at, last_seen_at,
-			created_at, updated_at, deleted_at
-		FROM network_assets
-		WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+			a.id, a.tenant_id, a.hostname, host(a.primary_address), ep.port, a.class_key,
+			` + assetOperatingSystemSQL + `, a.environment, a.business_unit, a.owner_email,
+			a.description, a.tags::text, a.metadata::text, a.asset_ownership, a.asset_status,
+			a.first_discovered_at, a.last_seen_at,
+			a.created_at, a.updated_at, a.deleted_at
+		FROM assets a` + primaryEndpointJoin + `
+		WHERE a.id = $1 AND a.tenant_id = $2 AND a.deleted_at IS NULL
 	`
 
 	var asset models.Asset
 	var tagsText, metadataText sql.NullString
+	var operatingSystem *string
+	var ep models.Endpoint
 
 	err := tx.QueryRow(query, assetID, tenantID).Scan(
-		&asset.ID, &asset.TenantID, &asset.Hostname, &asset.IPAddress, &asset.Port,
-		&asset.AssetType, &asset.OperatingSystem, &asset.Environment, &asset.BusinessUnit,
+		&asset.ID, &asset.TenantID, &asset.Hostname, &asset.PrimaryAddress, &ep.Port,
+		&asset.ClassKey, &operatingSystem, &asset.Environment, &asset.BusinessUnit,
 		&asset.OwnerEmail, &asset.Description, &tagsText, &metadataText, &asset.AssetOwnership, &asset.AssetStatus,
 		&asset.FirstDiscoveredAt, &asset.LastSeenAt, &asset.CreatedAt, &asset.UpdatedAt,
 		&asset.DeletedAt,
@@ -576,6 +601,9 @@ func (s *UnifiedInventoryService) loadAssetTx(tx *sqlx.Tx, tenantID, assetID uui
 	if err != nil {
 		return nil, err
 	}
+	setAssetOperatingSystem(&asset, operatingSystem)
+	attachPrimaryEndpoint(&asset, ep)
+	normalizeAssetCollections(&asset)
 
 	// Parse JSON fields
 	if tagsText.Valid {
@@ -658,13 +686,13 @@ func (s *UnifiedInventoryService) calculateSummary(
 ) (*models.UnifiedInventorySummary, error) {
 	summary := &models.UnifiedInventorySummary{}
 
-	// RLS-scoped reads over network_assets / certificates / crypto_implementations —
+	// RLS-scoped reads over assets / certificates / crypto_implementations —
 	// all summary counts run in one tenant tx (sets app.tenant_id). Per-query errors
 	// are tolerated (best-effort summary), matching the prior behavior.
 	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		// Total assets
 		var totalAssets int
-		if e := tx.QueryRow("SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND deleted_at IS NULL AND asset_status = 'monitoring'", tenantID).Scan(&totalAssets); e == nil {
+		if e := tx.QueryRow("SELECT COUNT(*) FROM assets WHERE tenant_id = $1 AND deleted_at IS NULL AND asset_status = 'monitoring'", tenantID).Scan(&totalAssets); e == nil {
 			summary.TotalAssets = totalAssets
 		}
 
@@ -678,7 +706,7 @@ func (s *UnifiedInventoryService) calculateSummary(
 		var totalImpls int
 		if e := tx.QueryRow(`
 			SELECT COUNT(*) FROM crypto_implementations ci
-			JOIN network_assets a ON ci.asset_id = a.id
+			JOIN assets a ON a.tenant_id = ci.tenant_id AND a.id = ci.asset_id
 			WHERE a.tenant_id = $1 AND ci.deleted_at IS NULL AND a.deleted_at IS NULL
 		`, tenantID).Scan(&totalImpls); e == nil {
 			summary.TotalCryptoImplementations = totalImpls
@@ -698,7 +726,7 @@ func (s *UnifiedInventoryService) calculateSummary(
 		var deprecatedAlgs int
 		if e := tx.QueryRow(`
 			SELECT COUNT(DISTINCT ci.id) FROM crypto_implementations ci
-			JOIN network_assets a ON ci.asset_id = a.id
+			JOIN assets a ON a.tenant_id = ci.tenant_id AND a.id = ci.asset_id
 			WHERE a.tenant_id = $1
 			AND ci.deleted_at IS NULL
 			AND a.deleted_at IS NULL
@@ -709,7 +737,7 @@ func (s *UnifiedInventoryService) calculateSummary(
 		// Assets with certificates
 		var assetsWithCerts int
 		if e := tx.QueryRow(`
-			SELECT COUNT(DISTINCT a.id) FROM network_assets a
+			SELECT COUNT(DISTINCT a.id) FROM assets a
 			JOIN crypto_implementations ci ON a.id = ci.asset_id
 			WHERE a.tenant_id = $1
 			AND a.deleted_at IS NULL
@@ -722,13 +750,9 @@ func (s *UnifiedInventoryService) calculateSummary(
 		// High risk entities
 		var highRisk int
 		if e := tx.QueryRow(`
-			SELECT COUNT(*) FROM (
-				SELECT a.id FROM network_assets a
-				LEFT JOIN crypto_implementations ci ON a.id = ci.asset_id AND ci.deleted_at IS NULL
-				WHERE a.tenant_id = $1 AND a.deleted_at IS NULL
-				GROUP BY a.id
-				HAVING `+models.MustRiskAtLeastSQL("COALESCE(MAX(ci.risk_score), 0)", "High")+`
-			) as high_risk_assets
+			SELECT COUNT(*) FROM assets a
+			WHERE a.tenant_id = $1 AND a.deleted_at IS NULL
+			  AND `+models.MustRiskAtLeastSQL("a.risk_score", "High")+`
 		`, tenantID).Scan(&highRisk); e == nil {
 			summary.HighRiskEntities = highRisk
 		}
@@ -772,4 +796,41 @@ func (s *UnifiedInventoryService) adjustPlaceholderNumbers(query string, oldBase
 		}
 		return match
 	})
+}
+
+// resolveAssetTypeFilter turns the `asset_type` filter's values into class keys.
+//
+// Three cases, in order:
+//
+//  1. a real class key, passed through;
+//  2. a value of the RETIRED four-value asset_type enum, mapped to the
+//     shallowest class that honestly covers it (assetclass.FromLegacyAssetType
+//     — `appliance` is `hardware`, not a guess at which kind of hardware);
+//  3. anything else, REFUSED. Silently matching nothing is how a caller comes
+//     to believe the tenant has no appliances.
+//
+// One value is in BOTH vocabularies: `service` is a retired enum value meaning
+// "an application" and a live class key meaning a DECLARED service. The live
+// key wins, because it is the vocabulary the rest of the product speaks and the
+// one a class picker offers. A caller that meant the old sense writes
+// `application`, which is what the class is called now.
+func resolveAssetTypeFilter(values []string) ([]string, error) {
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		trimmed := strings.ToLower(strings.TrimSpace(v))
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := assetclass.Get(trimmed); ok {
+			out = append(out, trimmed)
+			continue
+		}
+		if key, ok := assetclass.FromLegacyAssetType(trimmed); ok {
+			out = append(out, string(key))
+			continue
+		}
+		return nil, fmt.Errorf("asset_type %q is neither an asset class nor one of the retired "+
+			"asset_type values; use a class key (see GET /asset-classes)", v)
+	}
+	return out, nil
 }

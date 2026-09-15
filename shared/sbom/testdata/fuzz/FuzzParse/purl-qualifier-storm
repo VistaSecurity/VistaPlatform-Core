@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.6\",\"components\":[{\"name\":\"a\",\"purl\":\"pkg:deb/debian/a@1?Z=1&z=2&A=3&a=4&m=&=5\"}]}")

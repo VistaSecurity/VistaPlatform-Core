@@ -109,12 +109,39 @@ func sampleFixedCatalogEntry() services.CatalogEntry {
 	}
 }
 
+// sampleFixedRungCatalogEntry is a ladder-severity-model entry whose ladder is
+// FIXED rather than tenant-tunable (known_vulnerability) — the shape workstream
+// 3.9 added, which carries `rungs` and no `ladder`/`baseline_days`. Without it
+// the contract suite would never send the field through the schema, and
+// `additionalProperties: false` would only have rejected it in production.
+func sampleFixedRungCatalogEntry() services.CatalogEntry {
+	return services.CatalogEntry{
+		Entry: alertcatalog.Entry{
+			ID:               "known_vulnerability",
+			Track:            "tenant",
+			Kind:             "policy",
+			Status:           "live",
+			Source:           "compliance-engine",
+			SubjectType:      "software_install",
+			SeverityModel:    "ladder",
+			AutoResolve:      "the vulnerability finding stops being detected",
+			EnabledByDefault: true,
+			Description:      "Installed software matches a published advisory.",
+			Rungs: []alertcatalog.LadderRung{
+				{Threshold: "CVSS 4.0 or higher (Medium)", Severity: "medium"},
+				{Threshold: "CVSS 9.0 or higher (Critical)", Severity: "critical"},
+			},
+		},
+		Enabled: true,
+	}
+}
+
 // --- the contract tests -----------------------------------------------------
 
 func TestContract_GetAlertCatalog_200(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newAlertCatalogEngine(&stubAlertCatalogService{
-		catalog: []services.CatalogEntry{sampleCatalogEntry(), sampleFixedCatalogEntry()},
+		catalog: []services.CatalogEntry{sampleCatalogEntry(), sampleFixedCatalogEntry(), sampleFixedRungCatalogEntry()},
 	})
 	w := do(eng, http.MethodGet, "/api/v1/compliance-engine/alert-catalog", nil)
 	if w.Code != http.StatusOK {

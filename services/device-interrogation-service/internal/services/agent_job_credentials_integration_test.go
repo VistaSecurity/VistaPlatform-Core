@@ -39,8 +39,7 @@ func TestIntegration_GetNextJob_CarriesDeviceCredentialsToScheduledJob(t *testin
 	}
 
 	// A device with embedded credentials, encrypted under the test master key.
-	deviceSvc := NewDeviceService(db)
-	deviceSvc.encryptionKey = testMasterKey
+	deviceSvc := NewDeviceServiceWithKey(db, testMasterKey)
 	hostname := "gw-" + uuid.New().String()[:8] + ".example.test"
 	username := "admin"
 	password := "sch3duled-p@ss"
@@ -60,7 +59,7 @@ func TestIntegration_GetNextJob_CarriesDeviceCredentialsToScheduledJob(t *testin
 	job, err := jobQueue.CreateJob(ctx, models.CreateDeviceJobRequest{
 		TenantID:   tenant,
 		JobType:    models.JobTypeDeviceInterrogation,
-		DeviceID:   &dev.ID,
+		AssetID:    &dev.ID,
 		Parameters: map[string]interface{}{"device_type": "unifi"},
 	})
 	if err != nil {
@@ -123,7 +122,7 @@ func TestIntegration_ResolveJobCredentials_RefusesDeviceWithoutCredentials(t *te
 	job, err := jobQueue.CreateJob(ctx, models.CreateDeviceJobRequest{
 		TenantID:   tenant,
 		JobType:    models.JobTypeDeviceInterrogation,
-		DeviceID:   &dev.ID,
+		AssetID:    &dev.ID,
 		Parameters: map[string]interface{}{"device_type": "unifi"},
 	})
 	if err != nil {
@@ -149,8 +148,7 @@ func TestIntegration_ResolveJobCredentials_DoesNotLeakAcrossTenants(t *testing.T
 	other := testdb.NewTenant(t, db)
 	ctx := context.Background()
 
-	deviceSvc := NewDeviceService(db)
-	deviceSvc.encryptionKey = testMasterKey
+	deviceSvc := NewDeviceServiceWithKey(db, testMasterKey)
 	hostname := "secret-" + uuid.New().String()[:8] + ".example.test"
 	username := "admin"
 	password := "not-yours"
@@ -165,9 +163,9 @@ func TestIntegration_ResolveJobCredentials_DoesNotLeakAcrossTenants(t *testing.T
 	}
 
 	job := &models.Job{
-		ID:       uuid.New(),
-		Type:     string(models.JobTypeDeviceInterrogation),
-		DeviceID: &dev.ID,
+		ID:      uuid.New(),
+		Type:    string(models.JobTypeDeviceInterrogation),
+		AssetID: &dev.ID,
 	}
 
 	svc := NewAgentService(db, db, nil)
@@ -191,8 +189,7 @@ func TestIntegration_ResolveJobCredentials_KeepsExplicitJobCredentials(t *testin
 	tenant := testdb.NewTenant(t, db)
 	ctx := context.Background()
 
-	deviceSvc := NewDeviceService(db)
-	deviceSvc.encryptionKey = testMasterKey
+	deviceSvc := NewDeviceServiceWithKey(db, testMasterKey)
 	hostname := "gw-" + uuid.New().String()[:8] + ".example.test"
 	deviceUser := "device-row-user"
 	devicePass := "device-row-pass"
@@ -207,9 +204,9 @@ func TestIntegration_ResolveJobCredentials_KeepsExplicitJobCredentials(t *testin
 	}
 
 	job := &models.Job{
-		ID:       uuid.New(),
-		Type:     string(models.JobTypeDeviceInterrogation),
-		DeviceID: &dev.ID,
+		ID:      uuid.New(),
+		Type:    string(models.JobTypeDeviceInterrogation),
+		AssetID: &dev.ID,
 		Credentials: map[string]interface{}{
 			"username":  "job-payload-user",
 			"password":  mustEncrypt(t, testMasterKey, "job-payload-pass"),

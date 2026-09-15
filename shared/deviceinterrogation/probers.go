@@ -47,17 +47,31 @@ const snmpDefaultTimeout = 5 * time.Second
 // SNMPInterrogator interrogates devices via SNMP v2c. It is zero-value
 // constructable: the community string, target host and port are all resolved
 // per-call from the DeviceInfo / Credentials passed to Interrogate.
-type SNMPInterrogator struct{}
+type SNMPInterrogator struct {
+	// Timeout overrides the per-request timeout. Zero means
+	// snmpDefaultTimeout. Same shape as TLSProber's timeout, and for the same
+	// reason: a caller that knows its network (or a test that does not want to
+	// wait out five real timeouts) can say so.
+	Timeout time.Duration
+}
 
 // SupportedDeviceTypes implements DeviceInterrogator.
 func (*SNMPInterrogator) SupportedDeviceTypes() []string {
 	return []string{"generic_snmp"}
 }
 
+// snmpTimeout returns the configured per-request timeout, defaulting when unset.
+func (s *SNMPInterrogator) snmpTimeout() time.Duration {
+	if s.Timeout <= 0 {
+		return snmpDefaultTimeout
+	}
+	return s.Timeout
+}
+
 // Interrogate implements DeviceInterrogator. It performs SNMP-based device
 // interrogation, emitting a single asset representing the device itself
 // enriched with the queried system-info OIDs.
-func (*SNMPInterrogator) Interrogate(ctx context.Context, device DeviceInfo, creds Credentials) (*InterrogateResult, error) {
+func (s *SNMPInterrogator) Interrogate(ctx context.Context, device DeviceInfo, creds Credentials) (*InterrogateResult, error) {
 	host := device.IPAddress
 	if host == "" {
 		host = device.Hostname
@@ -79,9 +93,22 @@ func (*SNMPInterrogator) Interrogate(ctx context.Context, device DeviceInfo, cre
 	}
 	target := net.JoinHostPort(host, strconv.Itoa(port))
 
-	sysInfo, err := snmpGetSystemInfo(ctx, target, community, snmpDefaultTimeout)
+	timeout := s.snmpTimeout()
+
+	conn, err := net.DialTimeout("udp", target, timeout)
 	if err != nil {
 		return nil, fmt.Errorf("SNMP interrogation failed: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	sysInfo := snmpSystemScalars(conn, community, timeout)
+	if len(sysInfo) == 0 {
+		// UDP connects without an exchange, so reaching here with nothing means
+		// the agent never answered — a wrong community string, a filtered port,
+		// or no agent at all. Returning success with an empty asset would
+		// record "we looked and this device has nothing", which is the opposite
+		// of what happened.
+		return nil, fmt.Errorf("SNMP interrogation failed: no response from %s (community, firewall, or no agent)", target)
 	}
 
 	deviceInfo := make(map[string]interface{})
@@ -106,65 +133,58 @@ func (*SNMPInterrogator) Interrogate(ctx context.Context, device DeviceInfo, cre
 		asset.Metadata[k] = v
 	}
 
-	// Extract device identity from SNMP OIDs (values are strings).
-	identity := &DeviceIdentity{}
-	if desc, ok := sysInfo[snmpOIDSysDescr]; ok {
-		identity.OSVersion = desc
-	}
-	if name, ok := sysInfo[snmpOIDSysName]; ok {
+	// Ops facts and topology: interfaces, neighbours, hardware identity and
+	// uptime from the standard MIBs (ADR-0004 D1 item 3). Best-effort — a
+	// device that answers the system group but not ENTITY-MIB or LLDP-MIB is
+	// ordinary, and each walk that finds nothing simply emits nothing.
+	chassis := snmpCollectOps(ctx, conn, community, result, timeout)
+	snmpEmitVendorHint(result, chassis, sysInfo[snmpOIDSysObjectID])
+
+	if name := sysInfo[snmpOIDSysName]; name != "" {
 		asset.Hostname = name
 	}
-	result.DeviceIdentity = identity
+	result.DeviceIdentity = snmpIdentity(chassis, sysInfo[snmpOIDSysObjectID], sysInfo[snmpOIDSysDescr])
 
 	result.Assets = append(result.Assets, asset)
 
 	return result, nil
 }
 
-// snmpGetSystemInfo retrieves basic system-info OIDs from a device over UDP.
-// target is a host:port string; community is the SNMP v2c community string.
-func snmpGetSystemInfo(_ context.Context, target, community string, timeout time.Duration) (map[string]string, error) {
-	conn, err := net.DialTimeout("udp", target, timeout)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to %s: %w", target, err)
+// snmpSystemScalars reads the MIB-II system group, keyed by OID.
+//
+// sysObjectID is queried now: it was declared in the constant block above and
+// never asked for, and it is the one scalar that identifies the vendor and
+// product line (see snmpObjectIDHint). Each GET is best-effort — an agent may
+// refuse any of them — and an empty map means the agent answered nothing at
+// all, which the caller treats as a failed interrogation rather than an empty
+// device.
+func snmpSystemScalars(conn net.Conn, community string, timeout time.Duration) map[string]string {
+	oids := []string{
+		snmpOIDSysDescr,
+		snmpOIDSysObjectID,
+		snmpOIDSysName,
+		snmpOIDSysContact,
+		snmpOIDSysLocation,
 	}
-	defer func() { _ = conn.Close() }()
-
-	oids := []string{snmpOIDSysDescr, snmpOIDSysName, snmpOIDSysContact, snmpOIDSysLocation}
-	result := make(map[string]string)
-
-	for _, oid := range oids {
-		val, err := snmpGet(conn, community, oid, timeout)
+	out := make(map[string]string, len(oids))
+	for i, oid := range oids {
+		bind, err := snmpGetVar(conn, community, oid, timeout)
 		if err != nil {
+			// Give up once two OIDs in a row have gone unanswered with nothing
+			// collected: the device is unreachable, filtered, or the community
+			// string is wrong, and asking the remaining three costs three more
+			// full timeouts to learn the same thing. Two rather than one
+			// because a restricted SNMP view can legitimately exclude sysDescr.
+			if len(out) == 0 && i >= 1 {
+				return out
+			}
 			continue // best effort
 		}
-		result[oid] = val
+		if text := bind.Text(); text != "" {
+			out[oid] = text
+		}
 	}
-
-	return result, nil
-}
-
-// snmpGet sends an SNMP GET request and returns the string value.
-func snmpGet(conn net.Conn, community, oid string, timeout time.Duration) (string, error) {
-	request, err := snmpBuildGetRequest(community, oid)
-	if err != nil {
-		return "", fmt.Errorf("failed to build SNMP request: %w", err)
-	}
-
-	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-		return "", fmt.Errorf("failed to set SNMP deadline: %w", err)
-	}
-	if _, err := conn.Write(request); err != nil {
-		return "", fmt.Errorf("failed to send SNMP request: %w", err)
-	}
-
-	buf := make([]byte, 4096)
-	n, err := conn.Read(buf)
-	if err != nil {
-		return "", fmt.Errorf("failed to read SNMP response: %w", err)
-	}
-
-	return snmpParseResponse(buf[:n])
+	return out
 }
 
 // snmpOIDToASN1 converts a dotted OID string to ASN.1 ObjectIdentifier.
@@ -183,161 +203,6 @@ func snmpOIDToASN1(oidStr string) (asn1.ObjectIdentifier, error) {
 		}
 	}
 	return oid, nil
-}
-
-// snmpBuildGetRequest builds a minimal SNMP v2c GET PDU.
-func snmpBuildGetRequest(community, oidStr string) ([]byte, error) {
-	oid, err := snmpOIDToASN1(oidStr)
-	if err != nil {
-		return nil, err
-	}
-
-	// VarBind: SEQUENCE { OID, NULL }
-	nullBytes := []byte{0x05, 0x00}
-	oidBytes, err := asn1.Marshal(oid)
-	if err != nil {
-		return nil, err
-	}
-
-	varBind := snmpMakeSequence(append(oidBytes, nullBytes...))
-	varBindList := snmpMakeSequence(varBind)
-
-	// GetRequest-PDU [0] { requestID, errorStatus, errorIndex, varBindList }
-	requestID := []byte{0x02, 0x01, 0x01} // Integer 1
-	errorStatus := []byte{0x02, 0x01, 0x00}
-	errorIndex := []byte{0x02, 0x01, 0x00}
-	pduData := append(append(append(requestID, errorStatus...), errorIndex...), varBindList...)
-	pdu := snmpMakeTaggedSequence(0xa0, pduData) // GetRequest [0]
-
-	// Message: SEQUENCE { version(1=v2c), community, pdu }
-	version := []byte{0x02, 0x01, 0x01} // Integer 1 = SNMPv2c
-	communityBytes := snmpMakeOctetString([]byte(community))
-	msg := snmpMakeSequence(append(append(version, communityBytes...), pdu...))
-
-	return msg, nil
-}
-
-// snmpParseResponse extracts the string value from an SNMP v2c GetResponse.
-// Structure: SEQUENCE { version, community, GetResponse-PDU { requestID, errorStatus, errorIndex, VarBindList } }
-// We must skip version, community, and PDU header to reach the VarBind value.
-func snmpParseResponse(data []byte) (string, error) {
-	// Get content of outer SEQUENCE (message).
-	msgContent, err := snmpGetTLVContent(data, 0x30)
-	if err != nil {
-		return "", err
-	}
-	// Skip version INTEGER, rest = community + pdu.
-	rem, err := snmpSkipTLV(msgContent, 0x02)
-	if err != nil {
-		return "", err
-	}
-	// Skip community OCTET STRING, rest = GetResponse-PDU (full TLV).
-	rem, err = snmpSkipTLV(rem, 0x04)
-	if err != nil {
-		return "", err
-	}
-	// Get content of GetResponse-PDU [2] (requestID, errorStatus, errorIndex, VarBindList).
-	pduContent, err := snmpGetTLVContent(rem, 0xa2)
-	if err != nil {
-		return "", err
-	}
-	// Skip requestID, errorStatus, errorIndex (three INTEGERs).
-	rem = pduContent
-	for k := 0; k < 3; k++ {
-		rem, err = snmpSkipTLV(rem, 0x02)
-		if err != nil {
-			return "", err
-		}
-	}
-	// VarBindList SEQUENCE content.
-	vblContent, err := snmpGetTLVContent(rem, 0x30)
-	if err != nil {
-		return "", err
-	}
-	// First VarBind SEQUENCE content.
-	vbContent, err := snmpGetTLVContent(vblContent, 0x30)
-	if err != nil {
-		return "", err
-	}
-	// Skip OID (ObjectIdentifier = 0x06), rest = value TLV.
-	rem, err = snmpSkipTLV(vbContent, 0x06)
-	if err != nil {
-		return "", err
-	}
-	// Parse value as OCTET STRING or INTEGER.
-	if len(rem) < 2 {
-		return "", fmt.Errorf("no value in VarBind")
-	}
-	tag := rem[0]
-	length, n := snmpDecodeLength(rem[1:])
-	if n <= 0 || 1+n+length > len(rem) {
-		return "", fmt.Errorf("invalid value TLV")
-	}
-	value := rem[1+n : 1+n+length]
-	switch tag {
-	case 0x04: // OCTET STRING
-		return string(value), nil
-	case 0x02: // INTEGER
-		val := 0
-		for j := 0; j < length; j++ {
-			val = val<<8 | int(value[j])
-		}
-		return fmt.Sprintf("%d", val), nil
-	default:
-		return "", fmt.Errorf("unsupported value type 0x%02x", tag)
-	}
-}
-
-// snmpGetTLVContent returns the content (bytes after tag+length) of the first TLV with expectedTag.
-func snmpGetTLVContent(data []byte, expectedTag byte) ([]byte, error) {
-	if len(data) < 2 {
-		return nil, fmt.Errorf("TLV too short")
-	}
-	if data[0] != expectedTag {
-		return nil, fmt.Errorf("unexpected tag 0x%02x, want 0x%02x", data[0], expectedTag)
-	}
-	length, n := snmpDecodeLength(data[1:])
-	if n <= 0 || 1+n+length > len(data) {
-		return nil, fmt.Errorf("invalid TLV length")
-	}
-	return data[1+n : 1+n+length], nil
-}
-
-// snmpSkipTLV advances past a TLV with the expected tag; returns the remaining bytes.
-func snmpSkipTLV(data []byte, expectedTag byte) ([]byte, error) {
-	if len(data) < 2 {
-		return nil, fmt.Errorf("TLV too short")
-	}
-	if data[0] != expectedTag {
-		return nil, fmt.Errorf("unexpected tag 0x%02x, want 0x%02x", data[0], expectedTag)
-	}
-	length, n := snmpDecodeLength(data[1:])
-	if n <= 0 || 1+n+length > len(data) {
-		return nil, fmt.Errorf("invalid TLV length")
-	}
-	return data[1+n+length:], nil
-}
-
-// snmpDecodeLength returns (length, bytesConsumed). Handles short and long form.
-func snmpDecodeLength(data []byte) (int, int) {
-	if len(data) == 0 {
-		return 0, 0
-	}
-	b := data[0]
-	if b < 0x80 {
-		return int(b), 1
-	}
-	numBytes := int(b & 0x7f)
-	// BER allows up to 127 length-of-length bytes; reject anything > 4 to prevent
-	// integer overflow when accumulating the length value into a Go int.
-	if numBytes > 4 || len(data) < 1+numBytes {
-		return 0, 0
-	}
-	length := 0
-	for i := 1; i < 1+numBytes; i++ {
-		length = length<<8 | int(data[i])
-	}
-	return length, 1 + numBytes
 }
 
 // ASN.1 encoding helpers.

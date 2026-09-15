@@ -63,6 +63,7 @@ jobs:
     outputs:
       is_core: ${{ steps.check.outputs.is_core }}
       version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -81,6 +82,26 @@ jobs:
             *) echo "::error::'$VERSION' is not a vX.Y.Z tag"; exit 1 ;;
           esac
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          # RELEASE CANDIDATES. A prerelease is any version carrying a `-`
+          # suffix — v1.0.0-rc.1. The tag glob above already matches it
+          # (`v*.*.*` is anchored and `*` spans the suffix), which is why an RC
+          # needs no new trigger; what it needs is for everything downstream to
+          # stop treating it as final. Three consequences, all handled below and
+          # all pinned by scripts/test-release-tag-split.mjs:
+          #
+          #   * the GitHub Release is created --prerelease --latest=false, so an
+          #     RC never becomes the repository's "Latest release" (the thing a
+          #     reader lands on, and the thing install docs implicitly point at);
+          #   * the images job does NOT move the :latest tag, so `docker pull
+          #     ghcr.io/…/auth-service` keeps resolving to the last real release;
+          #   * release notes come from the BASE version's CHANGELOG section,
+          #     because an RC has no section of its own by rule.
+          case "$VERSION" in
+            *-*) echo "prerelease=true"  >> "$GITHUB_OUTPUT"
+                 echo "::notice::$VERSION is a PRERELEASE — not latest, :latest untouched" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
 
   images:
     needs: guard
@@ -161,6 +182,37 @@ jobs:
             echo "No Docker Hub credentials — building from public library images"
           fi
 
+      # The version tag always; `:latest` only for a real release.
+      #
+      # Computed in a step rather than inlined in `tags:` because the condition
+      # has to REMOVE a line, and an expression that renders to an empty line
+      # inside a multi-line `tags:` block is a silent no-op-or-not depending on
+      # how the action trims its input. Here the list is built explicitly and
+      # the choice is visible in the run log.
+      #
+      # Why it matters: `:latest` is what an evaluator gets from a bare
+      # `docker pull`, and what a copy-pasted `kubectl set image` without a tag
+      # resolves to. Moving it to a release candidate would hand unreviewed
+      # bits to anyone who never asked for an RC.
+      - name: Image tags
+        id: tags
+        env:
+          PRERELEASE: ${{ needs.guard.outputs.prerelease }}
+          REPO: ghcr.io/${{ steps.owner.outputs.lc }}/${{ matrix.image.name }}
+          V: ${{ needs.guard.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo 'list<<TAGS_EOF'
+            echo "${REPO}:${V}"
+            if [ "$PRERELEASE" = 'true' ]; then
+              echo "::notice::prerelease — not tagging ${REPO}:latest" >&2
+            else
+              echo "${REPO}:latest"
+            fi
+            echo 'TAGS_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
@@ -170,9 +222,7 @@ jobs:
           push: true
           provenance: mode=max
           sbom: true
-          tags: |
-            ghcr.io/${{ steps.owner.outputs.lc }}/${{ matrix.image.name }}:${{ needs.guard.outputs.version }}
-            ghcr.io/${{ steps.owner.outputs.lc }}/${{ matrix.image.name }}:latest
+          tags: ${{ steps.tags.outputs.list }}
           build-args: |
             GO_BUILDER_IMAGE=${{ steps.bases.outputs.go }}
             RUNTIME_IMAGE=${{ steps.bases.outputs.runtime }}
@@ -437,14 +487,96 @@ jobs:
       # source the commercial line uses. Absent (a Core-only tree restarts its
       # CHANGELOG at the current version), fall back to a pointer rather than
       # failing the release over prose.
+      # A PRERELEASE has no CHANGELOG section of its own — by rule: an RC is a
+      # rehearsal of a release, and the notes it exists to test are the
+      # release's notes. The export already relabels the base section under the
+      # RC heading (scripts/prepare-public-tree.sh), so the first lookup
+      # normally hits. The base-version fallback is the belt: it keeps this
+      # working against a tree whose CHANGELOG was written by hand, instead of
+      # silently degrading a release candidate's notes to a bare pointer.
       - name: Release notes
         run: |
           set -euo pipefail
           V="${{ needs.guard.outputs.version }}"; V="${V#v}"
-          if awk -v v="$V" '$0 ~ "^## \\[" v "\\]" {f=1;next} f && /^## \[/ {exit} f' CHANGELOG.md > notes.md && [ -s notes.md ]; then
+          BASE="${V%%-*}"
+          section() {
+            awk -v v="$1" '$0 ~ "^## \\[" v "\\]" {f=1;next} f && /^## \[/ {exit} f' CHANGELOG.md
+          }
+          if section "$V" > notes.md && [ -s notes.md ]; then
             echo "using the CHANGELOG section for $V"
+          elif [ "$BASE" != "$V" ] && section "$BASE" > notes.md && [ -s notes.md ]; then
+            echo "$V is a prerelease with no section of its own — using the CHANGELOG section for $BASE"
           else
             printf 'See CHANGELOG.md for details.\n' > notes.md
+          fi
+          # A release section can grow into a reference document rather than
+          # release notes — 1.0.0's per-change detail ran to ~200 KB, which is
+          # why it now lives in docsv4/core/releases/1.0.0.md. A section may
+          # therefore open with a hand-written LEAD — highlights,
+          # breaking/upgrading, editions, verify — terminated by a marker, and
+          # the Release body is that lead plus a pointer to the full list.
+          #
+          # Marker ABSENT (every section written before this, and every future
+          # one whose author did not add a lead) falls through to the whole
+          # section, unchanged. So this is an opt-in per section, not a new
+          # requirement that can silently empty a release body.
+          MARKER='<!-- release-notes-end -->'
+          if grep -qF -- "$MARKER" notes.md; then
+            # Everything strictly ABOVE the marker line; the marker itself is
+            # not published. `index()` rather than a regex: the marker is an
+            # HTML comment, full of characters a regex would read as syntax.
+            awk -v m="$MARKER" 'index($0, m) { exit } { print }' notes.md > notes.lead
+            # An empty lead would publish a release body consisting of a pointer
+            # and nothing else — the marker on the section's first line, say.
+            # Keep the whole section in that case rather than shipping nothing.
+            if [ -s notes.lead ]; then
+              { cat notes.lead
+                printf '\n---\n\n_The complete list of changes in this release is in [CHANGELOG.md](CHANGELOG.md)._\n'
+              } > notes.md
+              echo "lifted the lead (through the ${MARKER} marker) as the release body"
+            else
+              echo "::warning::${MARKER} left an empty lead; publishing the whole CHANGELOG section"
+            fi
+            rm -f notes.lead
+          else
+            echo "no ${MARKER} marker in this section — publishing it whole"
+          fi
+          # GitHub caps a Release body at 125,000 characters and answers 422
+          # above it — so the release would fail at its very LAST step, after
+          # every image and the chart are built and signed, with an error that
+          # says nothing about length. Not hypothetical: the 1.0.0 CHANGELOG
+          # section was ~200 KB before its detail moved to
+          # docsv4/core/releases/1.0.0.md, and nothing stops the next one.
+          #
+          # This stays BELOW the marker lift above and independent of it: the
+          # lift is a choice the section's author makes, and the cap is what
+          # holds when they did not make it (or made it badly). Two mechanisms,
+          # because a body that is merely usually short is not a guarantee.
+          #
+          # Truncated at a line boundary (head -c can split a UTF-8 sequence;
+          # dropping the final partial line handles that as well as the ragged
+          # sentence) and pointed at CHANGELOG.md, which SHIPS in this
+          # repository — so unlike the old "see the source repository" pointer,
+          # it is a link the reader can actually follow.
+          LIMIT=110000
+          if [ "$(wc -c < notes.md)" -gt "$LIMIT" ]; then
+            head -c "$LIMIT" notes.md | sed '$d' > notes.trunc
+            { cat notes.trunc
+              printf '\n\n---\n\n_These release notes were truncated to fit GitHub'"'"'s release-body limit._\n'
+              printf '_The complete entry for this version is in [CHANGELOG.md](CHANGELOG.md)._\n'
+            } > notes.md
+            rm -f notes.trunc
+            echo "::warning::the CHANGELOG section exceeded ${LIMIT} bytes; the release notes were truncated"
+          fi
+
+          if [ "${{ needs.guard.outputs.prerelease }}" = 'true' ]; then
+            # Prepended, not appended: a reader who lands here from a search
+            # result needs to know what this is before reading the notes.
+            { printf '> **Release candidate.** Published through the real pipeline for\n'
+              printf '> pre-release verification. Not the latest release, not announced, and\n'
+              printf '> superseded by the final `v%s` release. Use it only if you are\n' "${BASE}"
+              printf '> deliberately testing this candidate.\n\n'
+              cat notes.md; } > notes.rc && mv notes.rc notes.md
           fi
           {
             printf '\n\n## Binaries\n\n'
@@ -475,8 +607,23 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRERELEASE: ${{ needs.guard.outputs.prerelease }}
         run: |
           set -euo pipefail
           TAG="${{ needs.guard.outputs.version }}"
-          gh release create "$TAG" --title "$TAG" --notes-file notes.md --verify-tag dist/* \
+          FLAGS=()
+          if [ "$PRERELEASE" = 'true' ]; then
+            # --prerelease marks it; --latest=false is the belt-and-braces half.
+            # GitHub's own rule ("drafts and prereleases cannot be set as
+            # latest") already excludes it, but `gh release create` sends
+            # make_latest only when --latest is given, so the repository's
+            # Latest pointer is otherwise decided by server-side defaulting we
+            # do not control and cannot see in the run log. Saying it outright
+            # costs one flag and removes the class of bug where an RC becomes
+            # the page every reader lands on.
+            FLAGS+=(--prerelease --latest=false)
+          fi
+          # ${FLAGS[@]+…} rather than a bare "${FLAGS[@]}": an empty array under
+          # `set -u` is an unbound reference on bash before 4.4.
+          gh release create "$TAG" --title "$TAG" --notes-file notes.md --verify-tag ${FLAGS[@]+"${FLAGS[@]}"} dist/* \
             || gh release upload "$TAG" dist/* --clobber

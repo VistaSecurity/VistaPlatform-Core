@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/vistasecurity/vistaplatform/cbom-service/internal/cbom"
+	"github.com/vistasecurity/vistaplatform/shared/ai"
 	sharedstorage "github.com/vistasecurity/vistaplatform/shared/storage"
 )
 
@@ -36,7 +37,20 @@ type editionHooks struct {
 
 	// RegisterComparisonRoutes mounts the artifact comparison/drift
 	// endpoints. Nil in Core, so those routes simply do not exist.
-	RegisterComparisonRoutes func(api *gin.RouterGroup, repo *cbom.Repository, storage sharedstorage.ArtifactStorageService)
+	//
+	// aiSink is the ADR-0008 D4.7 audit sink for the comparison narrator's
+	// generative calls. It is built on the Core side (shared/middleware/audit
+	// and shared/ai are both Core) and passed in, rather than constructed
+	// behind the hook, so the Enterprise side does not rebuild the audit
+	// transport the service already configured. Nil is legal and means no
+	// audit trail — not a configuration that should be sending prompts.
+	//
+	// rawDB is the pool the comparison handler reads the calling tenant's
+	// Settings → AI assistant controls from (the kill switch and the D4.7
+	// question-recording opt-in). Core side for the same reason as aiSink:
+	// shared/ai is Core, the pool already exists, and the Enterprise side
+	// should not open a second one.
+	RegisterComparisonRoutes func(api *gin.RouterGroup, repo *cbom.Repository, storage sharedstorage.ArtifactStorageService, aiSink ai.AuditSink, rawDB *sql.DB)
 
 	// NewArtifactFormatter returns the renderer for the alternate download
 	// formats (SPDX, PDF), or nil to serve CycloneDX only. Unlike the hooks

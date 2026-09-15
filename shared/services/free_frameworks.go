@@ -5,10 +5,10 @@ package services
 //
 // They do NOT count against the `compliance_frameworks_max` cap, and the cap
 // does not block activating them. Without that carve-out a Core tenant could
-// activate exactly one of the six: `compliance_frameworks_max` is 0 on the
+// activate exactly one of the eight: `compliance_frameworks_max` is 0 on the
 // community, free and starter tiers, and the only exemption was
 // `is_platform_default` — which a UNIQUE index (idx_platform_frameworks_single_default)
-// restricts to a single framework, Best Practices. The other five free
+// restricts to a single framework, Best Practices. The other seven free
 // frameworks are published, advertised, priced at nothing, and were
 // unreachable (CMP-6).
 //
@@ -30,4 +30,10 @@ var FreeFrameworkCodes = []string{
 	"cert-expiry-not-expired",
 	"cert-expiry-30-day",
 	"cert-expiry-90-day",
+	// Seeded by seed.sql's "Inventory Hygiene" / "Lifecycle" sections (the
+	// general inventory's own two, ADR-0005 D5) — Core deliberately, so an ops
+	// buyer who never buys a compliance framework still gets a score on day
+	// one.
+	"inventory-hygiene",
+	"lifecycle",
 }

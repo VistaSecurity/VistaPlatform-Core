@@ -29,6 +29,13 @@ type UpdateSensorConfigRequest struct {
 	Description      *string  `json:"description,omitempty"`
 	ActiveProbing    *bool    `json:"active_probing,omitempty"`
 	NetworkDiscovery *bool    `json:"network_discovery,omitempty"`
+	// HostObservation toggles passive host observation (asset-inventory
+	// ADR-0004 D2). Queues an update_config command like its neighbours, but
+	// the sensor applies it on its next RESTART rather than immediately: the
+	// BPF capture filter is fixed when the interface handle opens, so
+	// switching the decoders on without reopening the handle would leave them
+	// running and receiving nothing.
+	HostObservation *bool `json:"host_observation,omitempty"`
 	// DedupTTLMinutes sets the rest period (minutes) between re-reporting the
 	// same observation.  When set, an update_config command is queued for the
 	// sensor to apply immediately on next checkin.
@@ -167,7 +174,7 @@ func (h *Handler) UpdateSensorConfig(c *gin.Context) {
 
 	// If capture/reporting config fields were changed, queue an update_config
 	// command so the sensor picks up the new settings on its next heartbeat.
-	if h.repo != nil && (req.ActiveProbing != nil || req.NetworkDiscovery != nil || req.DedupTTLMinutes != nil || req.ReportingInterval != nil) {
+	if h.repo != nil && (req.ActiveProbing != nil || req.NetworkDiscovery != nil || req.HostObservation != nil || req.DedupTTLMinutes != nil || req.ReportingInterval != nil) {
 		configPayload := map[string]interface{}{}
 
 		capturePayload := map[string]interface{}{}
@@ -176,6 +183,9 @@ func (h *Handler) UpdateSensorConfig(c *gin.Context) {
 		}
 		if req.NetworkDiscovery != nil {
 			capturePayload["network_discovery"] = *req.NetworkDiscovery
+		}
+		if req.HostObservation != nil {
+			capturePayload["host_observation"] = *req.HostObservation
 		}
 		if req.DedupTTLMinutes != nil {
 			capturePayload["dedup_ttl_minutes"] = *req.DedupTTLMinutes

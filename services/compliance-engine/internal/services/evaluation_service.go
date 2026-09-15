@@ -169,8 +169,18 @@ func (s *EvaluationService) EvaluateFramework(tenantID, frameworkID uuid.UUID, v
 	var framework models.Framework
 	var frameworkSource string // "platform" or "tenant"
 
+	// description is COALESCEd: platform_frameworks.description is NULLABLE
+	// (scripts/database/schema.sql) but models.Framework scans it into a plain
+	// Go string, and a NULL failed this Get outright — which, because the
+	// platform-lookup failure is exactly what sends control flow into the
+	// tenant_frameworks fallback below, surfaced as "framework not found" for a
+	// real, published, licensed platform framework whose only defect was
+	// having no description. EvaluateFramework is the core evaluation function
+	// (every score, control-status and finding view goes through it), so this
+	// broke every caller: GetComplianceScore, GetFrameworkStatus's per-control
+	// detail path, EvaluateMultipleFrameworks, and the Ask/MCP tools.
 	err := s.db.Get(&framework, `
-		SELECT id, code, name, version, description,
+		SELECT id, code, name, version, COALESCE(description, '') AS description,
 		       (status = 'published') as active, created_at, updated_at
 		FROM platform_frameworks
 		WHERE id = $1 AND status = 'published'
@@ -211,7 +221,11 @@ func (s *EvaluationService) EvaluateFramework(tenantID, frameworkID uuid.UUID, v
 			return nil, fmt.Errorf("framework not licensed: tenant does not have an active subscription for this framework")
 		}
 	} else {
-		// Try tenant_frameworks (custom policies)
+		// Try tenant_frameworks (custom policies).
+		//
+		// description is COALESCEd here too: tenant_frameworks.description is
+		// also NULLABLE, and this local struct scans it into a plain Go string
+		// with the same failure mode as the platform branch above.
 		var tenantFramework struct {
 			ID          uuid.UUID `db:"id"`
 			Name        string    `db:"name"`
@@ -230,7 +244,7 @@ func (s *EvaluationService) EvaluateFramework(tenantID, frameworkID uuid.UUID, v
 					return
 				}
 				if gErr := tx.Get(&tenantFramework, `
-					SELECT id, name, version, description
+					SELECT id, name, version, COALESCE(description, '') AS description
 					FROM tenant_frameworks
 					WHERE id = $1 AND tenant_id = $2
 				`, frameworkID, tenantID); gErr != nil {
@@ -316,7 +330,7 @@ func (s *EvaluationService) EvaluateFramework(tenantID, frameworkID uuid.UUID, v
 				notAssessedReason = result.NotAssessedReason
 				findingCount = len(result.Findings)
 				for _, f := range result.Findings {
-					affectedAssetSet[f.AssetID] = true
+					affectedAssetSet[f.SubjectID] = true
 				}
 			} else {
 				baselineStatus, baselineSeverity, notAssessedReason = s.controlStatusFromAssessment(findings, assessments[control.ID])
@@ -324,7 +338,7 @@ func (s *EvaluationService) EvaluateFramework(tenantID, frameworkID uuid.UUID, v
 		} else {
 			baselineStatus, baselineSeverity, notAssessedReason = s.controlStatusFromAssessment(findings, assessments[control.ID])
 			for _, finding := range findings {
-				affectedAssetSet[finding.AssetID] = true
+				affectedAssetSet[finding.SubjectID] = true
 			}
 		}
 
@@ -564,11 +578,16 @@ func (s *EvaluationService) EvaluateMultipleFrameworks(
 				return
 			}
 
-			// Get framework info for name/code
+			// Get framework info for name/code.
+			//
+			// description is COALESCEd for the same reason as the identical
+			// query in EvaluateFramework above: a NULL failed this Get outright,
+			// which sent a real published platform framework into the
+			// tenant_frameworks/"Unknown Framework" fallback below it.
 			var frameworkName, frameworkCode, frameworkType string
 			var framework models.Framework
 			err = s.db.Get(&framework, `
-				SELECT id, code, name, version, description,
+				SELECT id, code, name, version, COALESCE(description, '') AS description,
 				       (status = 'published') as active, created_at, updated_at
 				FROM platform_frameworks
 				WHERE id = $1 AND status = 'published'
@@ -778,10 +797,17 @@ func (s *EvaluationService) GetComplianceScore(tenantID uuid.UUID, frameworkID *
 		targetFrameworkID = defaultLicense.PlatformFrameworkID
 	}
 
-	// Get framework details
+	// Get framework details.
+	//
+	// description/organization are COALESCEd: both are NULLABLE
+	// (scripts/database/schema.sql) but models.PlatformFramework scans them
+	// into plain Go strings, and a NULL fails the row outright — which used to
+	// take down the whole compliance-score read for a framework somebody
+	// created without naming an organization (the same defect
+	// framework_license_service.go was fixed for first).
 	var framework models.PlatformFramework
 	err := s.db.Get(&framework, `
-		SELECT id, code, name, version, description, organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at
+		SELECT id, code, name, version, COALESCE(description, '') AS description, COALESCE(organization, '') AS organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at
 		FROM platform_frameworks
 		WHERE id = $1 AND status = 'published'
 	`, targetFrameworkID)
@@ -1027,10 +1053,19 @@ func (s *EvaluationService) GetFrameworkStatus(tenantID uuid.UUID) (*FrameworkSt
 	var licensedDetails []LicensedFrameworkDetail
 
 	if len(licensedFrameworks) > 0 {
-		// Query platform frameworks for licensed ones
+		// Query platform frameworks for licensed ones.
+		//
+		// pf.description/pf.organization are COALESCEd: both are NULLABLE
+		// (scripts/database/schema.sql) and the row.Scan below reads them into
+		// plain Go strings, so a NULL fails that one row's Scan. The loop below
+		// only appends a row `if sErr == nil`, so — before this fix — a licensed
+		// framework with no organization recorded did not error the request; it
+		// silently vanished from the tenant's Frameworks status, the same
+		// three-valued-honesty violation CLAUDE.md warns about (a real "not
+		// assessed" rendered as if the framework did not exist at all).
 		query := `
 			SELECT
-				pf.id, pf.code, pf.name, pf.version, pf.description, pf.organization, pf.status,
+				pf.id, pf.code, pf.name, pf.version, COALESCE(pf.description, '') AS description, COALESCE(pf.organization, '') AS organization, pf.status,
 				pf.is_platform_default, pf.published_at, pf.published_by, pf.created_by, pf.created_at, pf.updated_at,
 				tfl.is_default
 			FROM platform_frameworks pf
@@ -1152,19 +1187,27 @@ func (s *EvaluationService) getVisibleFindingsForControl(tenantID, controlID uui
 }
 
 func (s *EvaluationService) getFindingsForControlScoped(tenantID, controlID uuid.UUID, filters models.ScenarioFilters, licensedOnly bool) ([]models.ComplianceFinding, error) {
-	// Note: We join network_assets only for filtering, not for selecting fields
+	// Note: We join assets only for filtering, not for selecting fields
 	// Asset fields are in the joined Asset struct with db:"-" tag, so sqlx can't scan them
 	query := `
-		SELECT cf.id, cf.tenant_id, cf.control_id, cf.asset_id, cf.severity, cf.summary,
+		SELECT cf.id, cf.tenant_id, cf.producer, cf.kind, cf.control_id,
+		       cf.subject_id, cf.subject_type, cf.subject_label,
+		       cf.severity, cf.score, cf.summary,
 		       cf.evidence, cf.first_seen, cf.last_seen, cf.assigned_to, cf.assigned_at,
 		       cf.assigned_by, cf.remediation_notes, cf.detection_state, cf.workflow_status,
 		       cf.occurrence_count, cf.resurfaced_at, cf.suppressed_until, cf.suppression_reason,
 		       cf.is_stale, cf.last_evaluated_at, cf.evaluation_version,
 		       cf.created_at, cf.updated_at
-		FROM compliance_findings cf
-		LEFT JOIN network_assets na ON cf.asset_id = na.id AND na.deleted_at IS NULL
+		FROM findings cf
+		-- Both key columns: assets is hash-partitioned by tenant_id and keyed on
+		-- (tenant_id, id), with no index on id alone, so a join that names only
+		-- id scans all eight partitions per row.
+		LEFT JOIN assets na
+		       ON na.tenant_id = cf.tenant_id AND na.id = cf.subject_id
+		      AND na.deleted_at IS NULL
 		WHERE cf.tenant_id = $1 AND cf.control_id = $2
 		  AND cf.detection_state = 'ACTIVE'
+		  AND ` + complianceProducerScope("cf") + `
 		  AND (cf.workflow_status != 'SUPPRESSED' OR cf.workflow_status IS NULL)
 	`
 	args := []interface{}{tenantID, controlID}
@@ -1181,28 +1224,16 @@ func (s *EvaluationService) getFindingsForControlScoped(tenantID, controlID uuid
 		argIndex++
 	}
 
-	// Apply severity filter (normalize to match database format: Low, Med, High, Critical)
+	// Apply severity filter, normalized onto the registry ladder.
 	// Ignore "undefined" string values (from frontend URLSearchParams)
 	if filters.Severity != "" && strings.ToLower(filters.Severity) != "undefined" {
-		severity := filters.Severity
-		// Normalize severity to match database format
-		switch strings.ToLower(severity) {
-		case "low":
-			severity = "Low"
-		case "med", "medium":
-			severity = "Med"
-		case "high":
-			severity = "High"
-		case "critical":
-			severity = "Critical"
-		}
 		query += fmt.Sprintf(" AND cf.severity = $%d", argIndex)
-		args = append(args, severity)
+		args = append(args, normalizeSeverity(filters.Severity))
 	}
 
 	query += " ORDER BY cf.last_seen DESC"
 
-	// compliance_findings and network_assets are RLS-policied: run the read inside
+	// findings and assets are RLS-policied: run the read inside
 	// a tenant-scoped transaction so app.tenant_id is set on the query connection.
 	ctx := context.Background()
 	var findings []models.ComplianceFinding
@@ -1219,8 +1250,10 @@ func (s *EvaluationService) getFindingsForControlScoped(tenantID, controlID uuid
 			var evidenceJSONB []byte
 
 			err := rows.Scan(
-				&finding.ID, &finding.TenantID, &finding.ControlID, &finding.AssetID,
-				&finding.Severity, &finding.Summary, &evidenceJSONB,
+				&finding.ID, &finding.TenantID, &finding.Producer, &finding.Kind,
+				&finding.ControlID, &finding.SubjectID, &finding.SubjectType,
+				&finding.SubjectLabel, &finding.Severity, &finding.Score, &finding.Summary,
+				&evidenceJSONB,
 				&finding.FirstSeen, &finding.LastSeen, &finding.AssignedTo, &finding.AssignedAt,
 				&finding.AssignedBy, &finding.RemediationNotes, &finding.DetectionState,
 				&finding.WorkflowStatus, &finding.OccurrenceCount, &finding.ResurfacedAt,
@@ -1510,7 +1543,7 @@ func (s *EvaluationService) GetControlDetails(tenantID, controlID uuid.UUID, sce
 	failingFindingsCount := len(allFindings)
 	affectedAssetSet := make(map[uuid.UUID]bool)
 	for _, finding := range allFindings {
-		affectedAssetSet[finding.AssetID] = true
+		affectedAssetSet[finding.SubjectID] = true
 	}
 
 	// Paginate findings
@@ -1527,22 +1560,40 @@ func (s *EvaluationService) GetControlDetails(tenantID, controlID uuid.UUID, sce
 	// Convert findings to summaries
 	findingSummaries := make([]FindingSummary, 0, len(paginatedFindings))
 	for _, finding := range paginatedFindings {
-		// Get asset name from database. network_assets is RLS-policied: scope the
-		// lookup with app.tenant_id.
+		// Name the finding's asset. `assets` is RLS-policied, so the lookup is
+		// scoped with app.tenant_id; the composite key (tenant_id, id) is
+		// matched in full so the planner prunes to one partition.
+		//
+		// The address column is `primary_address`, the asset-level copy of an
+		// address that otherwise lives on the endpoints — an asset has no
+		// `ip_address` and no port of its own since phase 1.
+		// Naming a column that does not exist is exactly what this did, and
+		// because the error was discarded outright the failure was invisible:
+		// the query errored for EVERY finding, hostname and address stayed
+		// invalid, and the whole control-detail view rendered "Unknown Asset"
+		// while reporting success.
+		//
+		// sql.ErrNoRows stays expected and silent — it is the ordinary case for
+		// a finding whose target is a certificate or a crypto configuration
+		// rather than an asset. Anything else is a bug in this query and is
+		// logged.
 		ctx := context.Background()
 		assetName := "Unknown Asset"
-		var hostname, ipAddress sql.NullString
-		_ = shareddatabase.WithTenantTx(ctx, s.db.DB, tenantID, func(tx *sql.Tx) error {
+		var hostname, primaryAddress sql.NullString
+		if err := shareddatabase.WithTenantTx(ctx, s.db.DB, tenantID, func(tx *sql.Tx) error {
 			return tx.QueryRowContext(ctx, `
-				SELECT hostname, ip_address
-				FROM network_assets
-				WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-			`, finding.AssetID, tenantID).Scan(&hostname, &ipAddress)
-		})
+				SELECT hostname, host(primary_address)
+				FROM assets
+				WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+			`, tenantID, finding.SubjectID).Scan(&hostname, &primaryAddress)
+		}); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[Compliance] control detail: naming subject %s for finding %s: %v",
+				finding.SubjectID, finding.ID, err)
+		}
 		if hostname.Valid && hostname.String != "" {
 			assetName = hostname.String
-		} else if ipAddress.Valid && ipAddress.String != "" {
-			assetName = ipAddress.String
+		} else if primaryAddress.Valid && primaryAddress.String != "" {
+			assetName = primaryAddress.String
 		}
 
 		// Get assigned user email if assigned

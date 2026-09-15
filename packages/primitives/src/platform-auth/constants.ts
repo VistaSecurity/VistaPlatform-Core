@@ -27,6 +27,11 @@ export const PLATFORM_PERMISSIONS = {
   algorithms: {
     manage: 'algorithms.manage',
   },
+  // The non-crypto platform catalogues (Catalog ▸ End-of-life, Catalog ▸
+  // Vulnerability feed) and their mirror-feed controls.
+  catalogs: {
+    manage: 'catalogs.manage',
+  },
   platform: {
     settings: 'platform.settings',
     billing: 'platform.billing',

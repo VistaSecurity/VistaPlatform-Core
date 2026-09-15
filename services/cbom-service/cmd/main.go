@@ -36,6 +36,8 @@ import (
 	"github.com/vistasecurity/vistaplatform/cbom-service/internal/handlers"
 	"github.com/vistasecurity/vistaplatform/cbom-service/internal/middleware"
 	"github.com/vistasecurity/vistaplatform/cbom-service/internal/scopes"
+	"github.com/vistasecurity/vistaplatform/cbom-service/internal/xbom"
+	seams "github.com/vistasecurity/vistaplatform/shared/ai/seams"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
@@ -160,6 +162,10 @@ func main() {
 	auditConfig.PlatformCACertPath = cfg.PlatformCACertPath
 	auditMiddleware := auditmiddleware.NewMiddleware(auditConfig)
 	router.Use(auditMiddleware.LogRequest())
+	// The same rail carries the ADR-0008 D4.7 record for every generative call
+	// the comparison narrator makes: seam, provider, model id, prompt hash,
+	// tokens, invoker. Never the prompt itself.
+	aiAuditSink := auditmiddleware.NewAISink(auditMiddleware, "cbom-service")
 
 	// Inventory data source — used by the CBOM builder to fetch the snapshot
 	// of every asset / certificate / crypto-implementation / algorithm
@@ -175,12 +181,21 @@ func main() {
 
 	// Phase 1: Scopes.
 	scopeRepo := scopes.NewRepository(db)
-	scopeHandler := scopes.NewHandler(scopeRepo)
+	// The preview's asset count goes to inventory-service through the SAME
+	// client the CBOM generation uses, so the number a customer tunes a scope
+	// against and the rows the artifact ends up containing come from one
+	// predicate answered by one service.
+	scopeHandler := scopes.NewHandler(scopeRepo).WithAssetCounter(inventoryDataSource)
 
 	// Phase 2 + Phase 4: CBOM Artifact persistence + signing + attestation.
 	cbomArtifactStorage := initCBOMArtifactStorage(db, bypassDB)
 	cbomRepo := cbom.NewRepository(db)
 	cbomBuilder := cbom.NewBuilder(cbomReportHandler)
+	// The xBOM kinds (sbom, hbom, inventory) are Core and are assembled from
+	// the inventory tables by asset id, after inventory-service has resolved
+	// the scope — see internal/xbom's package doc for why the boundary and the
+	// join live in different places.
+	cbomBuilder.SetKindAssembler(xbom.NewAssembler(xbom.NewSource(db.SQLDB())))
 	// Signing + attestation are Enterprise (cmd/edition.go). In Core both
 	// hooks are nil, so cbomSigner/attestationBuilder stay nil interfaces and
 	// the persister's nil-tolerant paths generate unsigned, unattested
@@ -202,6 +217,10 @@ func main() {
 	cbomHandler := cbom.NewHandler(cbomRepo, cbomBuilder, cbomPersister, scopeRepo, cbomArtifactStorage)
 	cbomHandler.SetFeatureChecker(sharedservices.NewLimitEnforcementService(db.SQLDB()))
 	cbomHandler.SetSigner(cbomSigner)
+	// OCSF export is Core, unconditionally: it is how an inventory reaches the
+	// SIEM an ops team already lives in, and an edition that could not do that
+	// would not be usable where it has to work.
+	cbomHandler.SetOCSFRenderer(xbom.RenderOCSF)
 	// SPDX/PDF export is Enterprise (cmd/edition.go). Left unset in Core, where
 	// /cbom/artifacts/:id/download answers 402 for those formats and serves the
 	// canonical CycloneDX form as always.
@@ -238,11 +257,13 @@ func main() {
 		if hooks.RegisterComparisonRoutes != nil {
 			compare := api.Group("")
 			compare.Use(sharedmw.RequireFeature(db.SQLDB(), cbom.FeatureCBOMSigning))
-			hooks.RegisterComparisonRoutes(compare, cbomRepo, cbomArtifactStorage)
+			hooks.RegisterComparisonRoutes(compare, cbomRepo, cbomArtifactStorage, aiAuditSink, db.SQLDB())
 		}
 	}
 
-	// Health check server (HTTP, port 8080).
+	// Health check server (HTTP, port 8080). Answers a static body and never
+	// calls a seam, so it keeps its own short timeout — see
+	// seams.GenerativeWriteTimeout for why the API server below does not.
 	healthRouter := gin.New()
 	healthRouter.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -281,7 +302,7 @@ func main() {
 		apiServer.Addr = ":" + cfg.TLSPort
 		apiServer.ReadHeaderTimeout = 5 * time.Second
 		apiServer.ReadTimeout = 10 * time.Second
-		apiServer.WriteTimeout = 15 * time.Second
+		apiServer.WriteTimeout = seams.GenerativeWriteTimeout
 		apiServer.IdleTimeout = 60 * time.Second
 	} else {
 		apiServer = &http.Server{
@@ -289,7 +310,7 @@ func main() {
 			Handler:           router,
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       10 * time.Second,
-			WriteTimeout:      15 * time.Second,
+			WriteTimeout:      seams.GenerativeWriteTimeout,
 			IdleTimeout:       60 * time.Second,
 		}
 	}

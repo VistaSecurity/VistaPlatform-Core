@@ -88,7 +88,7 @@ Everything a tenant does day-to-day lives in one of these:
 | **Dashboard** | Priority-based health overview — risk summary, compliance status, recent activity. |
 | **Discovery** | Run and review discovery — sensors & agents, jobs, devices, scheduled scans, cloud sources, PCAP upload, and approvals. |
 | **Inventory** | Your unified asset inventory, viewed through switchable **lenses** (infrastructure, certificate, configuration, network, keys, connections, stale, and more). |
-| **Risk & Compliance** | **Posture** (scores, framework transparency, algorithm reference), **Findings**, and **CBOM**. |
+| **Risk & Compliance** | **Posture** (scores, framework transparency, algorithm reference), **Findings**, and **Bills of Materials** (cryptographic, software, hardware and full-inventory snapshots). |
 | **Remediation** | **Alerts**, **Queue** (the unified ticket work surface), and **Plans** (migration planning). |
 
 **Organization Settings** (the admin's main workspace) opens from the profile
@@ -109,7 +109,7 @@ went:
 
 | Old location (v1) | Where it is now |
 |-------------------|-----------------|
-| **Reports → Create Report** / **Reports & Analytics** | **Removed.** For evidence-grade output, generate a **CBOM artifact** (Risk & Compliance → **CBOM**). For a quick spreadsheet of what's on screen, use the **Export** button on any **Inventory** lens. See [Evidence](#evidence-cbom-artifacts--exports). |
+| **Reports → Create Report** / **Reports & Analytics** | **Removed.** For evidence-grade output, generate a **CBOM artifact** (Risk & Compliance → **Bills of Materials**). For a quick spreadsheet of what's on screen, use the **Export** button on any **Inventory** lens. See [Evidence](#evidence-cbom-artifacts--exports). |
 | **Crypto Inventory → Certificates view** | **Inventory** → switch to the **certificate** lens. |
 | **Crypto Workbench** (perspectives, framework selector) | Split: browse assets via **Inventory** lenses; review compliance posture and framework transparency under **Risk & Compliance → Posture**; work findings under **Risk & Compliance → Findings**. |
 | **Operations → Activity Logs** | **Organization Settings → Audit**. |
@@ -321,6 +321,13 @@ look like once raised). For each catalog entry you can:
   silenceable from a settings toggle. Your own preference *replaces* the
   platform default, so activating more frameworks can only tighten the
   schedule, never loosen it.
+- Some ladder types show their rungs but offer **no editor** — *Known
+  vulnerability* and *End of life*. Their boundaries are not ours to move: the
+  vulnerability rungs are the published CVSS severity bands, and the
+  end-of-life rungs are the deadline itself. You can still enable, disable and
+  route these types; there is simply nothing to tune inside them. See
+  [Remediation → Alerts](../features/remediation.md#alerts-raised-from-your-inventory)
+  for what each one opens on and when it closes.
 
 Below the catalog is the pre-existing **audit alert rules** list —
 threshold- and pattern-based detection over the activity log (failed-login
@@ -396,18 +403,41 @@ Connect Vista Platform to third-party systems under **Organization Settings
 1. Go to **Organization Settings → Integrations**.
 2. Choose an integration type — messaging channels (Slack, PagerDuty, custom
    webhook) and storage are available in every edition. SIEM forwarding
-   (Splunk, Datadog, Elastic) and CMDB/ITSM platforms are Enterprise.
+   (Splunk, Datadog, Elastic), CMDB/ITSM platforms and the NetBox connector are
+   Enterprise.
 3. Enter credentials (webhook URL, routing key, API key — as appropriate).
 4. **Test** the connection, then **Save**.
 
 Messaging integrations you connect here become the delivery channels referenced
 by [Notifications & Alerts](#notifications--alerts).
 
+### Available connectors
+
+The **Available connectors** panel at the bottom of the page lists everything
+Vista Platform can integrate with, grouped by kind, and says plainly which
+state each one is in:
+
+- **addable** — you can connect it now, here or on the page named under it;
+- **Enterprise** — a real capability your plan does not include;
+- **Soon** — declared but not built yet. It is shown greyed out and cannot be
+  selected. It is deliberately *not* offered as an upgrade: we do not sell
+  something that does not exist.
+
+The list is generated from the platform's connector registry, so it cannot
+drift from what the platform can actually do.
+
 ### CMDB Integrations
 
 > **Enterprise capability.** Core does not mount the CMDB endpoints in either
 > direction, so there is no CMDB integration to add. Core keeps the complete
 > *internal* CMDB — see [Working with Inventory & Certificates](#working-with-inventory--certificates).
+
+
+### NetBox
+
+> **Enterprise capability.** Core does not mount the NetBox endpoints, so there
+> is no NetBox connection to add. Discovery, the inventory and the
+> network-segment editor are included in every edition.
 
 
 ---
@@ -592,7 +622,7 @@ A **CBOM artifact** is an immutable, dated, content-hashed snapshot of every
 cryptographic component matching a **Scope** at the moment of generation — the
 right tool when you need evidence with provenance.
 
-1. Go to **Risk & Compliance → CBOM**.
+1. Go to **Risk & Compliance → Bills of Materials**.
 2. Generate an artifact against a **Scope** (defined under
    [Policies → Scopes](#policies)).
 3. Download it as **CycloneDX 1.7** (also SPDX and PDF as those formatters

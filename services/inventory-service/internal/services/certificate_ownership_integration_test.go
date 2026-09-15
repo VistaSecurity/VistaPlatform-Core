@@ -70,8 +70,8 @@ func (f certOwnershipFixture) insertAsset(t *testing.T, hostname, ownership stri
 	t.Helper()
 	id := uuid.New()
 	_, err := f.db.Exec(`
-		INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, asset_ownership, last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,$3,'server','monitoring',$4,NOW(),NOW(),NOW(),NOW())`,
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, asset_ownership, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, 'server', 'hardware.computer.server', 'monitoring', $4, NOW(), NOW(), NOW(), NOW())`,
 		id, f.tenant, hostname, ownership)
 	if err != nil {
 		t.Fatalf("insert asset %s: %v", hostname, err)

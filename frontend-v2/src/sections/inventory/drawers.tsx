@@ -1,10 +1,12 @@
 import { useQuery } from '@tanstack/react-query';
+import { Link } from 'react-router';
 import type { Asset, inventoryComponents } from '@vistasecurity/api-contract';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
 import { DrawerCloseBtn as CloseBtn, DrawerShell, Icon, LevelDot, MetaRow, RiskChip, RiskGauge, SectionLabel, levelFromScore, riskColor } from '../../components/ui';
 import { DeleteAssetButton, RestoreAssetButton, ScanAssetButton } from './bulk-actions';
 import { serviceConfidence } from './lens-helpers';
+import { assetIdentity, classDeclares, classLabel, operatingSystem, primaryAddressPort, primaryEndpoint } from './asset-shape';
 import {
   PROVENANCE_LABEL,
   PROVENANCE_TITLE,
@@ -52,7 +54,17 @@ export function ConfigDrawer({ config, onOpenAsset, onOpenCert, onClose, active 
         </div>
         {assetId && onOpenAsset && (
           <button
-            onClick={() => onOpenAsset(assetId, { hostname: c.asset_hostname as string, ip_address: c.asset_ip_address as string, asset_type: c.asset_type as string, environment: c.asset_environment as string })}
+            // The seed paints the drawer's header before the asset read
+            // returns. It carries only fields the Asset schema still has: the
+            // configuration knows the host's name and environment, but its
+            // address belongs to the ENDPOINT the configuration was measured on,
+            // so it is seeded as one rather than as a column that no longer
+            // exists.
+            onClick={() => onOpenAsset(assetId, {
+              hostname: c.asset_hostname as string,
+              environment: c.asset_environment as string,
+              ...(c.asset_ip_address ? { primary_address: c.asset_ip_address as string } : {}),
+            })}
             className="row-hover"
             style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', marginTop: 14, padding: '9px 11px', borderRadius: 9, border: '1px solid var(--app-border2)', background: 'var(--app-panel2)', cursor: 'pointer', textAlign: 'left' }}
           >
@@ -279,6 +291,7 @@ export function AssetDrawer({ assetId, seed, onOpenConfig, onClose, onEdit, acti
   const riskLevel = (a.risk_level as string) || levelFromScore(risk);
   const configs = configsQ.data ?? [];
   const tags = Array.isArray(a.tags) ? (a.tags as string[]) : [];
+  const ident = assetIdentity(a);
 
   return (
     <DrawerShell onClose={onClose} width={500} active={active} depth={depth}>
@@ -287,6 +300,18 @@ export function AssetDrawer({ assetId, seed, onOpenConfig, onClose, onEdit, acti
             with the hostname left it a narrow column in a 500px drawer, so any
             real FQDN wrapped mid-name. The identity block now gets full width. */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, flexWrap: 'wrap' }}>
+          {/* The drawer is the PEEK from a list (ADR-0006 D3); the page is
+              where relationships, software, findings and history live and is
+              the thing you can send someone a link to. This is the hop between
+              them, and it is first in the row because it is the way out. */}
+          <Link
+            to={`/inventory/assets/${assetId}`}
+            className="ui-btn sm"
+            title="Open the full asset page"
+            style={{ height: 28, padding: '0 9px', textDecoration: 'none' }}
+          >
+            <Icon name="external-link" size={13} />Open full page
+          </Link>
           {detailQ.data && (a.deleted_at || a.asset_status === 'archived') && (
             <RestoreAssetButton assetId={assetId} onDone={onClose} />
           )}
@@ -308,9 +333,12 @@ export function AssetDrawer({ assetId, seed, onOpenConfig, onClose, onEdit, acti
         <div style={{ display: 'flex', gap: 14, alignItems: 'center', minWidth: 0, marginTop: 12 }}>
           <RiskGauge score={risk} level={riskLevel} size={68} label="" stroke={6} />
           <div style={{ minWidth: 0 }}>
-            <div className="eyebrow-app">{(a.asset_type as string) || 'asset'}</div>
-            <h2 className="mono" style={{ margin: '4px 0 2px', fontSize: 16, fontWeight: 600, color: 'var(--app-t1)', wordBreak: 'break-word', lineHeight: 1.25 }}>{(a.hostname as string) || '—'}</h2>
-            <div className="mono" style={{ fontSize: 11.5, color: 'var(--app-t3)' }}>{(a.ip_address as string) || ''}{a.port ? ':' + a.port : ''}</div>
+            <div className="eyebrow-app">{classLabel(a.class_key) || 'asset'}</div>
+            <h2 className="mono" style={{ margin: '4px 0 2px', fontSize: 16, fontWeight: 600, color: 'var(--app-t1)', wordBreak: 'break-word', lineHeight: 1.25 }}>{ident.primary}</h2>
+            {/* The primary endpoint's address and port, or nothing at all. An
+                asset with no network face has no address to show, and the old
+                model's `port` column made one up for every one of them. */}
+            <div className="mono" style={{ fontSize: 11.5, color: 'var(--app-t3)' }}>{primaryAddressPort(a)}</div>
           </div>
         </div>
         {tags.length > 0 && (
@@ -345,8 +373,15 @@ export function AssetDrawer({ assetId, seed, onOpenConfig, onClose, onEdit, acti
         )}
 
         <SectionLabel icon="circle-alert">Asset details</SectionLabel>
+        <MetaRow k="Class" v={classLabel(a.class_key)} />
         <ServiceMetaRow a={a} />
-        <MetaRow k="Operating system" v={a.operating_system as string} />
+        {/* OS is an ATTRIBUTE now, and only on the classes that declare one. A
+            switch has no operating_system slot, so the row is absent rather
+            than showing an em dash that reads as "we failed to collect it". */}
+        {classDeclares(a.class_key, 'operating_system') && (
+          <MetaRow k="Operating system" v={operatingSystem(a)} />
+        )}
+        <MetaRow k="Support group" v={a.support_group as string} />
         <MetaRow k="Environment" v={a.environment as string} />
         <MetaRow k="Business unit" v={a.business_unit as string} />
         <MetaRow k="Owner" v={a.owner_email as string} />
@@ -367,11 +402,16 @@ export function AssetDrawer({ assetId, seed, onOpenConfig, onClose, onEdit, acti
 // ever showed. A name inferred from a port number now reads as "Best guess ·
 // from port"; a name read out of a banner reads as "Confirmed · from banner".
 // Muted and inline — this is a meta row, not a warning.
-function ServiceMetaRow({ a }: { a: Record<string, unknown> }) {
-  const name = [a.service_name, a.service_version].filter(Boolean).join(' ');
+function ServiceMetaRow({ a }: { a: Record<string, unknown> & Partial<Asset> }) {
+  // A service belongs to a network FACE, not to a host — one server runs nginx
+  // on 443 and sshd on 22, and the flat column this used to read could hold
+  // only one of them. The drawer shows the primary endpoint's; the page's
+  // Services & Endpoints tab shows them all.
+  const ep = primaryEndpoint(a);
+  const name = [ep?.service_name, ep?.service_version].filter(Boolean).join(' ');
   const { qualifier, title } = serviceConfidence({
-    service_confidence: a.service_confidence as string | null,
-    service_identification_method: a.service_identification_method as string | null,
+    service_confidence: ep?.service_confidence ?? null,
+    service_identification_method: ep?.service_identification_method ?? null,
   });
   return (
     <MetaRow

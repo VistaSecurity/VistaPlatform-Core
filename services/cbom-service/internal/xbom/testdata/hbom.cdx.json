@@ -1,0 +1,182 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.7",
+  "version": 1,
+  "serialNumber": "urn:uuid:22222222-2222-4222-8222-222222222222",
+  "metadata": {
+    "timestamp": "2026-09-12T10:30:00Z",
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "name": "Vista Platform xBOM Generator",
+          "version": "1.0.0",
+          "group": "io.vistasecurity"
+        }
+      ]
+    },
+    "component": {
+      "type": "application",
+      "bom-ref": "xbom-22222222-2222-4222-8222-222222222222",
+      "name": "Hardware Bill of Materials — Production",
+      "version": "1.0",
+      "description": "Every hardware asset in scope, with its hardware identity facts and identifiers."
+    },
+    "lifecycles": [
+      {
+        "phase": "operations"
+      }
+    ]
+  },
+  "components": [
+    {
+      "type": "device",
+      "bom-ref": "asset/a0000000-0000-4000-8000-000000000001",
+      "name": "web-01",
+      "properties": [
+        {
+          "name": "vista:asset:business_unit",
+          "value": "Platform"
+        },
+        {
+          "name": "vista:asset:class",
+          "value": "server"
+        },
+        {
+          "name": "vista:asset:class_path",
+          "value": "hardware.computer.server"
+        },
+        {
+          "name": "vista:asset:environment",
+          "value": "production"
+        },
+        {
+          "name": "vista:asset:first_seen_at",
+          "value": "2026-08-13T10:30:00Z"
+        },
+        {
+          "name": "vista:asset:last_seen_at",
+          "value": "2026-09-12T10:30:00Z"
+        },
+        {
+          "name": "vista:asset:owner_email",
+          "value": "ops@example.com"
+        },
+        {
+          "name": "vista:asset:ownership",
+          "value": "internal"
+        },
+        {
+          "name": "vista:asset:region",
+          "value": "us-east"
+        },
+        {
+          "name": "vista:asset:risk_score",
+          "value": "72"
+        },
+        {
+          "name": "vista:asset:site",
+          "value": "dc1"
+        },
+        {
+          "name": "vista:asset:status",
+          "value": "monitoring"
+        },
+        {
+          "name": "vista:asset:uid",
+          "value": "a0000000-0000-4000-8000-000000000001"
+        },
+        {
+          "name": "vista:asset:zone",
+          "value": "a"
+        },
+        {
+          "name": "vista:fact:hw.model",
+          "value": "PowerEdge R650"
+        },
+        {
+          "name": "vista:fact:hw.vendor",
+          "value": "Dell Inc."
+        },
+        {
+          "name": "vista:identifier:fqdn",
+          "value": "web-01.example.com"
+        },
+        {
+          "name": "vista:identifier:hostname",
+          "value": "web-01"
+        },
+        {
+          "name": "vista:identifier:ip_address",
+          "value": "192.0.2.10"
+        },
+        {
+          "name": "vista:identifier:mac_address",
+          "value": "00:53:00:00:00:10"
+        }
+      ],
+      "group": "Dell Inc."
+    },
+    {
+      "type": "device",
+      "bom-ref": "asset/a0000000-0000-4000-8000-000000000002",
+      "name": "192.0.2.20",
+      "version": "17.09.04a",
+      "properties": [
+        {
+          "name": "vista:asset:class",
+          "value": "switch"
+        },
+        {
+          "name": "vista:asset:class_path",
+          "value": "hardware.network_device.switch"
+        },
+        {
+          "name": "vista:asset:first_seen_at",
+          "value": "2026-08-13T10:30:00Z"
+        },
+        {
+          "name": "vista:asset:last_seen_at",
+          "value": "2026-09-12T10:30:00Z"
+        },
+        {
+          "name": "vista:asset:ownership",
+          "value": "internal"
+        },
+        {
+          "name": "vista:asset:risk_score",
+          "value": "10"
+        },
+        {
+          "name": "vista:asset:status",
+          "value": "monitoring"
+        },
+        {
+          "name": "vista:asset:uid",
+          "value": "a0000000-0000-4000-8000-000000000002"
+        },
+        {
+          "name": "vista:fact:hw.firmware_version",
+          "value": "17.09.04a"
+        },
+        {
+          "name": "vista:fact:hw.model",
+          "value": "Catalyst 9300-48P"
+        },
+        {
+          "name": "vista:fact:hw.vendor",
+          "value": "Cisco Systems"
+        },
+        {
+          "name": "vista:identifier:ip_address",
+          "value": "192.0.2.20"
+        },
+        {
+          "name": "vista:identifier:serial_number",
+          "value": "FOC2201X0AB"
+        }
+      ],
+      "group": "Cisco Systems"
+    }
+  ]
+}

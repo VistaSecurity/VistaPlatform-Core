@@ -14,6 +14,7 @@ export type FeatureName =
   | 'sso_saml'
   | 'custom_branding'
   | 'cmdb_sync'
+  | 'connector_netbox'
   | 'siem_export'
   | 'billing_portal';
 
@@ -52,6 +53,12 @@ export interface FeaturesMap {
   custom_branding: boolean;
   /** Sync inventory out to an external CMDB/ITSM (ServiceNow, Device42, SolarWinds). */
   cmdb_sync: boolean;
+  /**
+   * Pull sites, prefixes, VLANs, device types and devices from a NetBox
+   * network source of truth, and see the drift between it and what we
+   * discovered. Read-only towards NetBox — nothing is ever written back.
+   */
+  connector_netbox: boolean;
   /** Forward audit events to an external SIEM (Splunk, Datadog, Elastic, webhook). */
   siem_export: boolean;
   /**
@@ -86,6 +93,7 @@ export const defaultFeatures: FeaturesMap = {
   sso_saml: false,
   custom_branding: false,
   cmdb_sync: false,
+  connector_netbox: false,
   siem_export: false,
   billing_portal: false,
 };

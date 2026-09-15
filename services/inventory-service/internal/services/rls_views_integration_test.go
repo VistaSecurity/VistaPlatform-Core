@@ -35,8 +35,12 @@ import (
 // invokerViews is every view over RLS-policied base tables. Keep in sync with
 // the VIEW ISOLATION HARDENING block at the bottom of scripts/database/schema.sql.
 var invokerViews = []string{
-	// partition wrappers (flipped with the partition conversion)
-	"network_assets", "sensor_discoveries", "crypto_implementations",
+	// Partition wrappers (flipped with the partition conversion). `assets` and
+	// `asset_endpoints` are NOT here: phase 1 dropped the network_assets view
+	// and queries the partitioned parent directly, so there is no view to flip —
+	// the policy on the parent is what applies. TestIntegration_AssetInventorySchema_*
+	// covers their isolation.
+	"sensor_discoveries", "crypto_implementations",
 	// flipped by the view-isolation hardening
 	"active_resource_alerts",
 	"aws_daily_cost_summary", "aws_daily_service_cost_summary", "aws_tenant_monthly_cost_summary",
@@ -77,8 +81,8 @@ func TestIntegration_VCIInventory_EnforcesRLS(t *testing.T) {
 		host          string
 	}{{assetA, tenantA, "rls-view-a.example.test"}, {assetB, tenantB, "rls-view-b.example.test"}} {
 		mustExec(t, db, `
-			INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-			VALUES ($1,$2,$3,'server','monitoring',NOW(),NOW(),NOW(),NOW())`, r.asset, r.tenant, r.host)
+			INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`, r.asset, r.tenant, r.host)
 	}
 
 	countVisible := func(tx *sql.Tx) (n int) {

@@ -393,6 +393,24 @@ spec:
                   name: {{ include "vistaplatform.platformSecretName" $ctx }}
                   key: internal-auth-secret
             {{- end }}
+            {{- if and (include "vistaplatform.aiProvider" $ctx) $ctx.Values.ai.apiKey.existingSecret }}
+            # The generative provider's credential, under the name
+            # AI_API_KEY_ENV points at. Injected on EVERY backend, from one
+            # place, because `GET /tenant/ai` is the single availability answer
+            # both UIs read before rendering any AI control — and auth-service,
+            # which serves it, owns no seam. The anthropic client refuses to
+            # construct without a key, so an auth-service that did not have one
+            # would report provider_configured:false and hide every AI button in
+            # the product while the capability underneath worked.
+            #
+            # The env var NAME is resolved once by the same helper that writes
+            # AI_API_KEY_ENV into the ConfigMap, so the two cannot disagree.
+            - name: {{ include "vistaplatform.aiAPIKeyEnvVar" $ctx }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $ctx.Values.ai.apiKey.existingSecret }}
+                  key: {{ $ctx.Values.ai.apiKey.existingSecretKey | default "api-key" }}
+            {{- end }}
             {{- if $secrets.encryptionMasterKey }}
             - name: ENCRYPTION_MASTER_KEY
               valueFrom:

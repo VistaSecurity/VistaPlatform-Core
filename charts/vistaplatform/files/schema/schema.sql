@@ -43,12 +43,6 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public;
 
 
--- TYPE: asset_type
-DO $$ BEGIN CREATE TYPE public.asset_type AS ENUM (
-    'server', 'endpoint', 'service', 'appliance'
-); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-
 -- TYPE: device_job_status
 DO $$ BEGIN CREATE TYPE public.device_job_status AS ENUM (
     'pending', 'assigned', 'in_progress', 'completed', 'failed', 'cancelled'
@@ -56,8 +50,14 @@ DO $$ BEGIN CREATE TYPE public.device_job_status AS ENUM (
 
 
 -- TYPE: device_job_type
+-- NOTE: adding a value here reaches FRESH INSTALLS ONLY — this CREATE is
+-- wrapped in `EXCEPTION WHEN duplicate_object`, so on a database that already
+-- has the type it silently no-ops. The matching
+-- `ALTER TYPE public.device_job_type ADD VALUE IF NOT EXISTS ...` in
+-- POST-MIGRATIONS is what carries it to an existing database. Both edits,
+-- always.
 DO $$ BEGIN CREATE TYPE public.device_job_type AS ENUM (
-    'device_interrogation', 'cloud_discovery'
+    'device_interrogation', 'cloud_discovery', 'host_inventory'
 ); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 
@@ -1509,6 +1509,13 @@ CREATE TABLE IF NOT EXISTS public.api_usage_logs (
 -- TABLE: asset_history
 CREATE TABLE IF NOT EXISTS public.asset_history (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
+    -- The append counter, and the ONLY thing that can order this table.
+    -- created_at defaults to now(), which is the TRANSACTION timestamp: the
+    -- identification engine writes `created` and then `merge_proposed` for one
+    -- observation inside one transaction, so both carry the same instant and an
+    -- ORDER BY created_at tells the story in whichever order the planner
+    -- happens to return. Added in phase 1 with the table's first writer.
+    seq bigserial NOT NULL,
     asset_id uuid NOT NULL,
     tenant_id uuid NOT NULL,
     actor_user_id uuid,
@@ -1992,40 +1999,6 @@ CREATE TABLE IF NOT EXISTS public.compliance_finding_history (
 );
 
 
--- TABLE: compliance_findings
-CREATE TABLE IF NOT EXISTS public.compliance_findings (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    tenant_id uuid NOT NULL,
-    control_id uuid NOT NULL,
-    asset_id uuid NOT NULL,
-    asset_type character varying(50) DEFAULT 'network_asset'::character varying NOT NULL,
-    severity character varying(20) NOT NULL,
-    summary text NOT NULL,
-    evidence jsonb DEFAULT '{}'::jsonb NOT NULL,
-    first_seen timestamp with time zone DEFAULT now(),
-    last_seen timestamp with time zone DEFAULT now(),
-    assigned_to uuid,
-    assigned_at timestamp with time zone,
-    assigned_by uuid,
-    remediation_notes text,
-    detection_state character varying(20) DEFAULT 'ACTIVE'::character varying NOT NULL,
-    workflow_status character varying(20) DEFAULT 'NEW'::character varying NOT NULL,
-    occurrence_count integer DEFAULT 1 NOT NULL,
-    resurfaced_at timestamp with time zone,
-    suppressed_until timestamp with time zone,
-    suppression_reason text,
-    is_stale boolean DEFAULT false,
-    last_evaluated_at timestamp with time zone,
-    evaluation_version integer DEFAULT 1,
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT compliance_findings_asset_type_check CHECK (((asset_type)::text = ANY ((ARRAY['network_asset'::character varying, 'certificate'::character varying, 'crypto_implementation'::character varying])::text[]))),
-    CONSTRAINT compliance_findings_detection_state_check CHECK (((detection_state)::text = ANY ((ARRAY['ACTIVE'::character varying, 'INACTIVE'::character varying, 'ARCHIVED'::character varying])::text[]))),
-    CONSTRAINT compliance_findings_severity_check CHECK (((severity)::text = ANY ((ARRAY['Low'::character varying, 'Med'::character varying, 'High'::character varying, 'Critical'::character varying])::text[]))),
-    CONSTRAINT compliance_findings_workflow_status_check CHECK (((workflow_status)::text = ANY ((ARRAY['NEW'::character varying, 'NOTIFIED'::character varying, 'RESOLVED'::character varying, 'SUPPRESSED'::character varying])::text[])))
-);
-
-
 -- TABLE: compliance_overrides
 CREATE TABLE IF NOT EXISTS public.compliance_overrides (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
@@ -2076,6 +2049,89 @@ CREATE TABLE IF NOT EXISTS public.compliance_scenarios (
     framework_type character varying(20) DEFAULT 'platform'::character varying NOT NULL,
     CONSTRAINT compliance_scenarios_framework_type_check CHECK (((framework_type)::text = ANY ((ARRAY['platform'::character varying, 'tenant'::character varying])::text[])))
 );
+
+
+-- TABLE: connector_connections
+--
+-- One tenant-configured connection to an external system that is NOT a CMDB
+-- sync profile and NOT a cloud/SaaS platform_integration: the
+-- `network_source_of_truth` family and whatever joins it.
+--
+-- Why a third store rather than a column on platform_integrations: that table
+-- is the ADMIN-plane integration registry (shared, cross-tenant capable,
+-- provider-typed) and cmdb_sync_profiles carries push/field-mapping concepts a
+-- pull-only connector has no use for. Stretching either to fit would have made
+-- half its columns meaningless for the new rows — which is how a table ends up
+-- with a column nobody can explain.
+--
+-- connector_key is the registry key (standards/connectors.yaml). The CHECK is
+-- hand-maintained and audited against the registry by
+-- scripts/generate-connectors.mjs --check, exactly like the other two.
+CREATE TABLE IF NOT EXISTS public.connector_connections (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL,
+    connector_key character varying(50) NOT NULL,
+    name character varying(255) NOT NULL,
+    base_url text NOT NULL,
+    -- Credential-bearing. Written through shared/security/credentials with
+    -- credentials.ConnectorAuthConfigPolicy; the audit at
+    -- scripts/audit-credential-encryption.mjs fails any writer that does not.
+    auth_config jsonb DEFAULT '{}'::jsonb NOT NULL,
+    -- Non-secret connector options (default environment for imported segments,
+    -- device-role→class overrides). Deliberately separate from auth_config so
+    -- the credential cipher has a narrow, stable blob to protect.
+    options jsonb DEFAULT '{}'::jsonb NOT NULL,
+    -- Whether this connection may target an RFC1918 / private address.
+    -- Defaults TRUE for the network-source-of-truth family because such a
+    -- system is on-premises by construction; the SSRF guard still refuses
+    -- loopback, link-local and cloud-metadata addresses whatever this says.
+    -- Every private-target connection is recorded in the audit log on save.
+    allow_private_endpoint boolean DEFAULT true NOT NULL,
+    is_enabled boolean DEFAULT true NOT NULL,
+    schedule character varying(20) DEFAULT 'manual'::character varying NOT NULL,
+    last_run_at timestamp with time zone,
+    last_run_status character varying(20),
+    last_error text,
+    last_tested_at timestamp with time zone,
+    created_by uuid,
+    updated_by uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    deleted_at timestamp with time zone,
+    CONSTRAINT connector_connections_pkey PRIMARY KEY (id),
+    CONSTRAINT connector_connections_unique_name UNIQUE (tenant_id, connector_key, name),
+    CONSTRAINT valid_connector_key CHECK (((connector_key)::text = ANY ((ARRAY['netbox'::character varying])::text[]))),
+    CONSTRAINT valid_connector_schedule CHECK (((schedule)::text = ANY ((ARRAY['manual'::character varying, 'hourly'::character varying, 'daily'::character varying, 'weekly'::character varying])::text[]))),
+    CONSTRAINT valid_connector_last_run_status CHECK (((last_run_status IS NULL) OR ((last_run_status)::text = ANY ((ARRAY['success'::character varying, 'partial'::character varying, 'failed'::character varying, 'in_progress'::character varying])::text[]))))
+);
+CREATE INDEX IF NOT EXISTS idx_connector_connections_tenant ON public.connector_connections USING btree (tenant_id, connector_key) WHERE (deleted_at IS NULL);
+CREATE INDEX IF NOT EXISTS idx_connector_connections_due ON public.connector_connections USING btree (schedule, last_run_at) WHERE (deleted_at IS NULL AND is_enabled = true);
+
+
+-- TABLE: connector_runs
+--
+-- One execution of a connector_connections row, with the counts the
+-- integration's page shows. Counts live in a typed `summary` jsonb rather than
+-- twelve integer columns because each connector kind counts different things;
+-- what is NOT optional is that a run records them, so "it said success" can be
+-- checked against "it imported nothing".
+CREATE TABLE IF NOT EXISTS public.connector_runs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL,
+    connection_id uuid NOT NULL,
+    status character varying(20) DEFAULT 'in_progress'::character varying NOT NULL,
+    trigger_type character varying(20) DEFAULT 'manual'::character varying NOT NULL,
+    started_at timestamp with time zone DEFAULT now() NOT NULL,
+    completed_at timestamp with time zone,
+    summary jsonb DEFAULT '{}'::jsonb NOT NULL,
+    error_log jsonb DEFAULT '[]'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT connector_runs_pkey PRIMARY KEY (id),
+    CONSTRAINT valid_connector_run_status CHECK (((status)::text = ANY ((ARRAY['in_progress'::character varying, 'success'::character varying, 'partial'::character varying, 'failed'::character varying])::text[]))),
+    CONSTRAINT valid_connector_run_trigger CHECK (((trigger_type)::text = ANY ((ARRAY['manual'::character varying, 'scheduled'::character varying, 'test'::character varying])::text[])))
+);
+CREATE INDEX IF NOT EXISTS idx_connector_runs_connection ON public.connector_runs USING btree (connection_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_connector_runs_tenant ON public.connector_runs USING btree (tenant_id, started_at DESC);
 
 
 -- TABLE: control_measurements
@@ -2165,6 +2221,11 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_partitioned (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
     tenant_id uuid NOT NULL,
     asset_id uuid NOT NULL,
+    -- The endpoint this configuration was measured on (DATA_MODEL §2). NULL for
+    -- a configuration that is not tied to one socket: an at-rest cloud resource
+    -- has no endpoint at all, which is what retires the "AT-REST" port
+    -- sentinel. asset_id stays and is the roll-up target.
+    endpoint_id uuid,
     protocol public.protocol_type NOT NULL,
     protocol_version character varying(100),
     cipher_suite character varying(255),
@@ -2196,12 +2257,35 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_partitioned (
 )
 PARTITION BY HASH (tenant_id);
 
+-- CREATE TABLE IF NOT EXISTS above is a no-op on a database that already has
+-- this table, so the new column needs its own statement for existing installs.
+-- ADD COLUMN on a partitioned parent propagates to every attached partition, so
+-- one statement covers all eight. It sits HERE, not in POST-MIGRATIONS, because
+-- the view immediately below selects the column.
+ALTER TABLE public.crypto_implementations_partitioned ADD COLUMN IF NOT EXISTS endpoint_id uuid;
+
 
 -- VIEW: crypto_implementations
-CREATE OR REPLACE VIEW public.crypto_implementations AS
+-- DROP + CREATE, not CREATE OR REPLACE. `CREATE OR REPLACE VIEW` may only
+-- APPEND columns to the end of an existing view's list; inserting one in the
+-- middle — `endpoint_id` between asset_id and protocol, below — is refused with
+--   ERROR: cannot change name of view column "protocol" to "endpoint_id"
+-- on every database that already carries the old view, which aborts the whole
+-- apply under ON_ERROR_STOP=1. That is the same class as the `character
+-- varying` → `text` note further down: OR REPLACE cannot change a view's
+-- column list OR a column's type, only add to the end.
+--
+-- CASCADE is safe and checked: nothing in this file or in any lab database
+-- selects from this view (the only other reference is the security_invoker
+-- ALTER in POST-MIGRATIONS, which runs after this and re-applies it). A future
+-- dependent added between here and POST-MIGRATIONS would be dropped silently,
+-- so add dependents AFTER this statement, never before it.
+DROP VIEW IF EXISTS public.crypto_implementations CASCADE;
+CREATE VIEW public.crypto_implementations AS
  SELECT crypto_implementations_partitioned.id,
     crypto_implementations_partitioned.tenant_id,
     crypto_implementations_partitioned.asset_id,
+    crypto_implementations_partitioned.endpoint_id,
     crypto_implementations_partitioned.protocol,
     crypto_implementations_partitioned.protocol_version,
     crypto_implementations_partitioned.cipher_suite,
@@ -2238,6 +2322,11 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_0 (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
     tenant_id uuid NOT NULL,
     asset_id uuid NOT NULL,
+    -- The endpoint this configuration was measured on (DATA_MODEL §2). NULL for
+    -- a configuration that is not tied to one socket: an at-rest cloud resource
+    -- has no endpoint at all, which is what retires the "AT-REST" port
+    -- sentinel. asset_id stays and is the roll-up target.
+    endpoint_id uuid,
     protocol public.protocol_type NOT NULL,
     protocol_version character varying(100),
     cipher_suite character varying(255),
@@ -2274,6 +2363,11 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_1 (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
     tenant_id uuid NOT NULL,
     asset_id uuid NOT NULL,
+    -- The endpoint this configuration was measured on (DATA_MODEL §2). NULL for
+    -- a configuration that is not tied to one socket: an at-rest cloud resource
+    -- has no endpoint at all, which is what retires the "AT-REST" port
+    -- sentinel. asset_id stays and is the roll-up target.
+    endpoint_id uuid,
     protocol public.protocol_type NOT NULL,
     protocol_version character varying(100),
     cipher_suite character varying(255),
@@ -2310,6 +2404,11 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_2 (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
     tenant_id uuid NOT NULL,
     asset_id uuid NOT NULL,
+    -- The endpoint this configuration was measured on (DATA_MODEL §2). NULL for
+    -- a configuration that is not tied to one socket: an at-rest cloud resource
+    -- has no endpoint at all, which is what retires the "AT-REST" port
+    -- sentinel. asset_id stays and is the roll-up target.
+    endpoint_id uuid,
     protocol public.protocol_type NOT NULL,
     protocol_version character varying(100),
     cipher_suite character varying(255),
@@ -2346,6 +2445,11 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_3 (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
     tenant_id uuid NOT NULL,
     asset_id uuid NOT NULL,
+    -- The endpoint this configuration was measured on (DATA_MODEL §2). NULL for
+    -- a configuration that is not tied to one socket: an at-rest cloud resource
+    -- has no endpoint at all, which is what retires the "AT-REST" port
+    -- sentinel. asset_id stays and is the roll-up target.
+    endpoint_id uuid,
     protocol public.protocol_type NOT NULL,
     protocol_version character varying(100),
     cipher_suite character varying(255),
@@ -2382,6 +2486,11 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_4 (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
     tenant_id uuid NOT NULL,
     asset_id uuid NOT NULL,
+    -- The endpoint this configuration was measured on (DATA_MODEL §2). NULL for
+    -- a configuration that is not tied to one socket: an at-rest cloud resource
+    -- has no endpoint at all, which is what retires the "AT-REST" port
+    -- sentinel. asset_id stays and is the roll-up target.
+    endpoint_id uuid,
     protocol public.protocol_type NOT NULL,
     protocol_version character varying(100),
     cipher_suite character varying(255),
@@ -2418,6 +2527,11 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_5 (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
     tenant_id uuid NOT NULL,
     asset_id uuid NOT NULL,
+    -- The endpoint this configuration was measured on (DATA_MODEL §2). NULL for
+    -- a configuration that is not tied to one socket: an at-rest cloud resource
+    -- has no endpoint at all, which is what retires the "AT-REST" port
+    -- sentinel. asset_id stays and is the roll-up target.
+    endpoint_id uuid,
     protocol public.protocol_type NOT NULL,
     protocol_version character varying(100),
     cipher_suite character varying(255),
@@ -2454,6 +2568,11 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_6 (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
     tenant_id uuid NOT NULL,
     asset_id uuid NOT NULL,
+    -- The endpoint this configuration was measured on (DATA_MODEL §2). NULL for
+    -- a configuration that is not tied to one socket: an at-rest cloud resource
+    -- has no endpoint at all, which is what retires the "AT-REST" port
+    -- sentinel. asset_id stays and is the roll-up target.
+    endpoint_id uuid,
     protocol public.protocol_type NOT NULL,
     protocol_version character varying(100),
     cipher_suite character varying(255),
@@ -2490,6 +2609,11 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_7 (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
     tenant_id uuid NOT NULL,
     asset_id uuid NOT NULL,
+    -- The endpoint this configuration was measured on (DATA_MODEL §2). NULL for
+    -- a configuration that is not tied to one socket: an at-rest cloud resource
+    -- has no endpoint at all, which is what retires the "AT-REST" port
+    -- sentinel. asset_id stays and is the roll-up target.
+    endpoint_id uuid,
     protocol public.protocol_type NOT NULL,
     protocol_version character varying(100),
     cipher_suite character varying(255),
@@ -2584,7 +2708,13 @@ CREATE OR REPLACE VIEW public.current_resource_usage_summary AS
 CREATE TABLE IF NOT EXISTS public.database_encryption_states (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     tenant_id uuid NOT NULL,
-    device_id uuid,
+    -- One asset link, not two. This table carried BOTH device_id (-> devices)
+    -- and asset_id (-> network_assets) because a device and the asset the same
+    -- host produced through ingest were separate rows with no link between them
+    -- (ADR-0002 "the devices table is a second asset table"). With `devices`
+    -- merged into `assets` they are the same row, so device_id is dropped and
+    -- asset_id is the one link. DATA_MODEL §2's "device_id -> asset_id" reads as
+    -- a rename only for tables that had no asset_id already; this one did.
     asset_id uuid,
     db_engine character varying(50) NOT NULL,
     db_version character varying(100),
@@ -2644,7 +2774,10 @@ CREATE TABLE IF NOT EXISTS public.device_jobs (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     tenant_id uuid NOT NULL,
     job_type public.device_job_type NOT NULL,
-    device_id uuid,
+    -- Renamed from device_id (DATA_MODEL §2): a job targets an asset, because
+    -- `devices` is gone and an interrogated device is an asset with an
+    -- asset_management row.
+    asset_id uuid,
     integration_id uuid,
     agent_id uuid,
     status public.device_job_status DEFAULT 'pending'::public.device_job_status,
@@ -2659,42 +2792,7 @@ CREATE TABLE IF NOT EXISTS public.device_jobs (
     expires_at timestamp with time zone,
     updated_at timestamp with time zone DEFAULT now(),
     deleted_at timestamp with time zone,
-    CONSTRAINT valid_job_assignment CHECK ((((agent_id IS NULL) AND (job_type = 'cloud_discovery'::public.device_job_type)) OR ((agent_id IS NOT NULL) AND (job_type = 'device_interrogation'::public.device_job_type)) OR ((agent_id IS NULL) AND (job_type = 'device_interrogation'::public.device_job_type) AND (device_id IS NOT NULL))))
-);
-
-
--- TABLE: devices
-CREATE TABLE IF NOT EXISTS public.devices (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    tenant_id uuid NOT NULL,
-    device_type character varying(50) NOT NULL,
-    vendor character varying(50),
-    model character varying(100),
-    hostname character varying(255),
-    ip_address inet,
-    management_url character varying(500),
-    serial_number character varying(255),
-    firmware_version character varying(100),
-    discovery_method public.discovery_method DEFAULT 'device_interrogation'::public.discovery_method NOT NULL,
-    credential_id uuid,
-    username character varying(255),
-    password text,
-    -- TLS verification posture when the platform connects to the device's
-    -- management API. Defaults to false (verify) — must be explicitly opted
-    -- in per device for self-signed network gear. Defaulting to skip-verify
-    -- was a MITM exposure for embedded-credential devices (HIGH-1 in the
-    -- 2026-05 security audit).
-    tls_insecure_skip_verify boolean NOT NULL DEFAULT false,
-    connection_status character varying(20) DEFAULT 'unknown'::character varying,
-    last_interrogated_at timestamp with time zone,
-    interrogation_error text,
-    metadata jsonb DEFAULT '{}'::jsonb,
-    tags jsonb DEFAULT '{}'::jsonb,
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    deleted_at timestamp with time zone,
-    CONSTRAINT device_identifier CHECK (((hostname IS NOT NULL) OR (ip_address IS NOT NULL) OR (management_url IS NOT NULL))),
-    CONSTRAINT valid_connection_status CHECK (((connection_status)::text = ANY ((ARRAY['connected'::character varying, 'disconnected'::character varying, 'error'::character varying, 'unknown'::character varying])::text[])))
+    CONSTRAINT valid_job_assignment CHECK ((((agent_id IS NULL) AND (job_type = 'cloud_discovery'::public.device_job_type)) OR ((agent_id IS NOT NULL) AND (job_type = 'device_interrogation'::public.device_job_type)) OR ((agent_id IS NULL) AND (job_type = 'device_interrogation'::public.device_job_type) AND (asset_id IS NOT NULL)) OR ((agent_id IS NOT NULL) AND (job_type = 'host_inventory'::public.device_job_type))))
 );
 
 
@@ -2736,7 +2834,14 @@ CREATE TABLE IF NOT EXISTS public.discovery_auto_approval_rules (
     tenant_id uuid NOT NULL,
     name character varying(255) NOT NULL,
     description text,
-    conditions jsonb NOT NULL,
+    -- The rule, as a query-language string over the `observation` target
+    -- (QUERY_LANGUAGE.md §8). It replaced a jsonb `conditions` object whose
+    -- seven keys were interpreted by a hand-written evaluator; the language is
+    -- validated on write, so a typo is a 422 rather than a key the evaluator
+    -- silently ignores. An EMPTY query matches every observation, which is a
+    -- rule that auto-approves everything — deliberately expressible, and
+    -- deliberately something a person has to type.
+    query text DEFAULT ''::text NOT NULL,
     is_active boolean DEFAULT true,
     created_by uuid,
     created_at timestamp with time zone DEFAULT now(),
@@ -2900,9 +3005,20 @@ CREATE TABLE IF NOT EXISTS public.external_connections (
     service_confidence character varying(20),
     service_identification_method character varying(50),
     -- Non-null once a tenant promotes a 3rd-party connection to a managed asset
-    --links the connection to that network_asset. App-managed, no FK:
-    -- network_assets is hash-partitioned and soft-deleted.
+    --links the connection to that asset. App-managed, no FK: `assets`
+    -- is hash-partitioned and soft-deleted.
     elevated_asset_id uuid,
+    -- The endpoint of OUR asset the connection leaves from (DATA_MODEL §2).
+    -- source_asset_id stays and is the roll-up target.
+    --
+    -- It is NULL for everything phase 1 writes, and that is a decision rather
+    -- than an omission: an outbound connection leaves from an EPHEMERAL socket,
+    -- which no producer observes and which is not an inventoried endpoint. The
+    -- listening endpoint of the same asset is a different socket, and linking to
+    -- it would assert a measurement nobody made. A producer that does report a
+    -- source port (a host agent watching its own connections, ADR-0004 D3) fills
+    -- it in.
+    source_endpoint_id uuid,
     CONSTRAINT external_connections_crypto_strength_check CHECK (((crypto_strength)::text = ANY ((ARRAY['good'::character varying, 'weak'::character varying, 'unknown'::character varying])::text[]))),
     CONSTRAINT external_connections_dest_port_check CHECK (((dest_port >= 1) AND (dest_port <= 65535)))
 );
@@ -3214,7 +3330,6 @@ CREATE TABLE IF NOT EXISTS public.measurement_types (
     name character varying(255) NOT NULL,
     description text,
     data_type character varying(20) NOT NULL,
-    extraction_query text,
     units character varying(50),
     valid_range jsonb,
     allowed_rule_types jsonb,
@@ -3296,110 +3411,307 @@ CREATE TABLE IF NOT EXISTS public.monitoring_notification_channels (
 );
 
 
--- TABLE: network_assets_partitioned
-CREATE TABLE IF NOT EXISTS public.network_assets_partitioned (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    tenant_id uuid NOT NULL,
-    hostname character varying(255),
-    ip_address inet,
-    port integer,
-    asset_type public.asset_type NOT NULL,
-    operating_system character varying(100),
-    environment public.environment_type,
-    business_unit character varying(100),
-    owner_email character varying(255),
+-- ============================================================================
+-- GENERAL ASSET INVENTORY — the unit of inventory (ADR-0002 D1)
+-- ============================================================================
+-- `assets` + `asset_endpoints` (and the `asset_classes` registry they resolve
+-- against) sit HERE, where network_assets_partitioned used to, because the
+-- operational views immediately below read them. The rest of the inventory
+-- tables — identifiers, management, credentials, relationships, facts,
+-- software, findings, catalogues — and every policy and trigger for all of
+-- them are together further down, in the GENERAL ASSET INVENTORY block.
+-- Column design: docsv4/internal/developer/design/asset-inventory/DATA_MODEL.md
+-- §1–§2.
+
+-- ----------------------------------------------------------------------------
+-- 1. asset_classes — the class registry (DATA_MODEL §1, ADR-0002 D2)
+-- ----------------------------------------------------------------------------
+-- Hybrid table: platform rows carry tenant_id IS NULL and are seeded from
+-- standards/asset-classes.yaml through the generated region in seed.sql;
+-- tenant leaf subclasses are runtime rows with tenant_id set and
+-- is_fixed = false.
+--
+-- `key` is unique per SCOPE, not globally: one partial unique index over the
+-- platform rows (which is also the arbiter the generated seed's
+-- `ON CONFLICT (key) WHERE tenant_id IS NULL` infers) and one over tenant rows.
+-- Two tenants may therefore use the same subclass key independently.
+--
+-- The two indexes are DISJOINT, so they do not — and structurally cannot —
+-- stop a tenant subclass from reusing a platform key: `WHERE tenant_id IS NULL`
+-- and `WHERE tenant_id IS NOT NULL` never compare a row against the other set.
+-- Nothing here forbids shadowing, and nothing here can: a CHECK may not run a
+-- subquery, so the rule would need a trigger or an API-layer guard. That
+-- matters because assets.class_key is an FK BY VALUE with no tenant qualifier,
+-- so a shadowed key makes `class_key = 'server'` ambiguous — which
+-- attribute_schema validates the asset, which identifier_precedence the
+-- identification engine walks. Whether to forbid shadowing, and where, is
+-- workstream 1.1's call (ADR-0002 D2 constrains tenants to leaf subclasses but
+-- does not speak to key reuse). Do not read these indexes as enforcing it.
+--
+-- `path` is the materialised ancestry (`hardware.computer.server`), derived by
+-- the generator from `parent`, never stored in the YAML. The btree carries
+-- text_pattern_ops so a prefix facet (`path LIKE 'hardware.%'`) is an index
+-- scan under any collation; DATA_MODEL floated pg_trgm as an alternative, and
+-- text_pattern_ops is preferred because it needs no extension and prefix is the
+-- only pattern the facets use.
+CREATE TABLE IF NOT EXISTS public.asset_classes (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid,
+    key text NOT NULL,
+    parent_key text,
+    path text NOT NULL,
+    label text NOT NULL,
     description text,
-    tags jsonb DEFAULT '{}'::jsonb,
-    metadata jsonb DEFAULT '{}'::jsonb,
-    first_discovered_at timestamp with time zone DEFAULT now(),
-    last_seen_at timestamp with time zone DEFAULT now(),
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    deleted_at timestamp with time zone,
-    risk_score integer DEFAULT 0,
-    risk_level character varying(20) DEFAULT 'Informational'::character varying,
-    location_id uuid,
-    network_segment_id uuid,
-    service_name character varying(100),
-    service_version character varying(100),
-    service_confidence character varying(20) DEFAULT 'none'::character varying,
-    service_identification_method character varying(50),
-    fqdns text[],
-    mac_addresses text[],
-    serial_number text,
-    cloud_provider text,
-    cloud_account_id text,
-    cloud_instance_id text,
+    icon text,
+    attribute_schema jsonb DEFAULT '{}'::jsonb NOT NULL,
+    identifier_precedence text[] DEFAULT ARRAY[]::text[] NOT NULL,
+    cmdb_ci_type text,
+    cyclonedx_type text NOT NULL,
+    is_fixed boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT asset_classes_pkey PRIMARY KEY (id)
+);
+
+-- The arbiter scripts/database/seed-asset-classes.sql's upsert infers.
+CREATE UNIQUE INDEX IF NOT EXISTS asset_classes_platform_key_uniq
+    ON public.asset_classes (key) WHERE tenant_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS asset_classes_tenant_key_uniq
+    ON public.asset_classes (tenant_id, key) WHERE tenant_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_asset_classes_path
+    ON public.asset_classes USING btree (path text_pattern_ops);
+CREATE INDEX IF NOT EXISTS idx_asset_classes_parent_key
+    ON public.asset_classes USING btree (parent_key) WHERE parent_key IS NOT NULL;
+
+
+
+-- ----------------------------------------------------------------------------
+-- 2. assets — the unit of inventory (DATA_MODEL §2, ADR-0002 D1)
+-- ----------------------------------------------------------------------------
+-- THE unit of inventory as of phase 1 (workstream 1.1). Hash-partitioned by
+-- tenant_id with the same modulus 8 as crypto_implementations_partitioned and
+-- sensor_discoveries_partitioned, so the partition arithmetic across the
+-- inventory tables stays uniform.
+--
+-- PRIMARY KEY is (tenant_id, id), not (id): a unique constraint on a
+-- partitioned table must contain the partition key. That is also what makes
+-- the child tables' composite FKs possible.
+--
+-- class_key is an FK BY VALUE to asset_classes.key (ADR-0002 D2, DATA_MODEL
+-- §2). It cannot be a real foreign key: `key` is unique only within a scope
+-- (two partial unique indexes, above), and a partial index cannot back an FK.
+-- class_path is the denormalised ancestry, carried so a prefix facet on the
+-- asset list needs no join.
+--
+-- Deliberately absent, relative to the retired network_assets (DATA_MODEL §2):
+-- `port` and the service_* columns (endpoints), `asset_type` (class keys
+-- replace the enum, which is dropped), `operating_system` (a class attribute),
+-- `mac_addresses` / `serial_number` / `cloud_*` / `fqdns` (identifiers),
+-- `last_scanned_at` / `last_scan_status` (endpoint-level).
+--
+-- risk_score is RECOMPUTED per asset as MAX over active risk-feeding findings
+-- (ADR-0005 D4) — not the GREATEST(old, new) write network_assets carried,
+-- which could never go down. risk_assessed_by records which producers have
+-- evaluated the asset: score 0 with an EMPTY array is *not assessed*, score 0
+-- with {crypto,eol,vulnerability} is *assessed clean*. Keeping them distinct is
+-- the three-valued rule applied to risk; do not default the array to anything
+-- non-empty.
+CREATE TABLE IF NOT EXISTS public.assets (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL,
+    class_key text NOT NULL,
+    class_path text NOT NULL,
+    class_source_kind text DEFAULT 'measured'::text NOT NULL,
+    -- The producer that assigned the class: `classifier:<model>`, `user:<id>`,
+    -- `cmdb:<profile>`, `sensor:<id>`, and — when class_source_kind is `rule` —
+    -- the classification_rules row id that argued it. Sibling of
+    -- class_source_kind: the kind says HOW the class was decided, this says WHO
+    -- or WHAT decided it. The query language's `proposed_by` sugar reads it, and
+    -- a class proposal that cannot name its producer is not reviewable.
+    --
+    -- `rule` is the fifth source kind and it is not a synonym for any of the
+    -- other four (workstream 2.10b). A class argued from a curated OUI rule is
+    -- not `measured` — the MAC was measured, the MAC-to-class mapping was not —
+    -- and it is not `inferred`, which ADR-0008 D4.2 defines as "something a
+    -- model proposed" and prices accordingly. A deterministic, citable rule row
+    -- is neither, and making it claim to be either would put false provenance on
+    -- the one field a reviewer uses to audit a class.
+    class_source_ref text,
+    class_confidence numeric(3,2),
+    display_name text,
+    hostname text,
+    primary_address inet,
+    attributes jsonb DEFAULT '{}'::jsonb NOT NULL,
+    environment public.environment_type,
+    business_unit text,
+    owner_email text,
+    support_group text,
+    description text,
     site text,
     region text,
     zone text,
+    location_id uuid,
+    network_segment_id uuid,
+    tags jsonb DEFAULT '{}'::jsonb NOT NULL,
+    -- Pipeline state, not class attributes. Two things live here and neither is
+    -- an attribute of the thing: the discovery-source attribution the Approvals
+    -- filter buttons read (discovery_source / sensor_id / batch_id), and the
+    -- DEFERRED FINDINGS holding pen — the raw observations an asset accumulates
+    -- while it waits in Approvals, drained into certificates and crypto
+    -- configurations the moment it is approved.
+    --
+    -- Deviation from DATA_MODEL §2, which lists no metadata column: it named
+    -- `attributes` for class-specific typed attributes and had no home for
+    -- either of these. They cannot go in `attributes`, which is validated
+    -- against the class schema and whose names are reserved (ADR-0002 D2
+    -- erratum) — a holding pen of raw findings is not a property of a server.
+    metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
+    asset_status text DEFAULT 'pending_approval'::text NOT NULL,
+    asset_ownership text DEFAULT 'unknown'::text NOT NULL,
+    stale_status text,
     discovery_method text,
     confidence_score integer,
-    stale_status character varying(50) DEFAULT NULL::character varying,
-    asset_status character varying(50) DEFAULT 'monitoring'::character varying,
-    asset_ownership character varying(50) DEFAULT 'unknown'::character varying,
-    -- Active Scan per-asset crypto-scan freshness.
-    --   last_scanned_at  = when the asset was last actively scanned (NULL =
-    --                      never; drives the "unscanned" coverage filter)
-    --   last_scan_status = outcome of the most recent scan dispatch
-    --                      ('scanning' | 'completed' | 'failed')
-    last_scanned_at timestamp with time zone,
-    last_scan_status text,
-    CONSTRAINT network_assets_partitioned_asset_ownership_check CHECK (((asset_ownership)::text = ANY ((ARRAY['internal'::character varying, 'third_party'::character varying, 'unknown'::character varying])::text[])))
+    first_discovered_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    risk_score integer DEFAULT 0 NOT NULL,
+    risk_assessed_by text[] DEFAULT ARRAY[]::text[] NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    deleted_at timestamp with time zone,
+    CONSTRAINT assets_pkey PRIMARY KEY (tenant_id, id),
+    CONSTRAINT assets_class_source_kind_check CHECK (class_source_kind = ANY (ARRAY['measured'::text, 'declared'::text, 'imported'::text, 'inferred'::text, 'rule'::text])),
+    CONSTRAINT assets_asset_status_check CHECK (asset_status = ANY (ARRAY['pending_approval'::text, 'monitoring'::text, 'denied'::text, 'archived'::text])),
+    CONSTRAINT assets_asset_ownership_check CHECK (asset_ownership = ANY (ARRAY['internal'::text, 'third_party'::text, 'unknown'::text])),
+    CONSTRAINT assets_stale_status_check CHECK (stale_status IS NULL OR stale_status = ANY (ARRAY['active'::text, 'stale'::text, 'archived'::text])),
+    CONSTRAINT assets_risk_score_range_check CHECK (risk_score >= 0 AND risk_score <= 100),
+    CONSTRAINT assets_class_confidence_range_check CHECK (class_confidence IS NULL OR (class_confidence >= 0 AND class_confidence <= 1))
 )
 PARTITION BY HASH (tenant_id);
 
+CREATE TABLE IF NOT EXISTS public.assets_part_0 PARTITION OF public.assets FOR VALUES WITH (modulus 8, remainder 0);
+CREATE TABLE IF NOT EXISTS public.assets_part_1 PARTITION OF public.assets FOR VALUES WITH (modulus 8, remainder 1);
+CREATE TABLE IF NOT EXISTS public.assets_part_2 PARTITION OF public.assets FOR VALUES WITH (modulus 8, remainder 2);
+CREATE TABLE IF NOT EXISTS public.assets_part_3 PARTITION OF public.assets FOR VALUES WITH (modulus 8, remainder 3);
+CREATE TABLE IF NOT EXISTS public.assets_part_4 PARTITION OF public.assets FOR VALUES WITH (modulus 8, remainder 4);
+CREATE TABLE IF NOT EXISTS public.assets_part_5 PARTITION OF public.assets FOR VALUES WITH (modulus 8, remainder 5);
+CREATE TABLE IF NOT EXISTS public.assets_part_6 PARTITION OF public.assets FOR VALUES WITH (modulus 8, remainder 6);
+CREATE TABLE IF NOT EXISTS public.assets_part_7 PARTITION OF public.assets FOR VALUES WITH (modulus 8, remainder 7);
 
--- VIEW: network_assets
--- DROP first so re-applying the file is idempotent: this view is redefined in the
--- POST-MIGRATIONS block with two extra columns (last_scanned_at, last_scan_status)
--- ALTER-added there; without the DROP, the second apply tries to shrink the
--- already-widened view and fails with "cannot drop columns from view".
-DROP VIEW IF EXISTS public.network_assets;
-CREATE OR REPLACE VIEW public.network_assets AS
- SELECT network_assets_partitioned.id,
-    network_assets_partitioned.tenant_id,
-    network_assets_partitioned.hostname,
-    network_assets_partitioned.ip_address,
-    network_assets_partitioned.port,
-    network_assets_partitioned.asset_type,
-    network_assets_partitioned.operating_system,
-    network_assets_partitioned.environment,
-    network_assets_partitioned.business_unit,
-    network_assets_partitioned.owner_email,
-    network_assets_partitioned.description,
-    network_assets_partitioned.tags,
-    network_assets_partitioned.metadata,
-    network_assets_partitioned.first_discovered_at,
-    network_assets_partitioned.last_seen_at,
-    network_assets_partitioned.created_at,
-    network_assets_partitioned.updated_at,
-    network_assets_partitioned.deleted_at,
-    network_assets_partitioned.risk_score,
-    network_assets_partitioned.risk_level,
-    network_assets_partitioned.location_id,
-    network_assets_partitioned.network_segment_id,
-    network_assets_partitioned.service_name,
-    network_assets_partitioned.service_version,
-    network_assets_partitioned.service_confidence,
-    network_assets_partitioned.service_identification_method,
-    network_assets_partitioned.fqdns,
-    network_assets_partitioned.mac_addresses,
-    network_assets_partitioned.serial_number,
-    network_assets_partitioned.cloud_provider,
-    network_assets_partitioned.cloud_account_id,
-    network_assets_partitioned.cloud_instance_id,
-    network_assets_partitioned.site,
-    network_assets_partitioned.region,
-    network_assets_partitioned.zone,
-    network_assets_partitioned.discovery_method,
-    network_assets_partitioned.confidence_score,
-    network_assets_partitioned.stale_status,
-    network_assets_partitioned.asset_status,
-    network_assets_partitioned.asset_ownership,
-    network_assets_partitioned.last_scanned_at,
-    network_assets_partitioned.last_scan_status
-   FROM public.network_assets_partitioned;
+-- class_path prefix drives the class facet; the partial index on live rows is
+-- what every list query actually scans.
+CREATE INDEX IF NOT EXISTS idx_assets_tenant_class_key
+    ON public.assets USING btree (tenant_id, class_key) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_assets_tenant_class_path
+    ON public.assets USING btree (tenant_id, class_path text_pattern_ops) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_assets_tenant_status
+    ON public.assets USING btree (tenant_id, asset_status) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_assets_tenant_last_seen
+    ON public.assets USING btree (tenant_id, last_seen_at DESC) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_assets_tenant_hostname
+    ON public.assets USING btree (tenant_id, lower(hostname)) WHERE hostname IS NOT NULL AND deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_assets_tenant_risk
+    ON public.assets USING btree (tenant_id, risk_score DESC) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_assets_tags
+    ON public.assets USING gin (tags);
+
+
+
+-- ----------------------------------------------------------------------------
+-- asset_endpoints — an asset's reachable (address, port, transport) faces
+-- ----------------------------------------------------------------------------
+-- DATA_MODEL §2. One row per network face the asset exposes. An asset may have
+-- zero (an at-rest bucket, a declared business service) or many; the `AT-REST`
+-- port sentinel the old port-as-asset model needed is retired — an at-rest
+-- resource simply has no endpoint row at all.
+--
+-- Hash-partitioned by tenant on the same modulus as assets so the two colocate.
+--
+-- The uniqueness key differs from DATA_MODEL's literal text, which reads
+-- `coalesce(address)`: single-argument coalesce is not valid SQL. The
+-- expression below is the intended semantics — NULL and NULL collide, so
+-- re-observing the same face updates one row rather than appending. (A plain
+-- multi-column unique constraint would NOT do this: in SQL two NULLs are
+-- distinct, so every re-observation of an endpoint with no FQDN would insert
+-- again. That is the same class of bug as the port sentinel.)
+CREATE TABLE IF NOT EXISTS public.asset_endpoints (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL,
+    asset_id uuid NOT NULL,
+    address inet,
+    fqdn text,
+    port integer,
+    transport text DEFAULT 'tcp'::text NOT NULL,
+    protocol public.protocol_type,
+    service_name text,
+    service_version text,
+    -- Normalised, component-wise sort key derived from service_version on
+    -- write, NULL when the version does not parse — the same rule as
+    -- software_products.version_sort (QUERY_LANGUAGE §5.5). NULL means the
+    -- comparison evaluates UNKNOWN; the query language forbids falling back to
+    -- a lexical compare, because "1.10" sorts before "1.9" as text and that
+    -- silently inverts every version predicate it touches.
+    service_version_sort text,
+    service_confidence text DEFAULT 'none'::text,
+    service_identification_method text,
+    sni text[],
+    alpn text[],
+    -- Whether the socket is bound to a LOOPBACK address and is therefore
+    -- reachable only from the host itself.
+    --
+    -- NULLABLE and three-valued on purpose. NULL means nobody established it —
+    -- which is every endpoint a network scan found, because a scan cannot
+    -- establish it even in principle: it only ever sees what answers on the
+    -- wire. Only a host's own view of its sockets (the agent's host inventory,
+    -- workstream 2.11b) can say true or false, and both of those are real
+    -- answers: `false` on a measured endpoint is "this service IS exposed to
+    -- the network", which is a finding's input, and defaulting it to false
+    -- would have every scanned endpoint assert that for free.
+    bound_local boolean,
+    source_kind text DEFAULT 'measured'::text NOT NULL,
+    source_ref text,
+    status text DEFAULT 'active'::text NOT NULL,
+    first_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_scanned_at timestamp with time zone,
+    last_scan_status text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT asset_endpoints_pkey PRIMARY KEY (tenant_id, id),
+    CONSTRAINT asset_endpoints_transport_check CHECK (transport = ANY (ARRAY['tcp'::text, 'udp'::text, 'none'::text])),
+    CONSTRAINT asset_endpoints_source_kind_check CHECK (source_kind = ANY (ARRAY['measured'::text, 'declared'::text, 'imported'::text, 'inferred'::text])),
+    CONSTRAINT asset_endpoints_status_check CHECK (status = ANY (ARRAY['active'::text, 'stale'::text, 'closed'::text])),
+    CONSTRAINT asset_endpoints_port_range_check CHECK (port IS NULL OR (port >= 0 AND port <= 65535)),
+    -- An endpoint must be addressable somehow. DATA_MODEL: "at least one of
+    -- address/fqdn".
+    CONSTRAINT asset_endpoints_addressable_check CHECK (address IS NOT NULL OR fqdn IS NOT NULL)
+)
+PARTITION BY HASH (tenant_id);
+
+CREATE TABLE IF NOT EXISTS public.asset_endpoints_part_0 PARTITION OF public.asset_endpoints FOR VALUES WITH (modulus 8, remainder 0);
+CREATE TABLE IF NOT EXISTS public.asset_endpoints_part_1 PARTITION OF public.asset_endpoints FOR VALUES WITH (modulus 8, remainder 1);
+CREATE TABLE IF NOT EXISTS public.asset_endpoints_part_2 PARTITION OF public.asset_endpoints FOR VALUES WITH (modulus 8, remainder 2);
+CREATE TABLE IF NOT EXISTS public.asset_endpoints_part_3 PARTITION OF public.asset_endpoints FOR VALUES WITH (modulus 8, remainder 3);
+CREATE TABLE IF NOT EXISTS public.asset_endpoints_part_4 PARTITION OF public.asset_endpoints FOR VALUES WITH (modulus 8, remainder 4);
+CREATE TABLE IF NOT EXISTS public.asset_endpoints_part_5 PARTITION OF public.asset_endpoints FOR VALUES WITH (modulus 8, remainder 5);
+CREATE TABLE IF NOT EXISTS public.asset_endpoints_part_6 PARTITION OF public.asset_endpoints FOR VALUES WITH (modulus 8, remainder 6);
+CREATE TABLE IF NOT EXISTS public.asset_endpoints_part_7 PARTITION OF public.asset_endpoints FOR VALUES WITH (modulus 8, remainder 7);
+
+CREATE UNIQUE INDEX IF NOT EXISTS asset_endpoints_identity_uniq
+    ON public.asset_endpoints (
+        tenant_id,
+        asset_id,
+        coalesce(address::text, ''),
+        coalesce(fqdn, ''),
+        coalesce(port, -1),
+        transport
+    );
+CREATE INDEX IF NOT EXISTS idx_asset_endpoints_tenant_asset
+    ON public.asset_endpoints USING btree (tenant_id, asset_id);
+CREATE INDEX IF NOT EXISTS idx_asset_endpoints_tenant_address
+    ON public.asset_endpoints USING btree (tenant_id, address) WHERE address IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_asset_endpoints_tenant_port
+    ON public.asset_endpoints USING btree (tenant_id, port) WHERE port IS NOT NULL;
+
 
 
 -- MATERIALIZED VIEW: mv_location_finding_summary
@@ -3435,7 +3747,7 @@ CREATE MATERIALIZED VIEW public.mv_location_finding_summary AS
     count(DISTINCT a.id) AS asset_count,
     count(DISTINCT ci.id) AS crypto_config_count,
     count(DISTINCT c.id) AS certificate_count,
-    -- B-18: band network_assets_partitioned.risk_score, do NOT read the stored
+    -- B-18: band assets.risk_score, do NOT read a stored
     -- risk_level column. Nothing anywhere writes risk_level — no INSERT,
     -- UPDATE, trigger or seed — so it sits at its DEFAULT 'Informational'
     -- forever and these four counters were structurally always 0, however
@@ -3453,7 +3765,7 @@ CREATE MATERIALIZED VIEW public.mv_location_finding_summary AS
     count(DISTINCT c.id) FILTER (WHERE ((c.not_after IS NOT NULL) AND (c.not_after > now()) AND (c.not_after <= (now() + '30 days'::interval)))) AS expiring_certs_30d,
     count(DISTINCT c.id) FILTER (WHERE ((c.not_after IS NOT NULL) AND (c.not_after < now()))) AS expired_certs
    FROM (((public.locations l
-     LEFT JOIN public.network_assets_partitioned a ON (((a.location_id = l.id) AND (a.deleted_at IS NULL))))
+     LEFT JOIN public.assets a ON (((a.location_id = l.id) AND (a.deleted_at IS NULL))))
      LEFT JOIN public.crypto_implementations_partitioned ci ON (((ci.asset_id = a.id) AND (ci.deleted_at IS NULL))))
      LEFT JOIN public.certificates c ON ((c.id = ci.certificate_id)))
   GROUP BY l.id, l.tenant_id, l.name, l.location_type, l.full_path, a.environment
@@ -3476,19 +3788,20 @@ CREATE MATERIALIZED VIEW public.mv_remediation_queue AS
         END AS severity,
     a.id AS asset_id,
     a.hostname AS asset_hostname,
-    (a.ip_address)::text AS asset_ip,
-    a.port AS asset_port,
+    COALESCE((e.address)::text, (a.primary_address)::text) AS asset_ip,
+    e.port AS asset_port,
     l.name AS location_name,
     l.full_path AS location_full_path,
     (a.environment)::text AS environment,
-    a.service_name,
+    e.service_name,
     c.id AS certificate_id,
     ci.id AS crypto_implementation_id,
     ((('Certificate '::text || (COALESCE(c.common_name, (c.subject_dn)::character varying))::text) || ' expires '::text) || (c.not_after)::text) AS detail_text,
     ci.created_at
-   FROM (((public.network_assets_partitioned a
+   FROM ((((public.assets a
      JOIN public.crypto_implementations_partitioned ci ON (((ci.asset_id = a.id) AND (ci.deleted_at IS NULL))))
      JOIN public.certificates c ON (((c.id = ci.certificate_id) AND (c.not_after IS NOT NULL) AND ((c.not_after <= now()) OR (c.not_after <= (now() + '30 days'::interval))))))
+     LEFT JOIN public.asset_endpoints e ON (((e.tenant_id = ci.tenant_id) AND (e.id = ci.endpoint_id))))
      LEFT JOIN public.locations l ON ((l.id = a.location_id)))
   WHERE (a.deleted_at IS NULL)
 UNION ALL
@@ -3511,20 +3824,21 @@ UNION ALL
         END AS severity,
     a.id AS asset_id,
     a.hostname AS asset_hostname,
-    (a.ip_address)::text AS asset_ip,
-    a.port AS asset_port,
+    COALESCE((e.address)::text, (a.primary_address)::text) AS asset_ip,
+    e.port AS asset_port,
     l.name AS location_name,
     l.full_path AS location_full_path,
     (a.environment)::text AS environment,
-    a.service_name,
+    e.service_name,
     NULL::uuid AS certificate_id,
     ci.id AS crypto_implementation_id,
     ((('Risk score '::text || (ci.risk_score)::text) || ': '::text) || (COALESCE(ci.cipher_suite, ((ci.protocol)::text)::character varying))::text) AS detail_text,
     ci.created_at
-   FROM ((public.network_assets_partitioned a
+   FROM (((public.assets a
      -- >= 40 is the canonical Medium floor (risk_bands.go). It was >= 60, which
      -- silently hid the bottom half of the Medium band from the queue.
      JOIN public.crypto_implementations_partitioned ci ON (((ci.asset_id = a.id) AND (ci.deleted_at IS NULL) AND (ci.risk_score >= 40))))
+     LEFT JOIN public.asset_endpoints e ON (((e.tenant_id = ci.tenant_id) AND (e.id = ci.endpoint_id))))
      LEFT JOIN public.locations l ON ((l.id = a.location_id)))
   WHERE (a.deleted_at IS NULL)
 UNION ALL
@@ -3533,405 +3847,22 @@ UNION ALL
     'medium'::text AS severity,
     a.id AS asset_id,
     a.hostname AS asset_hostname,
-    (a.ip_address)::text AS asset_ip,
-    a.port AS asset_port,
+    COALESCE((e.address)::text, (a.primary_address)::text) AS asset_ip,
+    e.port AS asset_port,
     l.name AS location_name,
     l.full_path AS location_full_path,
     (a.environment)::text AS environment,
-    a.service_name,
+    e.service_name,
     NULL::uuid AS certificate_id,
     ci.id AS crypto_implementation_id,
     ('Protocol '::text || (COALESCE(ci.protocol_version, ((ci.protocol)::text)::character varying))::text) AS detail_text,
     ci.created_at
-   FROM ((public.network_assets_partitioned a
+   FROM (((public.assets a
      JOIN public.crypto_implementations_partitioned ci ON (((ci.asset_id = a.id) AND (ci.deleted_at IS NULL))))
+     LEFT JOIN public.asset_endpoints e ON (((e.tenant_id = ci.tenant_id) AND (e.id = ci.endpoint_id))))
      LEFT JOIN public.locations l ON ((l.id = a.location_id)))
   WHERE ((a.deleted_at IS NULL) AND (((ci.protocol_version)::text = ANY ((ARRAY['TLS 1.0'::character varying, 'TLS 1.1'::character varying, 'SSL 3.0'::character varying])::text[])) OR ((ci.protocol_version)::text ~~ '1.0'::text) OR ((ci.protocol_version)::text ~~ '1.1'::text)))
   WITH DATA;
-
-
--- TABLE: network_assets_part_0
-CREATE TABLE IF NOT EXISTS public.network_assets_part_0 (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    tenant_id uuid NOT NULL,
-    hostname character varying(255),
-    ip_address inet,
-    port integer,
-    asset_type public.asset_type NOT NULL,
-    operating_system character varying(100),
-    environment public.environment_type,
-    business_unit character varying(100),
-    owner_email character varying(255),
-    description text,
-    tags jsonb DEFAULT '{}'::jsonb,
-    metadata jsonb DEFAULT '{}'::jsonb,
-    first_discovered_at timestamp with time zone DEFAULT now(),
-    last_seen_at timestamp with time zone DEFAULT now(),
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    deleted_at timestamp with time zone,
-    risk_score integer DEFAULT 0,
-    risk_level character varying(20) DEFAULT 'Informational'::character varying,
-    location_id uuid,
-    network_segment_id uuid,
-    service_name character varying(100),
-    service_version character varying(100),
-    service_confidence character varying(20) DEFAULT 'none'::character varying,
-    service_identification_method character varying(50),
-    fqdns text[],
-    mac_addresses text[],
-    serial_number text,
-    cloud_provider text,
-    cloud_account_id text,
-    cloud_instance_id text,
-    site text,
-    region text,
-    zone text,
-    discovery_method text,
-    confidence_score integer,
-    stale_status character varying(50) DEFAULT NULL::character varying,
-    asset_status character varying(50) DEFAULT 'monitoring'::character varying,
-    asset_ownership character varying(50) DEFAULT 'unknown'::character varying,
-    last_scanned_at timestamp with time zone,
-    last_scan_status text,
-    CONSTRAINT network_assets_partitioned_asset_ownership_check CHECK (((asset_ownership)::text = ANY ((ARRAY['internal'::character varying, 'third_party'::character varying, 'unknown'::character varying])::text[])))
-);
-
-
--- TABLE: network_assets_part_1
-CREATE TABLE IF NOT EXISTS public.network_assets_part_1 (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    tenant_id uuid NOT NULL,
-    hostname character varying(255),
-    ip_address inet,
-    port integer,
-    asset_type public.asset_type NOT NULL,
-    operating_system character varying(100),
-    environment public.environment_type,
-    business_unit character varying(100),
-    owner_email character varying(255),
-    description text,
-    tags jsonb DEFAULT '{}'::jsonb,
-    metadata jsonb DEFAULT '{}'::jsonb,
-    first_discovered_at timestamp with time zone DEFAULT now(),
-    last_seen_at timestamp with time zone DEFAULT now(),
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    deleted_at timestamp with time zone,
-    risk_score integer DEFAULT 0,
-    risk_level character varying(20) DEFAULT 'Informational'::character varying,
-    location_id uuid,
-    network_segment_id uuid,
-    service_name character varying(100),
-    service_version character varying(100),
-    service_confidence character varying(20) DEFAULT 'none'::character varying,
-    service_identification_method character varying(50),
-    fqdns text[],
-    mac_addresses text[],
-    serial_number text,
-    cloud_provider text,
-    cloud_account_id text,
-    cloud_instance_id text,
-    site text,
-    region text,
-    zone text,
-    discovery_method text,
-    confidence_score integer,
-    stale_status character varying(50) DEFAULT NULL::character varying,
-    asset_status character varying(50) DEFAULT 'monitoring'::character varying,
-    asset_ownership character varying(50) DEFAULT 'unknown'::character varying,
-    last_scanned_at timestamp with time zone,
-    last_scan_status text,
-    CONSTRAINT network_assets_partitioned_asset_ownership_check CHECK (((asset_ownership)::text = ANY ((ARRAY['internal'::character varying, 'third_party'::character varying, 'unknown'::character varying])::text[])))
-);
-
-
--- TABLE: network_assets_part_2
-CREATE TABLE IF NOT EXISTS public.network_assets_part_2 (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    tenant_id uuid NOT NULL,
-    hostname character varying(255),
-    ip_address inet,
-    port integer,
-    asset_type public.asset_type NOT NULL,
-    operating_system character varying(100),
-    environment public.environment_type,
-    business_unit character varying(100),
-    owner_email character varying(255),
-    description text,
-    tags jsonb DEFAULT '{}'::jsonb,
-    metadata jsonb DEFAULT '{}'::jsonb,
-    first_discovered_at timestamp with time zone DEFAULT now(),
-    last_seen_at timestamp with time zone DEFAULT now(),
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    deleted_at timestamp with time zone,
-    risk_score integer DEFAULT 0,
-    risk_level character varying(20) DEFAULT 'Informational'::character varying,
-    location_id uuid,
-    network_segment_id uuid,
-    service_name character varying(100),
-    service_version character varying(100),
-    service_confidence character varying(20) DEFAULT 'none'::character varying,
-    service_identification_method character varying(50),
-    fqdns text[],
-    mac_addresses text[],
-    serial_number text,
-    cloud_provider text,
-    cloud_account_id text,
-    cloud_instance_id text,
-    site text,
-    region text,
-    zone text,
-    discovery_method text,
-    confidence_score integer,
-    stale_status character varying(50) DEFAULT NULL::character varying,
-    asset_status character varying(50) DEFAULT 'monitoring'::character varying,
-    asset_ownership character varying(50) DEFAULT 'unknown'::character varying,
-    last_scanned_at timestamp with time zone,
-    last_scan_status text,
-    CONSTRAINT network_assets_partitioned_asset_ownership_check CHECK (((asset_ownership)::text = ANY ((ARRAY['internal'::character varying, 'third_party'::character varying, 'unknown'::character varying])::text[])))
-);
-
-
--- TABLE: network_assets_part_3
-CREATE TABLE IF NOT EXISTS public.network_assets_part_3 (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    tenant_id uuid NOT NULL,
-    hostname character varying(255),
-    ip_address inet,
-    port integer,
-    asset_type public.asset_type NOT NULL,
-    operating_system character varying(100),
-    environment public.environment_type,
-    business_unit character varying(100),
-    owner_email character varying(255),
-    description text,
-    tags jsonb DEFAULT '{}'::jsonb,
-    metadata jsonb DEFAULT '{}'::jsonb,
-    first_discovered_at timestamp with time zone DEFAULT now(),
-    last_seen_at timestamp with time zone DEFAULT now(),
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    deleted_at timestamp with time zone,
-    risk_score integer DEFAULT 0,
-    risk_level character varying(20) DEFAULT 'Informational'::character varying,
-    location_id uuid,
-    network_segment_id uuid,
-    service_name character varying(100),
-    service_version character varying(100),
-    service_confidence character varying(20) DEFAULT 'none'::character varying,
-    service_identification_method character varying(50),
-    fqdns text[],
-    mac_addresses text[],
-    serial_number text,
-    cloud_provider text,
-    cloud_account_id text,
-    cloud_instance_id text,
-    site text,
-    region text,
-    zone text,
-    discovery_method text,
-    confidence_score integer,
-    stale_status character varying(50) DEFAULT NULL::character varying,
-    asset_status character varying(50) DEFAULT 'monitoring'::character varying,
-    asset_ownership character varying(50) DEFAULT 'unknown'::character varying,
-    last_scanned_at timestamp with time zone,
-    last_scan_status text,
-    CONSTRAINT network_assets_partitioned_asset_ownership_check CHECK (((asset_ownership)::text = ANY ((ARRAY['internal'::character varying, 'third_party'::character varying, 'unknown'::character varying])::text[])))
-);
-
-
--- TABLE: network_assets_part_4
-CREATE TABLE IF NOT EXISTS public.network_assets_part_4 (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    tenant_id uuid NOT NULL,
-    hostname character varying(255),
-    ip_address inet,
-    port integer,
-    asset_type public.asset_type NOT NULL,
-    operating_system character varying(100),
-    environment public.environment_type,
-    business_unit character varying(100),
-    owner_email character varying(255),
-    description text,
-    tags jsonb DEFAULT '{}'::jsonb,
-    metadata jsonb DEFAULT '{}'::jsonb,
-    first_discovered_at timestamp with time zone DEFAULT now(),
-    last_seen_at timestamp with time zone DEFAULT now(),
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    deleted_at timestamp with time zone,
-    risk_score integer DEFAULT 0,
-    risk_level character varying(20) DEFAULT 'Informational'::character varying,
-    location_id uuid,
-    network_segment_id uuid,
-    service_name character varying(100),
-    service_version character varying(100),
-    service_confidence character varying(20) DEFAULT 'none'::character varying,
-    service_identification_method character varying(50),
-    fqdns text[],
-    mac_addresses text[],
-    serial_number text,
-    cloud_provider text,
-    cloud_account_id text,
-    cloud_instance_id text,
-    site text,
-    region text,
-    zone text,
-    discovery_method text,
-    confidence_score integer,
-    stale_status character varying(50) DEFAULT NULL::character varying,
-    asset_status character varying(50) DEFAULT 'monitoring'::character varying,
-    asset_ownership character varying(50) DEFAULT 'unknown'::character varying,
-    last_scanned_at timestamp with time zone,
-    last_scan_status text,
-    CONSTRAINT network_assets_partitioned_asset_ownership_check CHECK (((asset_ownership)::text = ANY ((ARRAY['internal'::character varying, 'third_party'::character varying, 'unknown'::character varying])::text[])))
-);
-
-
--- TABLE: network_assets_part_5
-CREATE TABLE IF NOT EXISTS public.network_assets_part_5 (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    tenant_id uuid NOT NULL,
-    hostname character varying(255),
-    ip_address inet,
-    port integer,
-    asset_type public.asset_type NOT NULL,
-    operating_system character varying(100),
-    environment public.environment_type,
-    business_unit character varying(100),
-    owner_email character varying(255),
-    description text,
-    tags jsonb DEFAULT '{}'::jsonb,
-    metadata jsonb DEFAULT '{}'::jsonb,
-    first_discovered_at timestamp with time zone DEFAULT now(),
-    last_seen_at timestamp with time zone DEFAULT now(),
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    deleted_at timestamp with time zone,
-    risk_score integer DEFAULT 0,
-    risk_level character varying(20) DEFAULT 'Informational'::character varying,
-    location_id uuid,
-    network_segment_id uuid,
-    service_name character varying(100),
-    service_version character varying(100),
-    service_confidence character varying(20) DEFAULT 'none'::character varying,
-    service_identification_method character varying(50),
-    fqdns text[],
-    mac_addresses text[],
-    serial_number text,
-    cloud_provider text,
-    cloud_account_id text,
-    cloud_instance_id text,
-    site text,
-    region text,
-    zone text,
-    discovery_method text,
-    confidence_score integer,
-    stale_status character varying(50) DEFAULT NULL::character varying,
-    asset_status character varying(50) DEFAULT 'monitoring'::character varying,
-    asset_ownership character varying(50) DEFAULT 'unknown'::character varying,
-    last_scanned_at timestamp with time zone,
-    last_scan_status text,
-    CONSTRAINT network_assets_partitioned_asset_ownership_check CHECK (((asset_ownership)::text = ANY ((ARRAY['internal'::character varying, 'third_party'::character varying, 'unknown'::character varying])::text[])))
-);
-
-
--- TABLE: network_assets_part_6
-CREATE TABLE IF NOT EXISTS public.network_assets_part_6 (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    tenant_id uuid NOT NULL,
-    hostname character varying(255),
-    ip_address inet,
-    port integer,
-    asset_type public.asset_type NOT NULL,
-    operating_system character varying(100),
-    environment public.environment_type,
-    business_unit character varying(100),
-    owner_email character varying(255),
-    description text,
-    tags jsonb DEFAULT '{}'::jsonb,
-    metadata jsonb DEFAULT '{}'::jsonb,
-    first_discovered_at timestamp with time zone DEFAULT now(),
-    last_seen_at timestamp with time zone DEFAULT now(),
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    deleted_at timestamp with time zone,
-    risk_score integer DEFAULT 0,
-    risk_level character varying(20) DEFAULT 'Informational'::character varying,
-    location_id uuid,
-    network_segment_id uuid,
-    service_name character varying(100),
-    service_version character varying(100),
-    service_confidence character varying(20) DEFAULT 'none'::character varying,
-    service_identification_method character varying(50),
-    fqdns text[],
-    mac_addresses text[],
-    serial_number text,
-    cloud_provider text,
-    cloud_account_id text,
-    cloud_instance_id text,
-    site text,
-    region text,
-    zone text,
-    discovery_method text,
-    confidence_score integer,
-    stale_status character varying(50) DEFAULT NULL::character varying,
-    asset_status character varying(50) DEFAULT 'monitoring'::character varying,
-    asset_ownership character varying(50) DEFAULT 'unknown'::character varying,
-    last_scanned_at timestamp with time zone,
-    last_scan_status text,
-    CONSTRAINT network_assets_partitioned_asset_ownership_check CHECK (((asset_ownership)::text = ANY ((ARRAY['internal'::character varying, 'third_party'::character varying, 'unknown'::character varying])::text[])))
-);
-
-
--- TABLE: network_assets_part_7
-CREATE TABLE IF NOT EXISTS public.network_assets_part_7 (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    tenant_id uuid NOT NULL,
-    hostname character varying(255),
-    ip_address inet,
-    port integer,
-    asset_type public.asset_type NOT NULL,
-    operating_system character varying(100),
-    environment public.environment_type,
-    business_unit character varying(100),
-    owner_email character varying(255),
-    description text,
-    tags jsonb DEFAULT '{}'::jsonb,
-    metadata jsonb DEFAULT '{}'::jsonb,
-    first_discovered_at timestamp with time zone DEFAULT now(),
-    last_seen_at timestamp with time zone DEFAULT now(),
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    deleted_at timestamp with time zone,
-    risk_score integer DEFAULT 0,
-    risk_level character varying(20) DEFAULT 'Informational'::character varying,
-    location_id uuid,
-    network_segment_id uuid,
-    service_name character varying(100),
-    service_version character varying(100),
-    service_confidence character varying(20) DEFAULT 'none'::character varying,
-    service_identification_method character varying(50),
-    fqdns text[],
-    mac_addresses text[],
-    serial_number text,
-    cloud_provider text,
-    cloud_account_id text,
-    cloud_instance_id text,
-    site text,
-    region text,
-    zone text,
-    discovery_method text,
-    confidence_score integer,
-    stale_status character varying(50) DEFAULT NULL::character varying,
-    asset_status character varying(50) DEFAULT 'monitoring'::character varying,
-    asset_ownership character varying(50) DEFAULT 'unknown'::character varying,
-    last_scanned_at timestamp with time zone,
-    last_scan_status text,
-    CONSTRAINT network_assets_partitioned_asset_ownership_check CHECK (((asset_ownership)::text = ANY ((ARRAY['internal'::character varying, 'third_party'::character varying, 'unknown'::character varying])::text[])))
-);
 
 
 -- TABLE: network_segments
@@ -3953,6 +3884,30 @@ CREATE TABLE IF NOT EXISTS public.network_segments (
     metadata jsonb DEFAULT '{}'::jsonb,
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
+    -- The cloud network (VPC / VNet / GCP network) this segment belongs to, as
+    -- the provider's own resource id. NULL for every operator-drawn LAN
+    -- segment, which is the overwhelming majority.
+    --
+    -- It is part of the segment's IDENTITY, not a decoration: uniqueness is
+    -- (tenant_id, value, coalesce(cloud_network_ref, '')) rather than
+    -- (tenant_id, value). Two VPCs using the same CIDR — two Terraform-default
+    -- 10.0.0.0/16s in one account is the common shape — are two different
+    -- address spaces, and collapsing them into one segment made two instances
+    -- with the same private address resolve to one scope and therefore to one
+    -- ASSET. See the unique index in POST-MIGRATIONS.
+    cloud_network_ref text,
+    -- Provenance (ADR-0005 source_kind vocabulary). NULL means "created before
+    -- this column existed", deliberately distinct from 'declared': a row that
+    -- predates provenance has none, and calling it declared would invent a
+    -- fact about who drew this segment. 'imported' is a segment pulled from a
+    -- network source of truth (NetBox), with source_ref naming the connection
+    -- and the remote id: `netbox:<connection-id>:prefix:<netbox-id>`.
+    --
+    -- Appended AFTER the timestamps on purpose: ADD COLUMN appends, so a fresh
+    -- install and an upgraded one end up with the same column order.
+    source_kind character varying(20),
+    source_ref character varying(200),
+    CONSTRAINT network_segments_source_kind_check CHECK ((source_kind IS NULL OR (source_kind)::text = ANY ((ARRAY['measured'::character varying, 'imported'::character varying, 'declared'::character varying, 'inferred'::character varying])::text[]))),
     CONSTRAINT network_segments_network_type_check CHECK (((network_type)::text = ANY ((ARRAY['private'::character varying, 'public'::character varying, 'vpn'::character varying, 'cloud'::character varying])::text[]))),
     CONSTRAINT network_segments_segment_type_check CHECK (((segment_type)::text = ANY ((ARRAY['cidr'::character varying, 'ip_range'::character varying, 'domain'::character varying, 'cloud_vpc'::character varying])::text[])))
 );
@@ -4161,8 +4116,15 @@ CREATE TABLE IF NOT EXISTS public.platform_framework_controls (
     description text,
     baseline_severity character varying(20) NOT NULL,
     crypto_relevant boolean DEFAULT false NOT NULL,
+    -- Provenance (ADR-0005 source_kind vocabulary, ADR-0008 D4.1). NULL means
+    -- "created before this column existed" and is deliberately distinct from
+    -- 'declared': a row that predates provenance has none, and guessing one for
+    -- it would invent a fact about who wrote it.
+    source_kind character varying(20),
+    source_ref character varying(200),
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
+    CONSTRAINT platform_framework_controls_source_kind_check CHECK ((source_kind IS NULL OR (source_kind)::text = ANY ((ARRAY['measured'::character varying, 'imported'::character varying, 'declared'::character varying, 'inferred'::character varying])::text[]))),
     CONSTRAINT platform_framework_controls_baseline_severity_check CHECK (((baseline_severity)::text = ANY ((ARRAY['Low'::character varying, 'Med'::character varying, 'High'::character varying, 'Critical'::character varying])::text[])))
 );
 
@@ -4590,7 +4552,15 @@ CREATE TABLE IF NOT EXISTS public.remediation_plan_items (
     ticket_id uuid,
     notes text,
     added_at timestamp with time zone DEFAULT now() NOT NULL,
-    added_by uuid NOT NULL
+    added_by uuid NOT NULL,
+    -- Where this item's notes came from (ADR-0008 D4.1). 'inferred' with a
+    -- source_ref of `remediator:<model id>` means a person accepted a drafted
+    -- plan; NULL means the item was added the ordinary way, before or after
+    -- this column existed. See the ALTER further down for why NULL is not
+    -- backfilled.
+    source_kind character varying(20),
+    source_ref character varying(200),
+    CONSTRAINT remediation_plan_items_source_kind_check CHECK ((source_kind IS NULL OR (source_kind)::text = ANY ((ARRAY['measured'::character varying, 'imported'::character varying, 'declared'::character varying, 'inferred'::character varying])::text[])))
 );
 
 
@@ -5029,6 +4999,22 @@ CREATE TABLE IF NOT EXISTS public.sensor_health_metrics (
     packets_captured bigint DEFAULT 0 NOT NULL,
     discoveries_made bigint DEFAULT 0 NOT NULL,
     errors_count integer DEFAULT 0 NOT NULL,
+    -- Counters the heartbeat carries that have no column of their own.
+    --
+    -- The sensor reports eight host_observations_* metrics (offered, decoded,
+    -- emitted, malformed, queue_dropped, emit_dropped, coalesce_dropped,
+    -- pending) and sensor-manager mapped a FIXED column set onto this table, so
+    -- all eight were read off the wire and dropped on the floor — the contract
+    -- doc had a Metrics table describing numbers no operator could see anywhere.
+    --
+    -- jsonb rather than eight more columns because the set is a capture
+    -- runtime's business and will grow: a decoder added to shared/hostobs brings
+    -- its own counters, and an ALTER TABLE per counter is how a diagnostic
+    -- stops being worth adding. NULL means the sensor reported none — an older
+    -- build, or the feature switched off — which is deliberately distinct from
+    -- `{}`, "running and seeing nothing". "Not running" and "running and idle"
+    -- must not look the same.
+    extra_counters jsonb,
     recorded_at timestamp with time zone DEFAULT now()
 );
 
@@ -5162,6 +5148,9 @@ CREATE TABLE IF NOT EXISTS public.ssh_keys (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     tenant_id uuid NOT NULL,
     asset_id uuid,
+    -- Set for a key observed on one endpoint; NULL for a HOST key, which
+    -- belongs to the asset and not to any single socket (ADR-0002 D6).
+    endpoint_id uuid,
     key_type character varying(50) NOT NULL,
     key_size integer,
     fingerprint_sha256 character varying(100) NOT NULL,
@@ -5409,8 +5398,15 @@ CREATE TABLE IF NOT EXISTS public.tenant_framework_controls (
     description text,
     baseline_severity character varying(20) NOT NULL,
     crypto_relevant boolean DEFAULT false NOT NULL,
+    -- Provenance (ADR-0005 source_kind vocabulary, ADR-0008 D4.1). NULL means
+    -- "created before this column existed" and is deliberately distinct from
+    -- 'declared': a row that predates provenance has none, and guessing one for
+    -- it would invent a fact about who wrote it.
+    source_kind character varying(20),
+    source_ref character varying(200),
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
+    CONSTRAINT tenant_framework_controls_source_kind_check CHECK ((source_kind IS NULL OR (source_kind)::text = ANY ((ARRAY['measured'::character varying, 'imported'::character varying, 'declared'::character varying, 'inferred'::character varying])::text[]))),
     CONSTRAINT tenant_framework_controls_baseline_severity_check CHECK (((baseline_severity)::text = ANY ((ARRAY['Low'::character varying, 'Med'::character varying, 'High'::character varying, 'Critical'::character varying])::text[])))
 );
 
@@ -5818,27 +5814,24 @@ CREATE TABLE IF NOT EXISTS public.user_workflow_progress (
 
 -- VIEW: v_ci_inventory
 CREATE OR REPLACE VIEW public.v_ci_inventory AS
- SELECT network_assets_partitioned.id,
-    network_assets_partitioned.tenant_id,
+ SELECT a.id,
+    a.tenant_id,
     'infrastructure_asset'::text AS ci_category,
-        CASE network_assets_partitioned.asset_type
-            WHEN 'server'::public.asset_type THEN 'cmdb_ci_server'::text
-            WHEN 'endpoint'::public.asset_type THEN 'cmdb_ci_endpoint'::text
-            WHEN 'service'::public.asset_type THEN 'cmdb_ci_service'::text
-            WHEN 'appliance'::public.asset_type THEN 'cmdb_ci_appliance'::text
-            ELSE 'cmdb_ci_hardware'::text
-        END AS cmdb_ci_type,
-    COALESCE(network_assets_partitioned.hostname, ((network_assets_partitioned.ip_address)::text)::character varying) AS display_name,
-    network_assets_partitioned.description,
-    network_assets_partitioned.risk_score,
-        -- B-18: band risk_score; do NOT select the stored risk_level column.
-        -- Nothing writes network_assets_partitioned.risk_level — ingest updates
-        -- risk_score and no INSERT, UPDATE, trigger or seed ever touches its
-        -- sibling — so it stays at its DEFAULT 'Informational' forever. An
-        -- Enterprise CMDB sync profile that maps risk_level therefore pushed
-        -- `risk_level: "Informational"` next to `risk_score: 90` into the
-        -- customer's system of record. Same canonical ladder as the
-        -- crypto_configuration branch below and as
+    -- The CMDB CI class comes from the class registry (ADR-0002 D2:
+    -- asset_classes.cmdb_ci_type is "the default ServiceNow class for the
+    -- sync"), not from a four-arm CASE over the retired asset_type enum. An
+    -- empty registry value is NOT a guess: it falls back to the generic
+    -- hardware class exactly as the old ELSE arm did.
+    COALESCE(NULLIF(ac.cmdb_ci_type, ''::text), 'cmdb_ci_hardware'::text) AS cmdb_ci_type,
+    (COALESCE(a.display_name, a.hostname, host(a.primary_address)))::character varying AS display_name,
+    a.description,
+    a.risk_score,
+        -- B-18: band risk_score; do NOT select a stored risk_level column —
+        -- `assets` deliberately has none (DATA_MODEL §2), because nothing wrote
+        -- the one network_assets carried and an Enterprise CMDB sync profile
+        -- mapping it therefore pushed `risk_level: "Informational"` next to
+        -- `risk_score: 90` into the customer's system of record. Same canonical
+        -- ladder as the crypto_configuration branch below and as
         -- services/inventory-service/internal/models/risk_bands.go
         -- (RiskLevelCaseSQL): Critical >= 90, High >= 70, Medium >= 40,
         -- Low >= 1, Informational 0. Score 0 means NOT ASSESSED, so only 0
@@ -5848,23 +5841,24 @@ CREATE OR REPLACE VIEW public.v_ci_inventory AS
         -- Postgres resolves a UNION column to the FIRST branch's type when the
         -- conversions are implicit in both directions, so this branch decides
         -- the view's risk_level type; the column has always been `character
-        -- varying` (from the stored column this replaces). Emitting ::text here
-        -- flips it, and CREATE OR REPLACE VIEW cannot change a column's type —
-        -- it fails with "cannot change data type of view column", aborting the
-        -- migration on every EXISTING install while passing on a fresh one.
+        -- varying`. Emitting ::text here flips it, and CREATE OR REPLACE VIEW
+        -- cannot change a column's type — it fails with "cannot change data
+        -- type of view column", aborting the migration on every EXISTING
+        -- install while passing on a fresh one.
         CASE
-            WHEN (network_assets_partitioned.risk_score >= 90) THEN 'Critical'::character varying
-            WHEN (network_assets_partitioned.risk_score >= 70) THEN 'High'::character varying
-            WHEN (network_assets_partitioned.risk_score >= 40) THEN 'Medium'::character varying
-            WHEN (network_assets_partitioned.risk_score >= 1) THEN 'Low'::character varying
+            WHEN (a.risk_score >= 90) THEN 'Critical'::character varying
+            WHEN (a.risk_score >= 70) THEN 'High'::character varying
+            WHEN (a.risk_score >= 40) THEN 'Medium'::character varying
+            WHEN (a.risk_score >= 1) THEN 'Low'::character varying
             ELSE 'Informational'::character varying
         END AS risk_level,
-    network_assets_partitioned.first_discovered_at,
-    network_assets_partitioned.last_seen_at AS last_verified_at,
-    network_assets_partitioned.created_at,
-    network_assets_partitioned.updated_at,
-    network_assets_partitioned.deleted_at
-   FROM public.network_assets_partitioned
+    a.first_discovered_at,
+    a.last_seen_at AS last_verified_at,
+    a.created_at,
+    a.updated_at,
+    a.deleted_at
+   FROM (public.assets a
+     LEFT JOIN public.asset_classes ac ON (((ac.key = a.class_key) AND (ac.tenant_id IS NULL))))
 UNION ALL
  SELECT certificates.id,
     certificates.tenant_id,
@@ -6131,118 +6125,6 @@ DO $$ BEGIN
          AND inhrelid = to_regclass('public.crypto_implementations_part_7')
      ) THEN
     ALTER TABLE ONLY public.crypto_implementations_partitioned ATTACH PARTITION public.crypto_implementations_part_7 FOR VALUES WITH (modulus 8, remainder 7);
-  END IF;
-END $$;
-
-
--- TABLE ATTACH: network_assets_part_0
-DO $$ BEGIN
-  IF to_regclass('public.network_assets_partitioned') IS NOT NULL
-     AND to_regclass('public.network_assets_part_0') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_inherits
-       WHERE inhparent = to_regclass('public.network_assets_partitioned')
-         AND inhrelid = to_regclass('public.network_assets_part_0')
-     ) THEN
-    ALTER TABLE ONLY public.network_assets_partitioned ATTACH PARTITION public.network_assets_part_0 FOR VALUES WITH (modulus 8, remainder 0);
-  END IF;
-END $$;
-
-
--- TABLE ATTACH: network_assets_part_1
-DO $$ BEGIN
-  IF to_regclass('public.network_assets_partitioned') IS NOT NULL
-     AND to_regclass('public.network_assets_part_1') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_inherits
-       WHERE inhparent = to_regclass('public.network_assets_partitioned')
-         AND inhrelid = to_regclass('public.network_assets_part_1')
-     ) THEN
-    ALTER TABLE ONLY public.network_assets_partitioned ATTACH PARTITION public.network_assets_part_1 FOR VALUES WITH (modulus 8, remainder 1);
-  END IF;
-END $$;
-
-
--- TABLE ATTACH: network_assets_part_2
-DO $$ BEGIN
-  IF to_regclass('public.network_assets_partitioned') IS NOT NULL
-     AND to_regclass('public.network_assets_part_2') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_inherits
-       WHERE inhparent = to_regclass('public.network_assets_partitioned')
-         AND inhrelid = to_regclass('public.network_assets_part_2')
-     ) THEN
-    ALTER TABLE ONLY public.network_assets_partitioned ATTACH PARTITION public.network_assets_part_2 FOR VALUES WITH (modulus 8, remainder 2);
-  END IF;
-END $$;
-
-
--- TABLE ATTACH: network_assets_part_3
-DO $$ BEGIN
-  IF to_regclass('public.network_assets_partitioned') IS NOT NULL
-     AND to_regclass('public.network_assets_part_3') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_inherits
-       WHERE inhparent = to_regclass('public.network_assets_partitioned')
-         AND inhrelid = to_regclass('public.network_assets_part_3')
-     ) THEN
-    ALTER TABLE ONLY public.network_assets_partitioned ATTACH PARTITION public.network_assets_part_3 FOR VALUES WITH (modulus 8, remainder 3);
-  END IF;
-END $$;
-
-
--- TABLE ATTACH: network_assets_part_4
-DO $$ BEGIN
-  IF to_regclass('public.network_assets_partitioned') IS NOT NULL
-     AND to_regclass('public.network_assets_part_4') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_inherits
-       WHERE inhparent = to_regclass('public.network_assets_partitioned')
-         AND inhrelid = to_regclass('public.network_assets_part_4')
-     ) THEN
-    ALTER TABLE ONLY public.network_assets_partitioned ATTACH PARTITION public.network_assets_part_4 FOR VALUES WITH (modulus 8, remainder 4);
-  END IF;
-END $$;
-
-
--- TABLE ATTACH: network_assets_part_5
-DO $$ BEGIN
-  IF to_regclass('public.network_assets_partitioned') IS NOT NULL
-     AND to_regclass('public.network_assets_part_5') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_inherits
-       WHERE inhparent = to_regclass('public.network_assets_partitioned')
-         AND inhrelid = to_regclass('public.network_assets_part_5')
-     ) THEN
-    ALTER TABLE ONLY public.network_assets_partitioned ATTACH PARTITION public.network_assets_part_5 FOR VALUES WITH (modulus 8, remainder 5);
-  END IF;
-END $$;
-
-
--- TABLE ATTACH: network_assets_part_6
-DO $$ BEGIN
-  IF to_regclass('public.network_assets_partitioned') IS NOT NULL
-     AND to_regclass('public.network_assets_part_6') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_inherits
-       WHERE inhparent = to_regclass('public.network_assets_partitioned')
-         AND inhrelid = to_regclass('public.network_assets_part_6')
-     ) THEN
-    ALTER TABLE ONLY public.network_assets_partitioned ATTACH PARTITION public.network_assets_part_6 FOR VALUES WITH (modulus 8, remainder 6);
-  END IF;
-END $$;
-
-
--- TABLE ATTACH: network_assets_part_7
-DO $$ BEGIN
-  IF to_regclass('public.network_assets_partitioned') IS NOT NULL
-     AND to_regclass('public.network_assets_part_7') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_inherits
-       WHERE inhparent = to_regclass('public.network_assets_partitioned')
-         AND inhrelid = to_regclass('public.network_assets_part_7')
-     ) THEN
-    ALTER TABLE ONLY public.network_assets_partitioned ATTACH PARTITION public.network_assets_part_7 FOR VALUES WITH (modulus 8, remainder 7);
   END IF;
 END $$;
 
@@ -6970,19 +6852,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: compliance_findings compliance_findings_pkey
-DO $$ BEGIN
-  IF to_regclass('public.compliance_findings') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'compliance_findings_pkey' AND conrelid = to_regclass('public.compliance_findings')
-     ) THEN
-    ALTER TABLE ONLY public.compliance_findings
-        ADD CONSTRAINT compliance_findings_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: compliance_overrides compliance_overrides_pkey
 DO $$ BEGIN
   IF to_regclass('public.compliance_overrides') IS NOT NULL
@@ -7124,19 +6993,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.device_jobs
         ADD CONSTRAINT device_jobs_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: devices devices_pkey
-DO $$ BEGIN
-  IF to_regclass('public.devices') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'devices_pkey' AND conrelid = to_regclass('public.devices')
-     ) THEN
-    ALTER TABLE ONLY public.devices
-        ADD CONSTRAINT devices_pkey PRIMARY KEY (id);
   END IF;
 END $$;
 
@@ -7635,63 +7491,11 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: network_assets_partitioned network_assets_partitioned_pkey
--- HASH-partitioned on tenant_id, so the PK must include the partition column.
--- Added late: the table shipped without a PK, which broke strict GROUP BY
--- functional-dependency inference for any aggregate over the network_assets view.
--- NOT `ALTER TABLE ONLY`: the partitions are attached by this point, and a
--- parent-ONLY primary key on a partitioned table is created INVALID (no
--- per-partition indexes, uniqueness unenforced) until every partition's index
--- is attached — which nothing in this file did. The recursive form creates and
--- attaches the partition indexes in one statement.
-DO $$ BEGIN
-  IF to_regclass('public.network_assets_partitioned') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'network_assets_partitioned_pkey' AND conrelid = to_regclass('public.network_assets_partitioned')
-     ) THEN
-    ALTER TABLE public.network_assets_partitioned
-        ADD CONSTRAINT network_assets_partitioned_pkey PRIMARY KEY (tenant_id, id);
-  END IF;
-END $$;
-
--- Existing installs that once ran ALTER TABLE ONLY on the partitioned parent
--- can have an INVALID parent pkey with no attached partition indexes. Such a
--- pkey is not a usable FK target, so attach per-partition pkeys before the
--- tenant-scoped composite FKs below are created.
-DO $$
-DECLARE
-    i int;
-BEGIN
-    IF to_regclass('public.network_assets_partitioned_pkey') IS NOT NULL
-       AND NOT (SELECT indisvalid FROM pg_index
-                WHERE indexrelid = to_regclass('public.network_assets_partitioned_pkey')) THEN
-        FOR i IN 0..7 LOOP
-            IF to_regclass(format('public.network_assets_part_%s', i)) IS NOT NULL THEN
-                IF NOT EXISTS (
-                    SELECT 1 FROM pg_constraint
-                    WHERE conname = format('network_assets_part_%s_pkey', i)
-                      AND conrelid = to_regclass(format('public.network_assets_part_%s', i))
-                ) THEN
-                    EXECUTE format('ALTER TABLE ONLY public.network_assets_part_%s ADD CONSTRAINT network_assets_part_%s_pkey PRIMARY KEY (tenant_id, id)', i, i);
-                END IF;
-                IF NOT EXISTS (
-                    SELECT 1 FROM pg_inherits
-                    WHERE inhrelid = to_regclass(format('public.network_assets_part_%s_pkey', i))
-                ) THEN
-                    EXECUTE format('ALTER INDEX public.network_assets_partitioned_pkey ATTACH PARTITION public.network_assets_part_%s_pkey', i);
-                END IF;
-            END IF;
-        END LOOP;
-    END IF;
-END $$;
-
-
 -- CONSTRAINT: crypto_implementations_partitioned crypto_implementations_partitioned_pkey
--- Same shape and same reasoning as network_assets_partitioned_pkey above: HASH
--- partitioned on tenant_id, so the PK must lead with the partition column, and
--- the recursive (non-ONLY) form is required for it to be VALID and usable as an
--- FK target.
+-- HASH partitioned on tenant_id, so the PK must lead with the partition column,
+-- and the recursive (non-ONLY) form is required for it to be VALID and usable
+-- as an FK target. (`assets` states the same rule inline in its CREATE TABLE;
+-- this is the older spelling of it.)
 DO $$ BEGIN
   IF to_regclass('public.crypto_implementations_partitioned') IS NOT NULL
      AND NOT EXISTS (
@@ -7738,16 +7542,16 @@ END $$;
 
 
 -- CONSTRAINT: network_segments network_segments_value_unique_per_tenant
-DO $$ BEGIN
-  IF to_regclass('public.network_segments') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'network_segments_value_unique_per_tenant' AND conrelid = to_regclass('public.network_segments')
-     ) THEN
-    ALTER TABLE ONLY public.network_segments
-        ADD CONSTRAINT network_segments_value_unique_per_tenant UNIQUE (tenant_id, value);
-  END IF;
-END $$;
+--
+-- DELIBERATELY ABSENT. A table constraint cannot be declared over an
+-- expression, and the uniqueness this table needs is
+-- (tenant_id, value, coalesce(cloud_network_ref, '')) — see the column comment
+-- on `cloud_network_ref`. It is a UNIQUE INDEX in POST-MIGRATIONS instead, and
+-- the old constraint is dropped there.
+--
+-- The ADD CONSTRAINT is removed from this body rather than left beside the
+-- drop: a statement that re-adds what POST-MIGRATIONS drops puts the file into
+-- a loop where every apply undoes the previous one's shape.
 
 
 -- CONSTRAINT: notification_delivery_queue notification_delivery_queue_pkey
@@ -10277,34 +10081,6 @@ CREATE INDEX IF NOT EXISTS idx_cmdb_sync_profiles_platform ON public.cmdb_sync_p
 CREATE INDEX IF NOT EXISTS idx_cmdb_sync_profiles_tenant ON public.cmdb_sync_profiles USING btree (tenant_id) WHERE (deleted_at IS NULL);
 
 
--- INDEX: idx_compliance_findings_asset_id
-CREATE INDEX IF NOT EXISTS idx_compliance_findings_asset_id ON public.compliance_findings USING btree (asset_id);
-
-
--- INDEX: idx_compliance_findings_assigned_at
-CREATE INDEX IF NOT EXISTS idx_compliance_findings_assigned_at ON public.compliance_findings USING btree (assigned_at) WHERE (assigned_to IS NOT NULL);
-
-
--- INDEX: idx_compliance_findings_assigned_to
-CREATE INDEX IF NOT EXISTS idx_compliance_findings_assigned_to ON public.compliance_findings USING btree (tenant_id, assigned_to) WHERE (assigned_to IS NOT NULL);
-
-
--- INDEX: idx_compliance_findings_control_id
-CREATE INDEX IF NOT EXISTS idx_compliance_findings_control_id ON public.compliance_findings USING btree (control_id);
-
-
--- INDEX: idx_compliance_findings_last_seen
-CREATE INDEX IF NOT EXISTS idx_compliance_findings_last_seen ON public.compliance_findings USING btree (last_seen);
-
-
--- INDEX: idx_compliance_findings_severity
-CREATE INDEX IF NOT EXISTS idx_compliance_findings_severity ON public.compliance_findings USING btree (severity);
-
-
--- INDEX: idx_compliance_findings_tenant_id
-CREATE INDEX IF NOT EXISTS idx_compliance_findings_tenant_id ON public.compliance_findings USING btree (tenant_id);
-
-
 -- INDEX: idx_compliance_overrides_control_id
 CREATE INDEX IF NOT EXISTS idx_compliance_overrides_control_id ON public.compliance_overrides USING btree (control_id);
 
@@ -10456,7 +10232,7 @@ CREATE INDEX IF NOT EXISTS idx_db_encryption_states_at_rest ON public.database_e
 
 
 -- INDEX: idx_db_encryption_states_device
-CREATE INDEX IF NOT EXISTS idx_db_encryption_states_device ON public.database_encryption_states USING btree (device_id) WHERE ((device_id IS NOT NULL) AND (deleted_at IS NULL));
+CREATE INDEX IF NOT EXISTS idx_db_encryption_states_asset ON public.database_encryption_states USING btree (asset_id) WHERE ((asset_id IS NOT NULL) AND (deleted_at IS NULL));
 
 
 -- INDEX: idx_db_encryption_states_engine
@@ -10495,8 +10271,13 @@ CREATE INDEX IF NOT EXISTS idx_device_jobs_active ON public.device_jobs USING bt
 CREATE INDEX IF NOT EXISTS idx_device_jobs_agent_id ON public.device_jobs USING btree (agent_id);
 
 
--- INDEX: idx_device_jobs_device_id
-CREATE INDEX IF NOT EXISTS idx_device_jobs_device_id ON public.device_jobs USING btree (device_id);
+-- INDEX: idx_device_jobs_asset_id
+-- NOT here: `device_jobs.asset_id` replaces `device_id`, and on a database that
+-- already has the table the CREATE TABLE above is a no-op — the column is added
+-- by the phase-1 POST-MIGRATIONS block, which is where this index is created
+-- too, alongside the endpoint-link indexes that have the same dependency.
+-- Creating it here failed with `column "asset_id" does not exist` and aborted
+-- the whole apply under ON_ERROR_STOP=1.
 
 
 -- INDEX: idx_device_jobs_expires
@@ -10521,42 +10302,6 @@ CREATE INDEX IF NOT EXISTS idx_device_jobs_tenant_id ON public.device_jobs USING
 
 -- INDEX: idx_device_jobs_updated_at
 CREATE INDEX IF NOT EXISTS idx_device_jobs_updated_at ON public.device_jobs USING btree (updated_at);
-
-
--- INDEX: idx_devices_active
-CREATE INDEX IF NOT EXISTS idx_devices_active ON public.devices USING btree (tenant_id, device_type) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_devices_connection_status
-CREATE INDEX IF NOT EXISTS idx_devices_connection_status ON public.devices USING btree (connection_status);
-
-
--- INDEX: idx_devices_credential_id
-CREATE INDEX IF NOT EXISTS idx_devices_credential_id ON public.devices USING btree (credential_id);
-
-
--- INDEX: idx_devices_device_type
-CREATE INDEX IF NOT EXISTS idx_devices_device_type ON public.devices USING btree (device_type);
-
-
--- INDEX: idx_devices_discovery_method
-CREATE INDEX IF NOT EXISTS idx_devices_discovery_method ON public.devices USING btree (discovery_method);
-
-
--- INDEX: idx_devices_tenant_id
-CREATE INDEX IF NOT EXISTS idx_devices_tenant_id ON public.devices USING btree (tenant_id);
-
-
--- INDEX: idx_devices_unique_per_tenant
-CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_unique_per_tenant ON public.devices USING btree (tenant_id, device_type, management_url) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_devices_username
-CREATE INDEX IF NOT EXISTS idx_devices_username ON public.devices USING btree (username) WHERE ((username IS NOT NULL) AND (deleted_at IS NULL));
-
-
--- INDEX: idx_devices_vendor
-CREATE INDEX IF NOT EXISTS idx_devices_vendor ON public.devices USING btree (vendor);
 
 
 -- INDEX: idx_discovery_findings_confidence_score
@@ -10670,25 +10415,6 @@ CREATE INDEX IF NOT EXISTS idx_finding_history_changed_by ON public.compliance_f
 -- INDEX: idx_finding_history_finding_id
 CREATE INDEX IF NOT EXISTS idx_finding_history_finding_id ON public.compliance_finding_history USING btree (finding_id, changed_at DESC);
 
-
--- INDEX: idx_findings_active_rollup
-CREATE INDEX IF NOT EXISTS idx_findings_active_rollup ON public.compliance_findings USING btree (tenant_id, control_id, last_seen) WHERE (((detection_state)::text = 'ACTIVE'::text) AND (((workflow_status)::text <> 'SUPPRESSED'::text) OR (workflow_status IS NULL)));
-
-
--- INDEX: idx_findings_detection_state
-CREATE INDEX IF NOT EXISTS idx_findings_detection_state ON public.compliance_findings USING btree (tenant_id, detection_state, last_seen);
-
-
--- INDEX: idx_findings_identity
-CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_identity ON public.compliance_findings USING btree (tenant_id, control_id, asset_id) WHERE ((detection_state)::text <> 'ARCHIVED'::text);
-
-
--- INDEX: idx_findings_resurfaced
-CREATE INDEX IF NOT EXISTS idx_findings_resurfaced ON public.compliance_findings USING btree (tenant_id, resurfaced_at) WHERE (resurfaced_at IS NOT NULL);
-
-
--- INDEX: idx_findings_workflow_status
-CREATE INDEX IF NOT EXISTS idx_findings_workflow_status ON public.compliance_findings USING btree (tenant_id, workflow_status) WHERE ((workflow_status)::text <> 'SUPPRESSED'::text);
 
 
 -- INDEX: idx_framework_versions_created_at
@@ -10953,22 +10679,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_location_finding_summary_key ON public.
 
 -- INDEX: idx_mv_remediation_queue_tenant_severity
 CREATE INDEX IF NOT EXISTS idx_mv_remediation_queue_tenant_severity ON public.mv_remediation_queue USING btree (tenant_id, severity, created_at);
-
-
--- INDEX: idx_network_assets_partitioned_deleted_at
-CREATE INDEX IF NOT EXISTS idx_network_assets_partitioned_deleted_at ON ONLY public.network_assets_partitioned USING btree (deleted_at) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_network_assets_partitioned_hostname
-CREATE INDEX IF NOT EXISTS idx_network_assets_partitioned_hostname ON ONLY public.network_assets_partitioned USING btree (hostname);
-
-
--- INDEX: idx_network_assets_partitioned_ip_address
-CREATE INDEX IF NOT EXISTS idx_network_assets_partitioned_ip_address ON ONLY public.network_assets_partitioned USING btree (ip_address);
-
-
--- INDEX: idx_network_assets_partitioned_tenant_id
-CREATE INDEX IF NOT EXISTS idx_network_assets_partitioned_tenant_id ON ONLY public.network_assets_partitioned USING btree (tenant_id);
 
 
 -- INDEX: idx_network_segments_active
@@ -11897,134 +11607,6 @@ CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_status ON public.security_inci
 CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook ON public.security_incident_webhook_deliveries USING btree (webhook_id, created_at DESC);
 
 
--- INDEX: network_assets_part_0_deleted_at_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_0_deleted_at_idx ON public.network_assets_part_0 USING btree (deleted_at) WHERE (deleted_at IS NULL);
-
-
--- INDEX: network_assets_part_0_hostname_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_0_hostname_idx ON public.network_assets_part_0 USING btree (hostname);
-
-
--- INDEX: network_assets_part_0_ip_address_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_0_ip_address_idx ON public.network_assets_part_0 USING btree (ip_address);
-
-
--- INDEX: network_assets_part_0_tenant_id_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_0_tenant_id_idx ON public.network_assets_part_0 USING btree (tenant_id);
-
-
--- INDEX: network_assets_part_1_deleted_at_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_1_deleted_at_idx ON public.network_assets_part_1 USING btree (deleted_at) WHERE (deleted_at IS NULL);
-
-
--- INDEX: network_assets_part_1_hostname_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_1_hostname_idx ON public.network_assets_part_1 USING btree (hostname);
-
-
--- INDEX: network_assets_part_1_ip_address_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_1_ip_address_idx ON public.network_assets_part_1 USING btree (ip_address);
-
-
--- INDEX: network_assets_part_1_tenant_id_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_1_tenant_id_idx ON public.network_assets_part_1 USING btree (tenant_id);
-
-
--- INDEX: network_assets_part_2_deleted_at_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_2_deleted_at_idx ON public.network_assets_part_2 USING btree (deleted_at) WHERE (deleted_at IS NULL);
-
-
--- INDEX: network_assets_part_2_hostname_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_2_hostname_idx ON public.network_assets_part_2 USING btree (hostname);
-
-
--- INDEX: network_assets_part_2_ip_address_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_2_ip_address_idx ON public.network_assets_part_2 USING btree (ip_address);
-
-
--- INDEX: network_assets_part_2_tenant_id_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_2_tenant_id_idx ON public.network_assets_part_2 USING btree (tenant_id);
-
-
--- INDEX: network_assets_part_3_deleted_at_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_3_deleted_at_idx ON public.network_assets_part_3 USING btree (deleted_at) WHERE (deleted_at IS NULL);
-
-
--- INDEX: network_assets_part_3_hostname_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_3_hostname_idx ON public.network_assets_part_3 USING btree (hostname);
-
-
--- INDEX: network_assets_part_3_ip_address_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_3_ip_address_idx ON public.network_assets_part_3 USING btree (ip_address);
-
-
--- INDEX: network_assets_part_3_tenant_id_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_3_tenant_id_idx ON public.network_assets_part_3 USING btree (tenant_id);
-
-
--- INDEX: network_assets_part_4_deleted_at_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_4_deleted_at_idx ON public.network_assets_part_4 USING btree (deleted_at) WHERE (deleted_at IS NULL);
-
-
--- INDEX: network_assets_part_4_hostname_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_4_hostname_idx ON public.network_assets_part_4 USING btree (hostname);
-
-
--- INDEX: network_assets_part_4_ip_address_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_4_ip_address_idx ON public.network_assets_part_4 USING btree (ip_address);
-
-
--- INDEX: network_assets_part_4_tenant_id_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_4_tenant_id_idx ON public.network_assets_part_4 USING btree (tenant_id);
-
-
--- INDEX: network_assets_part_5_deleted_at_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_5_deleted_at_idx ON public.network_assets_part_5 USING btree (deleted_at) WHERE (deleted_at IS NULL);
-
-
--- INDEX: network_assets_part_5_hostname_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_5_hostname_idx ON public.network_assets_part_5 USING btree (hostname);
-
-
--- INDEX: network_assets_part_5_ip_address_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_5_ip_address_idx ON public.network_assets_part_5 USING btree (ip_address);
-
-
--- INDEX: network_assets_part_5_tenant_id_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_5_tenant_id_idx ON public.network_assets_part_5 USING btree (tenant_id);
-
-
--- INDEX: network_assets_part_6_deleted_at_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_6_deleted_at_idx ON public.network_assets_part_6 USING btree (deleted_at) WHERE (deleted_at IS NULL);
-
-
--- INDEX: network_assets_part_6_hostname_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_6_hostname_idx ON public.network_assets_part_6 USING btree (hostname);
-
-
--- INDEX: network_assets_part_6_ip_address_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_6_ip_address_idx ON public.network_assets_part_6 USING btree (ip_address);
-
-
--- INDEX: network_assets_part_6_tenant_id_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_6_tenant_id_idx ON public.network_assets_part_6 USING btree (tenant_id);
-
-
--- INDEX: network_assets_part_7_deleted_at_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_7_deleted_at_idx ON public.network_assets_part_7 USING btree (deleted_at) WHERE (deleted_at IS NULL);
-
-
--- INDEX: network_assets_part_7_hostname_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_7_hostname_idx ON public.network_assets_part_7 USING btree (hostname);
-
-
--- INDEX: network_assets_part_7_ip_address_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_7_ip_address_idx ON public.network_assets_part_7 USING btree (ip_address);
-
-
--- INDEX: network_assets_part_7_tenant_id_idx
-CREATE INDEX IF NOT EXISTS network_assets_part_7_tenant_id_idx ON public.network_assets_part_7 USING btree (tenant_id);
-
-
 -- INDEX: sensor_discoveries_part_0_batch_id_idx
 CREATE INDEX IF NOT EXISTS sensor_discoveries_part_0_batch_id_idx ON public.sensor_discoveries_part_0 USING btree (batch_id);
 
@@ -12625,134 +12207,6 @@ ALTER INDEX public.idx_crypto_implementations_partitioned_risk_score ATTACH PART
 ALTER INDEX public.idx_crypto_implementations_partitioned_tenant_id ATTACH PARTITION public.crypto_implementations_part_7_tenant_id_idx;
 
 
--- INDEX ATTACH: network_assets_part_0_deleted_at_idx
-ALTER INDEX public.idx_network_assets_partitioned_deleted_at ATTACH PARTITION public.network_assets_part_0_deleted_at_idx;
-
-
--- INDEX ATTACH: network_assets_part_0_hostname_idx
-ALTER INDEX public.idx_network_assets_partitioned_hostname ATTACH PARTITION public.network_assets_part_0_hostname_idx;
-
-
--- INDEX ATTACH: network_assets_part_0_ip_address_idx
-ALTER INDEX public.idx_network_assets_partitioned_ip_address ATTACH PARTITION public.network_assets_part_0_ip_address_idx;
-
-
--- INDEX ATTACH: network_assets_part_0_tenant_id_idx
-ALTER INDEX public.idx_network_assets_partitioned_tenant_id ATTACH PARTITION public.network_assets_part_0_tenant_id_idx;
-
-
--- INDEX ATTACH: network_assets_part_1_deleted_at_idx
-ALTER INDEX public.idx_network_assets_partitioned_deleted_at ATTACH PARTITION public.network_assets_part_1_deleted_at_idx;
-
-
--- INDEX ATTACH: network_assets_part_1_hostname_idx
-ALTER INDEX public.idx_network_assets_partitioned_hostname ATTACH PARTITION public.network_assets_part_1_hostname_idx;
-
-
--- INDEX ATTACH: network_assets_part_1_ip_address_idx
-ALTER INDEX public.idx_network_assets_partitioned_ip_address ATTACH PARTITION public.network_assets_part_1_ip_address_idx;
-
-
--- INDEX ATTACH: network_assets_part_1_tenant_id_idx
-ALTER INDEX public.idx_network_assets_partitioned_tenant_id ATTACH PARTITION public.network_assets_part_1_tenant_id_idx;
-
-
--- INDEX ATTACH: network_assets_part_2_deleted_at_idx
-ALTER INDEX public.idx_network_assets_partitioned_deleted_at ATTACH PARTITION public.network_assets_part_2_deleted_at_idx;
-
-
--- INDEX ATTACH: network_assets_part_2_hostname_idx
-ALTER INDEX public.idx_network_assets_partitioned_hostname ATTACH PARTITION public.network_assets_part_2_hostname_idx;
-
-
--- INDEX ATTACH: network_assets_part_2_ip_address_idx
-ALTER INDEX public.idx_network_assets_partitioned_ip_address ATTACH PARTITION public.network_assets_part_2_ip_address_idx;
-
-
--- INDEX ATTACH: network_assets_part_2_tenant_id_idx
-ALTER INDEX public.idx_network_assets_partitioned_tenant_id ATTACH PARTITION public.network_assets_part_2_tenant_id_idx;
-
-
--- INDEX ATTACH: network_assets_part_3_deleted_at_idx
-ALTER INDEX public.idx_network_assets_partitioned_deleted_at ATTACH PARTITION public.network_assets_part_3_deleted_at_idx;
-
-
--- INDEX ATTACH: network_assets_part_3_hostname_idx
-ALTER INDEX public.idx_network_assets_partitioned_hostname ATTACH PARTITION public.network_assets_part_3_hostname_idx;
-
-
--- INDEX ATTACH: network_assets_part_3_ip_address_idx
-ALTER INDEX public.idx_network_assets_partitioned_ip_address ATTACH PARTITION public.network_assets_part_3_ip_address_idx;
-
-
--- INDEX ATTACH: network_assets_part_3_tenant_id_idx
-ALTER INDEX public.idx_network_assets_partitioned_tenant_id ATTACH PARTITION public.network_assets_part_3_tenant_id_idx;
-
-
--- INDEX ATTACH: network_assets_part_4_deleted_at_idx
-ALTER INDEX public.idx_network_assets_partitioned_deleted_at ATTACH PARTITION public.network_assets_part_4_deleted_at_idx;
-
-
--- INDEX ATTACH: network_assets_part_4_hostname_idx
-ALTER INDEX public.idx_network_assets_partitioned_hostname ATTACH PARTITION public.network_assets_part_4_hostname_idx;
-
-
--- INDEX ATTACH: network_assets_part_4_ip_address_idx
-ALTER INDEX public.idx_network_assets_partitioned_ip_address ATTACH PARTITION public.network_assets_part_4_ip_address_idx;
-
-
--- INDEX ATTACH: network_assets_part_4_tenant_id_idx
-ALTER INDEX public.idx_network_assets_partitioned_tenant_id ATTACH PARTITION public.network_assets_part_4_tenant_id_idx;
-
-
--- INDEX ATTACH: network_assets_part_5_deleted_at_idx
-ALTER INDEX public.idx_network_assets_partitioned_deleted_at ATTACH PARTITION public.network_assets_part_5_deleted_at_idx;
-
-
--- INDEX ATTACH: network_assets_part_5_hostname_idx
-ALTER INDEX public.idx_network_assets_partitioned_hostname ATTACH PARTITION public.network_assets_part_5_hostname_idx;
-
-
--- INDEX ATTACH: network_assets_part_5_ip_address_idx
-ALTER INDEX public.idx_network_assets_partitioned_ip_address ATTACH PARTITION public.network_assets_part_5_ip_address_idx;
-
-
--- INDEX ATTACH: network_assets_part_5_tenant_id_idx
-ALTER INDEX public.idx_network_assets_partitioned_tenant_id ATTACH PARTITION public.network_assets_part_5_tenant_id_idx;
-
-
--- INDEX ATTACH: network_assets_part_6_deleted_at_idx
-ALTER INDEX public.idx_network_assets_partitioned_deleted_at ATTACH PARTITION public.network_assets_part_6_deleted_at_idx;
-
-
--- INDEX ATTACH: network_assets_part_6_hostname_idx
-ALTER INDEX public.idx_network_assets_partitioned_hostname ATTACH PARTITION public.network_assets_part_6_hostname_idx;
-
-
--- INDEX ATTACH: network_assets_part_6_ip_address_idx
-ALTER INDEX public.idx_network_assets_partitioned_ip_address ATTACH PARTITION public.network_assets_part_6_ip_address_idx;
-
-
--- INDEX ATTACH: network_assets_part_6_tenant_id_idx
-ALTER INDEX public.idx_network_assets_partitioned_tenant_id ATTACH PARTITION public.network_assets_part_6_tenant_id_idx;
-
-
--- INDEX ATTACH: network_assets_part_7_deleted_at_idx
-ALTER INDEX public.idx_network_assets_partitioned_deleted_at ATTACH PARTITION public.network_assets_part_7_deleted_at_idx;
-
-
--- INDEX ATTACH: network_assets_part_7_hostname_idx
-ALTER INDEX public.idx_network_assets_partitioned_hostname ATTACH PARTITION public.network_assets_part_7_hostname_idx;
-
-
--- INDEX ATTACH: network_assets_part_7_ip_address_idx
-ALTER INDEX public.idx_network_assets_partitioned_ip_address ATTACH PARTITION public.network_assets_part_7_ip_address_idx;
-
-
--- INDEX ATTACH: network_assets_part_7_tenant_id_idx
-ALTER INDEX public.idx_network_assets_partitioned_tenant_id ATTACH PARTITION public.network_assets_part_7_tenant_id_idx;
-
-
 -- INDEX ATTACH: sensor_discoveries_part_0_batch_id_idx
 ALTER INDEX public.idx_sensor_discoveries_partitioned_batch_id ATTACH PARTITION public.sensor_discoveries_part_0_batch_id_idx;
 
@@ -12992,9 +12446,6 @@ CREATE OR REPLACE TRIGGER update_cmdb_sync_jobs_updated_at BEFORE UPDATE ON publ
 -- TRIGGER: cmdb_sync_profiles update_cmdb_sync_profiles_updated_at
 CREATE OR REPLACE TRIGGER update_cmdb_sync_profiles_updated_at BEFORE UPDATE ON public.cmdb_sync_profiles FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
-
--- TRIGGER: compliance_findings update_compliance_findings_updated_at
-CREATE OR REPLACE TRIGGER update_compliance_findings_updated_at BEFORE UPDATE ON public.compliance_findings FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
 
 -- TRIGGER: compliance_overrides update_compliance_overrides_updated_at
@@ -13775,57 +13226,6 @@ DO $$ BEGIN
 END $$;
 
 
--- FK CONSTRAINT: compliance_finding_history compliance_finding_history_finding_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.compliance_finding_history') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'compliance_finding_history_finding_id_fkey' AND conrelid = to_regclass('public.compliance_finding_history')
-     ) THEN
-    ALTER TABLE ONLY public.compliance_finding_history
-        ADD CONSTRAINT compliance_finding_history_finding_id_fkey FOREIGN KEY (finding_id) REFERENCES public.compliance_findings(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: compliance_findings compliance_findings_assigned_by_fkey
-DO $$ BEGIN
-  IF to_regclass('public.compliance_findings') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'compliance_findings_assigned_by_fkey' AND conrelid = to_regclass('public.compliance_findings')
-     ) THEN
-    ALTER TABLE ONLY public.compliance_findings
-        ADD CONSTRAINT compliance_findings_assigned_by_fkey FOREIGN KEY (assigned_by) REFERENCES public.users(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: compliance_findings compliance_findings_assigned_to_fkey
-DO $$ BEGIN
-  IF to_regclass('public.compliance_findings') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'compliance_findings_assigned_to_fkey' AND conrelid = to_regclass('public.compliance_findings')
-     ) THEN
-    ALTER TABLE ONLY public.compliance_findings
-        ADD CONSTRAINT compliance_findings_assigned_to_fkey FOREIGN KEY (assigned_to) REFERENCES public.users(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: compliance_findings compliance_findings_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.compliance_findings') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'compliance_findings_tenant_id_fkey' AND conrelid = to_regclass('public.compliance_findings')
-     ) THEN
-    ALTER TABLE ONLY public.compliance_findings
-        ADD CONSTRAINT compliance_findings_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
 
 -- FK CONSTRAINT: compliance_overrides compliance_overrides_created_by_fkey
 DO $$ BEGIN
@@ -14057,19 +13457,6 @@ DO $$ BEGIN
 END $$;
 
 
--- FK CONSTRAINT: database_encryption_states database_encryption_states_device_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.database_encryption_states') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'database_encryption_states_device_id_fkey' AND conrelid = to_regclass('public.database_encryption_states')
-     ) THEN
-    ALTER TABLE ONLY public.database_encryption_states
-        ADD CONSTRAINT database_encryption_states_device_id_fkey FOREIGN KEY (device_id) REFERENCES public.devices(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
 -- FK CONSTRAINT: database_encryption_states database_encryption_states_encryption_algorithm_id_fkey
 DO $$ BEGIN
   IF to_regclass('public.database_encryption_states') IS NOT NULL
@@ -14148,19 +13535,6 @@ DO $$ BEGIN
 END $$;
 
 
--- FK CONSTRAINT: device_jobs device_jobs_device_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.device_jobs') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'device_jobs_device_id_fkey' AND conrelid = to_regclass('public.device_jobs')
-     ) THEN
-    ALTER TABLE ONLY public.device_jobs
-        ADD CONSTRAINT device_jobs_device_id_fkey FOREIGN KEY (device_id) REFERENCES public.devices(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
 -- FK CONSTRAINT: device_jobs device_jobs_integration_id_fkey
 DO $$ BEGIN
   IF to_regclass('public.device_jobs') IS NOT NULL
@@ -14183,19 +13557,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.device_jobs
         ADD CONSTRAINT device_jobs_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: devices devices_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.devices') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'devices_tenant_id_fkey' AND conrelid = to_regclass('public.devices')
-     ) THEN
-    ALTER TABLE ONLY public.devices
-        ADD CONSTRAINT devices_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
   END IF;
 END $$;
 
@@ -15100,18 +14461,6 @@ DO $$ BEGIN
 END $$;
 
 
--- FK CONSTRAINT: remediation_plan_items remediation_plan_items_finding_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.remediation_plan_items') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'remediation_plan_items_finding_id_fkey' AND conrelid = to_regclass('public.remediation_plan_items')
-     ) THEN
-    ALTER TABLE ONLY public.remediation_plan_items
-        ADD CONSTRAINT remediation_plan_items_finding_id_fkey FOREIGN KEY (finding_id) REFERENCES public.compliance_findings(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
 
 -- FK CONSTRAINT: remediation_plan_items remediation_plan_items_plan_id_fkey
 DO $$ BEGIN
@@ -15829,14 +15178,12 @@ END $$;
 
 
 -- FK CONSTRAINT: tickets tickets_asset_id_fkey — INTENTIONALLY OMITTED
--- The original constraint referenced network_assets_legacy(id), which is
--- now an empty residual table. Live asset data lives in
--- network_assets_partitioned (exposed via the network_assets view), but
--- that table has no PK/UNIQUE on id alone — PG won't allow a FK to
--- reference it. The application validates asset_id via uuid.Parse and
--- joins by id at read time, so DB-level FK enforcement is skipped here
--- until the legacy/partitioned migration is finished. Same situation for
--- tickets_crypto_implementation_id_fkey below.
+-- Live asset data is in `assets`, whose only unique key is the composite
+-- (tenant_id, id) every hash-partitioned table here needs — so a FK from
+-- tickets.asset_id ALONE cannot reference it. Adding one would mean adding
+-- tenant_id to the reference, which is a ticketing change, not an inventory
+-- one. The application validates asset_id via uuid.Parse and joins by id at
+-- read time. Same situation for tickets_crypto_implementation_id_fkey below.
 
 
 -- FK CONSTRAINT: tickets tickets_assigned_to_fkey
@@ -15883,18 +15230,6 @@ END $$;
 -- is empty; live data lives in crypto_implementations_partitioned, which
 -- has no PK on id alone, so no FK can target it.
 
-
--- FK CONSTRAINT: tickets tickets_finding_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.tickets') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'tickets_finding_id_fkey' AND conrelid = to_regclass('public.tickets')
-     ) THEN
-    ALTER TABLE ONLY public.tickets
-        ADD CONSTRAINT tickets_finding_id_fkey FOREIGN KEY (finding_id) REFERENCES public.compliance_findings(id) ON DELETE SET NULL;
-  END IF;
-END $$;
 
 
 -- FK CONSTRAINT: tickets tickets_tenant_id_fkey
@@ -16085,20 +15420,6 @@ END $$;
 
 
 DO $$ BEGIN
-  IF to_regclass('public.network_assets_partitioned') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'network_assets_partitioned_tenant_id_fkey'
-         AND conrelid = to_regclass('public.network_assets_partitioned')
-     ) THEN
-    ALTER TABLE public.network_assets_partitioned
-      ADD CONSTRAINT network_assets_partitioned_tenant_id_fkey
-      FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
-DO $$ BEGIN
   IF to_regclass('public.crypto_implementations_partitioned') IS NOT NULL
      AND NOT EXISTS (
        SELECT 1 FROM pg_constraint
@@ -16168,76 +15489,6 @@ DO $$ BEGIN
 END $$;
 
 
--- Asset references into the hash-partitioned network_assets_partitioned.
--- Composite (tenant_id, asset_id) rather than a single column because the
--- partitioned table's only unique key is (tenant_id, id) — with the welcome
--- side effect that a cross-tenant asset reference is unrepresentable at the
--- database level.
--- FK CONSTRAINT: asset_history asset_history_tenant_asset_fkey
-DO $$ BEGIN
-  IF to_regclass('public.asset_history') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'asset_history_tenant_asset_fkey' AND conrelid = to_regclass('public.asset_history')
-     ) THEN
-    ALTER TABLE ONLY public.asset_history
-        ADD CONSTRAINT asset_history_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id) REFERENCES public.network_assets_partitioned(tenant_id, id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: crypto_applications crypto_applications_tenant_asset_fkey
-DO $$ BEGIN
-  IF to_regclass('public.crypto_applications') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'crypto_applications_tenant_asset_fkey' AND conrelid = to_regclass('public.crypto_applications')
-     ) THEN
-    ALTER TABLE ONLY public.crypto_applications
-        ADD CONSTRAINT crypto_applications_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id) REFERENCES public.network_assets_partitioned(tenant_id, id) ON DELETE SET NULL (asset_id);
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: database_encryption_states database_encryption_states_tenant_asset_fkey
-DO $$ BEGIN
-  IF to_regclass('public.database_encryption_states') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'database_encryption_states_tenant_asset_fkey' AND conrelid = to_regclass('public.database_encryption_states')
-     ) THEN
-    ALTER TABLE ONLY public.database_encryption_states
-        ADD CONSTRAINT database_encryption_states_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id) REFERENCES public.network_assets_partitioned(tenant_id, id) ON DELETE SET NULL (asset_id);
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: external_connections external_connections_tenant_source_asset_fkey
-DO $$ BEGIN
-  IF to_regclass('public.external_connections') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'external_connections_tenant_source_asset_fkey' AND conrelid = to_regclass('public.external_connections')
-     ) THEN
-    ALTER TABLE ONLY public.external_connections
-        ADD CONSTRAINT external_connections_tenant_source_asset_fkey FOREIGN KEY (tenant_id, source_asset_id) REFERENCES public.network_assets_partitioned(tenant_id, id) ON DELETE SET NULL (source_asset_id);
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: ssh_keys ssh_keys_tenant_asset_fkey
-DO $$ BEGIN
-  IF to_regclass('public.ssh_keys') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'ssh_keys_tenant_asset_fkey' AND conrelid = to_regclass('public.ssh_keys')
-     ) THEN
-    ALTER TABLE ONLY public.ssh_keys
-        ADD CONSTRAINT ssh_keys_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id) REFERENCES public.network_assets_partitioned(tenant_id, id) ON DELETE SET NULL (asset_id);
-  END IF;
-END $$;
-
-
 -- =================================================================
 -- ROW SECURITY: ticket_comments (tenant scope inherited via tickets.tenant_id;
 -- ticket_comments has no tenant_id column of its own — see H1)
@@ -16286,6 +15537,25 @@ ALTER TYPE public.protocol_type ADD VALUE IF NOT EXISTS 'PPTP' BEFORE 'Modbus';
 
 
 -- =========================================================================
+-- device_job_type: values added after the type first shipped
+-- =========================================================================
+-- The SECOND half of the two-edit enum rule, for exactly the reasons spelled
+-- out above protocol_type: the `CREATE TYPE public.device_job_type` near the
+-- top of this file is a silent no-op on any database that already has the
+-- type, so without this line `host_inventory` would reach fresh installs only
+-- and an existing cluster would start failing much later with
+-- "invalid input value for enum device_job_type" the first time an agent
+-- submitted a host inventory.
+--
+-- No BEFORE clause: host_inventory is LAST in the CREATE TYPE list too, so
+-- appending gives pg_enum the same ordering on a fresh install and an upgraded
+-- one.
+ALTER TYPE public.device_job_type ADD VALUE IF NOT EXISTS 'host_inventory';
+
+
+
+
+-- =========================================================================
 -- CBOM-CENTRIC REPORTING REDESIGN — Phase 1
 -- Scopes: tenant-owned, named, versioned predicate definitions that define
 -- "what's in a CBOM." A Scope is the boundary an auditor or compliance team
@@ -16300,7 +15570,13 @@ CREATE TABLE IF NOT EXISTS public.scopes (
     tenant_id uuid NOT NULL,
     name character varying(255) NOT NULL,
     description text,
-    predicate jsonb DEFAULT '{}'::jsonb NOT NULL,
+    -- The boundary, as a query-language string (QUERY_LANGUAGE.md, ADR-0006
+    -- D2). It replaced a jsonb include/exclude predicate whose vocabulary was
+    -- a third of the language's and which nothing but cbom-service could
+    -- evaluate. Empty string = every asset under RLS, which is what the `All`
+    -- scope is. Validated on write; a scope whose query stops validating is a
+    -- 422 on save, never a silently wider artifact.
+    query text DEFAULT ''::text NOT NULL,
     version integer DEFAULT 1 NOT NULL,
     is_default boolean DEFAULT false NOT NULL,
     is_system boolean DEFAULT false NOT NULL,
@@ -16324,8 +15600,8 @@ CREATE TABLE IF NOT EXISTS public.scopes_audit (
     tenant_id uuid NOT NULL,
     name_before character varying(255) NOT NULL,
     name_after character varying(255) NOT NULL,
-    predicate_before jsonb NOT NULL,
-    predicate_after jsonb NOT NULL,
+    query_before text NOT NULL,
+    query_after text NOT NULL,
     version_before integer NOT NULL,
     version_after integer NOT NULL,
     changed_by uuid,
@@ -16347,8 +15623,8 @@ BEGIN
         tenant_id,
         name_before,
         name_after,
-        predicate_before,
-        predicate_after,
+        query_before,
+        query_after,
         version_before,
         version_after,
         changed_by,
@@ -16360,8 +15636,8 @@ BEGIN
         NEW.tenant_id,
         OLD.name,
         NEW.name,
-        OLD.predicate,
-        NEW.predicate,
+        OLD.query,
+        NEW.query,
         OLD.version,
         NEW.version,
         NEW.updated_by,
@@ -16373,12 +15649,44 @@ END;
 $$;
 
 
+-- The `query` columns MUST exist before the trigger below is created.
+--
+-- These ALTERs live here, in the middle of the pg_dump body, for one reason:
+-- `scopes_audit_trigger`'s WHEN clause names `OLD.query` / `NEW.query`, and
+-- Postgres validates a trigger's WHEN clause at CREATE time. On a database that
+-- still has the PRE-query `scopes` shape — jsonb `predicate`, no `query` — the
+-- CREATE TRIGGER therefore fails, and under `ON_ERROR_STOP=1` the file stops
+-- right there. The ALTERs that would have fixed it were three thousand lines
+-- further down in POST-MIGRATIONS and never ran, while the `DROP TRIGGER IF
+-- EXISTS` on the line above had already committed: the database was left with
+-- no audit trigger on scopes and no way to re-apply the file, permanently.
+--
+-- A fresh double-apply cannot see this — both of its passes build TODAY's shape
+-- — which is why it is a statement-ordering rule written down here rather than
+-- a test result. TestIntegration_Schema_AppliesOverThePreQueryScopesShape
+-- builds the old shape deliberately and applies the file over it.
+--
+-- The `predicate` DROP stays with its ADD: they are one change, and splitting
+-- them would leave the file able to create the column and never retire the old
+-- one. ADR-0007 D2 is the no-migration path — there are no installs to carry
+-- forward and no translation is attempted.
+ALTER TABLE IF EXISTS public.scopes
+    ADD COLUMN IF NOT EXISTS query text DEFAULT ''::text NOT NULL;
+ALTER TABLE IF EXISTS public.scopes DROP COLUMN IF EXISTS predicate;
+
+ALTER TABLE IF EXISTS public.scopes_audit
+    ADD COLUMN IF NOT EXISTS query_before text DEFAULT ''::text NOT NULL,
+    ADD COLUMN IF NOT EXISTS query_after  text DEFAULT ''::text NOT NULL;
+ALTER TABLE IF EXISTS public.scopes_audit DROP COLUMN IF EXISTS predicate_before;
+ALTER TABLE IF EXISTS public.scopes_audit DROP COLUMN IF EXISTS predicate_after;
+
+
 DROP TRIGGER IF EXISTS scopes_audit_trigger ON public.scopes;
 CREATE OR REPLACE TRIGGER scopes_audit_trigger
     AFTER UPDATE ON public.scopes
     FOR EACH ROW
     WHEN (((OLD.name IS DISTINCT FROM NEW.name)
-        OR (OLD.predicate IS DISTINCT FROM NEW.predicate)
+        OR (OLD.query IS DISTINCT FROM NEW.query)
         OR (OLD.version IS DISTINCT FROM NEW.version)))
     EXECUTE FUNCTION public.log_scope_change();
 
@@ -16490,12 +15798,52 @@ CREATE TABLE IF NOT EXISTS public.cbom_artifacts (
     created_at timestamp with time zone DEFAULT now(),
 
 
+    -- Which bill of materials this artifact is (ADR-0005 D6). The CBOM is one
+    -- KIND of snapshot, not the only one: the same scope → assemble → hash →
+    -- sign → compare pipeline also produces a software BOM, a hardware BOM and
+    -- a whole-inventory BOM. 'cbom' is the default so every row written before
+    -- this column existed is what it always was.
+    artifact_kind text DEFAULT 'cbom'::text NOT NULL,
+
+
     CONSTRAINT cbom_artifacts_pkey PRIMARY KEY (id),
     CONSTRAINT cbom_artifacts_storage_or_inline CHECK (
         (storage_key IS NOT NULL AND inline_content IS NULL) OR
         (storage_key IS NULL AND inline_content IS NOT NULL)
     )
 );
+
+
+-- artifact_kind, for a database that already has this table.
+--
+-- `CREATE TABLE IF NOT EXISTS` above is a NO-OP on such a database, so a column
+-- added to the literal never reaches it — the column arrives only on a fresh
+-- install, and the first INSERT naming it fails at runtime with "column does
+-- not exist". cbom_artifacts shipped in v2.2.0, so every database created since
+-- then has the table WITHOUT this column. Two edits, both required — the same
+-- treatment `findings`' workflow columns get.
+ALTER TABLE public.cbom_artifacts ADD COLUMN IF NOT EXISTS artifact_kind text DEFAULT 'cbom'::text NOT NULL;
+
+-- The kind vocabulary is a CHECK rather than an enum: adding a kind is then one
+-- statement instead of the two-edit ALTER TYPE dance, and there is no ordering
+-- to keep identical between fresh and upgraded installs.
+DO $$ BEGIN
+  IF to_regclass('public.cbom_artifacts') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'cbom_artifacts_artifact_kind_check' AND conrelid = to_regclass('public.cbom_artifacts')
+     ) THEN
+    ALTER TABLE ONLY public.cbom_artifacts
+        ADD CONSTRAINT cbom_artifacts_artifact_kind_check
+        CHECK (artifact_kind = ANY (ARRAY['cbom'::text, 'sbom'::text, 'hbom'::text, 'inventory'::text]));
+  END IF;
+END $$;
+
+
+-- The list page filters by kind, and the kind badge is on every row.
+CREATE INDEX IF NOT EXISTS idx_cbom_artifacts_tenant_kind
+    ON public.cbom_artifacts USING btree (tenant_id, artifact_kind, generated_at DESC)
+    WHERE (deleted_at IS NULL);
 
 
 CREATE INDEX IF NOT EXISTS idx_cbom_artifacts_tenant_generated
@@ -16798,8 +16146,8 @@ CREATE INDEX IF NOT EXISTS idx_oauth_codes_expires ON public.oauth_authorization
 -- Per-(tenant, framework) score rollup written by the evaluation engine
 -- reconcile (services/compliance-engine .../evaluation_engine.go). One row per
 -- published framework per tenant — read for posture scorecards and the preview
--- score on unactivated frameworks. Findings (failures) stay in
--- compliance_findings; this is just the rollup.
+-- score on unactivated frameworks. Findings (failures) live in `findings`, as
+-- the compliance producer's rows; this is just the rollup.
 -- =====================================================================
 -- score is NULLable on purpose: a framework with no ASSESSED control has
 -- no score, and the rollup must be able to say so. It used to be NOT NULL
@@ -16830,9 +16178,99 @@ CREATE INDEX IF NOT EXISTS idx_tenant_framework_scores_tenant
   ON public.tenant_framework_scores (tenant_id);
 
 
--- Speeds the evaluation engine's active-finding reconcile load + posture reads.
-CREATE INDEX IF NOT EXISTS idx_compliance_findings_tenant_control_state
-  ON public.compliance_findings (tenant_id, control_id, detection_state);
+-- =====================================================================
+-- Framework-control provenance (ADR-0008 D4.1 — "provenance on every fact")
+-- =====================================================================
+-- Where a control came from: a person typing it in the authoring form
+-- ('declared'), the Author seam drafting it from a pasted standard and a person
+-- accepting the draft ('inferred', with source_ref naming the model), or a
+-- content bundle ('imported').
+--
+-- NULL is a real, distinct state and is NOT backfilled: it means the row was
+-- created before this column existed. Backfilling it to 'declared' would be
+-- asserting that a person wrote every historical control, which we do not know
+-- — the same "did not check, rendered as passed" shape these columns exist to
+-- prevent. Nothing reads NULL as inferred, so the only cost is that old rows
+-- carry no badge.
+--
+-- Both ALTERs are safe on a populated table: the columns are nullable with no
+-- default, so no row is rewritten and no existing row can violate the CHECK
+-- (which admits NULL). That is the reason the CHECK is written with an explicit
+-- `IS NULL OR`, rather than relying on SQL's three-valued CHECK semantics — the
+-- rule is load-bearing and should read as a rule, not as a side effect.
+ALTER TABLE public.platform_framework_controls
+  ADD COLUMN IF NOT EXISTS source_kind character varying(20),
+  ADD COLUMN IF NOT EXISTS source_ref  character varying(200);
+
+ALTER TABLE public.tenant_framework_controls
+  ADD COLUMN IF NOT EXISTS source_kind character varying(20),
+  ADD COLUMN IF NOT EXISTS source_ref  character varying(200);
+
+DO $$
+BEGIN
+  IF to_regclass('public.platform_framework_controls') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+        WHERE conname = 'platform_framework_controls_source_kind_check'
+          AND conrelid = to_regclass('public.platform_framework_controls'))
+  THEN
+    ALTER TABLE public.platform_framework_controls
+      ADD CONSTRAINT platform_framework_controls_source_kind_check
+      CHECK (source_kind IS NULL OR source_kind IN ('measured', 'imported', 'declared', 'inferred'));
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF to_regclass('public.tenant_framework_controls') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+        WHERE conname = 'tenant_framework_controls_source_kind_check'
+          AND conrelid = to_regclass('public.tenant_framework_controls'))
+  THEN
+    ALTER TABLE public.tenant_framework_controls
+      ADD CONSTRAINT tenant_framework_controls_source_kind_check
+      CHECK (source_kind IS NULL OR source_kind IN ('measured', 'imported', 'declared', 'inferred'));
+  END IF;
+END $$;
+
+
+-- =====================================================================
+-- Remediation-plan-item provenance (ADR-0008 D4.1 / D5)
+-- =====================================================================
+-- Where a plan item's notes came from: a person typing them (NULL, the
+-- ordinary path), or a person ACCEPTING a plan the Remediator seam drafted
+-- ('inferred', with source_ref naming the model — `remediator:<model id>`).
+--
+-- The acting user is already on the row as `added_by`, and that is the half
+-- ADR-0008 D5 is about: a seam proposes, a human approves. The two columns say
+-- what was proposed and by what; `added_by` says who admitted it. Neither is
+-- derivable from the other and the row needs both to be readable a year later.
+--
+-- NULL is a real, distinct state and is NOT backfilled — for the reason the
+-- framework-control columns above give: backfilling to 'declared' would assert
+-- that a person wrote every historical item, which we do not know.
+--
+-- Safe on a populated table: nullable, no default, so no row is rewritten and
+-- no existing row can violate the CHECK, which admits NULL explicitly rather
+-- than relying on SQL's three-valued CHECK semantics.
+ALTER TABLE public.remediation_plan_items
+  ADD COLUMN IF NOT EXISTS source_kind character varying(20),
+  ADD COLUMN IF NOT EXISTS source_ref  character varying(200);
+
+DO $$
+BEGIN
+  IF to_regclass('public.remediation_plan_items') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+        WHERE conname = 'remediation_plan_items_source_kind_check'
+          AND conrelid = to_regclass('public.remediation_plan_items'))
+  THEN
+    ALTER TABLE public.remediation_plan_items
+      ADD CONSTRAINT remediation_plan_items_source_kind_check
+      CHECK (source_kind IS NULL OR source_kind IN ('measured', 'imported', 'declared', 'inferred'));
+  END IF;
+END $$;
 
 
 --
@@ -17035,11 +16473,6 @@ DROP POLICY IF EXISTS cmdb_sync_profiles_tenant_isolation ON public.cmdb_sync_pr
 CREATE POLICY cmdb_sync_profiles_tenant_isolation ON public.cmdb_sync_profiles
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.compliance_findings ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS compliance_findings_tenant_isolation ON public.compliance_findings;
-CREATE POLICY compliance_findings_tenant_isolation ON public.compliance_findings
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.compliance_overrides ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS compliance_overrides_tenant_isolation ON public.compliance_overrides;
 CREATE POLICY compliance_overrides_tenant_isolation ON public.compliance_overrides
@@ -17078,11 +16511,6 @@ CREATE POLICY device_agents_tenant_isolation ON public.device_agents
 ALTER TABLE public.device_jobs ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS device_jobs_tenant_isolation ON public.device_jobs;
 CREATE POLICY device_jobs_tenant_isolation ON public.device_jobs
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.devices ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS devices_tenant_isolation ON public.devices;
-CREATE POLICY devices_tenant_isolation ON public.devices
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.discovery_alert_configs ENABLE ROW LEVEL SECURITY;
@@ -17189,11 +16617,6 @@ CREATE POLICY kms_keys_tenant_isolation ON public.kms_keys
 ALTER TABLE public.locations ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS locations_tenant_isolation ON public.locations;
 CREATE POLICY locations_tenant_isolation ON public.locations
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.network_assets_partitioned ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS network_assets_partitioned_tenant_isolation ON public.network_assets_partitioned;
-CREATE POLICY network_assets_partitioned_tenant_isolation ON public.network_assets_partitioned
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.network_segments ENABLE ROW LEVEL SECURITY;
@@ -17490,7 +16913,8 @@ CREATE INDEX IF NOT EXISTS idx_users_tenant_lower_email
 -- =========================================================================
 -- Partition-aware views must run with the querying role's RLS context, not the
 -- view owner's, so the parent-table policies above actually apply through them.
-ALTER VIEW public.network_assets SET (security_invoker = true);
+-- (`assets` and `asset_endpoints` are queried through the partitioned parent
+-- directly, with no wrapper view, so there is nothing to flip for them.)
 ALTER VIEW public.sensor_discoveries SET (security_invoker = true);
 ALTER VIEW public.crypto_implementations SET (security_invoker = true);
 
@@ -17940,6 +17364,45 @@ ALTER TABLE IF EXISTS public.crypto_implementation_certificates
   ADD CONSTRAINT valid_certificate_role
     CHECK (certificate_role IN ('leaf', 'primary', 'additional', 'intermediate', 'root'));
 
+-- Converge crypto_implementations.certificate_id onto the junction table.
+--
+-- The junction is the ONE source of truth for the certificate↔configuration
+-- link: every reader that asks "which certificates belong to this asset /
+-- endpoint / configuration" walks it (shared/findings.AssetSubjects' certificate
+-- descendant path, the asset/cert · endpoint/cert · crypto_configuration/cert ·
+-- certificate/asset shapes in shared/query/sql, the location roll-up, the
+-- crypto-risk certificate-expiry bands). `certificate_id` is the leaf
+-- denormalisation beside it.
+--
+-- They were written apart and diverged: the column by the ingest INSERT/UPDATE,
+-- the junction row by a later best-effort call the CHECK widened just above used
+-- to REFUSE ('leaf' was not an accepted role). The writers are now atomic, but
+-- rows written before that landed still carry a certificate_id with no junction
+-- row, and their certificates are invisible from their own asset.
+--
+-- Must run AFTER the CHECK widening above: on an install still carrying the
+-- original constraint this INSERT would be rejected outright.
+--
+-- Idempotent by ON CONFLICT on unique_impl_cert, and by construction — the
+-- certificate is read out of the row, so re-running converges rather than
+-- inventing links. A row whose junction already names the same certificate under
+-- a different role (the demo fixtures write 'additional') is left as it is;
+-- nothing reads certificate_role, and rewriting a seeded row's role would buy
+-- nothing.
+DO $$
+BEGIN
+  IF to_regclass('public.crypto_implementation_certificates') IS NOT NULL
+     AND to_regclass('public.crypto_implementations') IS NOT NULL THEN
+    INSERT INTO public.crypto_implementation_certificates (
+      crypto_implementation_id, certificate_id, certificate_role, certificate_order
+    )
+    SELECT ci.id, ci.certificate_id, 'leaf', 0
+      FROM public.crypto_implementations ci
+     WHERE ci.certificate_id IS NOT NULL
+    ON CONFLICT (crypto_implementation_id, certificate_id) DO NOTHING;
+  END IF;
+END $$;
+
 
 -- ============================================================================
 -- W2-2 SELF-CHECK: no tenant-isolation policy may survive on the old,
@@ -18009,8 +17472,8 @@ DROP TABLE IF EXISTS public.crypto_code_findings CASCADE;
 -- A plain view executes with its OWNER's privileges, and the owner
 -- (crypto_user) both owns the base tables and is exempt from their RLS —
 -- so every view below was a cross-tenant read path for the NOBYPASSRLS
--- crypto_app role. Only the three partition-wrapper views (network_assets,
--- sensor_discoveries, crypto_implementations, flipped above) had
+-- crypto_app role. Only the two partition-wrapper views (sensor_discoveries
+-- and crypto_implementations, flipped above) had
 -- security_invoker. Flip every remaining view whose base tables carry a
 -- tenant_isolation policy, so RLS applies to the querying role exactly as it
 -- would on the tables themselves. Deliberately NOT flipped: v_tenants,
@@ -18235,7 +17698,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_crypto_applications_tenant_resource_context
 -- unbacked.
 --
 -- What it is for: the primary deny guard is `asset_status = 'denied'` on the
--- network_assets row itself, which holds as long as that row survives. The
+-- `assets` row itself, which holds as long as that row survives. The
 -- fingerprint here is the fallback for when it does not — a denied host that is
 -- subsequently deleted from Inventory would otherwise come back on the next
 -- discovery as a fresh pending_approval asset.
@@ -18305,6 +17768,2282 @@ DROP INDEX IF EXISTS public.idx_aws_cost_data_unique;
 
 
 -- ============================================================================
+-- GENERAL ASSET INVENTORY — ADDITIVE SCHEMA (phase 0, BUILD_PLAN workstream 0.2)
+-- ============================================================================
+-- The tables the general-asset-inventory initiative adds. Column design is
+-- docsv4/internal/developer/design/asset-inventory/DATA_MODEL.md §1–§4; the
+-- decisions behind it are ADR-0002 (identity and class taxonomy), ADR-0003
+-- (relationships), ADR-0005 (facts, findings, risk) in that directory.
+--
+-- Phase 0 added these tables additively; phase 1 (workstream 1.1) removed
+-- `network_assets_partitioned` and `devices` and made `assets` +
+-- `asset_endpoints` THE unit of inventory. Phase 3 (workstream 3.1) replaced
+-- `compliance_findings` with `findings`; `cbom_artifacts` is still to come
+-- (ADR-0007 D2). Every table below is created EMPTY except asset_classes,
+-- whose platform rows come from the generated region in seed.sql.
+--
+-- Owner decision (ADR-0007): there are no existing installs, so
+-- there is no backfill, no compatibility view, and no migration of the old
+-- shape into these tables.
+--
+-- Conventions followed here, per CLAUDE.md's schema idempotency invariants:
+--   * CREATE TABLE IF NOT EXISTS, CREATE INDEX IF NOT EXISTS.
+--   * Constraints that must be added to an existing table go in DO blocks
+--     gated on pg_constraint; constraints that can live in the CREATE TABLE
+--     body do, because IF NOT EXISTS makes the whole statement a no-op on a
+--     re-apply.
+--   * Policies are DROP POLICY IF EXISTS + CREATE (not the DO/EXCEPTION
+--     duplicate_object form), matching the RLS HARDENING block: that form
+--     cannot UPDATE an existing policy, so a policy change would silently not
+--     apply on an installed database. These tables are created BELOW the RLS
+--     HARDENING block, so — like legal_acceptances — their policies must be
+--     declared here rather than up there.
+--   * USING and WITH CHECK are both stated. Postgres reuses USING as the
+--     WITH CHECK when the latter is omitted, so this is legibility, not a
+--     security fix — and TestIntegration_RLS_EveryTenantPolicyHasWithCheck
+--     requires it.
+--   * NO ENUMS for class_key / source_kind / status-shaped columns. They are
+--     text with a CHECK, so a new value is one edit rather than the two the
+--     enum rule demands (and cannot half-apply: an `ALTER TYPE ... ADD VALUE`
+--     missing from POST-MIGRATIONS fails SILENTLY, psql exit 0). protocol_type
+--     on asset_endpoints is the EXISTING enum and is reused as-is.
+--   * Tenant-scoped tables carry a FK to tenants ON DELETE CASCADE so a tenant
+--     delete (and testdb.NewTenant's cleanup) takes their rows with it.
+
+
+-- ----------------------------------------------------------------------------
+-- asset_classes, assets and asset_endpoints are defined ABOVE, in the pg_dump
+-- body, where network_assets_partitioned used to sit
+-- ----------------------------------------------------------------------------
+-- They moved there in phase 1 (workstream 1.1) for one concrete reason: the
+-- operational views in the body — mv_location_finding_summary,
+-- mv_remediation_queue and v_ci_inventory — now read them, and a view cannot
+-- reference a table this file has not created yet. Their policies, triggers and
+-- the rest of the inventory tables stay here.
+
+-- ----------------------------------------------------------------------------
+-- Foreign keys for the three tables defined in the pg_dump body above
+-- ----------------------------------------------------------------------------
+-- They live here and not next to their CREATE TABLE because every PRIMARY KEY
+-- in this file is added in the CONSTRAINT section further down the body: at the
+-- point those tables are created, `tenants(id)` is not yet a unique key and the
+-- FK is refused with "there is no unique constraint matching given keys".
+DO $$ BEGIN
+  IF to_regclass('public.asset_classes') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'asset_classes_tenant_id_fkey' AND conrelid = to_regclass('public.asset_classes')
+     ) THEN
+    ALTER TABLE ONLY public.asset_classes
+        ADD CONSTRAINT asset_classes_tenant_id_fkey FOREIGN KEY (tenant_id)
+        REFERENCES public.tenants(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.assets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'assets_tenant_id_fkey' AND conrelid = to_regclass('public.assets')
+     ) THEN
+    ALTER TABLE public.assets
+        ADD CONSTRAINT assets_tenant_id_fkey FOREIGN KEY (tenant_id)
+        REFERENCES public.tenants(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.asset_endpoints') IS NOT NULL
+     AND to_regclass('public.assets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'asset_endpoints_tenant_asset_fkey' AND conrelid = to_regclass('public.asset_endpoints')
+     ) THEN
+    ALTER TABLE public.asset_endpoints
+        ADD CONSTRAINT asset_endpoints_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id)
+        REFERENCES public.assets(tenant_id, id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+
+-- ----------------------------------------------------------------------------
+-- asset_identifiers — every identifier ever observed for an asset
+-- ----------------------------------------------------------------------------
+-- DATA_MODEL §2, ADR-0002 D3. The identification engine (workstream 0.4) reads
+-- this table; the unique index below is the whole mechanism.
+--
+-- UNIQUE (tenant_id, kind, value, coalesce(scope,'')) is ACROSS ASSETS, not per
+-- asset: an identifier value maps to at most one asset. A conflict on insert is
+-- not an error to swallow — it is the signal that produces a merge proposal in
+-- Approvals (ADR-0002 D3, outcome three). Never auto-merge on conflict.
+--
+-- `kind` is validated against the registry in Go (shared/assetclass's
+-- identifier kinds), not by a CHECK: the class registry owns the vocabulary and
+-- the per-class precedence order, and duplicating the list here is a second
+-- source of truth that can drift. The column is deliberately plain text.
+CREATE TABLE IF NOT EXISTS public.asset_identifiers (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL,
+    asset_id uuid NOT NULL,
+    kind text NOT NULL,
+    value text NOT NULL,
+    scope text,
+    source_kind text DEFAULT 'measured'::text NOT NULL,
+    source_ref text,
+    confidence numeric(3,2) DEFAULT 1.00 NOT NULL,
+    first_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT asset_identifiers_pkey PRIMARY KEY (id),
+    CONSTRAINT asset_identifiers_source_kind_check CHECK (source_kind = ANY (ARRAY['measured'::text, 'declared'::text, 'imported'::text, 'inferred'::text])),
+    CONSTRAINT asset_identifiers_confidence_range_check CHECK (confidence >= 0 AND confidence <= 1)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS asset_identifiers_value_uniq
+    ON public.asset_identifiers (tenant_id, kind, value, coalesce(scope, ''));
+CREATE INDEX IF NOT EXISTS idx_asset_identifiers_tenant_asset
+    ON public.asset_identifiers USING btree (tenant_id, asset_id);
+
+DO $$ BEGIN
+  IF to_regclass('public.asset_identifiers') IS NOT NULL
+     AND to_regclass('public.assets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'asset_identifiers_tenant_asset_fkey' AND conrelid = to_regclass('public.asset_identifiers')
+     ) THEN
+    ALTER TABLE ONLY public.asset_identifiers
+        ADD CONSTRAINT asset_identifiers_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id)
+        REFERENCES public.assets(tenant_id, id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+
+-- ----------------------------------------------------------------------------
+-- asset_management / asset_credentials — the two halves of `devices`
+-- ----------------------------------------------------------------------------
+-- DATA_MODEL §2, ADR-0002 D5. A device is an asset of a hardware or cloud class
+-- with a management address and, optionally, credentials. `devices` is removed
+-- in phase 1 (workstream 1.6); these two tables are its replacement and stay
+-- empty until then. The Devices page becomes "assets with management
+-- configured", i.e. a filter on asset_management.
+--
+-- One row per asset: PRIMARY KEY (tenant_id, asset_id). tenant_id is present
+-- (DATA_MODEL lists asset_id alone as the key) because the composite FK into
+-- the partitioned assets table needs it and because it lets RLS be the plain
+-- tenant_id policy rather than an EXISTS over the parent.
+CREATE TABLE IF NOT EXISTS public.asset_management (
+    tenant_id uuid NOT NULL,
+    asset_id uuid NOT NULL,
+    management_url text,
+    management_protocol text,
+    tls_insecure_skip_verify boolean DEFAULT false NOT NULL,
+    connection_status text DEFAULT 'unknown'::text NOT NULL,
+    last_interrogated_at timestamp with time zone,
+    interrogation_error text,
+    interrogation_schedule_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT asset_management_pkey PRIMARY KEY (tenant_id, asset_id),
+    CONSTRAINT asset_management_connection_status_check CHECK (connection_status = ANY (ARRAY['connected'::text, 'disconnected'::text, 'error'::text, 'unknown'::text]))
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_management_tenant_status
+    ON public.asset_management USING btree (tenant_id, connection_status);
+
+DO $$ BEGIN
+  IF to_regclass('public.asset_management') IS NOT NULL
+     AND to_regclass('public.assets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'asset_management_tenant_asset_fkey' AND conrelid = to_regclass('public.asset_management')
+     ) THEN
+    ALTER TABLE ONLY public.asset_management
+        ADD CONSTRAINT asset_management_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id)
+        REFERENCES public.assets(tenant_id, id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+-- password_enc holds CIPHERTEXT, always. The name is the contract, and it is
+-- the reason the column is not called `password` the way devices.password is:
+-- `devices` stored the interrogation password as the caller handed it over.
+-- Writers MUST go through shared/security/credentials (the shared encryption
+-- helper); scripts/audit-credential-encryption.mjs enforces that on the Go side
+-- by requiring any file writing a credential-shaped column to import the
+-- helper. It reads Go, not SQL, so this comment is the only thing standing
+-- here — there is no writer yet, and workstream 1.6 is where the rule bites.
+--
+-- credential_id is a loose uuid, not an FK: it points into the tenant's
+-- credential store the same way devices.credential_id does, and that store has
+-- no table in this schema to reference.
+CREATE TABLE IF NOT EXISTS public.asset_credentials (
+    tenant_id uuid NOT NULL,
+    asset_id uuid NOT NULL,
+    credential_id uuid,
+    username text,
+    password_enc text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT asset_credentials_pkey PRIMARY KEY (tenant_id, asset_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_credentials_credential_id
+    ON public.asset_credentials USING btree (credential_id) WHERE credential_id IS NOT NULL;
+
+DO $$ BEGIN
+  IF to_regclass('public.asset_credentials') IS NOT NULL
+     AND to_regclass('public.assets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'asset_credentials_tenant_asset_fkey' AND conrelid = to_regclass('public.asset_credentials')
+     ) THEN
+    ALTER TABLE ONLY public.asset_credentials
+        ADD CONSTRAINT asset_credentials_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id)
+        REFERENCES public.assets(tenant_id, id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+
+-- ----------------------------------------------------------------------------
+-- 3. asset_relationships — one typed, directional edge table (DATA_MODEL §3)
+-- ----------------------------------------------------------------------------
+-- ADR-0003 D1/D2. Stored once in canonical direction; the reverse label is
+-- derived from the vocabulary and never stored. The same pair may carry several
+-- types, hence the unique on (tenant_id, from, to, type) rather than on the
+-- pair.
+--
+-- `type` is one of the ten vocabulary keys (runs_on, hosted_on, virtualized_by,
+-- depends_on, connects_to, member_of, contains, manages, sends_data_to,
+-- impacts) and is registry-validated in Go, not by a CHECK — the vocabulary is
+-- owned by the relationship registry, and a CHECK here would be a second copy.
+--
+-- Both direction indexes exist because impact traversal (ADR-0003 D5) is a
+-- depth-capped recursive CTE that walks edges backwards as well as forwards.
+CREATE TABLE IF NOT EXISTS public.asset_relationships (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL,
+    from_asset_id uuid NOT NULL,
+    to_asset_id uuid NOT NULL,
+    type text NOT NULL,
+    source_kind text DEFAULT 'measured'::text NOT NULL,
+    source_ref text,
+    confidence numeric(3,2) DEFAULT 1.00 NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL,
+    attributes jsonb DEFAULT '{}'::jsonb NOT NULL,
+    first_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    observation_count integer DEFAULT 1 NOT NULL,
+    created_by uuid,
+    approved_by uuid,
+    approved_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT asset_relationships_pkey PRIMARY KEY (id),
+    CONSTRAINT asset_relationships_source_kind_check CHECK (source_kind = ANY (ARRAY['measured'::text, 'declared'::text, 'imported'::text, 'inferred'::text])),
+    CONSTRAINT asset_relationships_status_check CHECK (status = ANY (ARRAY['pending'::text, 'active'::text, 'rejected'::text, 'stale'::text])),
+    CONSTRAINT asset_relationships_confidence_range_check CHECK (confidence >= 0 AND confidence <= 1),
+    -- A self-edge is never meaningful in this vocabulary and is always an
+    -- identity bug upstream (the same host matched twice under two identifiers).
+    CONSTRAINT asset_relationships_no_self_edge_check CHECK (from_asset_id <> to_asset_id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS asset_relationships_edge_uniq
+    ON public.asset_relationships (tenant_id, from_asset_id, to_asset_id, type);
+CREATE INDEX IF NOT EXISTS idx_asset_relationships_tenant_from
+    ON public.asset_relationships USING btree (tenant_id, from_asset_id);
+CREATE INDEX IF NOT EXISTS idx_asset_relationships_tenant_to
+    ON public.asset_relationships USING btree (tenant_id, to_asset_id);
+CREATE INDEX IF NOT EXISTS idx_asset_relationships_tenant_status
+    ON public.asset_relationships USING btree (tenant_id, status);
+
+DO $$ BEGIN
+  IF to_regclass('public.asset_relationships') IS NOT NULL
+     AND to_regclass('public.assets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'asset_relationships_tenant_from_fkey' AND conrelid = to_regclass('public.asset_relationships')
+     ) THEN
+    ALTER TABLE ONLY public.asset_relationships
+        ADD CONSTRAINT asset_relationships_tenant_from_fkey FOREIGN KEY (tenant_id, from_asset_id)
+        REFERENCES public.assets(tenant_id, id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.asset_relationships') IS NOT NULL
+     AND to_regclass('public.assets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'asset_relationships_tenant_to_fkey' AND conrelid = to_regclass('public.asset_relationships')
+     ) THEN
+    ALTER TABLE ONLY public.asset_relationships
+        ADD CONSTRAINT asset_relationships_tenant_to_fkey FOREIGN KEY (tenant_id, to_asset_id)
+        REFERENCES public.assets(tenant_id, id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+
+-- ----------------------------------------------------------------------------
+-- 4. asset_facts — the extensible key/value fact store (DATA_MODEL §4)
+-- ----------------------------------------------------------------------------
+-- ADR-0005 D2. A fact is a statement with provenance, not a judgement. Keys are
+-- namespaced (`os.name`, `hw.serial`, `eol.os.date`) and registered in
+-- standards/fact-keys.yaml; there are no free-form keys, and validation happens
+-- in Go against the generated registry rather than a CHECK here.
+--
+-- UNIQUE (tenant_id, asset_id, key, source_ref) — PER SOURCE, deliberately: two
+-- sources may hold DIFFERENT values for the same key, and the reconciliation
+-- precedence (ADR-0002 D4) chooses the displayed one. Collapsing this to
+-- (tenant, asset, key) would make the last writer win and destroy the
+-- disagreement the precedence rule exists to resolve.
+--
+-- source_ref is NOT NULL and defaults to '' rather than being nullable: it is
+-- part of the unique key, and a nullable component would let two rows from
+-- "unknown source" coexist for the same key.
+CREATE TABLE IF NOT EXISTS public.asset_facts (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL,
+    asset_id uuid NOT NULL,
+    key text NOT NULL,
+    value jsonb NOT NULL,
+    source_kind text DEFAULT 'measured'::text NOT NULL,
+    source_ref text DEFAULT ''::text NOT NULL,
+    confidence numeric(3,2),
+    model_id text,
+    observed_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT asset_facts_pkey PRIMARY KEY (id),
+    CONSTRAINT asset_facts_source_kind_check CHECK (source_kind = ANY (ARRAY['measured'::text, 'declared'::text, 'imported'::text, 'inferred'::text])),
+    CONSTRAINT asset_facts_confidence_range_check CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
+    -- ADR-0005 D2: an inferred fact must say what inferred it and how sure it is.
+    CONSTRAINT asset_facts_inferred_needs_provenance_check CHECK (source_kind <> 'inferred'::text OR (confidence IS NOT NULL AND model_id IS NOT NULL))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS asset_facts_key_source_uniq
+    ON public.asset_facts (tenant_id, asset_id, key, source_ref);
+CREATE INDEX IF NOT EXISTS idx_asset_facts_tenant_key
+    ON public.asset_facts USING btree (tenant_id, key);
+CREATE INDEX IF NOT EXISTS idx_asset_facts_expires_at
+    ON public.asset_facts USING btree (expires_at) WHERE expires_at IS NOT NULL;
+
+DO $$ BEGIN
+  IF to_regclass('public.asset_facts') IS NOT NULL
+     AND to_regclass('public.assets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'asset_facts_tenant_asset_fkey' AND conrelid = to_regclass('public.asset_facts')
+     ) THEN
+    ALTER TABLE ONLY public.asset_facts
+        ADD CONSTRAINT asset_facts_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id)
+        REFERENCES public.assets(tenant_id, id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+
+-- ----------------------------------------------------------------------------
+-- asset_class_history — every class an asset has held, and who decided
+-- ----------------------------------------------------------------------------
+-- A reclassification used to leave no trace a consumer could read. The class
+-- lives in one mutable column on `assets`, so once a printer became a
+-- multifunction device the fact that it was ever a printer was gone: the
+-- producers that key their findings on class could not tell "this asset was
+-- always a printer" from "somebody changed its class this morning and every
+-- finding I wrote yesterday was about a different thing", and a reviewer
+-- looking at a surprising class had nothing to read but the current value.
+--
+-- `asset_history` is not that record. It carries a `created` row whose
+-- `changes_json` happens to mention `class_key`, and nothing at all for the two
+-- paths that CHANGE one — the proposal acceptance and the manual edit both
+-- wrote the column and moved on. Reconstructing a class timeline from it would
+-- mean parsing a free-shaped jsonb blob per action kind, which is exactly the
+-- "derive it later" that never survives the next writer.
+--
+-- So: one row per TRANSITION, with both ends of it named.
+--
+--   * `from_class_key` is NULL only on the row a CREATE writes. Every other row
+--     has both ends, so a reader never has to look at the previous row to know
+--     what changed — a self-contained row survives a page boundary and a
+--     filtered query, and the one that does not is how "the class before this
+--     one" becomes "the class before this one THAT I HAPPENED TO SELECT".
+--   * `source` is the mechanism, not the actor: `classifier` (the asset was
+--     created with a class the rules argued, or an intake path stated one),
+--     `proposal` (a reviewer accepted a class proposal in Approvals), `manual`
+--     (someone edited the asset), `import` (a connector or spreadsheet stated
+--     it). It is a closed set because a consumer branches on it.
+--   * `actor_user_id` is the person when there was one, NULL when a machine
+--     did it. NULL means "no person", never "person unknown" — every path that
+--     has a session passes it, and the ones that do not are machine paths.
+--   * `evidence` is the argument, copied at the moment of the change: the rule
+--     ids, the model id and probability, the proposal id. Posture only — it is
+--     built from the class proposal's own recorded fields, which carry no
+--     hostname, no address and no credential by construction.
+--
+-- Append-only by convention and by grant shape (no UPDATE path exists in Go).
+-- No unique key beyond the surrogate: the same asset can legitimately move
+-- A → B → A, and a unique (asset, from, to) would swallow the second move.
+CREATE TABLE IF NOT EXISTS public.asset_class_history (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL,
+    asset_id uuid NOT NULL,
+    from_class_key text,
+    to_class_key text NOT NULL,
+    source text NOT NULL,
+    actor_user_id uuid,
+    evidence jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT asset_class_history_pkey PRIMARY KEY (id),
+    CONSTRAINT asset_class_history_source_check CHECK (source = ANY (ARRAY['proposal'::text, 'manual'::text, 'import'::text, 'classifier'::text])),
+    -- A "change" from a class to itself is not a change. Writing one would put
+    -- noise in the one table whose whole value is that every row means
+    -- something moved.
+    CONSTRAINT asset_class_history_moves_check CHECK (from_class_key IS DISTINCT FROM to_class_key),
+    CONSTRAINT asset_class_history_to_class_nonempty_check CHECK (to_class_key <> ''::text)
+);
+
+-- The asset timeline read: newest first, for one asset.
+CREATE INDEX IF NOT EXISTS idx_asset_class_history_asset
+    ON public.asset_class_history USING btree (tenant_id, asset_id, created_at DESC);
+-- The producer read that motivated the table: "what was reclassified since X".
+CREATE INDEX IF NOT EXISTS idx_asset_class_history_tenant_time
+    ON public.asset_class_history USING btree (tenant_id, created_at DESC);
+
+DO $$ BEGIN
+  IF to_regclass('public.asset_class_history') IS NOT NULL
+     AND to_regclass('public.assets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'asset_class_history_tenant_asset_fkey'
+         AND conrelid = to_regclass('public.asset_class_history')
+     ) THEN
+    ALTER TABLE ONLY public.asset_class_history
+        ADD CONSTRAINT asset_class_history_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id)
+        REFERENCES public.assets(tenant_id, id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+
+-- ----------------------------------------------------------------------------
+-- software_products / software_installs — the software inventory (DATA_MODEL §4)
+-- ----------------------------------------------------------------------------
+-- software_products is a per-tenant catalogue deduped by identity; installs
+-- link a product to an asset. SBOM ingestion (workstream 2.6) and the
+-- vulnerability producer (3.4) are the consumers.
+--
+-- version_sort is a normalised component-wise sort key computed ON WRITE
+-- (QUERY_LANGUAGE §5.5), NULL when the version does not parse — so a version
+-- comparison against an unparseable version evaluates UNKNOWN rather than
+-- silently ordering it as a string. Do not backfill it with the raw version.
+--
+-- The unique expression differs from DATA_MODEL's literal
+-- `coalesce(purl, cpe, name||'@'||version)`: `name||'@'||version` is NULL
+-- whenever version is NULL, which would make the whole coalesce NULL and let
+-- unlimited duplicate rows coexist (NULLs do not conflict). The inner coalesce
+-- on version closes that.
+CREATE TABLE IF NOT EXISTS public.software_products (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL,
+    name text NOT NULL,
+    vendor text,
+    version text,
+    version_sort text,
+    cpe text,
+    purl text,
+    license_id text,
+    source_kind text DEFAULT 'measured'::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT software_products_pkey PRIMARY KEY (id),
+    CONSTRAINT software_products_source_kind_check CHECK (source_kind = ANY (ARRAY['measured'::text, 'declared'::text, 'imported'::text, 'inferred'::text]))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS software_products_identity_uniq
+    ON public.software_products (tenant_id, coalesce(purl, cpe, name || '@' || coalesce(version, '')));
+CREATE INDEX IF NOT EXISTS idx_software_products_tenant_name
+    ON public.software_products USING btree (tenant_id, lower(name));
+CREATE INDEX IF NOT EXISTS idx_software_products_cpe
+    ON public.software_products USING btree (cpe) WHERE cpe IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_software_products_purl
+    ON public.software_products USING btree (purl) WHERE purl IS NOT NULL;
+
+DO $$ BEGIN
+  IF to_regclass('public.software_products') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'software_products_tenant_id_fkey' AND conrelid = to_regclass('public.software_products')
+     ) THEN
+    ALTER TABLE ONLY public.software_products
+        ADD CONSTRAINT software_products_tenant_id_fkey FOREIGN KEY (tenant_id)
+        REFERENCES public.tenants(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS public.software_installs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL,
+    asset_id uuid NOT NULL,
+    product_id uuid NOT NULL,
+    install_path text,
+    source_kind text DEFAULT 'measured'::text NOT NULL,
+    source_ref text,
+    status text DEFAULT 'active'::text NOT NULL,
+    first_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT software_installs_pkey PRIMARY KEY (id),
+    CONSTRAINT software_installs_source_kind_check CHECK (source_kind = ANY (ARRAY['measured'::text, 'declared'::text, 'imported'::text, 'inferred'::text])),
+    CONSTRAINT software_installs_status_check CHECK (status = ANY (ARRAY['active'::text, 'stale'::text, 'removed'::text]))
+);
+
+-- One row per (asset, product, path). The coalesce is the same NULL-collision
+-- point the endpoints key makes: most installs report no path, and without it
+-- every re-observation would append.
+CREATE UNIQUE INDEX IF NOT EXISTS software_installs_identity_uniq
+    ON public.software_installs (tenant_id, asset_id, product_id, coalesce(install_path, ''));
+CREATE INDEX IF NOT EXISTS idx_software_installs_tenant_product
+    ON public.software_installs USING btree (tenant_id, product_id);
+
+DO $$ BEGIN
+  IF to_regclass('public.software_installs') IS NOT NULL
+     AND to_regclass('public.assets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'software_installs_tenant_asset_fkey' AND conrelid = to_regclass('public.software_installs')
+     ) THEN
+    ALTER TABLE ONLY public.software_installs
+        ADD CONSTRAINT software_installs_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id)
+        REFERENCES public.assets(tenant_id, id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+-- The product FK carries tenant_id, like every other FK in this block. A bare
+-- product_id FK is satisfied by ANOTHER tenant's product row, and two things
+-- follow from that: the install joins to a product RLS then hides, so it
+-- renders with no product and no error; and ON DELETE CASCADE lets the other
+-- tenant's deletion take this tenant's install row with it. The composite form
+-- makes the mismatch unrepresentable rather than merely unlikely.
+--
+-- It needs a unique key on (tenant_id, id) to reference — the PK is (id) alone,
+-- and an FK must point at a unique constraint or index.
+CREATE UNIQUE INDEX IF NOT EXISTS software_products_tenant_id_uniq
+    ON public.software_products (tenant_id, id);
+
+-- The single-column form shipped first on this branch; drop it before adding
+-- the composite so a database that applied the earlier revision converges
+-- rather than keeping both.
+DO $$ BEGIN
+  IF to_regclass('public.software_installs') IS NOT NULL THEN
+    ALTER TABLE public.software_installs
+        DROP CONSTRAINT IF EXISTS software_installs_product_id_fkey;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.software_installs') IS NOT NULL
+     AND to_regclass('public.software_products') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'software_installs_tenant_product_fkey' AND conrelid = to_regclass('public.software_installs')
+     ) THEN
+    ALTER TABLE ONLY public.software_installs
+        ADD CONSTRAINT software_installs_tenant_product_fkey FOREIGN KEY (tenant_id, product_id)
+        REFERENCES public.software_products(tenant_id, id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+
+-- ----------------------------------------------------------------------------
+-- findings — one table, every producer (DATA_MODEL §4, ADR-0005 D3)
+-- ----------------------------------------------------------------------------
+-- THE findings table. Workstream 3.1 moved the compliance producer onto it and
+-- DROPPED compliance_findings outright (POST-MIGRATIONS, below) — no view, no
+-- backfill, no dual-write, per ADR-0007's no-migration decision.
+--
+-- The workflow columns (assigned_to/at/by, remediation_notes, resurfaced_at,
+-- is_stale) came over from compliance_findings rather than being dropped with
+-- it. None of them is compliance-shaped: any producer's finding can be assigned
+-- to a person, annotated, go quiet and come back. They are the finding
+-- LIFECYCLE, which is the half of compliance_findings that generalised.
+--
+-- `producer` and `kind` come from standards/findings-registry.yaml and are
+-- validated against the generated Go registry, exactly the way alert types are
+-- — NOT by a CHECK constraint. `subject_type` uses the registry's subject
+-- vocabulary (asset, endpoint, certificate, key, crypto_configuration,
+-- software_install, relationship, control, framework) and is likewise
+-- registry-validated: ADR-0005 D3 says "No CHECK", because
+-- compliance_findings.asset_type's three-value CHECK is named there as the
+-- single hardest chokepoint for any non-crypto finding.
+--
+-- control_id is NULLABLE and is present only for producer = 'compliance'. The
+-- CHECK below states exactly that, which is the part a CHECK can carry without
+-- freezing the producer vocabulary.
+--
+-- severity is the registry's lowercase ladder, not compliance_findings'
+-- capitalised Low/Med/High/Critical. `info` is included for the Informational
+-- band models.RiskBands reports at score 0.
+--
+-- The partial unique index is on OPEN findings — everything not ARCHIVED, which
+-- is the same predicate compliance_findings' idx_findings_identity used, and
+-- deliberately NOT `detection_state = 'ACTIVE'`. The distinction is the
+-- INACTIVE state: a condition that stopped being detected keeps its row, and
+-- the reconciler flips that row back to ACTIVE when the condition returns.
+-- Keying on ACTIVE alone would leave the INACTIVE row unmatched, so every
+-- resurfacing would INSERT a second row for the same subject and
+-- occurrence_count / first_seen — the very columns that exist to carry a
+-- finding's history — would each describe only one episode of it. ARCHIVED is
+-- the soft-delete state and is excluded so a genuinely retired row never
+-- blocks a fresh one.
+CREATE TABLE IF NOT EXISTS public.findings (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL,
+    producer text NOT NULL,
+    kind text NOT NULL,
+    subject_type text NOT NULL,
+    subject_id uuid NOT NULL,
+    subject_label text,
+    control_id uuid,
+    severity text NOT NULL,
+    score integer DEFAULT 0 NOT NULL,
+    summary text NOT NULL,
+    evidence jsonb DEFAULT '{}'::jsonb NOT NULL,
+    source_kind text DEFAULT 'measured'::text NOT NULL,
+    detection_state text DEFAULT 'ACTIVE'::text NOT NULL,
+    workflow_status text DEFAULT 'NEW'::text NOT NULL,
+    assigned_to uuid,
+    assigned_at timestamp with time zone,
+    assigned_by uuid,
+    remediation_notes text,
+    occurrence_count integer DEFAULT 1 NOT NULL,
+    first_seen timestamp with time zone DEFAULT now() NOT NULL,
+    last_seen timestamp with time zone DEFAULT now() NOT NULL,
+    resurfaced_at timestamp with time zone,
+    suppressed_until timestamp with time zone,
+    suppression_reason text,
+    is_stale boolean DEFAULT false NOT NULL,
+    last_evaluated_at timestamp with time zone,
+    evaluation_version integer DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT findings_pkey PRIMARY KEY (id),
+    CONSTRAINT findings_severity_check CHECK (severity = ANY (ARRAY['info'::text, 'low'::text, 'medium'::text, 'high'::text, 'critical'::text])),
+    CONSTRAINT findings_detection_state_check CHECK (detection_state = ANY (ARRAY['ACTIVE'::text, 'INACTIVE'::text, 'ARCHIVED'::text])),
+    CONSTRAINT findings_workflow_status_check CHECK (workflow_status = ANY (ARRAY['NEW'::text, 'NOTIFIED'::text, 'RESOLVED'::text, 'SUPPRESSED'::text])),
+    CONSTRAINT findings_source_kind_check CHECK (source_kind = ANY (ARRAY['measured'::text, 'declared'::text, 'imported'::text, 'inferred'::text])),
+    CONSTRAINT findings_score_range_check CHECK (score >= 0 AND score <= 100),
+    CONSTRAINT findings_control_id_compliance_only_check CHECK (control_id IS NULL OR producer = 'compliance'::text)
+);
+
+-- The workflow columns, for a database that already has this table.
+--
+-- `CREATE TABLE IF NOT EXISTS` above is a NO-OP on such a database, so a column
+-- added to the literal above never reaches it — the columns arrive only on a
+-- fresh install, and the first query naming one fails at runtime with "column
+-- does not exist". That is not hypothetical here: `findings` shipped in Gate 1,
+-- so every database created between then and workstream 3.1 has the table
+-- WITHOUT these five. Same treatment tenant_framework_scores gets a few hundred
+-- lines up, and for the same reason.
+ALTER TABLE public.findings ADD COLUMN IF NOT EXISTS assigned_at timestamp with time zone;
+ALTER TABLE public.findings ADD COLUMN IF NOT EXISTS assigned_by uuid;
+ALTER TABLE public.findings ADD COLUMN IF NOT EXISTS remediation_notes text;
+ALTER TABLE public.findings ADD COLUMN IF NOT EXISTS resurfaced_at timestamp with time zone;
+ALTER TABLE public.findings ADD COLUMN IF NOT EXISTS is_stale boolean DEFAULT false NOT NULL;
+
+-- `control_id` is part of the identity, with NULLS NOT DISTINCT (PG15+).
+--
+-- Without it the compliance producer cannot write: its finding is one per
+-- (control, subject) pair — two controls failing on the same server are two
+-- separate things to triage, assign and ticket — so keying on the subject alone
+-- would make the second control's finding collide with the first's and
+-- overwrite it. Every other producer leaves control_id NULL (the CHECK above
+-- makes that a rule, not a habit), and NULLS NOT DISTINCT is what keeps their
+-- identity exactly what it was: Postgres treats NULLs as DISTINCT by default,
+-- so the plain form would have let one asset accumulate unlimited duplicate
+-- `eol/os_end_of_life` rows — the dedup this index exists for, silently off for
+-- six of the seven producers.
+CREATE UNIQUE INDEX IF NOT EXISTS findings_open_subject_uniq
+    ON public.findings (tenant_id, producer, kind, subject_type, subject_id, control_id)
+    NULLS NOT DISTINCT
+    WHERE detection_state <> 'ARCHIVED'::text;
+CREATE INDEX IF NOT EXISTS idx_findings_tenant_subject
+    ON public.findings USING btree (tenant_id, subject_type, subject_id);
+CREATE INDEX IF NOT EXISTS idx_findings_tenant_producer_severity
+    ON public.findings USING btree (tenant_id, producer, severity);
+CREATE INDEX IF NOT EXISTS idx_findings_tenant_workflow_status
+    ON public.findings USING btree (tenant_id, workflow_status) WHERE detection_state = 'ACTIVE'::text;
+-- The readers compliance_findings' own indexes served, renamed onto this table.
+-- Deliberately NOT reusing the old names (idx_findings_detection_state,
+-- idx_findings_resurfaced, …): an index name is database-global, so reusing one
+-- would collide on any database that still had the old table when this file ran.
+CREATE INDEX IF NOT EXISTS idx_findings_tenant_detection_state
+    ON public.findings USING btree (tenant_id, detection_state, last_seen);
+CREATE INDEX IF NOT EXISTS idx_findings_tenant_resurfaced
+    ON public.findings USING btree (tenant_id, resurfaced_at) WHERE resurfaced_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_findings_tenant_assigned_to
+    ON public.findings USING btree (tenant_id, assigned_to) WHERE assigned_to IS NOT NULL;
+-- The compliance rollup path: score a framework by walking its controls'
+-- findings. compliance_findings served this with idx_findings_active_rollup;
+-- without an equivalent here the rollup would have moved onto a sequential scan
+-- the moment 3.1 landed. Partial on the producer that is the only one with a
+-- control_id (the CHECK above guarantees the rest are NULL) and on the rows a
+-- rollup counts.
+CREATE INDEX IF NOT EXISTS idx_findings_tenant_control
+    ON public.findings USING btree (tenant_id, control_id)
+    WHERE producer = 'compliance'::text AND detection_state <> 'ARCHIVED'::text;
+
+-- Free-text search on the Findings page (`GET /findings?q=`) has NO index, and
+-- that is a measured decision rather than an omission.
+--
+-- There were two trigram GIN indexes here (idx_findings_summary_trgm,
+-- idx_findings_subject_label_trgm), dropped in POST-MIGRATIONS below. The
+-- predicate the page builds (findings_service.go, searchClause) is ONE OR over
+-- four arms: `summary ILIKE`, `subject_label ILIKE`,
+-- `replace(kind, '_', ' ') ILIKE`, and an `EXISTS` over `assets` that searches
+-- the HOST. Postgres can only turn an OR into a BitmapOr when EVERY arm is
+-- index-eligible; a correlated EXISTS never is, so the whole disjunction falls
+-- through to a filter and the two GIN indexes were never consulted.
+--
+-- Measured on a 50,000-finding tenant: the plan is
+-- `Index Scan using idx_findings_tenant_workflow_status` + `Filter: (summary
+-- ~~* … OR subject_label ~~* … OR replace(kind …) ~~* … OR EXISTS(SubPlan))`,
+-- byte-identical with the indexes present and dropped. Adding a third trigram
+-- index on `replace(kind, '_', ' ')` did not change it either — the planner
+-- still preferred the tenant btree. In isolation the index IS usable
+-- (`SELECT … WHERE summary ILIKE '%host-42%'` alone gives a Bitmap Index Scan,
+-- 3.7 ms vs 55 ms), so the reason is the query SHAPE, not a broken index.
+--
+-- They were not free: 11 MB + 7 MB on that tenant, maintained on every producer
+-- upsert — and a producer pass upserts the whole population. A GIN index that
+-- costs write amplification on the hottest write path in the system and serves
+-- no read is worse than none, because it also reads as "search is indexed".
+--
+-- If search becomes slow enough to matter, the fix is the query, not an index:
+-- lift the host arm out into a UNION of id sets so the trigram arms form an
+-- OR the planner can BitmapOr. That is a change to a WHERE builder three
+-- queries share (page, count and facets, which must describe the same set), so
+-- it is deliberately not bundled with the index removal.
+
+DO $$ BEGIN
+  IF to_regclass('public.findings') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'findings_tenant_id_fkey' AND conrelid = to_regclass('public.findings')
+     ) THEN
+    ALTER TABLE ONLY public.findings
+        ADD CONSTRAINT findings_tenant_id_fkey FOREIGN KEY (tenant_id)
+        REFERENCES public.tenants(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.findings') IS NOT NULL
+     AND to_regclass('public.users') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'findings_assigned_to_fkey' AND conrelid = to_regclass('public.findings')
+     ) THEN
+    ALTER TABLE ONLY public.findings
+        ADD CONSTRAINT findings_assigned_to_fkey FOREIGN KEY (assigned_to)
+        REFERENCES public.users(id) ON DELETE SET NULL;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.findings') IS NOT NULL
+     AND to_regclass('public.users') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'findings_assigned_by_fkey' AND conrelid = to_regclass('public.findings')
+     ) THEN
+    ALTER TABLE ONLY public.findings
+        ADD CONSTRAINT findings_assigned_by_fkey FOREIGN KEY (assigned_by)
+        REFERENCES public.users(id) ON DELETE SET NULL;
+  END IF;
+END $$;
+
+-- The three finding_id foreign keys that used to point at compliance_findings
+-- (compliance_finding_history, remediation_plan_items, tickets) are re-pointed
+-- at this table in POST-MIGRATIONS, not here. Two reasons, and both are the
+-- reason the phase-1 re-parenting sits there too: `findings` is created near the
+-- end of this file, so a guarded ADD placed beside the referencing table would
+-- run while `findings` did not exist yet and silently do nothing; and the guard
+-- is by constraint NAME, so on a lab database still carrying the old table it
+-- would find the name taken by the constraint pointing at compliance_findings,
+-- skip, and then be destroyed by that table's CASCADE drop — leaving no foreign
+-- key at all.
+
+
+-- ----------------------------------------------------------------------------
+-- producer_assessments — which producer has LOOKED at which asset
+-- ----------------------------------------------------------------------------
+-- DATA_MODEL §3.1, ADR-0005 D4. `assets.risk_assessed_by` is the answer a
+-- reader needs ("has anybody evaluated this?"); this table is the RECORD the
+-- answer is computed from, one row per (asset, producer) with the instant of
+-- the last completed pass.
+--
+-- Two tables rather than one array, for two reasons neither of which is
+-- tidiness:
+--
+--  1. ONE writer of `assets`. Six producers appending to an array on `assets`
+--     would be six writers racing on the same row, each doing a
+--     read-modify-write of a text[]; the risk rollup recomputing the score is a
+--     seventh. With the record here, the rollup is the only statement that
+--     touches `assets`, and it derives the array set-based from these rows.
+--  2. A pass that FAILED must mark nothing. These rows are written inside the
+--     producer's own write transaction — the same one that carries its upserts
+--     and its sweep — so a run that dies half way rolls back its coverage claim
+--     along with its findings. An array written afterwards, outside that
+--     transaction, could survive a rollback and claim an assessment that never
+--     happened.
+--
+-- `assessed_at` is not read by the rollup; it is here because "when did the
+-- vulnerability producer last look at this host" is the question a support case
+-- opens with, and an array cannot answer it.
+--
+-- Coverage is NOT the same question as risk, and the two sets differ. THIS
+-- table holds every producer, `hygiene` included; `assets.risk_assessed_by` is
+-- its RISK-FEEDING subset, derived by the rollup from the registry's
+-- feeds_risk flags. The array means "the RISK score here is a real answer", so
+-- an asset only the hygiene producer has visited must still read NOT ASSESSED
+-- for risk. Anything that needs the full record reads this table directly —
+-- which is what compliance-engine's `finding` measurement shape does
+-- (`EXISTS (SELECT 1 FROM producer_assessments pa WHERE … pa.producer = $3)`),
+-- so a hygiene control reads "not assessed" rather than "clean" for an asset
+-- the hygiene producer has never visited.
+--
+-- Retention: the FK below is ON DELETE CASCADE, so a hard-deleted asset takes
+-- its coverage with it. A SOFT-deleted or archived asset keeps its rows on
+-- purpose — the record is "did this producer look", which stays true, and an
+-- asset restored from archive must not come back reading NOT ASSESSED. The
+-- rollup's own scope excludes soft-deleted assets, so those rows feed nothing;
+-- they are reaped with the asset, by the same phase-3 reaper that owns
+-- findings on deleted assets (DATA_MODEL §3.1).
+CREATE TABLE IF NOT EXISTS public.producer_assessments (
+    tenant_id uuid NOT NULL,
+    asset_id uuid NOT NULL,
+    producer text NOT NULL,
+    assessed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT producer_assessments_pkey PRIMARY KEY (tenant_id, asset_id, producer)
+);
+
+-- The rollup's own access path: every asset in a tenant, with its producers.
+-- The primary key already leads with (tenant_id, asset_id), so the rollup's
+-- join is covered; this one serves "which assets has producer X assessed",
+-- which is how a stale-coverage report and the admin producer status page read
+-- it.
+CREATE INDEX IF NOT EXISTS idx_producer_assessments_tenant_producer
+    ON public.producer_assessments USING btree (tenant_id, producer, assessed_at DESC);
+
+DO $$ BEGIN
+  IF to_regclass('public.producer_assessments') IS NOT NULL
+     AND to_regclass('public.assets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'producer_assessments_asset_fkey'
+         AND conrelid = to_regclass('public.producer_assessments')
+     ) THEN
+    ALTER TABLE ONLY public.producer_assessments
+        ADD CONSTRAINT producer_assessments_asset_fkey
+        FOREIGN KEY (tenant_id, asset_id) REFERENCES public.assets(tenant_id, id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+
+-- ----------------------------------------------------------------------------
+-- software_install_lifecycle — what the eol producer resolved, per install
+-- ----------------------------------------------------------------------------
+-- The lifecycle analogue of `producer_assessments`, one level down. That table
+-- says the `eol` producer LOOKED at an asset; this one says what the lookup
+-- CONCLUDED for each of the asset's software installs. Without it the absence
+-- of a `software_end_of_life` finding collapsed four different situations —
+-- the catalogue has no entry for the product, its entry publishes no date, the
+-- date is further out than the warning window, and the install is not active
+-- so the producer skipped it — and the Software surfaces could only say "not
+-- assessed" for all of them, giving a supported package no credit and making
+-- it indistinguishable from one the catalogue has never heard of.
+--
+-- `assessment` is the producer's own conclusion, RECORDED rather than
+-- re-derived: `supported` (a catalogue row with a date beyond the warning
+-- window), `end_of_life` (a row whose date is inside the window or past — the
+-- finding is written in the same transaction), `no_date` (a row that publishes
+-- no date; endoflife.date mirrors both "support ended, date unknown" and "not
+-- announced" as NULL) and `not_in_catalogue` (a recorded miss). A list query
+-- reads these words. It never re-runs the resolution, which would be a second
+-- opinion about what the catalogue says — the shape this codebase keeps paying
+-- for.
+--
+-- The shape CHECK is the vocabulary made structural: a `supported` row with no
+-- date, or a `not_in_catalogue` row citing a catalogue id, cannot be written.
+-- `catalogue_id` is a citation, not a foreign key — the finding's evidence
+-- carries the same id the same way, and the platform catalogue is rewritten by
+-- the mirror job, whose deletes must not be blocked by tenant rows.
+--
+-- Written by the producer from INSIDE its write transaction, beside its
+-- findings, facts, coverage claim and sweep, so a failed pass records nothing
+-- and a completed one records a full statement: rows for installs the pass did
+-- not assess (removed, stale, or gone) are deleted in the same transaction. No
+-- row therefore means exactly "no completed pass has assessed this install
+-- since it was last active", which the Software surfaces render as
+-- `not_assessed`. A non-active install needs no row of its own: the producer's
+-- skip rule is reproducible from `software_installs.status`, the same way the
+-- vulnerability axis reads the product's purl and CPE.
+--
+-- Keyed by the INSTALL. The `eol.sw.date` fact is keyed by asset and source
+-- row, and cannot be mapped back to one install without re-resolving. The FK is
+-- composite for the reason every FK in the software block is: a bare
+-- install_id is satisfied by another tenant's row. ON DELETE CASCADE, so a
+-- merge that deletes a duplicate install takes its record with it, and the
+-- surviving install's record rides along with the row it is keyed on.
+CREATE TABLE IF NOT EXISTS public.software_install_lifecycle (
+    tenant_id uuid NOT NULL,
+    install_id uuid NOT NULL,
+    assessment text NOT NULL,
+    catalogue_id uuid,
+    eol_date date,
+    assessed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT software_install_lifecycle_pkey PRIMARY KEY (tenant_id, install_id),
+    CONSTRAINT software_install_lifecycle_assessment_check CHECK (assessment = ANY (ARRAY['supported'::text, 'end_of_life'::text, 'no_date'::text, 'not_in_catalogue'::text])),
+    CONSTRAINT software_install_lifecycle_shape_check CHECK (
+        (assessment = ANY (ARRAY['supported'::text, 'end_of_life'::text]) AND catalogue_id IS NOT NULL AND eol_date IS NOT NULL)
+     OR (assessment = 'no_date'::text AND catalogue_id IS NOT NULL AND eol_date IS NULL)
+     OR (assessment = 'not_in_catalogue'::text AND catalogue_id IS NULL AND eol_date IS NULL))
+);
+
+-- The composite FK below needs a unique key on (tenant_id, id) to reference;
+-- software_installs' primary key is (id) alone.
+CREATE UNIQUE INDEX IF NOT EXISTS software_installs_tenant_id_uniq
+    ON public.software_installs (tenant_id, id);
+
+DO $$ BEGIN
+  IF to_regclass('public.software_install_lifecycle') IS NOT NULL
+     AND to_regclass('public.software_installs') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'software_install_lifecycle_install_fkey'
+         AND conrelid = to_regclass('public.software_install_lifecycle')
+     ) THEN
+    ALTER TABLE ONLY public.software_install_lifecycle
+        ADD CONSTRAINT software_install_lifecycle_install_fkey
+        FOREIGN KEY (tenant_id, install_id) REFERENCES public.software_installs(tenant_id, id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+
+-- ----------------------------------------------------------------------------
+-- Platform catalogues — eol, vulnerability, classification rules
+-- ----------------------------------------------------------------------------
+-- DATA_MODEL §4. Platform-scoped, admin-curated, offline-bundle importable.
+-- NO RLS, exactly like `algorithms` and `platform_frameworks`: they carry no
+-- tenant_id, every tenant reads the same rows, and write access is a
+-- platform-admin decision made in the API layer, not a database role. Adding a
+-- policy here would be a new pattern, not the existing one.
+
+-- endoflife.date is the seed source; rows are admin-curated and shipped in the
+-- offline bundle for air-gapped installs (ADR-0005 D3).
+CREATE TABLE IF NOT EXISTS public.eol_catalogue (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    product_kind text NOT NULL,
+    vendor text,
+    product text NOT NULL,
+    cycle text NOT NULL,
+    release_date date,
+    eol_date date,
+    extended_support_date date,
+    source_url text,
+    source_kind text DEFAULT 'imported'::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT eol_catalogue_pkey PRIMARY KEY (id),
+    CONSTRAINT eol_catalogue_product_kind_check CHECK (product_kind = ANY (ARRAY['os'::text, 'software'::text, 'hardware'::text])),
+    CONSTRAINT eol_catalogue_source_kind_check CHECK (source_kind = ANY (ARRAY['measured'::text, 'declared'::text, 'imported'::text, 'inferred'::text]))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS eol_catalogue_identity_uniq
+    ON public.eol_catalogue (product_kind, coalesce(vendor, ''), product, cycle);
+CREATE INDEX IF NOT EXISTS idx_eol_catalogue_product
+    ON public.eol_catalogue USING btree (lower(product));
+
+-- NVD and OSV, mirrored by a platform job (workstream 3.4). cve_id is the
+-- primary key because it is the identity; there is no surrogate.
+CREATE TABLE IF NOT EXISTS public.vulnerability_catalogue (
+    cve_id text NOT NULL,
+    cvss_version text,
+    cvss_score numeric(3,1),
+    cvss_vector text,
+    severity text,
+    published_at timestamp with time zone,
+    modified_at timestamp with time zone,
+    description text,
+    source_kind text DEFAULT 'imported'::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT vulnerability_catalogue_pkey PRIMARY KEY (cve_id),
+    CONSTRAINT vulnerability_catalogue_severity_check CHECK (severity IS NULL OR severity = ANY (ARRAY['none'::text, 'low'::text, 'medium'::text, 'high'::text, 'critical'::text])),
+    CONSTRAINT vulnerability_catalogue_cvss_score_range_check CHECK (cvss_score IS NULL OR (cvss_score >= 0 AND cvss_score <= 10)),
+    CONSTRAINT vulnerability_catalogue_source_kind_check CHECK (source_kind = ANY (ARRAY['measured'::text, 'declared'::text, 'imported'::text, 'inferred'::text]))
+);
+
+CREATE INDEX IF NOT EXISTS idx_vulnerability_catalogue_severity
+    ON public.vulnerability_catalogue USING btree (severity);
+
+-- How a CVE matches an installed product: by CPE match string or by PURL range.
+-- Exactly one of the two is set — a row with neither matches nothing and a row
+-- with both is two rules wearing one coat.
+CREATE TABLE IF NOT EXISTS public.vulnerability_matches (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    cve_id text NOT NULL,
+    cpe_match_string text,
+    purl_range text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT vulnerability_matches_pkey PRIMARY KEY (id),
+    CONSTRAINT vulnerability_matches_one_matcher_check CHECK ((cpe_match_string IS NOT NULL) <> (purl_range IS NOT NULL))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS vulnerability_matches_identity_uniq
+    ON public.vulnerability_matches (cve_id, coalesce(cpe_match_string, ''), coalesce(purl_range, ''));
+CREATE INDEX IF NOT EXISTS idx_vulnerability_matches_cpe
+    ON public.vulnerability_matches USING btree (cpe_match_string) WHERE cpe_match_string IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_vulnerability_matches_purl
+    ON public.vulnerability_matches USING btree (purl_range) WHERE purl_range IS NOT NULL;
+
+DO $$ BEGIN
+  IF to_regclass('public.vulnerability_matches') IS NOT NULL
+     AND to_regclass('public.vulnerability_catalogue') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'vulnerability_matches_cve_id_fkey' AND conrelid = to_regclass('public.vulnerability_matches')
+     ) THEN
+    ALTER TABLE ONLY public.vulnerability_matches
+        ADD CONSTRAINT vulnerability_matches_cve_id_fkey FOREIGN KEY (cve_id)
+        REFERENCES public.vulnerability_catalogue(cve_id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+-- The rule-based classifier's evidence (ADR-0004 D6, workstream 2.10). Platform
+-- rows, read by every tenant, proposing a class from a vendor OUI, an SNMP
+-- sysObjectID, an EtherNet/IP identity, a cloud resource type, a banner, a port
+-- profile, a model prefix or the collector platform that reached the device.
+-- class_key is an FK by value to asset_classes.key for the same reason
+-- assets.class_key is.
+--
+-- The rows are generated from standards/classification-rules.yaml into a region
+-- of seed.sql; a platform admin adds their own through Catalog ▸ Classification
+-- rules. Engine: shared/classify.
+--
+-- `class_key` is NULLABLE, which is the whole posture of the table in one
+-- column. Most OUI rules assert a VENDOR and no class, because Dell, HP,
+-- Netgear and Ubiquiti each sell things from four different classes under one
+-- assignment and picking the most common one is a guess wearing a decimal. A
+-- wrong class is worse than none: an absent class shows as unclassified and
+-- invites someone to look, a wrong one shows as a fact and gets bulk-approved.
+--
+-- `cdp_capabilities`, `lldp_capability` and `mdns_service` joined the list in
+-- workstream 2.10b, with the passive class signals they read; `model` and
+-- `platform` joined it in workstream 2.10a, when
+-- the in-package class hints of shared/deviceinterrogation moved into this
+-- table. `model` carries product-id prefixes (a Cisco PID family, a UniFi
+-- device type); `platform` carries what the collector reached — "it answered
+-- the FortiOS API", which is a far stronger claim than "its MAC is in a
+-- Fortinet OUI" and is why the Fortinet OUI rules assert no class at all.
+CREATE TABLE IF NOT EXISTS public.classification_rules (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    rule_kind text NOT NULL,
+    pattern text NOT NULL,
+    class_key text,
+    vendor text,
+    model text,
+    -- No DEFAULT. The engine accepts 0.50-0.95 and refuses anything outside it
+    -- (shared/classify: below even money is noise in the approval queue, and
+    -- 1.00 would claim a measurement where every row here is an inference), so
+    -- a column default of 1.00 was a way to insert a row that classify.New
+    -- would then reject -- and it rejects the whole SET, not the one row. An
+    -- INSERT has to state what the rule asserts.
+    confidence numeric(3,2) NOT NULL,
+    source_url text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT classification_rules_pkey PRIMARY KEY (id),
+    CONSTRAINT classification_rules_rule_kind_check CHECK (rule_kind = ANY (ARRAY['oui'::text, 'sysobjectid'::text, 'enip'::text, 'cloud_type'::text, 'banner'::text, 'port_profile'::text, 'model'::text, 'platform'::text, 'cdp_capabilities'::text, 'lldp_capability'::text, 'mdns_service'::text])),
+    CONSTRAINT classification_rules_confidence_range_check CHECK (confidence >= 0 AND confidence <= 1),
+    -- A rule that asserts nothing is a row that can only waste a reviewer's
+    -- time. At least one of class, vendor or model has to be populated.
+    CONSTRAINT classification_rules_asserts_something_check CHECK (
+        class_key IS NOT NULL OR vendor IS NOT NULL OR model IS NOT NULL)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS classification_rules_identity_uniq
+    ON public.classification_rules (rule_kind, pattern);
+CREATE INDEX IF NOT EXISTS idx_classification_rules_class_key
+    ON public.classification_rules USING btree (class_key);
+
+-- The mirror jobs' bookmark and health, one row per feed (workstreams 3.3/3.4).
+-- Platform-scoped like the catalogues it tracks: no tenant_id, no RLS.
+--
+-- `cursor` is per-feed and deliberately opaque — NVD stores the last
+-- `lastModEndDate` it consumed, OSV a per-ecosystem import marker, and
+-- endoflife.date the date it last completed a full pass. Keeping it text rather
+-- than a typed timestamp is what lets three feeds share one table instead of
+-- each carrying a column nobody else sets. (CURSOR is a NON-reserved keyword in
+-- PostgreSQL, so it is legal unquoted as a column name; the double-apply and the
+-- integration test both exercise it.)
+--
+-- last_status starts at 'never' rather than NULL because "this feed has not run"
+-- and "this feed ran and the outcome was lost" are different answers, and NULL
+-- renders as the second. A feed error is RECORDED here and never fatal — see
+-- catalogfeeds.Runner: a mirror that cannot reach NVD must not take the admin
+-- console down with it, and an operator must be able to see that it failed.
+CREATE TABLE IF NOT EXISTS public.catalog_feed_state (
+    feed text NOT NULL,
+    cursor text,
+    last_run_at timestamp with time zone,
+    last_status text DEFAULT 'never'::text NOT NULL,
+    last_error text,
+    row_count bigint DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT catalog_feed_state_pkey PRIMARY KEY (feed),
+    CONSTRAINT catalog_feed_state_last_status_check CHECK (last_status = ANY (ARRAY['never'::text, 'running'::text, 'ok'::text, 'error'::text])),
+    CONSTRAINT catalog_feed_state_row_count_check CHECK (row_count >= 0)
+);
+
+-- The Enricher seam's two tables (ADR-0008 D1 / D3, workstream 4.5b).
+-- Platform-scoped like the catalogues they serve: no tenant_id, no RLS.
+--
+-- These exist because of D3: "AI output is a proposal, and proposals go through
+-- approval." A generative enricher never writes eol_catalogue. It writes HERE,
+-- pending, with the source URL it cited and the model that said it; a platform
+-- admin accepts or rejects, and only an accept puts a row in the catalogue —
+-- with source_kind 'inferred', so the catalogue row says forever where it came
+-- from.
+
+-- One proposed eol_catalogue row, awaiting review.
+--
+-- subject_* is what was ASKED about (the miss that triggered the proposal);
+-- proposed_* is what came back. They are kept apart because they are different
+-- claims: "we could not answer for Cisco IOS-XE 17.9" and "the model says cycle
+-- 17.9 leaves support on" have different lifetimes, and a reviewer
+-- comparing them is the whole review.
+--
+-- source_url is NOT NULL and has no default. ADR-0008 D4.4 is cite or refuse:
+-- an enrichment fact without a source URL is commentary and is never persisted,
+-- so a proposal that could not cite never reaches this table. A nullable column
+-- here would make the rule a convention.
+--
+-- confidence defaults to 0 and the generative enricher writes 0: we never ask a
+-- model to score itself, and a number we invented would read as a measurement.
+-- The column exists because D4.1 requires it beside model_id, not because
+-- anything currently has an estimate to put in it.
+CREATE TABLE IF NOT EXISTS public.eol_catalogue_proposals (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    product_kind text NOT NULL,
+    subject_vendor text,
+    subject_product text NOT NULL,
+    subject_version text,
+    proposed_cycle text NOT NULL,
+    proposed_release_date date,
+    proposed_eol_date date,
+    proposed_extended_support_date date,
+    source_url text NOT NULL,
+    model_id text NOT NULL,
+    source_kind text DEFAULT 'inferred'::text NOT NULL,
+    confidence numeric(3,2) DEFAULT 0 NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL,
+    reviewer_id uuid,
+    reviewer_email text,
+    reviewed_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT eol_catalogue_proposals_pkey PRIMARY KEY (id),
+    CONSTRAINT eol_catalogue_proposals_product_kind_check CHECK (product_kind = ANY (ARRAY['os'::text, 'software'::text, 'hardware'::text])),
+    CONSTRAINT eol_catalogue_proposals_source_kind_check CHECK (source_kind = 'inferred'::text),
+    CONSTRAINT eol_catalogue_proposals_status_check CHECK (status = ANY (ARRAY['pending'::text, 'accepted'::text, 'rejected'::text])),
+    CONSTRAINT eol_catalogue_proposals_confidence_range_check CHECK (confidence >= 0 AND confidence <= 1),
+    -- A reviewed proposal names who reviewed it and when. Without this a row
+    -- could read "accepted" with nobody attached, which is the shape of an
+    -- approval that never happened.
+    CONSTRAINT eol_catalogue_proposals_reviewed_check CHECK (
+        status = 'pending'::text OR (reviewed_at IS NOT NULL AND reviewer_id IS NOT NULL))
+);
+
+-- At most one PENDING proposal per subject. Partial on status so the history of
+-- accepted and rejected proposals for the same subject is kept — a rejected
+-- proposal is the record of a model having been wrong about something, which is
+-- worth keeping — while a repeated enrichment pass over the same gap cannot
+-- stack duplicates for a reviewer to wade through.
+CREATE UNIQUE INDEX IF NOT EXISTS eol_catalogue_proposals_pending_uniq
+    ON public.eol_catalogue_proposals
+       (product_kind, lower(coalesce(subject_vendor, '')), lower(subject_product), coalesce(subject_version, ''))
+    WHERE status = 'pending'::text;
+CREATE INDEX IF NOT EXISTS idx_eol_catalogue_proposals_status
+    ON public.eol_catalogue_proposals USING btree (status, created_at DESC);
+
+-- A lookup that found nothing, and how often.
+--
+-- This is the gap list: the enricher's rule default records every subject it
+-- could not answer for, and the generative enricher works the top of this list.
+-- Counting rather than logging is the point — a product asked about four
+-- thousand times is a different priority from one asked about once, and a log
+-- line cannot be sorted.
+--
+-- last_proposed_at is how a pass avoids re-asking a model the same question
+-- every day. It is set whether or not the ask produced a proposal: "we asked and
+-- got nothing usable" is an answer, and re-asking hourly would spend an
+-- operator's tokens re-deriving it.
+CREATE TABLE IF NOT EXISTS public.catalog_lookup_misses (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    product_kind text NOT NULL,
+    vendor text,
+    product text NOT NULL,
+    version text,
+    miss_count bigint DEFAULT 1 NOT NULL,
+    first_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_proposed_at timestamp with time zone,
+    CONSTRAINT catalog_lookup_misses_pkey PRIMARY KEY (id),
+    CONSTRAINT catalog_lookup_misses_product_kind_check CHECK (product_kind = ANY (ARRAY['os'::text, 'software'::text, 'hardware'::text])),
+    CONSTRAINT catalog_lookup_misses_miss_count_check CHECK (miss_count >= 0)
+);
+
+-- Identity folds case on ALL THREE name columns, version included.
+--
+-- Version is a name here, not a number: it is whatever a device or an operator
+-- reported. "17.9.4A" and "17.9.4a" are one gap, and counting them as two
+-- splits the number this list is ORDERED BY — so the product actually costing
+-- the most answers sinks below one asked about half as often. The same argument
+-- that folds vendor and product folds this.
+--
+-- The stored value stays verbatim (see RecordMiss); only the identity folds.
+CREATE UNIQUE INDEX IF NOT EXISTS catalog_lookup_misses_identity_uniq
+    ON public.catalog_lookup_misses
+       (product_kind, lower(coalesce(vendor, '')), lower(product), lower(coalesce(version, '')));
+CREATE INDEX IF NOT EXISTS idx_catalog_lookup_misses_rank
+    ON public.catalog_lookup_misses USING btree (miss_count DESC, last_seen_at DESC);
+
+
+
+-- ----------------------------------------------------------------------------
+-- RLS for the tables above
+-- ----------------------------------------------------------------------------
+-- Most of these tables are created BELOW the canonical RLS HARDENING block, so
+-- their policies are declared here (the block cannot reference a table that does
+-- not exist yet — the same reason legal_acceptances declares its own).
+-- asset_classes, assets and asset_endpoints are defined ABOVE that block since
+-- phase 1, and their policies are declared here too, with the rest, rather than
+-- split across two places by an accident of ordering. The form is identical:
+-- DROP POLICY IF EXISTS + CREATE, USING and WITH CHECK both stated.
+--
+-- Partitioned tables carry the POLICY on the parent only, which is where every
+-- query goes — the same shape crypto_implementations_partitioned and
+-- sensor_discoveries_partitioned use. A policy per partition would be eight
+-- copies to keep in step, and Postgres applies the PARENT's policies to any
+-- query that names the parent, so the copies would never be consulted.
+--
+-- They do, however, each get RLS ENABLED with NO policy of their own, which the
+-- older partitioned tables do not. Naming a partition directly
+-- (`SELECT … FROM assets_part_3`) is a separate relation reference: the parent's
+-- policies do NOT apply to it, only the partition's own. With RLS off on the
+-- partition, the blanket `GRANT … ON ALL TABLES IN SCHEMA public TO crypto_app`
+-- at the foot of this file therefore hands every tenant an unfiltered read of
+-- every other tenant's rows, one identifier away from the policy. Measured on
+-- PG17: tenant A saw 3 rows through `assets` and 4 through the partitions,
+-- including tenant B's.
+--
+-- RLS enabled with zero policies is default-deny, so the direct path returns
+-- nothing for crypto_app while the parent path is completely unaffected
+-- (verified: parent SELECT/INSERT/UPDATE/DELETE all unchanged, partition reads
+-- 0). Deny rather than a copied policy because nothing should be naming a
+-- partition in the first place — no Go or TypeScript in this repo does — so the
+-- correct answer to a direct partition reference is to refuse it, not to serve
+-- it correctly.
+--
+-- The two surviving pre-existing partitioned tables get the same treatment in
+-- the phase-1 block further down (`network_assets_partitioned`, the third, is
+-- dropped outright). Recorded in DATA_MODEL §9.
+ALTER TABLE public.assets_part_0 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.assets_part_1 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.assets_part_2 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.assets_part_3 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.assets_part_4 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.assets_part_5 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.assets_part_6 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.assets_part_7 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.asset_endpoints_part_0 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.asset_endpoints_part_1 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.asset_endpoints_part_2 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.asset_endpoints_part_3 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.asset_endpoints_part_4 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.asset_endpoints_part_5 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.asset_endpoints_part_6 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.asset_endpoints_part_7 ENABLE ROW LEVEL SECURITY;
+--
+-- asset_classes is the hybrid case: a tenant must SEE the platform rows
+-- (tenant_id IS NULL) it classifies against, but must only WRITE its own
+-- subclass rows. Platform rows are written by the seed (as the owner) or
+-- through the crypto_bypass role.
+--
+-- TWO policies, not the one-policy `USING (tenant_id IS NULL OR …)` form the
+-- RLS HYBRID-TABLE block uses, because that form does NOT hold for DELETE.
+-- WITH CHECK constrains the NEW row, and a DELETE produces no new row — so
+-- DELETE is governed by USING alone. With the admitting USING, any tenant
+-- session could `DELETE FROM asset_classes WHERE tenant_id IS NULL` and take
+-- the platform class registry out from under every other tenant on the
+-- install. (Verified against PG17: the delete succeeded as crypto_app.) The
+-- hybrid tables in that block share the hole; fixing them is its own change,
+-- but this table is the registry the whole inventory resolves class_key
+-- against — and class_key is an FK BY VALUE with no constraint, so the rows
+-- would go without a single database error.
+--
+-- Permissive policies are OR'd WITHIN a command type and AND'd ACROSS types,
+-- so: SELECT sees own ∪ platform (both policies apply); INSERT, UPDATE and
+-- DELETE consult only the FOR ALL policy and are therefore own-rows-only.
+ALTER TABLE public.asset_classes ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS asset_classes_tenant_isolation ON public.asset_classes;
+DROP POLICY IF EXISTS asset_classes_platform_read ON public.asset_classes;
+CREATE POLICY asset_classes_tenant_isolation ON public.asset_classes
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+CREATE POLICY asset_classes_platform_read ON public.asset_classes FOR SELECT
+  USING (tenant_id IS NULL);
+
+ALTER TABLE public.assets ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS assets_tenant_isolation ON public.assets;
+CREATE POLICY assets_tenant_isolation ON public.assets
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+ALTER TABLE public.asset_endpoints ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS asset_endpoints_tenant_isolation ON public.asset_endpoints;
+CREATE POLICY asset_endpoints_tenant_isolation ON public.asset_endpoints
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+ALTER TABLE public.asset_identifiers ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS asset_identifiers_tenant_isolation ON public.asset_identifiers;
+CREATE POLICY asset_identifiers_tenant_isolation ON public.asset_identifiers
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+ALTER TABLE public.asset_management ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS asset_management_tenant_isolation ON public.asset_management;
+CREATE POLICY asset_management_tenant_isolation ON public.asset_management
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+ALTER TABLE public.asset_credentials ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS asset_credentials_tenant_isolation ON public.asset_credentials;
+CREATE POLICY asset_credentials_tenant_isolation ON public.asset_credentials
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+ALTER TABLE public.asset_relationships ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS asset_relationships_tenant_isolation ON public.asset_relationships;
+CREATE POLICY asset_relationships_tenant_isolation ON public.asset_relationships
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+ALTER TABLE public.asset_facts ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS asset_facts_tenant_isolation ON public.asset_facts;
+CREATE POLICY asset_facts_tenant_isolation ON public.asset_facts
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+ALTER TABLE public.software_products ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS software_products_tenant_isolation ON public.software_products;
+CREATE POLICY software_products_tenant_isolation ON public.software_products
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+ALTER TABLE public.software_installs ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS software_installs_tenant_isolation ON public.software_installs;
+CREATE POLICY software_installs_tenant_isolation ON public.software_installs
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+ALTER TABLE public.findings ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS findings_tenant_isolation ON public.findings;
+CREATE POLICY findings_tenant_isolation ON public.findings
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+ALTER TABLE public.producer_assessments ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS producer_assessments_tenant_isolation ON public.producer_assessments;
+CREATE POLICY producer_assessments_tenant_isolation ON public.producer_assessments
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+ALTER TABLE public.asset_class_history ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS asset_class_history_tenant_isolation ON public.asset_class_history;
+CREATE POLICY asset_class_history_tenant_isolation ON public.asset_class_history
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+ALTER TABLE public.software_install_lifecycle ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS software_install_lifecycle_tenant_isolation ON public.software_install_lifecycle;
+CREATE POLICY software_install_lifecycle_tenant_isolation ON public.software_install_lifecycle
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+-- eol_catalogue, vulnerability_catalogue, vulnerability_matches,
+-- classification_rules and catalog_feed_state are deliberately NOT in the list
+-- above. They are platform catalogues (and the mirror jobs' own bookkeeping)
+-- with no tenant_id, and RLS on a table with nothing to isolate by would be
+-- theatre. See the note at their definitions.
+
+
+-- ----------------------------------------------------------------------------
+-- updated_at maintenance for the tables above
+-- ----------------------------------------------------------------------------
+-- Every table above carries `updated_at timestamptz DEFAULT now() NOT NULL`,
+-- and a DEFAULT fires on INSERT only. Without a trigger the column silently
+-- keeps its insert time for the life of the row, so "when did this asset last
+-- change" answers "when was it created" — wrong in a way no query errors on.
+-- These are ingest tables: last_seen_at moves on re-observation, updated_at
+-- must move on actual change.
+--
+-- public.update_updated_at_column() is the house function (52 existing tables
+-- use it). CREATE OR REPLACE TRIGGER is the idempotent form per CLAUDE.md;
+-- Postgres has no IF NOT EXISTS for triggers.
+--
+-- asset_history is absent because it is append-only and has no updated_at.
+-- Partitioned parents take the trigger on the PARENT: a row-level BEFORE
+-- trigger on a partitioned table is propagated to every partition by Postgres,
+-- so it fires for parent-routed writes without eight copies.
+CREATE OR REPLACE TRIGGER update_asset_classes_updated_at BEFORE UPDATE ON public.asset_classes FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE OR REPLACE TRIGGER update_assets_updated_at BEFORE UPDATE ON public.assets FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE OR REPLACE TRIGGER update_asset_endpoints_updated_at BEFORE UPDATE ON public.asset_endpoints FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE OR REPLACE TRIGGER update_asset_identifiers_updated_at BEFORE UPDATE ON public.asset_identifiers FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE OR REPLACE TRIGGER update_asset_management_updated_at BEFORE UPDATE ON public.asset_management FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE OR REPLACE TRIGGER update_asset_credentials_updated_at BEFORE UPDATE ON public.asset_credentials FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE OR REPLACE TRIGGER update_asset_relationships_updated_at BEFORE UPDATE ON public.asset_relationships FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE OR REPLACE TRIGGER update_asset_facts_updated_at BEFORE UPDATE ON public.asset_facts FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE OR REPLACE TRIGGER update_software_products_updated_at BEFORE UPDATE ON public.software_products FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE OR REPLACE TRIGGER update_software_installs_updated_at BEFORE UPDATE ON public.software_installs FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE OR REPLACE TRIGGER update_findings_updated_at BEFORE UPDATE ON public.findings FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE OR REPLACE TRIGGER update_eol_catalogue_updated_at BEFORE UPDATE ON public.eol_catalogue FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE OR REPLACE TRIGGER update_vulnerability_catalogue_updated_at BEFORE UPDATE ON public.vulnerability_catalogue FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE OR REPLACE TRIGGER update_classification_rules_updated_at BEFORE UPDATE ON public.classification_rules FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE OR REPLACE TRIGGER update_catalog_feed_state_updated_at BEFORE UPDATE ON public.catalog_feed_state FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+
+-- ----------------------------------------------------------------------------
+-- asset_history — repointed at `assets` (DATA_MODEL §2, BUILD_PLAN 0.6)
+-- ----------------------------------------------------------------------------
+-- asset_history is an EXISTING table whose composite FK referenced the old
+-- asset table, so a history row for one of the new `assets` rows was refused
+-- outright:
+--
+--   ERROR: insert or update on table "asset_history" violates foreign key
+--          constraint "asset_history_tenant_asset_fkey"
+--   DETAIL: Key (tenant_id, asset_id)=(…) is not present in table
+--           "network_assets_partitioned".
+--
+-- That made the table unusable by the identification engine (workstream 0.4),
+-- which records a `merge_proposed` entry when an identifier conflict opens a
+-- merge proposal, and by the 0.6 writer generally.
+--
+-- Repointing rather than dual-keying is safe because asset_history has never
+-- had a writer — not a trigger, not Go, not the seed (ADR-0002 "asset_history
+-- has no writer") — so there are no rows anywhere to preserve or migrate. The
+-- old constraint is dropped and the new one added, both guarded, so a database
+-- carrying either shape converges on one apply.
+DO $$ BEGIN
+  IF to_regclass('public.asset_history') IS NOT NULL THEN
+    ALTER TABLE public.asset_history
+        DROP CONSTRAINT IF EXISTS asset_history_tenant_asset_fkey;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.asset_history') IS NOT NULL
+     AND to_regclass('public.assets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'asset_history_tenant_asset_fkey' AND conrelid = to_regclass('public.asset_history')
+     ) THEN
+    ALTER TABLE ONLY public.asset_history
+        ADD CONSTRAINT asset_history_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id)
+        REFERENCES public.assets(tenant_id, id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+-- assets.metadata for an install created before phase 1 added it (the CREATE
+-- TABLE IF NOT EXISTS above is a no-op there). See the column comment for what
+-- it holds and why it is not `attributes`.
+DO $$ BEGIN
+  IF to_regclass('public.assets') IS NOT NULL THEN
+    ALTER TABLE public.assets ADD COLUMN IF NOT EXISTS metadata jsonb DEFAULT '{}'::jsonb NOT NULL;
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_assets_discovery_source
+    ON public.assets USING btree (tenant_id, (metadata->>'discovery_source')) WHERE deleted_at IS NULL;
+
+
+-- `seq` for an install that already has the table (the CREATE TABLE IF NOT
+-- EXISTS above is a no-op there). bigserial is not valid in ALTER TABLE ADD
+-- COLUMN, so this is its longhand: the column, the sequence, the default and
+-- the ownership that makes the sequence go away with the table.
+DO $$ BEGIN
+  IF to_regclass('public.asset_history') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_attribute
+       WHERE attrelid = to_regclass('public.asset_history') AND attname = 'seq' AND NOT attisdropped
+     ) THEN
+    CREATE SEQUENCE IF NOT EXISTS public.asset_history_seq_seq;
+    ALTER TABLE public.asset_history ADD COLUMN seq bigint NOT NULL DEFAULT nextval('public.asset_history_seq_seq');
+    ALTER SEQUENCE public.asset_history_seq_seq OWNED BY public.asset_history.seq;
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_asset_history_tenant_asset_seq
+    ON public.asset_history USING btree (tenant_id, asset_id, seq);
+
+
+-- `action` was unconstrained text, so any string was accepted and a typo in a
+-- writer would land silently and be invisible until someone filtered the
+-- timeline by an action that never matched. The vocabulary is DATA_MODEL §2's
+-- list plus `merge_proposed`, which ADR-0002 D3's third outcome needs: an
+-- identifier collision does not auto-merge, it opens a proposal, and the
+-- proposal is the thing the history has to record.
+--
+-- A CHECK rather than an enum, for the reason the rest of this block gives: a
+-- new action is one edit here instead of the two an ALTER TYPE needs, and it
+-- cannot half-apply.
+--
+-- WIDENING THE VOCABULARY, and why this is one block with one list.
+--
+-- The obvious form -- `IF NOT EXISTS (the constraint) THEN ADD` -- fires only
+-- when there is no constraint at all, so on a database created before a value
+-- existed it is a no-op and the narrower list survives. Because
+-- recordAssetHistory LOGS a failed insert rather than returning it, every row
+-- carrying the new action is then rejected IN SILENCE: the row simply is not
+-- there, and the first person to notice reads the timeline months later.
+-- `sbom_imported` (workstream 2.6b) was the first value to land after the
+-- constraint shipped and found exactly that.
+--
+-- A CHECK has no dependents, so widening one means dropping the stale
+-- definition and adding the current one. Two things decide the shape below:
+--
+--   * The list is written ONCE, as a DO-block variable used both to decide
+--     whether the deployed constraint is stale and to build the new one. A
+--     second copy -- a `NOT LIKE '%<newest value>%'` gate beside the list, or a
+--     whole second ADD -- is a copy that drifts, and it drifts in the direction
+--     that fails silently: the next author adds a value to the list, forgets
+--     the gate, and a FRESH database takes it (there is no constraint to skip)
+--     while every upgraded one rejects it. The parity test below runs against a
+--     fresh schema, so it would pass. That is the same trap one layer up.
+--   * The convergence is gated on COVERAGE, not on a value name, so it needs no
+--     edit when the vocabulary grows. It is gated at all because ADD CONSTRAINT
+--     revalidates the whole table, and asset_history is append-only and grows
+--     without bound: once the deployed constraint already covers every action,
+--     this does nothing.
+--
+-- identity.AllHistoryActions() and
+-- TestIntegration_SBOM_HistoryActionCheckCoversEveryGoAction compare the
+-- DEPLOYED constraint against the Go vocabulary, so a value added on one side
+-- and not the other fails loudly.
+DO $$
+DECLARE
+  actions text[] := ARRAY[
+      'created', 'updated', 'merged_from', 'merged_into',
+      'merge_proposed', 'approved', 'denied', 'classified',
+      'endpoint_added', 'edge_added', 'edge_removed',
+      'edge_accepted', 'edge_rejected', 'archived',
+      'sbom_imported',
+      'class_proposed', 'class_accepted', 'class_rejected'];
+  def  text;
+  list text;
+BEGIN
+  IF to_regclass('public.asset_history') IS NULL THEN
+    RETURN;
+  END IF;
+
+  SELECT pg_get_constraintdef(oid) INTO def
+    FROM pg_constraint
+   WHERE conname = 'asset_history_action_check'
+     AND conrelid = to_regclass('public.asset_history');
+
+  IF def IS NOT NULL THEN
+    -- Every action already accepted? Nothing to do. quote_literal wraps each
+    -- value in the quotes pg_get_constraintdef renders, so a short action name
+    -- cannot match inside a longer one.
+    IF (SELECT bool_and(position(quote_literal(x) IN def) > 0)
+          FROM unnest(actions) AS x) THEN
+      RETURN;
+    END IF;
+    ALTER TABLE public.asset_history DROP CONSTRAINT asset_history_action_check;
+  END IF;
+
+  SELECT string_agg(quote_literal(x) || '::text', ', ' ORDER BY ord) INTO list
+    FROM unnest(actions) WITH ORDINALITY AS t(x, ord);
+  EXECUTE 'ALTER TABLE public.asset_history ADD CONSTRAINT asset_history_action_check '
+       || 'CHECK (action = ANY (ARRAY[' || list || ']))';
+END $$;
+
+-- One PENDING merge proposal per contested observation, not one per poll.
+--
+-- The identification engine's floor — every identifier already belongs to some
+-- other asset and none of them may decide for this class — opens a proposal and
+-- creates nothing. Nothing about that changes between polls, so a cloud
+-- collector on a 15-minute schedule wrote the SAME proposal 96 times a day, and
+-- the Approvals queue filled with identical work items nobody could clear by
+-- deciding one of them.
+--
+-- The fingerprint (`changes_json->>'fingerprint'`) is computed by the writer
+-- over the observation asset, the candidate set and the matched identifiers —
+-- in Go, because sorting a JSON array inside an index expression would need an
+-- immutable helper function for no gain. A RESOLVED proposal carries
+-- `status` and drops out of the partial predicate, so once a human decides one,
+-- a later recurrence can open a fresh proposal rather than being swallowed
+-- forever.
+--
+-- Partial and expression-based, so it costs nothing on the 99.9% of
+-- asset_history rows that are not proposals.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_history_pending_merge_proposal
+    ON public.asset_history USING btree (tenant_id, (changes_json ->> 'fingerprint'))
+    WHERE action = 'merge_proposed'
+      AND changes_json ? 'fingerprint'
+      AND COALESCE(changes_json ->> 'status', 'pending') = 'pending';
+
+-- One PENDING class proposal per (asset, proposed class), not one per poll
+-- (workstream 2.10b).
+--
+-- Same shape and same reason as the merge index above. A rule-derived class
+-- proposal is the engine's answer to evidence that does not change between
+-- observations: a printer that advertises `_ipp._tcp` advertises it every time
+-- the sensor's coalescing window closes, and without this the reviewer would
+-- find the same "we think this is a printer" question a hundred times a day and
+-- could not clear it by answering one.
+--
+-- The key is the PROPOSED CLASS and not a fingerprint of the evidence, because
+-- the question a reviewer answers is "is this thing a printer", and two
+-- different rules arriving at `printer` are one question. The evidence that
+-- CHANGES is still recorded — accepting or rejecting stamps `status`, the row
+-- drops out of this predicate, and a later recurrence can open a fresh proposal
+-- rather than being swallowed for ever.
+--
+-- A rejection is deliberately NOT covered here: `class_rejected` is a different
+-- action, so the suppression check that stops a rejected class being proposed
+-- again is a read, not an index. An index cannot express "and nobody has said
+-- no to this" without also preventing the row that records the no.
+--
+-- # Why the key is not `proposed_class_key` alone
+--
+-- A CONFLICT proposal names no class: the rules disagreed, so the writer stores
+-- `proposed_class_key: ""` — present (the partial predicate needs it to be) and
+-- empty. Keyed on that column alone, EVERY conflict on an asset collapsed onto
+-- the one key `(tenant, asset, '')`, and the second one was swallowed by the
+-- `ON CONFLICT DO NOTHING`. So an asset that the catalogue argued over twice —
+-- `printer` vs `multifunction_device` on Monday, `switch` vs `router` after a
+-- new rule landed on Friday — showed the reviewer the FIRST disagreement and
+-- silently dropped the second, for as long as the first stayed pending. The
+-- suppression that is right for one repeated question is wrong for two
+-- different ones.
+--
+-- `conflict_key` is the sorted, joined list of the classes that tied, computed
+-- in Go by the writer for the same reason the merge proposal's `fingerprint` is
+-- — sorting a JSON array inside an index expression would need an immutable
+-- helper function for no gain. The COALESCE falls back to `''` rather than
+-- NULL: NULLs do not conflict in a unique index, so a row missing the key would
+-- silently opt OUT of deduplication, which is the failure this index exists to
+-- prevent arriving by a different door.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_history_pending_class_proposal
+    ON public.asset_history USING btree (
+        tenant_id, asset_id,
+        (COALESCE(NULLIF(changes_json ->> 'proposed_class_key', ''), changes_json ->> 'conflict_key', '')))
+    WHERE action = 'class_proposed'
+      AND changes_json ? 'proposed_class_key'
+      AND COALESCE(changes_json ->> 'status', 'pending') = 'pending';
+
+-- The Approvals queue's own read, which the unique index above cannot serve.
+--
+-- `ClassProposalService.ListPending` filters on `action`, `changes_json->>'kind'`
+-- and the pending status — and says nothing about `proposed_class_key`. The
+-- planner can only use a partial index when it can PROVE the query's predicate
+-- implies the index's, and `? 'proposed_class_key'` is not implied by anything
+-- the queue query states, so every page of Approvals seq-scanned an append-only
+-- table that grows without bound. This index's predicate is the queue's
+-- predicate, verbatim, and `created_at DESC` is the order it pages in.
+CREATE INDEX IF NOT EXISTS idx_asset_history_class_proposal_queue
+    ON public.asset_history USING btree (tenant_id, created_at DESC)
+    WHERE action = 'class_proposed'
+      AND changes_json ->> 'kind' = 'class_proposal'
+      AND COALESCE(changes_json ->> 'status', 'pending') = 'pending';
+
+-- The decided class proposals a reviewer has already answered, which the intake
+-- consults before proposing again. Partial, because `class_rejected` is a
+-- handful of rows beside an append-only table that grows without bound.
+CREATE INDEX IF NOT EXISTS idx_asset_history_class_rejected
+    ON public.asset_history USING btree (tenant_id, asset_id, (changes_json ->> 'proposed_class_key'))
+    WHERE action = 'class_rejected';
+
+-- ============================================================================
+-- POST-MIGRATIONS: phase 1 — retire the port-as-asset model (workstream 1.1)
+-- ============================================================================
+-- ADR-0002 D1/D5 and ADR-0007 D2. `assets` + `asset_endpoints` replace
+-- `network_assets_partitioned`; `asset_management` + `asset_credentials`
+-- replace `devices`. Owner decision: there are no existing installs,
+-- so there is NO backfill and NO compatibility view — the old tables are simply
+-- gone from the body above, and these drops exist so a LAB database carrying
+-- the old shape comes up clean on re-apply rather than keeping orphaned
+-- relations, policies and FKs.
+--
+-- CASCADE is required, not tidiness: on such a database the old table is still
+-- the target of composite FKs from asset_history, crypto_applications,
+-- database_encryption_states, external_connections and ssh_keys. CASCADE drops
+-- those; the guarded ADDs below then recreate them against `assets`. That
+-- ordering — drop, then add — is why these FKs cannot live in the pg_dump body:
+-- the body's guard is by constraint NAME, so on the old shape it would find the
+-- name already taken (by the constraint pointing at the table about to be
+-- dropped) and skip, leaving no FK at all after the CASCADE.
+DROP TABLE IF EXISTS public.network_assets_partitioned CASCADE;
+DROP TABLE IF EXISTS public.network_assets_part_0 CASCADE;
+DROP TABLE IF EXISTS public.network_assets_part_1 CASCADE;
+DROP TABLE IF EXISTS public.network_assets_part_2 CASCADE;
+DROP TABLE IF EXISTS public.network_assets_part_3 CASCADE;
+DROP TABLE IF EXISTS public.network_assets_part_4 CASCADE;
+DROP TABLE IF EXISTS public.network_assets_part_5 CASCADE;
+DROP TABLE IF EXISTS public.network_assets_part_6 CASCADE;
+DROP TABLE IF EXISTS public.network_assets_part_7 CASCADE;
+DROP VIEW IF EXISTS public.network_assets CASCADE;
+DROP TABLE IF EXISTS public.devices CASCADE;
+
+-- The four-value taxonomy the class registry replaces (ADR-0002 D2). Dropped
+-- only after the tables whose columns used it, or the drop fails with a
+-- dependency error.
+DROP TYPE IF EXISTS public.asset_type;
+
+
+-- ============================================================================
+-- POST-MIGRATIONS: phase 3 — one findings table, every producer (workstream 3.1)
+-- ============================================================================
+-- ADR-0005 D3 and ADR-0007 D2. `findings` replaces `compliance_findings`: the
+-- compliance producer now writes rows with `producer = 'compliance'` and
+-- `kind = 'control_noncompliant'`, and the old table is gone from the body
+-- above. Owner decision: there are no existing installs, so there is
+-- NO backfill and NO compatibility view. This drop exists so a LAB database
+-- carrying the old shape comes up clean on re-apply rather than keeping an
+-- orphaned relation, its policy and its foreign keys.
+--
+-- CASCADE is required, not tidiness: on such a database the old table is still
+-- the target of finding_id FKs from compliance_finding_history,
+-- remediation_plan_items and tickets. CASCADE drops those; the guarded ADDs
+-- below then recreate them against `findings`. That ordering — drop, then add —
+-- is why these three FKs cannot live in the pg_dump body: the body's guard is by
+-- constraint NAME, so on the old shape it would find the name already taken (by
+-- the constraint pointing at the table about to be dropped) and skip, leaving no
+-- FK at all after the CASCADE.
+DROP TABLE IF EXISTS public.compliance_findings CASCADE;
+
+-- The open-row unique index gained `control_id` (with NULLS NOT DISTINCT) when
+-- the compliance producer moved onto this table: its finding is one per
+-- (control, subject) pair, so keying on the subject alone makes the second
+-- control's finding overwrite the first's through ON CONFLICT — silently, with
+-- no error, losing a violation.
+--
+-- `CREATE UNIQUE INDEX IF NOT EXISTS` in the body above is a NO-OP on a database
+-- that already carries the five-column form (every database created between
+-- Gate 1 and workstream 3.1), so widening it has to be an explicit drop. The
+-- check is on the index's actual shape rather than a version marker, so this is
+-- a no-op on a fresh install and on any later re-apply.
+DO $$
+DECLARE
+  cols text;
+  nulls_not_distinct boolean;
+BEGIN
+  IF to_regclass('public.findings_open_subject_uniq') IS NOT NULL THEN
+    SELECT string_agg(a.attname, ',' ORDER BY k.ord), i.indnullsnotdistinct
+      INTO cols, nulls_not_distinct
+      FROM pg_index i
+      JOIN pg_class c ON c.oid = i.indexrelid
+      CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+      JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+     WHERE c.relname = 'findings_open_subject_uniq'
+     GROUP BY i.indnullsnotdistinct;
+    IF cols IS DISTINCT FROM 'tenant_id,producer,kind,subject_type,subject_id,control_id'
+       OR nulls_not_distinct IS DISTINCT FROM true THEN
+      DROP INDEX public.findings_open_subject_uniq;
+    END IF;
+  END IF;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS findings_open_subject_uniq
+    ON public.findings (tenant_id, producer, kind, subject_type, subject_id, control_id)
+    NULLS NOT DISTINCT
+    WHERE detection_state <> 'ARCHIVED'::text;
+
+-- Rows left pointing at a finding that no longer exists.
+--
+-- `DROP TABLE … CASCADE` drops the dependent CONSTRAINTS, not the dependent
+-- ROWS: on a lab database that carried compliance findings, the history entries,
+-- plan items and tickets that referenced them are still there, now naming ids
+-- that resolve to nothing. Re-adding the foreign keys below would fail on them —
+-- which is the honest outcome, since a dangling reference IS a broken one.
+--
+-- Each orphan is treated the way its own foreign key says it should be. History
+-- and plan items were ON DELETE CASCADE, so they go: the history OF a finding
+-- that no longer exists is not history of anything, and a plan item is a pointer
+-- with nothing behind it. Tickets were ON DELETE SET NULL and are kept with the
+-- link cleared — a ticket is a person's own work and must survive the table it
+-- happened to be filed against.
+DO $$ BEGIN
+  IF to_regclass('public.findings') IS NOT NULL THEN
+    IF to_regclass('public.compliance_finding_history') IS NOT NULL THEN
+      DELETE FROM public.compliance_finding_history h
+       WHERE NOT EXISTS (SELECT 1 FROM public.findings f WHERE f.id = h.finding_id);
+    END IF;
+    IF to_regclass('public.remediation_plan_items') IS NOT NULL THEN
+      DELETE FROM public.remediation_plan_items i
+       WHERE NOT EXISTS (SELECT 1 FROM public.findings f WHERE f.id = i.finding_id);
+    END IF;
+    IF to_regclass('public.tickets') IS NOT NULL THEN
+      UPDATE public.tickets t
+         SET finding_id = NULL
+       WHERE t.finding_id IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM public.findings f WHERE f.id = t.finding_id);
+    END IF;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.findings') IS NOT NULL
+     AND to_regclass('public.compliance_finding_history') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'compliance_finding_history_finding_id_fkey'
+         AND conrelid = to_regclass('public.compliance_finding_history')
+     ) THEN
+    ALTER TABLE ONLY public.compliance_finding_history
+        ADD CONSTRAINT compliance_finding_history_finding_id_fkey FOREIGN KEY (finding_id)
+        REFERENCES public.findings(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.findings') IS NOT NULL
+     AND to_regclass('public.remediation_plan_items') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'remediation_plan_items_finding_id_fkey'
+         AND conrelid = to_regclass('public.remediation_plan_items')
+     ) THEN
+    ALTER TABLE ONLY public.remediation_plan_items
+        ADD CONSTRAINT remediation_plan_items_finding_id_fkey FOREIGN KEY (finding_id)
+        REFERENCES public.findings(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.findings') IS NOT NULL
+     AND to_regclass('public.tickets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'tickets_finding_id_fkey' AND conrelid = to_regclass('public.tickets')
+     ) THEN
+    ALTER TABLE ONLY public.tickets
+        ADD CONSTRAINT tickets_finding_id_fkey FOREIGN KEY (finding_id)
+        REFERENCES public.findings(id) ON DELETE SET NULL;
+  END IF;
+END $$;
+
+
+-- device_jobs.device_id -> asset_id and database_encryption_states.device_id
+-- (dropped; asset_id was already there). On a fresh install the CREATE TABLEs
+-- above already carry the new shape and these are no-ops.
+--
+-- The values are NOT carried across. A device id and an asset id named
+-- different rows in different tables; copying one into the other would produce
+-- a column full of ids that resolve to nothing, which reads as data.
+DO $$ BEGIN
+  IF to_regclass('public.device_jobs') IS NOT NULL THEN
+    -- The CHECK names the column, so it has to go before the column does. Only
+    -- drop the OLD spelling of it: the body above already carries the new one,
+    -- and dropping/re-adding a valid constraint on every apply costs a table
+    -- scan for nothing.
+    IF EXISTS (
+      SELECT 1 FROM pg_constraint
+      WHERE conname = 'valid_job_assignment'
+        AND conrelid = to_regclass('public.device_jobs')
+        AND pg_get_constraintdef(oid) LIKE '%device_id%'
+    ) THEN
+      ALTER TABLE public.device_jobs DROP CONSTRAINT valid_job_assignment;
+    END IF;
+    ALTER TABLE public.device_jobs ADD COLUMN IF NOT EXISTS asset_id uuid;
+    ALTER TABLE public.device_jobs DROP COLUMN IF EXISTS device_id;
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint
+      WHERE conname = 'valid_job_assignment' AND conrelid = to_regclass('public.device_jobs')
+    ) THEN
+      -- NOT VALID, and only on this path. A fresh install gets the validated
+      -- constraint from the CREATE TABLE above and never reaches here (the
+      -- guard finds it). This branch runs only on a database carrying the OLD
+      -- shape, where the third arm was satisfied by `device_id` — a column
+      -- this block has just dropped without carrying its values across, on
+      -- purpose. Every in-cluster interrogation job already on such a database
+      -- therefore violates the new arm the instant it is written, and a plain
+      -- ADD CONSTRAINT aborts the whole apply:
+      --   ERROR: check constraint "valid_job_assignment" of relation
+      --          "device_jobs" is violated by some row
+      -- NOT VALID enforces the rule on every row written from now on and
+      -- grandfathers the legacy ones, which name a device that no longer
+      -- exists and can never run again. Deleting them instead would destroy a
+      -- record of work that did happen; validating them is impossible, because
+      -- there is no asset id to give them.
+      ALTER TABLE public.device_jobs
+        ADD CONSTRAINT valid_job_assignment CHECK ((((agent_id IS NULL) AND (job_type = 'cloud_discovery'::public.device_job_type)) OR ((agent_id IS NOT NULL) AND (job_type = 'device_interrogation'::public.device_job_type)) OR ((agent_id IS NULL) AND (job_type = 'device_interrogation'::public.device_job_type) AND (asset_id IS NOT NULL)))) NOT VALID;
+    END IF;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.database_encryption_states') IS NOT NULL THEN
+    ALTER TABLE public.database_encryption_states DROP COLUMN IF EXISTS device_id;
+  END IF;
+END $$;
+
+
+-- =========================================================================
+-- device_jobs.valid_job_assignment: the host_inventory arm
+-- =========================================================================
+-- MUST come after the device_id -> asset_id convergence above, and does.
+--
+-- Ordering is the whole of this block's correctness. Placed BEFORE that
+-- convergence it is wrong twice over: on a fresh install it would re-add a
+-- CHECK naming `device_id`, a column the new CREATE TABLE does not have, and
+-- abort the apply under ON_ERROR_STOP=1; on an upgraded one the convergence
+-- would then find `%device_id%`, drop the constraint and re-add ITS three-arm
+-- version, silently discarding the host_inventory arm — so every host
+-- inventory would fail its INSERT much later with a constraint violation.
+--
+-- Guarded on the arm rather than on the constraint's existence. The
+-- convergence above only re-adds when the constraint is absent, so on a
+-- database that already converged it is present, correct for assets, and still
+-- missing this arm — an existence check would find it and do nothing.
+--
+-- NOT VALID for the same reason the convergence uses it: a database that took
+-- that NOT VALID path carries in-cluster interrogation rows whose asset_id is
+-- NULL, already grandfathered. Re-adding VALID would re-check them and abort.
+-- Widening cannot invalidate a row that was legal before, so nothing is being
+-- waved through that a VALID constraint would have caught.
+--
+-- A host_inventory job is ALWAYS agent-assigned: local collections are
+-- agent-originated (the agent posts them; there is no queued job) and remote
+-- ones are executed by an agent that can reach the target.
+DO $$
+BEGIN
+    IF to_regclass('public.device_jobs') IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM pg_constraint
+          WHERE conname = 'valid_job_assignment'
+            AND conrelid = to_regclass('public.device_jobs')
+            AND pg_get_constraintdef(oid) LIKE '%host_inventory%'
+       ) THEN
+        ALTER TABLE public.device_jobs DROP CONSTRAINT IF EXISTS valid_job_assignment;
+        ALTER TABLE public.device_jobs
+          ADD CONSTRAINT valid_job_assignment CHECK (
+            ((agent_id IS NULL)     AND (job_type = 'cloud_discovery'::public.device_job_type))
+         OR ((agent_id IS NOT NULL) AND (job_type = 'device_interrogation'::public.device_job_type))
+         OR ((agent_id IS NULL)     AND (job_type = 'device_interrogation'::public.device_job_type) AND (asset_id IS NOT NULL))
+         OR ((agent_id IS NOT NULL) AND (job_type = 'host_inventory'::public.device_job_type))
+          ) NOT VALID;
+    END IF;
+END $$;
+
+-- The index on the column the block above adds. It cannot sit with the other
+-- device_jobs indexes in the pg_dump body: on a database that already has the
+-- table, the body's CREATE TABLE IF NOT EXISTS is a no-op and `asset_id` does
+-- not exist yet at that point.
+CREATE INDEX IF NOT EXISTS idx_device_jobs_asset_id ON public.device_jobs USING btree (asset_id);
+
+
+-- The endpoint links of DATA_MODEL §2. Added for installs whose CREATE TABLE
+-- IF NOT EXISTS above was a no-op; `crypto_implementations_partitioned` takes
+-- its ADD COLUMN at its definition instead, because the view immediately below
+-- it selects the column.
+DO $$ BEGIN
+  IF to_regclass('public.external_connections') IS NOT NULL THEN
+    ALTER TABLE public.external_connections ADD COLUMN IF NOT EXISTS source_endpoint_id uuid;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.ssh_keys') IS NOT NULL THEN
+    ALTER TABLE public.ssh_keys ADD COLUMN IF NOT EXISTS endpoint_id uuid;
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_crypto_impl_endpoint
+    ON public.crypto_implementations_partitioned USING btree (tenant_id, endpoint_id) WHERE endpoint_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_external_connections_source_endpoint
+    ON public.external_connections USING btree (tenant_id, source_endpoint_id) WHERE source_endpoint_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_ssh_keys_endpoint
+    ON public.ssh_keys USING btree (tenant_id, endpoint_id) WHERE endpoint_id IS NOT NULL;
+
+
+-- Asset references into the hash-partitioned `assets`. Composite
+-- (tenant_id, asset_id) rather than a single column because the partitioned
+-- table's only unique key is (tenant_id, id) — with the welcome side effect
+-- that a cross-tenant asset reference is unrepresentable at the database level.
+--
+-- asset_history's own FK is NOT repeated here: it is added a few blocks above,
+-- at the table, where the unconditional DROP + guarded ADD converges a database
+-- carrying either shape.
+--
+-- Each ADD is preceded by a clear of the references that no longer RESOLVE.
+-- On a lab database carrying the old shape these columns are full of ids that
+-- named rows in `network_assets_partitioned`, which the CASCADE above dropped:
+-- the CASCADE takes the constraint, not the rows, so the ids survive pointing
+-- at nothing and a plain ADD CONSTRAINT aborts the whole apply with
+--   ERROR: insert or update on table "…" violates foreign key constraint
+-- Setting them NULL is what the declared ON DELETE SET NULL would have done had
+-- the constraint still been in place when the parent went, and it is the same
+-- rule the device_jobs block applies one screen up: an id that resolves to
+-- nothing reads as data and must not be kept. The UPDATE sits INSIDE the
+-- constraint guard, so it runs on the one converging apply and never again.
+DO $$ BEGIN
+  IF to_regclass('public.crypto_applications') IS NOT NULL
+     AND to_regclass('public.assets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'crypto_applications_tenant_asset_fkey' AND conrelid = to_regclass('public.crypto_applications')
+     ) THEN
+    UPDATE public.crypto_applications t SET asset_id = NULL
+     WHERE t.asset_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM public.assets a WHERE a.tenant_id = t.tenant_id AND a.id = t.asset_id);
+    ALTER TABLE ONLY public.crypto_applications
+        ADD CONSTRAINT crypto_applications_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id) REFERENCES public.assets(tenant_id, id) ON DELETE SET NULL (asset_id);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.database_encryption_states') IS NOT NULL
+     AND to_regclass('public.assets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'database_encryption_states_tenant_asset_fkey' AND conrelid = to_regclass('public.database_encryption_states')
+     ) THEN
+    UPDATE public.database_encryption_states t SET asset_id = NULL
+     WHERE t.asset_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM public.assets a WHERE a.tenant_id = t.tenant_id AND a.id = t.asset_id);
+    ALTER TABLE ONLY public.database_encryption_states
+        ADD CONSTRAINT database_encryption_states_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id) REFERENCES public.assets(tenant_id, id) ON DELETE SET NULL (asset_id);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.external_connections') IS NOT NULL
+     AND to_regclass('public.assets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'external_connections_tenant_source_asset_fkey' AND conrelid = to_regclass('public.external_connections')
+     ) THEN
+    UPDATE public.external_connections t SET source_asset_id = NULL
+     WHERE t.source_asset_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM public.assets a WHERE a.tenant_id = t.tenant_id AND a.id = t.source_asset_id);
+    ALTER TABLE ONLY public.external_connections
+        ADD CONSTRAINT external_connections_tenant_source_asset_fkey FOREIGN KEY (tenant_id, source_asset_id) REFERENCES public.assets(tenant_id, id) ON DELETE SET NULL (source_asset_id);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.ssh_keys') IS NOT NULL
+     AND to_regclass('public.assets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'ssh_keys_tenant_asset_fkey' AND conrelid = to_regclass('public.ssh_keys')
+     ) THEN
+    UPDATE public.ssh_keys t SET asset_id = NULL
+     WHERE t.asset_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM public.assets a WHERE a.tenant_id = t.tenant_id AND a.id = t.asset_id);
+    ALTER TABLE ONLY public.ssh_keys
+        ADD CONSTRAINT ssh_keys_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id) REFERENCES public.assets(tenant_id, id) ON DELETE SET NULL (asset_id);
+  END IF;
+END $$;
+
+-- device_jobs gains the asset link `devices` used to provide. ON DELETE SET
+-- NULL, not CASCADE: a job is a record of work that ran, and deleting the asset
+-- it ran against does not unmake the job.
+DO $$ BEGIN
+  IF to_regclass('public.device_jobs') IS NOT NULL
+     AND to_regclass('public.assets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'device_jobs_tenant_asset_fkey' AND conrelid = to_regclass('public.device_jobs')
+     ) THEN
+    ALTER TABLE ONLY public.device_jobs
+        ADD CONSTRAINT device_jobs_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id) REFERENCES public.assets(tenant_id, id) ON DELETE SET NULL (asset_id);
+  END IF;
+END $$;
+
+
+-- Endpoint links. ON DELETE SET NULL so removing one endpoint of an asset
+-- leaves the crypto configuration attached to the asset rather than deleting
+-- evidence: the roll-up target is asset_id, and it is unaffected.
+DO $$ BEGIN
+  IF to_regclass('public.crypto_implementations_partitioned') IS NOT NULL
+     AND to_regclass('public.asset_endpoints') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'crypto_implementations_tenant_endpoint_fkey' AND conrelid = to_regclass('public.crypto_implementations_partitioned')
+     ) THEN
+    ALTER TABLE public.crypto_implementations_partitioned
+        ADD CONSTRAINT crypto_implementations_tenant_endpoint_fkey FOREIGN KEY (tenant_id, endpoint_id) REFERENCES public.asset_endpoints(tenant_id, id) ON DELETE SET NULL (endpoint_id);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.external_connections') IS NOT NULL
+     AND to_regclass('public.asset_endpoints') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'external_connections_tenant_source_endpoint_fkey' AND conrelid = to_regclass('public.external_connections')
+     ) THEN
+    ALTER TABLE ONLY public.external_connections
+        ADD CONSTRAINT external_connections_tenant_source_endpoint_fkey FOREIGN KEY (tenant_id, source_endpoint_id) REFERENCES public.asset_endpoints(tenant_id, id) ON DELETE SET NULL (source_endpoint_id);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.ssh_keys') IS NOT NULL
+     AND to_regclass('public.asset_endpoints') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'ssh_keys_tenant_endpoint_fkey' AND conrelid = to_regclass('public.ssh_keys')
+     ) THEN
+    ALTER TABLE ONLY public.ssh_keys
+        ADD CONSTRAINT ssh_keys_tenant_endpoint_fkey FOREIGN KEY (tenant_id, endpoint_id) REFERENCES public.asset_endpoints(tenant_id, id) ON DELETE SET NULL (endpoint_id);
+  END IF;
+END $$;
+
+
+-- ----------------------------------------------------------------------------
+-- Partition-direct access on the two surviving pre-existing partitioned tables
+-- ----------------------------------------------------------------------------
+-- A policy on a partitioned PARENT is applied to queries that name the parent.
+-- Naming a partition directly (`SELECT … FROM sensor_discoveries_part_3`) is a
+-- separate relation reference and consults only that partition's own policies —
+-- so with RLS off on the partition, the blanket `GRANT … ON ALL TABLES IN
+-- SCHEMA public TO crypto_app` at the foot of this file hands every tenant an
+-- unfiltered read of every other tenant's rows, one identifier away from the
+-- policy. Measured on PG17 during the workstream 0.2 review: 1 row through the
+-- parent, 2 through the partitions.
+--
+-- `assets` and `asset_endpoints` closed this at their definition. These two
+-- tables are the rest of the instance, and `network_assets_partitioned` — the
+-- third — is dropped above, which removes its instance outright. RLS enabled
+-- with ZERO policies is default-deny for the direct path and leaves the parent
+-- path untouched; deny rather than a copied policy, because nothing should be
+-- naming a partition and no Go or TypeScript in this repo does.
+ALTER TABLE public.sensor_discoveries_part_0 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sensor_discoveries_part_1 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sensor_discoveries_part_2 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sensor_discoveries_part_3 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sensor_discoveries_part_4 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sensor_discoveries_part_5 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sensor_discoveries_part_6 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sensor_discoveries_part_7 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.crypto_implementations_part_0 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.crypto_implementations_part_1 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.crypto_implementations_part_2 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.crypto_implementations_part_3 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.crypto_implementations_part_4 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.crypto_implementations_part_5 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.crypto_implementations_part_6 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.crypto_implementations_part_7 ENABLE ROW LEVEL SECURITY;
+
+
+-- ============================================================================
+-- POST-MIGRATIONS: assets.class_source_kind gains `rule` (workstream 2.10b)
+-- ============================================================================
+-- A class argued from a curated classification_rules row had nowhere honest to
+-- be recorded: the CHECK allowed measured / declared / imported / inferred, and
+-- a rule-derived class is none of them. `measured` would claim we measured the
+-- MAC-to-class mapping (we measured the MAC); `inferred` is ADR-0008 D4.2's
+-- "something a model proposed", and a deterministic rule that cites a source is
+-- not a model. Both are false provenance on the one field a reviewer uses to
+-- audit a class, which is the opposite of what ADR-0004 D6 wants.
+--
+-- BOTH edits are required and this is the second of them. The first is the
+-- inline CONSTRAINT in the pg_dump body above, which covers a FRESH install;
+-- `CREATE TABLE IF NOT EXISTS` does nothing to a database that already has the
+-- table, so without this block an existing install keeps the four-value CHECK,
+-- psql still exits 0, and the failure surfaces much later as a constraint
+-- violation on the first rule-classified INSERT.
+--
+-- DROP + ADD rather than the guarded ADD the house style uses for most
+-- constraints, for the same reason the classification_rules block below does
+-- it: this REPLACES a constraint of the same name with a wider list, and a
+-- CHECK has no dependents to break. On a fresh install it drops and re-adds
+-- what the body just created, which is a no-op.
+--
+-- Widening a CHECK cannot fail on existing rows: every value the old list
+-- allowed is in the new one.
+DO $$ BEGIN
+  IF to_regclass('public.assets') IS NOT NULL THEN
+    ALTER TABLE public.assets
+        DROP CONSTRAINT IF EXISTS assets_class_source_kind_check;
+    ALTER TABLE public.assets
+        ADD CONSTRAINT assets_class_source_kind_check
+        CHECK (class_source_kind = ANY (ARRAY['measured'::text, 'declared'::text,
+            'imported'::text, 'inferred'::text, 'rule'::text]));
+  END IF;
+END $$;
+
+-- ============================================================================
+-- POST-MIGRATIONS: classification_rules gains `model` and `platform` (2.10a)
+-- ============================================================================
+-- The table shipped in workstream 2.10's data-model slice with six rule kinds
+-- and a NOT NULL class_key. Workstream 2.10a migrated the in-package class
+-- hints of shared/deviceinterrogation into it and needed two more kinds
+-- (`model`, `platform`) and a nullable class_key, because most OUI rules assert
+-- a vendor and deliberately no class. Both changes are in the pg_dump body
+-- above, so a fresh install is already correct; this block is for an install
+-- that already created the table.
+--
+-- DROP + ADD on the CHECK rather than the guarded ADD the house style uses for
+-- most constraints: this one has to REPLACE a constraint of the same name with
+-- a wider list, and a CHECK has no dependents to break (the hazard the style
+-- note warns about is a PK with FK dependents). Both statements are idempotent
+-- on their own, and on a fresh install they drop and re-add a constraint the
+-- body just created, which is a no-op.
+DO $$ BEGIN
+  IF to_regclass('public.classification_rules') IS NOT NULL THEN
+    ALTER TABLE public.classification_rules ALTER COLUMN class_key DROP NOT NULL;
+
+    -- And the confidence default goes. The engine refuses anything outside
+    -- 0.50-0.95, so DEFAULT 1.00 was a way for an INSERT that omitted the
+    -- column to produce a row classify.New then rejects -- taking the whole
+    -- rule set with it, not just that row.
+    ALTER TABLE public.classification_rules ALTER COLUMN confidence DROP DEFAULT;
+
+    -- The kind list is widened here and in the inline CONSTRAINT in the body
+    -- above, and BOTH are required: the body covers a fresh install, this
+    -- covers one that already created the table. Workstream 2.10b added
+    -- `cdp_capabilities`, `lldp_capability` and `mdns_service` to the eight
+    -- 2.10a shipped.
+    ALTER TABLE public.classification_rules
+        DROP CONSTRAINT IF EXISTS classification_rules_rule_kind_check;
+    ALTER TABLE public.classification_rules
+        ADD CONSTRAINT classification_rules_rule_kind_check
+        CHECK (rule_kind = ANY (ARRAY['oui'::text, 'sysobjectid'::text, 'enip'::text,
+            'cloud_type'::text, 'banner'::text, 'port_profile'::text, 'model'::text,
+            'platform'::text, 'cdp_capabilities'::text, 'lldp_capability'::text,
+            'mdns_service'::text]));
+
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint
+      WHERE conname = 'classification_rules_asserts_something_check'
+        AND conrelid = to_regclass('public.classification_rules')
+    ) THEN
+      ALTER TABLE public.classification_rules
+          ADD CONSTRAINT classification_rules_asserts_something_check
+          CHECK (class_key IS NOT NULL OR vendor IS NOT NULL OR model IS NOT NULL);
+    END IF;
+  END IF;
+END $$;
+
+-- ============================================================================
 -- POST-MIGRATIONS: retire tables with neither reader nor writer
 -- ============================================================================
 -- Each was verified to have zero Go/TypeScript references, or to be superseded
@@ -18354,6 +20093,361 @@ DROP FUNCTION IF EXISTS public.calculate_tenant_cost CASCADE;
 DROP FUNCTION IF EXISTS public.cleanup_expired_dashboard_cache CASCADE;
 DROP FUNCTION IF EXISTS public.get_system_health_summary CASCADE;
 DROP FUNCTION IF EXISTS public.update_tenant_usage CASCADE;
+
+-- ============================================================================
+-- POST-MIGRATIONS: materialize the activity-log partitions for TODAY
+-- ============================================================================
+-- audit.activity_logs is RANGE-partitioned on occurred_at, and the pg_dump body
+-- above carries a FIXED set of monthly partitions — whatever existed when the
+-- dump was taken. An INSERT whose occurred_at falls outside every attached
+-- partition does not fall back anywhere: Postgres raises
+-- `no partition of relation "activity_logs" found for row` (23514), and the
+-- write that fails is an AUDIT write.
+--
+-- So the dumped partition list is a wall-clock expiry date baked into the file.
+-- It expired: the last dumped partition ended and every fresh apply
+-- from onwards produced a table that could not accept a row stamped
+-- `now()`.
+--
+-- audit.ensure_future_partitions() has existed since the partitioning went in,
+-- is granted EXECUTE to both roles a few sections above, and had NO CALLER
+-- ANYWHERE — not in this file, not in Go, not in a trigger. audit-service's
+-- PartitionManager job calls create_activity_logs_partition directly on startup
+-- and weekly thereafter, which is why long-running deployments self-heal and
+-- the gap stayed invisible: it only bites where the schema is applied but that
+-- job is not running, i.e. a fresh install before audit-service's first tick,
+-- and every DB-integration test database.
+--
+-- Calling it here makes the file self-sufficient: current month + 3, the same
+-- horizon PartitionManager uses, so the two agree rather than one silently
+-- depending on the other. Idempotent — the function skips any partition already
+-- in pg_class — and it must stay ABOVE the ROLE GRANTS block so the partitions
+-- it creates are covered by the blanket `ON ALL TABLES IN SCHEMA audit` grant.
+SELECT * FROM audit.ensure_future_partitions(3);
+
+
+
+-- =========================================================================
+-- SAVED VIEWS — general asset inventory, phase 1 (ADR-0006 D2, workstream 1.8)
+--
+-- A saved view is a NAMED QUERY STRING. That is the whole object: the facet
+-- rail writes the query, the user names it, and the name is how they get back
+-- to it. It is the beginner's surface for the query language — you learn the
+-- language by reading what your own views say.
+--
+-- `target` is the collection the query is a predicate over (§4.1), out of band
+-- because the URL and the endpoint already carry it and putting it in the text
+-- would make every stored predicate carry a redundant, forgeable prefix (§11
+-- Q2).
+--
+-- `is_shared` makes a view visible to the whole tenant; otherwise it belongs to
+-- its owner. RLS isolates the tenant; the owner filter is applied in the query,
+-- because "my views" is a product rule and not an isolation control.
+-- =========================================================================
+
+-- TABLE: saved_views
+CREATE TABLE IF NOT EXISTS public.saved_views (
+    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
+    tenant_id uuid NOT NULL,
+    name character varying(255) NOT NULL,
+    description text,
+    -- The collection the predicate is over: asset, endpoint, certificate,
+    -- crypto_configuration, finding, software_install, relationship.
+    target character varying(64) DEFAULT 'asset'::character varying NOT NULL,
+    -- The query, stored in CANONICAL form (§10). Two spellings of one
+    -- predicate stored verbatim are two rows a diff cannot match.
+    query text DEFAULT ''::text NOT NULL,
+    owner_user_id uuid NOT NULL,
+    is_shared boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT now(),
+    updated_at timestamp with time zone DEFAULT now(),
+    CONSTRAINT saved_views_pkey PRIMARY KEY (id),
+    -- Unique per OWNER, not per tenant: two people may each keep a view called
+    -- "Mine", and a tenant-wide unique name would make the first one to save
+    -- block everybody else.
+    CONSTRAINT saved_views_unique_name_per_owner UNIQUE (tenant_id, owner_user_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_saved_views_tenant_target ON public.saved_views USING btree (tenant_id, target);
+CREATE INDEX IF NOT EXISTS idx_saved_views_owner ON public.saved_views USING btree (tenant_id, owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_saved_views_shared ON public.saved_views USING btree (tenant_id) WHERE (is_shared = true);
+
+-- A SHARED saved view's name is unique tenant-wide, case-insensitively.
+--
+-- The table's own constraint is per (tenant, owner, name), which is right for a
+-- PRIVATE view: two people may each keep one called "Mine", and a tenant-wide
+-- unique name would let whoever saved first block everybody else. But the error
+-- copy promised tenant-wide uniqueness, and for a SHARED view it has to be true
+-- — a shared view is a name everyone in the tenant reads off one list, and two
+-- rows called "Production" from two owners are indistinguishable there.
+--
+-- Partial (only shared rows) and over lower(name), because "Production" and
+-- "production" are the same name to the person reading the list.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_views_shared_name_uniq
+    ON public.saved_views (tenant_id, lower(name))
+    WHERE is_shared = true;
+
+DROP TRIGGER IF EXISTS update_saved_views_updated_at ON public.saved_views;
+CREATE OR REPLACE TRIGGER update_saved_views_updated_at
+    BEFORE UPDATE ON public.saved_views
+    FOR EACH ROW
+    EXECUTE FUNCTION public.update_updated_at_column();
+
+ALTER TABLE public.saved_views ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+    CREATE POLICY saved_views_tenant_isolation ON public.saved_views
+      USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+      WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+
+-- =========================================================================
+-- POST-MIGRATIONS: scopes and approval rules carry a QUERY, not JSON
+-- =========================================================================
+-- The pg_dump body above declares the new columns for a FRESH install. A lab
+-- database created before this change still has the jsonb columns and none of
+-- the new ones, and CREATE TABLE IF NOT EXISTS does nothing to it — so the
+-- ALTERs below are what make the file converge on either shape in one apply.
+--
+-- The old columns are DROPPED rather than left in place. ADR-0007 D2 is the
+-- no-migration path: there are no installs to carry forward, the predicate
+-- shapes are gone from the API with no deprecation window (ADR-0007 D2.4), and
+-- a column nothing reads is a second place for a scope's meaning to live.
+-- Translating the old jsonb into a query string here is deliberately NOT done:
+-- it would be a third implementation of the compatibility mapping (§8), in SQL,
+-- untested, for rows that by decision do not exist.
+-- `scopes` and `scopes_audit` are handled EARLIER in this file, immediately
+-- above `scopes_audit_trigger` — the trigger's WHEN clause names the `query`
+-- column, so the column has to exist before the file reaches it. See the
+-- comment there.
+ALTER TABLE IF EXISTS public.discovery_auto_approval_rules
+    ADD COLUMN IF NOT EXISTS query text DEFAULT ''::text NOT NULL;
+ALTER TABLE IF EXISTS public.discovery_auto_approval_rules DROP COLUMN IF EXISTS conditions;
+
+
+-- =========================================================================
+-- POST-MIGRATIONS: heartbeat counters with no column of their own
+-- =========================================================================
+-- The pg_dump body above declares sensor_health_metrics.extra_counters for a
+-- FRESH install. A database created before this change has the table without
+-- the column, and CREATE TABLE IF NOT EXISTS does nothing to it — this ALTER is
+-- what makes the file converge on either shape in one apply.
+--
+-- Nullable and no default, on purpose. NULL is "the sensor reported no such
+-- counters" (an older build, or host observation switched off); `{}` would be
+-- "it reported an empty set", and the two are different facts about the
+-- segment. Backfilling every historical row with `{}` would assert the second
+-- about heartbeats that predate the feature.
+ALTER TABLE IF EXISTS public.sensor_health_metrics
+    ADD COLUMN IF NOT EXISTS extra_counters jsonb;
+
+
+-- =========================================================================
+-- POST-MIGRATIONS: a network segment is scoped to its cloud network (2.4)
+-- =========================================================================
+-- `network_segments` was unique on (tenant_id, value). A CIDR is not unique in
+-- a cloud account: two VPCs created from the same Terraform module both get
+-- 10.0.0.0/16, and their subnets both get 10.0.1.0/24. Under the old key those
+-- two subnets SHARED one segment row, so two instances at 10.0.1.20 in two
+-- different VPCs resolved to one scope — and `ip_address` then matched them to
+-- one ASSET, silently, with no merge proposal. Reproduced on PG17 before the
+-- fix: one asset carrying two `cloud_resource_id` identifiers.
+--
+-- The fix is to make the cloud network part of the segment's identity. A LAN
+-- segment carries NULL and behaves exactly as before, which is why the key is
+-- over `coalesce(cloud_network_ref, '')` rather than over the bare column —
+-- NULLs are distinct in a unique index, so a bare column would let a tenant
+-- accumulate unlimited duplicate LAN segments for one CIDR.
+--
+-- A constraint cannot be declared over an expression, so this is a unique
+-- INDEX and the old constraint is dropped. The index name deliberately keeps
+-- the old one's stem so anything grepping for it still finds the rule.
+ALTER TABLE IF EXISTS public.network_segments
+    ADD COLUMN IF NOT EXISTS cloud_network_ref text;
+ALTER TABLE IF EXISTS public.network_segments
+    DROP CONSTRAINT IF EXISTS network_segments_value_unique_per_tenant;
+CREATE UNIQUE INDEX IF NOT EXISTS network_segments_value_unique_per_tenant_idx
+    ON public.network_segments (tenant_id, value, coalesce(cloud_network_ref, ''::text));
+
+-- asset_endpoints.bound_local (workstream 2.11b). The column is also in the
+-- CREATE TABLE body above, which covers a FRESH install; this ALTER is what
+-- carries it to a database that already has the table, because the CREATE is
+-- `IF NOT EXISTS` and silently does nothing there. Both edits are required —
+-- see the two-edit rule at the top of this file.
+--
+-- Nullable with no default, deliberately: NULL is "nobody established this",
+-- which is the truth for every endpoint a network scan found. See the column
+-- comment for why a false default would be a fabricated measurement.
+ALTER TABLE IF EXISTS public.asset_endpoints
+    ADD COLUMN IF NOT EXISTS bound_local boolean;
+
+
+-- =========================================================================
+-- POST-MIGRATIONS: connector connections, runs, and segment provenance (2.7)
+-- =========================================================================
+-- The connector registry gains a third store (see connector_connections in the
+-- body above). Everything here is the half an EXISTING database needs: the
+-- pg_dump body covers a fresh install, this covers an upgrade. Both are
+-- required — an ADD COLUMN that lives only in the CREATE TABLE silently
+-- no-ops on an installed database.
+
+-- network_segments provenance. Nullable with no default, so existing rows keep
+-- "no provenance recorded" rather than being retroactively labelled: a segment
+-- drawn by hand two years ago was not imported, and saying it was would be a
+-- fact this migration invented.
+ALTER TABLE public.network_segments
+  ADD COLUMN IF NOT EXISTS source_kind character varying(20),
+  ADD COLUMN IF NOT EXISTS source_ref  character varying(200);
+
+DO $$
+BEGIN
+  IF to_regclass('public.network_segments') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+        WHERE conname = 'network_segments_source_kind_check'
+          AND conrelid = to_regclass('public.network_segments')
+     )
+  THEN
+    ALTER TABLE public.network_segments
+      ADD CONSTRAINT network_segments_source_kind_check
+      CHECK (source_kind IS NULL OR source_kind IN ('measured', 'imported', 'declared', 'inferred'));
+  END IF;
+END $$;
+
+-- Foreign keys for the two new tables. Tenant-scoped rows cascade with the
+-- tenant so testdb.NewTenant's cleanup takes them with it; a run cascades with
+-- its connection, because a run of a connection that no longer exists is an
+-- orphan nothing can interpret.
+DO $$
+BEGIN
+  IF to_regclass('public.connector_connections') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+        WHERE conname = 'connector_connections_tenant_id_fkey'
+          AND conrelid = to_regclass('public.connector_connections')
+     )
+  THEN
+    ALTER TABLE ONLY public.connector_connections
+      ADD CONSTRAINT connector_connections_tenant_id_fkey
+      FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF to_regclass('public.connector_runs') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+        WHERE conname = 'connector_runs_tenant_id_fkey'
+          AND conrelid = to_regclass('public.connector_runs')
+     )
+  THEN
+    ALTER TABLE ONLY public.connector_runs
+      ADD CONSTRAINT connector_runs_tenant_id_fkey
+      FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF to_regclass('public.connector_runs') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+        WHERE conname = 'connector_runs_connection_id_fkey'
+          AND conrelid = to_regclass('public.connector_runs')
+     )
+  THEN
+    ALTER TABLE ONLY public.connector_runs
+      ADD CONSTRAINT connector_runs_connection_id_fkey
+      FOREIGN KEY (connection_id) REFERENCES public.connector_connections(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+-- RLS. Declared here rather than in the RLS HARDENING block for the same
+-- reason legal_acceptances is: DROP POLICY IF EXISTS + CREATE is the form that
+-- can UPDATE an existing policy, and both USING and WITH CHECK are stated
+-- because Postgres silently reuses USING as WITH CHECK when the latter is
+-- omitted (TestIntegration_RLS_EveryTenantPolicyHasWithCheck requires it).
+ALTER TABLE public.connector_connections ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS connector_connections_tenant_isolation ON public.connector_connections;
+CREATE POLICY connector_connections_tenant_isolation ON public.connector_connections
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+ALTER TABLE public.connector_runs ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS connector_runs_tenant_isolation ON public.connector_runs;
+CREATE POLICY connector_runs_tenant_isolation ON public.connector_runs
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+
+-- =========================================================================
+-- POST-MIGRATIONS: measurement_types.extraction_query is gone (ADR-0005 D5)
+-- =========================================================================
+-- The column stored the SQL a measurement type "runs". Nothing ever executed
+-- it — every extractor was hand-written Go — and ADR-0005 D5 drops it rather
+-- than honouring it: a seeded query is an injection hazard and an upgrade
+-- hazard at once, and a column holding SQL that nothing runs is a standing
+-- invitation for someone to start running it.
+--
+-- What replaced it is standards/measurement-types.yaml, where a measurement
+-- type declares a whitelisted SHAPE, a selectable VALUE and a query-language
+-- predicate, and the compliance-engine composes the statement from those.
+ALTER TABLE IF EXISTS public.measurement_types DROP COLUMN IF EXISTS extraction_query;
+
+
+-- =========================================================================
+-- POST-MIGRATIONS: the pending-class-proposal index keys on the conflict too
+-- =========================================================================
+-- `CREATE UNIQUE INDEX IF NOT EXISTS` never WIDENS an index that already
+-- exists — it sees the name, does nothing, and says nothing. A database
+-- carrying the old two-column key would therefore keep collapsing every
+-- conflict proposal for an asset onto one row for ever, while the file above
+-- read as though it had been fixed.
+--
+-- So: drop it when its definition is not the current one, and let the body's
+-- CREATE (which runs BEFORE this block on the next apply) put it back. Dropping
+-- it here rather than unconditionally means a database already on the new
+-- definition pays nothing.
+--
+-- A unique index, so the drop-and-recreate can fail on a database that has
+-- already accumulated two pending conflict proposals with the same key — which
+-- cannot happen, because the OLD index is what prevented exactly that.
+DO $$
+DECLARE def text;
+BEGIN
+  IF to_regclass('public.asset_history') IS NULL THEN
+    RETURN;
+  END IF;
+  SELECT indexdef INTO def
+    FROM pg_indexes
+   WHERE schemaname = 'public' AND indexname = 'idx_asset_history_pending_class_proposal';
+  IF def IS NOT NULL AND position('conflict_key' IN def) = 0 THEN
+    DROP INDEX IF EXISTS public.idx_asset_history_pending_class_proposal;
+    CREATE UNIQUE INDEX idx_asset_history_pending_class_proposal
+        ON public.asset_history USING btree (
+            tenant_id, asset_id,
+            (COALESCE(NULLIF(changes_json ->> 'proposed_class_key', ''), changes_json ->> 'conflict_key', '')))
+        WHERE action = 'class_proposed'
+          AND changes_json ? 'proposed_class_key'
+          AND COALESCE(changes_json ->> 'status', 'pending') = 'pending';
+  END IF;
+END $$;
+
+
+-- Drop the two decorative trigram GIN indexes on `findings`.
+--
+-- See the long note where they used to be created (search for
+-- "Free-text search on the Findings page"): the Findings-page search predicate
+-- is one OR containing a correlated EXISTS, so Postgres cannot BitmapOr it and
+-- never consulted either index. Proven by EXPLAIN on a 50,000-finding tenant,
+-- with the indexes present and absent: the same plan, to the node.
+--
+-- Unconditional DROP ... IF EXISTS, because a database that never had them is
+-- the normal case on a fresh install (the CREATEs are gone from the body above)
+-- and IF EXISTS makes that a no-op rather than an error.
+DROP INDEX IF EXISTS public.idx_findings_summary_trgm;
+DROP INDEX IF EXISTS public.idx_findings_subject_label_trgm;
+
 
 -- ============================================================================
 -- ROLE GRANTS — THIS BLOCK MUST BE THE LAST THING IN THIS FILE

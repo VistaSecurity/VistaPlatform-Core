@@ -43,7 +43,7 @@ func TestIDOR_GetScopeForeignTenantNotFound(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("tenant_id = $2")).
 		WithArgs(scopeID, callerTenant).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "tenant_id", "name", "description", "predicate", "version",
+			"id", "tenant_id", "name", "description", "query", "version",
 			"is_default", "is_system", "deleted_at", "created_by", "updated_by",
 			"created_at", "updated_at",
 		}))
@@ -71,7 +71,7 @@ func TestIDOR_UpdateScopeForeignTenantNotFound(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("tenant_id = $6")).
 		WithArgs("renamed", sqlmock.AnyArg(), sqlmock.AnyArg(), updatedBy, scopeID, callerTenant).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "tenant_id", "name", "description", "predicate", "version",
+			"id", "tenant_id", "name", "description", "query", "version",
 			"is_default", "is_system", "deleted_at", "created_by", "updated_by",
 			"created_at", "updated_at",
 		}))
@@ -133,7 +133,7 @@ func TestIDOR_ListScopesIsTenantScoped(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("tenant_id = $1")).
 		WithArgs(callerTenant).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "tenant_id", "name", "description", "predicate", "version",
+			"id", "tenant_id", "name", "description", "query", "version",
 			"is_default", "is_system", "deleted_at", "created_by", "updated_by",
 			"created_at", "updated_at",
 		}))

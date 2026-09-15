@@ -17,6 +17,7 @@ import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rb
 import { clients } from '../../lib/clients';
 import { Icon, DrawerShell, DrawerCloseBtn, MetaRow, SectionLabel, Pill, Modal, ModalField } from '../../components/ui';
 import { DTable, CellMono, CellTxt, Note, sensorOnline, relTime } from './kit';
+import { summariseHostObservations } from './host-observations';
 // useDiscoveryCounts is the one hook this drawer borrows from the shared
 // queries.ts (everything else lives locally per the note above) — it's a
 // cheap bulk id→count fetch already shared by sensors-page.tsx and
@@ -512,6 +513,16 @@ function HealthTab({ sensorId }: { sensorId: string }) {
   const histQ = useSensorHealthHistory(sensorId, since, true);
   const hist = histQ.data ?? [];
 
+  // Passive host observations over the selected range. Null when no heartbeat
+  // in the range reported the counters — an older sensor build, or host
+  // observation switched off — in which case the whole block is omitted rather
+  // than shown as zeroes: "not running" and "running and seeing nothing" must
+  // not look the same.
+  // Depends on histQ.data rather than the `hist` local: `?? []` builds a fresh
+  // array every render, so memoising on it would recompute every time.
+  const hostObs = useMemo(() => summariseHostObservations(histQ.data ?? []), [histQ.data]);
+  const rangeLabel = HISTORY_RANGES.find((r) => r.key === range)?.label ?? '24h';
+
   return (
     <div style={{ marginTop: 12 }}>
       <SectionLabel icon="activity">Current</SectionLabel>
@@ -536,6 +547,34 @@ function HealthTab({ sensorId }: { sensorId: string }) {
           </>
         );
       })()}
+
+      {hostObs && (
+        <>
+          <div style={{ margin: '20px 0 0' }}>
+            <SectionLabel icon="radar">Host observations</SectionLabel>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginTop: 6 }}>
+            {/* The counters are cumulative, so this is a DIFFERENCE across the
+                range — and "since restart" when a restart inside the range makes
+                the range's own figure unknowable. See host-observations.ts. */}
+            <MetricCard
+              icon="radar"
+              label={hostObs.sinceRestart ? 'Hosts seen (since restart)' : `Hosts seen (${rangeLabel})`}
+              value={fmtNum(hostObs.emitted)}
+            />
+            <MetricCard
+              icon="alert-triangle"
+              label={hostObs.sinceRestart ? 'Shed (since restart)' : `Shed (${rangeLabel})`}
+              value={fmtNum(hostObs.dropped)}
+            />
+            <MetricCard icon="layers" label="Accumulating now" value={fmtNum(hostObs.pending)} />
+          </div>
+          <div style={{ fontSize: 10.5, color: 'var(--app-t3)', marginTop: 8 }}>
+            Devices seen on the wire without connecting to them. Each becomes a pending asset in Approvals.
+            {hostObs.dropped > 0 && ' Shed observations mean this segment is busier than the sensor is sized for.'}
+          </div>
+        </>
+      )}
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, margin: '20px 0 8px' }}>
         <div className="eyebrow-app" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><Icon name="activity" size={13} style={{ color: 'var(--accent)' }} />History</div>

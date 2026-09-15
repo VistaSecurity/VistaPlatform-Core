@@ -186,7 +186,10 @@ func TestIntegration_SeedBackfillsTierLessTenants(t *testing.T) {
 		t.Fatalf("assign pro tier: %v", err)
 	}
 
-	testdb.ApplySchemaAndSeed(t, db)
+	// FORCE: re-applying the seed IS the assertion here — the backfill under test
+	// lives in seed.sql, and the plain helper is a no-op against a database that
+	// already carries it.
+	testdb.ForceApplySeed(t, db)
 
 	if got := tierNameOf(t, db, tierLess); got != "community" {
 		t.Errorf("tier-less tenant after seed = %q, want \"community\"", got)

@@ -43,9 +43,9 @@ func TestIntegration_GetControlDetails_LowSeverityViolationsAreFailing(t *testin
 	const violations = 12
 	for i := 0; i < violations; i++ {
 		if _, err := f.db.Exec(`
-			INSERT INTO compliance_findings
-				(id, tenant_id, control_id, asset_id, asset_type, severity, summary, detection_state, workflow_status)
-			VALUES ($1, $2, $3, $4, 'certificate', 'Low', 'certificate expires inside 90 days', 'ACTIVE', 'NEW')`,
+			INSERT INTO findings
+				(id, tenant_id, producer, kind, control_id, subject_id, subject_type, severity, summary, detection_state, workflow_status)
+			VALUES ($1, $2, 'compliance', 'control_noncompliant', $3, $4, 'certificate', 'low', 'certificate expires inside 90 days', 'ACTIVE', 'NEW')`,
 			uuid.New(), f.tenant, controlID, uuid.New()); err != nil {
 			t.Fatalf("seed finding %d: %v", i, err)
 		}

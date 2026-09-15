@@ -39,7 +39,7 @@ export interface paths {
         get: operations["getScope"];
         /**
          * Update a scope
-         * @description Overwrites name/description/predicate. Version is bumped (and an audit row written) only when name or predicate actually changed.
+         * @description Overwrites name/description/query. Version is bumped (and an audit row written) only when name or query actually changed.
          */
         put: operations["updateScope"];
         post?: never;
@@ -67,7 +67,7 @@ export interface paths {
         put?: never;
         /**
          * Preview the assets a scope matches
-         * @description Phase 1 stub — echoes the predicate with a not_implemented preview. Phase 2 resolves the predicate against inventory-service and returns a matched asset count.
+         * @description Echoes the scope's query in canonical form, with a not_implemented preview count. Running the same query on `GET /api/v1/inventory-service/assets?query=` returns the count today; resolving it here against inventory-service returns a matched asset count.
          */
         post: operations["previewScope"];
         delete?: never;
@@ -173,6 +173,24 @@ export interface paths {
          *       **Enterprise edition only.**
          *     - `pdf` → PDF rendering for human review (re-rendered from canonical
          *       bytes). **Enterprise edition only.**
+         *     - `ocsf` → OCSF **1.9.0** event stream as JSON Lines
+         *       (`application/x-ndjson`): one `Device Inventory Info` (class_uid
+         *       5001) per asset, one `Vulnerability Finding` (class_uid 2002) per
+         *       vulnerability the artifact records. **Core**, and defined **only for
+         *       `inventory` artifacts** — any other kind returns 400. Projected from
+         *       the stored canonical bytes, so what a SIEM ingests is exactly what
+         *       `content_hash` covers.
+         *
+         *     Format ↔ kind compatibility, checked after the edition gate so the two
+         *     answers stay distinguishable (402 = "this deployment/subscription
+         *     cannot render that format at all"; 400 = "that format is not defined
+         *     for this kind of artifact"):
+         *
+         *     | format | defined for |
+         *     |---|---|
+         *     | `cyclonedx` | every kind |
+         *     | `ocsf` | `inventory` only |
+         *     | `spdx`, `pdf` | `cbom` only |
          *
          *     SPDX and PDF re-render server-side and therefore need the raw bytes
          *     to be loadable. Inline-stored artifacts read from
@@ -247,6 +265,13 @@ export interface paths {
          *     type+name; each change is categorized `improvement` / `regression` /
          *     `drift` / `neutral` with a one-phrase reason.
          *
+         *     **Same kind only.** Base and head must have the same `artifact_kind`;
+         *     a cross-kind request is 400. The match keys of two kinds are drawn
+         *     from disjoint identity spaces (a certificate fingerprint against an
+         *     asset id), so nothing would align and the result would be every
+         *     component of the base "removed" and every component of the head
+         *     "added" — precise, confident and entirely wrong.
+         *
          *     Requires the tenant's `cbom_signing` entitlement.
          */
         post: operations["compareCBOMArtifacts"];
@@ -268,7 +293,7 @@ export interface paths {
         };
         /**
          * Diff two CBOM artifacts (URL form)
-         * @description Same semantics as `POST /cbom/compare`, with the artifact ids in the URL so a diff can be shared as a deep link. Requires the tenant's `cbom_signing` entitlement.
+         * @description Same semantics as `POST /cbom/compare`, with the artifact ids in the URL so a diff can be shared as a deep link. Same-kind only (400 otherwise). Requires the tenant's `cbom_signing` entitlement.
          */
         get: operations["compareCBOMArtifactsByURL"];
         put?: never;
@@ -291,7 +316,7 @@ export interface components {
             name: string;
             /** @description Optional; omitted when empty. */
             description?: string;
-            predicate: components["schemas"]["Predicate"];
+            query: components["schemas"]["ScopeQuery"];
             version: number;
             is_default: boolean;
             /** @description System scopes are editable but not deletable (deleting one would orphan CBOM artifacts that reference it by id). */
@@ -310,23 +335,15 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
-        /** @description Selection rule stored as JSONB. An empty predicate (no include and no exclude) matches every asset visible to the tenant under RLS. */
-        Predicate: {
-            include?: components["schemas"]["PredicateClause"];
-            exclude?: components["schemas"]["PredicateClause"];
-        };
-        /** @description A set of asset-attribute filters joined OR-within-a-field and OR-across-fields. Used for both include and exclude clauses. */
-        PredicateClause: {
-            environment?: string[];
-            asset_type?: string[];
-            asset_ownership?: string[];
-            asset_status?: string[];
-            business_unit?: string[];
-            location_region?: string[];
-            risk_level?: string[];
-            /** @description Case-insensitive match against the asset's tags JSONB. */
-            tags_any_of?: string[];
-        };
+        /**
+         * @description The scope's boundary, as a query-language string over the `asset` target. An EMPTY string matches every asset visible to the tenant under RLS, which is what the seeded `All` scope is.
+         *
+         *     It replaced a JSONB include/exclude predicate. The language is documented at docsv4/internal/developer/design/asset-inventory/QUERY_LANGUAGE.md and is the same string `GET /api/v1/inventory-service/assets?query=` takes, so a scope can be previewed by running it on the inventory list.
+         *
+         *     Validated on write and stored in canonical form: a CBOM artifact captures scope_id + scope_version, and two spellings of one predicate would be two versions a diff could not match.
+         * @example environment:production and not tag:(dev or test)
+         */
+        ScopeQuery: string;
         /** @description CURRENT list envelope for GET /scopes. Pre-ADR-0002; a collection wrapped under the `scopes` key with no pagination. Hardening this to the ADR-0002 collection envelope (`{ data, pagination }`) is the documented go-forward change. */
         ScopeListResponse: {
             scopes: components["schemas"]["Scope"][];
@@ -334,25 +351,56 @@ export interface components {
         CreateScopeRequest: {
             name: string;
             description?: string;
-            predicate?: components["schemas"]["Predicate"];
+            query?: components["schemas"]["ScopeQuery"];
         };
         UpdateScopeRequest: {
             name: string;
             description?: string;
-            predicate?: components["schemas"]["Predicate"];
+            query?: components["schemas"]["ScopeQuery"];
         };
         PreviewResult: {
             /** Format: uuid */
             scope_id: string;
             name: string;
-            predicate: components["schemas"]["Predicate"];
+            query: components["schemas"]["ScopeQuery"];
+            /** @description How many assets the scope currently matches. The count is answered by inventory-service, compiling the SAME query string a CBOM generation sends it — so the number a customer tunes a scope against is the number of assets the artifact will cover, rather than a second opinion computed here. */
             preview: {
-                /** @enum {string} */
-                status: "not_implemented" | "ok";
+                /**
+                 * @description `ok` — `matched_count` is the live count. `unavailable` — inventory-service could not be reached, and `matched_count` is null. A count that cannot be obtained is NEVER reported as zero: "your scope matches nothing" is the worst possible wrong answer for an attestation boundary.
+                 * @enum {string}
+                 */
+                status: "ok" | "unavailable";
+                /** @description Null iff status is `unavailable`. */
                 matched_count: number | null;
-                note: string;
+                /** @description Present when status is `unavailable`, saying why. */
+                note?: string;
             };
         };
+        /**
+         * @description Which bill of materials an artifact is (ADR-0005 D6). One pipeline,
+         *     four products — same scope, same content hash, same signature, same
+         *     comparison; only the assembled components differ.
+         *
+         *     - `cbom` — cryptographic: certificates, algorithms, protocols, keys,
+         *       crypto libraries. The default, and what this API produced before
+         *       kinds existed.
+         *     - `sbom` — software: one `library` component per distinct software
+         *       product installed on the scope's assets, with the assets it was
+         *       found on as `evidence.occurrences`. No `dependencies` graph — an
+         *       install record says a product is present, not that anything depends
+         *       on it.
+         *     - `hbom` — hardware: one `device` component per hardware-class asset,
+         *       carrying its `hw.*` facts and its identifiers.
+         *     - `inventory` — everything: every asset as a component typed by its
+         *       class, endpoints as `services`, `asset_relationships` as the
+         *       `dependencies` graph, facts/identifiers/tags as `properties`, and
+         *       **only** the `vulnerability` producer's findings as
+         *       `vulnerabilities`. Other producers' findings are findings, not CVEs,
+         *       and are deliberately absent from that array.
+         * @default cbom
+         * @enum {string}
+         */
+        ArtifactKind: "cbom" | "sbom" | "hbom" | "inventory";
         /** @description An immutable, dated, content-hashed snapshot of every cryptographic component matching a Scope at the moment of generation. Storage is dual-path: exactly one of `storage_key` (S3) or inline content (dev, gated by `has_inline_content`). */
         CBOMArtifact: {
             /** Format: uuid */
@@ -367,6 +415,7 @@ export interface components {
             scope_name_snapshot: string;
             /** @description Optional human-meaningful name; omitted when empty. */
             name?: string;
+            artifact_kind: components["schemas"]["ArtifactKind"];
             /** @description Object-storage key when the canonical bytes live in S3. Omitted when the artifact is stored inline. */
             storage_key?: string;
             /** @description True when the canonical bytes live in Postgres (dev / no-S3). */
@@ -428,6 +477,8 @@ export interface components {
         GenerateCBOMRequest: {
             /** Format: uuid */
             scope_id: string;
+            /** @description Which bill of materials to assemble. Omitted means `cbom` — exactly what this endpoint produced before kinds existed, so an older client's request is unchanged in meaning as well as in shape. An unrecognised value is rejected with 400 rather than defaulted. */
+            kind?: components["schemas"]["ArtifactKind"];
             /** @description Optional human-meaningful name. */
             name?: string;
             /** @description Phase 4. Attach a compliance_attestation layer summarizing open findings for the scope's asset set. Server defaults to true when omitted — audit-ready by default. */
@@ -435,10 +486,10 @@ export interface components {
             /** @description Phase 4. HMAC-sign the artifact. Server defaults to true when omitted (requires INTERNAL_AUTH_SECRET on the server side). */
             sign?: boolean;
         };
-        UnsupportedPredicateError: {
+        InvalidScopeQueryError: {
             error: string;
-            /** @description The predicate field names that could not be evaluated. */
-            unsupported_fields: string[];
+            /** @description The stored scope query that no longer validates. */
+            query: string;
         };
         GenerateCBOMResponse: {
             /** Format: uuid */
@@ -480,6 +531,8 @@ export interface components {
         /** @enum {string} */
         ChangeCategory: "improvement" | "regression" | "drift" | "neutral";
         DiffChange: {
+            /** @description Citation target for this row — `r1`, `r2`, … assigned in the order `changes` is returned in, which is stable for a given pair of (immutable) artifacts. The narrative cites rows by this id; the UI anchors each row at `diff-row-<row_id>`. Not a durable identifier — `match_key` is the component identity. */
+            row_id: string;
             kind: components["schemas"]["ChangeKind"];
             category: components["schemas"]["ChangeCategory"];
             /** @description Stable identity used to align the two components. */
@@ -513,8 +566,41 @@ export interface components {
             };
             /** @description The change list. Currently serializes as `null` when there are no changes (Go nil slice) instead of `[]` — a known quirk mirroring the scopes `null`-on-empty finding, to be addressed in the same hardening pass. */
             changes?: components["schemas"]["DiffChange"][] | null;
-            /** @description One or two prose sentences summarizing the net change. */
+            /** @description Prose summarising the net change, with the citation markers stripped. Unchanged in shape from before citations existed, so a client that only wants a sentence can keep reading this field. */
             narrative: string;
+            narrative_detail?: components["schemas"]["NarrativeDetail"];
+        };
+        /** @description One row a narrative sentence draws on (ADR-0008 D4.4, "cite or refuse"). Rendered by the UI as a link to the cited diff row. */
+        Citation: {
+            /**
+             * @description What `ref` names. Only diff rows today.
+             * @enum {string}
+             */
+            kind: "diff_row";
+            /** @description The `row_id` of a change in this diff. */
+            ref: string;
+        };
+        /** @description The comparison narrative with its citations and provenance intact. The prose in `text` carries inline `[row:<row_id>]` markers; `citations` is the same set, derived from the text, in order of first appearance. */
+        NarrativeDetail: {
+            /** @description False means there is no narrative to show — render nothing, not an empty panel. In practice always true here: the deterministic narrator can summarise any set of rows, including the empty one. */
+            available: boolean;
+            /**
+             * @description Which narrator wrote it. `rules` is the deterministic narrator and is what every deployment without a configured AI provider gets, and what a configured one degrades to on any failure. `model` means a model wrote it and every sentence cited rows that resolved.
+             * @enum {string}
+             */
+            source: "rules" | "model";
+            /** @description The prose, with `[row:<row_id>]` citation markers inline. */
+            text?: string;
+            /** @description Each distinct row cited by `text`, in order of first appearance. Absent when the narrative cites nothing, which for the rule narrator means the comparison found no changes. */
+            citations?: components["schemas"]["Citation"][];
+            /** @description Always `inferred` (ADR-0008 D4.1). A narrative is prose derived from rows, never a measured fact, and it is never persisted as one. */
+            source_kind: string;
+            /** @description The producer — `narrator:rules` or `narrator:model`. */
+            source_ref: string;
+            /** @description The producer's own estimate, 0..1. The rule narrator reports 1 — it asserts only arithmetic over the rows it cites. The model narrator reports 0, meaning no estimate was made: we do not ask a model to score itself, and a number we invented would read as a measurement. */
+            confidence: number;
+            /** @description What produced it, as the provider reported it. Empty for the rule narrator — no model was involved, and "" is not a model named unknown. */
+            model_id: string;
         };
         /** @description CURRENT error shape returned by every cbom-service endpoint today: a single human-readable string under `error`. Unstructured — cannot be branched on safely. Superseded by the ADR-0002 `Error` envelope below as endpoints are hardened. */
         LegacyError: {
@@ -806,16 +892,25 @@ export interface operations {
                     "application/json": components["schemas"]["LegacyError"];
                 };
             };
-            /** @description The scope's predicate uses fields this deployment cannot evaluate. Generation is refused rather than producing an artifact whose contents are wider than the boundary it names. */
+            /** @description The scope's stored query no longer validates, so the artifact this would produce is not the one the scope describes. Generation is refused rather than producing an artifact whose contents are wider than the boundary it names. */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["UnsupportedPredicateError"];
+                    "application/json": components["schemas"]["InvalidScopeQueryError"];
                 };
             };
             500: components["responses"]["LegacyServerError"];
+            /** @description The requested `kind` is one this build recognises but this deployment has no assembler wired for. Distinct from 400 (unknown kind): the request was correct, the wiring is incomplete. */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
         };
     };
     listCBOMArtifacts: {
@@ -823,6 +918,8 @@ export interface operations {
             query?: {
                 /** @description Filter to artifacts generated from this scope. */
                 scope_id?: string;
+                /** @description Filter to one artifact kind. **Omitted means every kind, not `cbom`** — this is one list of the tenant's artifacts, and defaulting the filter would hide an SBOM someone just generated behind a filter they never set. An unrecognised value is 400, not an empty list. */
+                kind?: components["schemas"]["ArtifactKind"];
                 /** @description Maximum number of artifacts to return. Defaults to 50; values above 200 are clamped to 200. */
                 limit?: number;
             };
@@ -902,7 +999,7 @@ export interface operations {
         parameters: {
             query?: {
                 /** @description Wire format. Defaults to `cyclonedx`. */
-                format?: "cyclonedx" | "spdx" | "pdf";
+                format?: "cyclonedx" | "spdx" | "pdf" | "ocsf";
             };
             header?: never;
             path: {
@@ -922,6 +1019,7 @@ export interface operations {
                     "application/vnd.cyclonedx+json": string;
                     "application/spdx+json": string;
                     "application/pdf": string;
+                    "application/x-ndjson": string;
                 };
             };
             /** @description Object-stored CycloneDX downloads return a presigned URL in `Location`. */
@@ -945,6 +1043,15 @@ export interface operations {
             };
             404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
+            /** @description `format=ocsf` was requested but this deployment has no OCSF renderer wired. A wiring fault, not a missing subscription — the format is Core. */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
         };
     };
     verifyCBOMArtifact: {

@@ -192,7 +192,7 @@ func (j *StaleAssetDetector) detectStaleAssets(ctx context.Context) {
 // RLS: cross-tenant — runs on the bypass role. The per-tenant work below goes
 // through AssetLifecycleService, which sets app.tenant_id per tenant.
 //
-// `network_assets` is a security_invoker VIEW over the RLS-protected
+// `assets` is a security_invoker VIEW over the RLS-protected
 // network_assets_partitioned, so RLS applies to the caller here just as it would
 // on a table — the view is not an escape hatch. On the RLS-scoped handle with no
 // app.tenant_id this enumerator returns ZERO tenants and the whole detector
@@ -201,7 +201,7 @@ func (j *StaleAssetDetector) tenantsToProcess() ([]uuid.UUID, error) {
 	if j.bypassDB == nil {
 		return nil, nil
 	}
-	rows, err := j.bypassDB.Query(`SELECT DISTINCT tenant_id FROM network_assets WHERE deleted_at IS NULL`)
+	rows, err := j.bypassDB.Query(`SELECT DISTINCT tenant_id FROM assets WHERE deleted_at IS NULL`)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +268,7 @@ func (j *StaleAssetDetector) processTenant(ctx context.Context, tenantID uuid.UU
 	// Update statuses
 	var lastErr error
 	if len(warningAssets) > 0 {
-		if err := j.lifecycleService.UpdateStaleStatus(tenantID, warningAssets, "warning"); err != nil {
+		if err := j.lifecycleService.UpdateStaleStatus(tenantID, warningAssets, "warning", uuid.Nil); err != nil {
 			j.logger.Printf("ERROR: Failed to update warning status for tenant %s: %v", tenantID, err)
 			lastErr = err
 		} else {
@@ -277,7 +277,7 @@ func (j *StaleAssetDetector) processTenant(ctx context.Context, tenantID uuid.UU
 	}
 
 	if len(archivedAssets) > 0 {
-		if err := j.lifecycleService.UpdateStaleStatus(tenantID, archivedAssets, "archived"); err != nil {
+		if err := j.lifecycleService.UpdateStaleStatus(tenantID, archivedAssets, "archived", uuid.Nil); err != nil {
 			j.logger.Printf("ERROR: Failed to update archived status for tenant %s: %v", tenantID, err)
 			lastErr = err
 		} else {

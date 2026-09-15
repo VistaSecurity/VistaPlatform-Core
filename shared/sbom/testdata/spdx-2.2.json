@@ -1,0 +1,45 @@
+{
+  "spdxVersion": "SPDX-2.2",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "legacy-export",
+  "documentNamespace": "https://example.test/spdx/legacy-export-9f0c",
+  "creationInfo": {
+    "created": "2026-09-11T09:00:00Z",
+    "creators": ["Tool: some-older-tool-0.9"]
+  },
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-Package-root",
+      "name": "legacy-app",
+      "versionInfo": "1.0",
+      "supplier": "Organization: Legacy Ltd",
+      "licenseConcluded": "GPL-2.0-only"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-curl",
+      "name": "curl",
+      "versionInfo": "8.5.0",
+      "licenseConcluded": "curl",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:generic/curl@8.5.0"
+        }
+      ]
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-Package-root",
+      "relationshipType": "DESCRIBED_BY",
+      "relatedSpdxElement": "SPDXRef-DOCUMENT"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-root",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-curl"
+    }
+  ]
+}

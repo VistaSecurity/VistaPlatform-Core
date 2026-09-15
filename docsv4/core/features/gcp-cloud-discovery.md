@@ -55,6 +55,126 @@ SSL Proxy load balancers for non-HTTP TLS termination.
 
 ---
 
+## What is enumerated
+
+Alongside the cryptographic resources above, a run **inventories the project's
+compute and network estate**: Compute Engine instances, VPC networks, their
+subnetworks, and firewall membership. This is inventory rather than cryptography
+— an instance negotiates no protocol and states no at-rest encryption — and it
+is what makes the rest of a run legible.
+
+It is controlled by one switch per integration, **Inventory compute, networks and
+subnets** in Discovery → Cloud → Edit integration. It is **on by default**,
+including for integrations created before this feature existed.
+
+### Exact API calls
+
+| Call | Scope | Produces |
+|---|---|---|
+| `compute.instances.aggregatedList` | Project, **all zones**, paginated | One asset per instance |
+| `compute.networks.list` | Project (networks are global), paginated | One asset per VPC network |
+| `compute.subnetworks.aggregatedList` | Project, **all regions**, paginated | One asset per subnetwork |
+| `compute.firewalls.list` | Project (firewalls are global), paginated | Firewall **membership** — never the rules |
+
+The two **aggregated** forms are deliberate: GCP has around a hundred zones, and
+a per-zone `instances.list` loop would be a hundred calls to find a project with
+three VMs in it.
+
+**Cost.** Four extra project-wide calls per run, each paginated. GCP enumeration
+is not per-region, so the number does not grow with the number of regions you
+use.
+
+### IAM permissions to add
+
+```
+compute.instances.list
+compute.networks.list
+compute.subnetworks.list
+compute.firewalls.list
+```
+
+All four are in **`roles/compute.viewer`**, which the load-balancer discovery
+already requires — so a service account that can already discover HTTPS load
+balancers needs **no change**. The integration's existing
+`cloud-platform.read-only` scope covers them.
+
+### What lands in the inventory
+
+| GCP resource | Asset class | Identified by |
+|---|---|---|
+| Compute Engine instance | Compute instance | `projects/<p>/zones/<z>/instances/<name>` |
+| VPC network | Virtual network | `projects/<p>/global/networks/<name>` |
+| Subnetwork | Subnet | `projects/<p>/regions/<r>/subnetworks/<name>` |
+| Firewall rule | *not an asset* | recorded as membership on the instances it targets |
+
+The identifier is the **partial resource name**, not the self link. The Compute
+API echoes `www.googleapis.com` on some surfaces and `compute.googleapis.com` on
+others, and an identifier that changed with the endpoint host would create a
+second asset for one instance.
+
+Each instance carries its internal addresses, its NICs, its machine type, its
+labels, and the `cloud.*` placement facts. The relationships **network contains
+subnetwork** and **subnetwork contains instance** are drawn from the provider's
+own placement, and a subnetwork's CIDR becomes a network segment.
+
+**Firewall membership is computed**, because GCP has no security-group object: a
+firewall rule attaches to a network and selects instances by network tag. The
+rules implemented are GCP's own —
+
+- same network, and
+- the rule's `targetTags` intersect the instance's tags, **or**
+- the rule targets neither tags nor service accounts, in which case it applies
+  to every instance on the network.
+
+A rule targeted by **service account** is *not* claimed to apply: the platform
+does not collect an instance's service account, and a false membership is worse
+than a missing one. Disabled rules select nothing.
+
+New assets arrive in **Pending approval**. A re-run matches on the resource name
+and updates.
+
+### Two machines that share a private address
+
+A private address is not unique in a project, and the inventory is built so that
+it never has to be.
+
+- **Two VPC networks using the same CIDR** are two separate network segments, tagged
+  with the VPC network they belong to. Two instances at the same private address in two
+  different VPC networks are **two assets**, and neither is affected by the other.
+- **An address reused inside one subnetwork** — the provider gives a freed address to
+  the next instance created — is genuinely the same segment, and the platform cannot
+  tell from outside whether an address that changed hands means a new machine or
+  a rebuilt one. So it does not guess: the new instance is recorded as its own asset
+  in Pending approval, and a **review item appears in Approvals** asking whether
+  it is the machine that used to answer to that address. You decide; nothing is
+  merged on your behalf.
+
+  The previous asset is left exactly as it was, so its history, tags and
+  findings stay with the machine they were recorded against.
+
+### What is deliberately NOT collected
+
+- **`metadata.items`.** This is GCP's user-data — `startup-script` and
+  per-instance `ssh-keys` — and it routinely carries credentials. There is no
+  field for it.
+- **`disks[]`.** It carries `diskEncryptionKey`, which can hold a
+  customer-supplied key's `rsaEncryptedKey`, and `licenses`, which is an image
+  label rather than a statement about the running guest.
+- **Firewall rule content.** `allowed`, `denied`, `sourceRanges` and
+  `destinationRanges` are a map of your network. Only a rule's identity and its
+  targeting are read, and the targeting only so that membership can be computed.
+- **`serviceAccounts[]`.** A VM's service-account email and scopes describe what
+  it is authorised to do, not what it is.
+- **`accessConfigs`** (the external address). Public exposure is a posture
+  question answered by probing, and an ephemeral external address changes on
+  every stop/start.
+- **Guest operating system and source image.** GCE states neither on a list
+  call; the image is on the boot disk, which is not collected. The OS fields
+  stay empty rather than carrying a guess.
+- **The default internal DNS name.** `<name>.c.<project>.internal` is *derived*,
+  not stated. An instance's hostname is recorded only when the operator set a
+  custom one.
+
 ## Workflow
 
 ### 1. Configure GCP Integration

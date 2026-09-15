@@ -21,6 +21,17 @@ The device agent operates in a hybrid deployment model:
 - Registration key from the platform
 - Appropriate credentials for target devices (configured in platform)
 
+### Minimum supported Windows version
+
+**Windows Server 2019 or later** (or Windows 10 1809 and later) — for the host
+the agent runs on, and for any Windows host it collects from in remote mode.
+Remote host-inventory collection on Windows uses **PowerShell over SSH**, which
+needs the **OpenSSH Server** feature; that feature is available from these
+versions. WinRM is not supported (see "Exactly what runs, per OS" below).
+
+The OS/arch list for the binaries themselves is in
+[Downloads in INSTALL.md](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/INSTALL.md#downloads).
+
 ## Installation
 
 ### Getting the binary
@@ -136,6 +147,11 @@ The agent can be configured via environment variables or a YAML file:
 - `VERBOSE`: Enable verbose logging. Verbose is **on by default**; set
   `VERBOSE=false` (or `verbose: false` in the config file, or `-verbose=false`
   on the command line) to quiet a long-running install.
+- `HOST_INVENTORY_ENABLED`: set to `true` to have the agent inventory **its own
+  host** on a schedule (default: `false`). See
+  [Host inventory](#host-inventory-local-and-remote-modes).
+- `HOST_INVENTORY_INTERVAL`: how often it does so (default: `24h`, minimum
+  `1h` — a shorter value is raised to the minimum and logged).
 
 ### Configuration File
 
@@ -146,6 +162,10 @@ platform_url: https://platform.example.com
 registration_key: your-registration-key-here
 poll_interval: 30s
 verbose: true
+
+# Optional: inventory this host as well as interrogating network devices.
+host_inventory_enabled: true
+host_inventory_interval: 24h
 ```
 
 ## Registration
@@ -253,6 +273,223 @@ Currently supported:
 - **Generic HTTP** - REST API certificate extraction with TLS deep scan
 - **Generic SNMP** - SNMPv2c system information collection
 
+### Host inventory: local and remote modes
+
+Beyond interrogating network devices, the agent can build a general inventory of
+a **host** — its operating system and kernel, hardware identity, installed
+packages, listening sockets, and installed certificate stores. One collector,
+reached two ways:
+
+| | **Local** | **Remote** |
+|---|---|---|
+| What it describes | The machine the agent is installed on | Another machine, over SSH |
+| Credentials | None — it is already there | The target's stored SSH credentials |
+| Started by | The agent, on a schedule | A job you queue against a device |
+| Identity | Strongest: the agent's own id, plus the host's serial and MACs | Whatever the host reports |
+| Sees loopback sockets and the package database | Yes | Yes, subject to the login account's privileges |
+
+**Local mode** is off by default. Turn it on with `HOST_INVENTORY_ENABLED=true`
+(or `host_inventory_enabled: true` in the config file). The agent then collects
+on start and every `HOST_INVENTORY_INTERVAL` (default 24 hours, minimum 1 hour)
+and posts the result to the platform. An agent you installed to interrogate
+firewalls will not start enumerating its own host's software just because it was
+upgraded.
+
+**Remote mode** is queued like any other job, against a device that already has
+SSH credentials configured:
+
+```
+POST /api/v1/device-interrogation-service/devices/{id}/interrogate
+{
+  "job_type": "host_inventory",
+  "mode": "remote",
+  "transport": "ssh",
+  "agent_id": "<the agent that can reach the target>"
+}
+```
+
+`mode` must be `remote`: local collection is agent-originated, so a local-mode
+job would sit in the queue with nothing to claim it. `agent_id` is required —
+the collection runs *from* an agent that can reach the target host.
+
+#### Preview what would be sent
+
+```bash
+./device-agent --host-inventory-once
+```
+
+Collects this host once, prints the whole report as JSON, and exits. It contacts
+nothing and needs no enrollment, so you can see exactly what the agent would
+send before turning the schedule on. It exits `2` if some sections did not
+complete (the report is still printed).
+
+#### Exactly what runs, per OS
+
+Everything below is read-only. Nothing is written to the host, no configuration
+is changed, and no command takes an argument from outside the agent.
+
+**Linux**
+
+| What | Command or file |
+|---|---|
+| OS name and version | `/etc/os-release` |
+| Kernel | `uname -r` |
+| Host and domain names | `uname -n`, `hostname -f` |
+| Hardware vendor, model, serial, UUID, BIOS | `/sys/class/dmi/id/{sys_vendor,product_name,product_serial,product_uuid,bios_version}` |
+| Interfaces and addresses | `ip -j addr` |
+| Installed packages | `dpkg-query -W -f=…`, or `rpm -qa --queryformat=…`, or `apk info -v` |
+| Listening sockets | `ss -ltnup`, falling back to `/proc/net/tcp` and `/proc/net/tcp6` |
+| Trust stores | `find /etc/ssl/certs /etc/pki/tls/certs -maxdepth 1 -type f …`, then reads the certificate files it lists |
+
+`product_serial` and `product_uuid` are root-readable only on most
+distributions. An agent running unprivileged simply does not report them — the
+fields are **absent**, never blank, because a blank serial shared across the
+estate would merge every host into one asset.
+
+**macOS**
+
+| What | Command or file |
+|---|---|
+| OS name, version, build | `sw_vers` |
+| Kernel | `uname -r` |
+| Host and domain names | `uname -n`, `hostname -f` |
+| Hardware model, serial, platform UUID, boot ROM | `system_profiler SPHardwareDataType -json` |
+| Interfaces and addresses | `ifconfig -a` |
+| Installed packages | `pkgutil --pkgs`, plus each `/Applications/*/Contents/Info.plist` for names and versions |
+| Listening sockets | `lsof -nP -iTCP -sTCP:LISTEN` |
+| Trust stores | `/etc/ssl/cert.pem`, `/private/etc/ssl/certs` |
+
+The **System and login Keychains are not read.** Reading a keychain means asking
+for access to a store that also holds private keys and passwords, which a host
+inventory has no business holding.
+
+**Windows** (PowerShell, run as `powershell -NoProfile -NonInteractive
+-EncodedCommand …`)
+
+| What | Command |
+|---|---|
+| OS name, version, build, machine and domain names | `Get-CimInstance Win32_OperatingSystem`, `Win32_ComputerSystem` |
+| Hardware vendor, model, UUID, serial, BIOS | `Get-CimInstance Win32_ComputerSystemProduct`, `Win32_BIOS` |
+| Installed programs | `Get-ItemProperty` over the Uninstall keys under `HKLM:\SOFTWARE\…` and `HKLM:\SOFTWARE\WOW6432Node\…` |
+| Interfaces and addresses | `Get-NetAdapter`, `Get-NetIPAddress` |
+| Listening sockets | `Get-NetTCPConnection -State Listen`, `Get-NetUDPEndpoint` |
+| Certificate stores | `Get-ChildItem Cert:\LocalMachine\{Root,CA,My}` — **subject, issuer, thumbprint and expiry only** |
+
+Remote collection on Windows uses **PowerShell over SSH**, which needs the
+OpenSSH Server feature enabled. **The minimum supported Windows version is
+Windows Server 2019 or later** (or Windows 10 1809 and later) — that is where the
+OpenSSH Server feature is available. WinRM is not supported: its Go client would
+add sixteen modules, including a Kerberos stack, to a cross-compiled agent in
+order to run one PowerShell command over a channel SSH already provides. Asking
+for `"transport": "winrm"` returns an error that says so.
+
+#### What is never collected
+
+- **No private keys, ever.** Certificate stores are read for certificates only:
+  a PEM block that is not a `CERTIFICATE` is skipped without being decoded, and
+  the shape a certificate is stored in has four fields — subject, issuer,
+  SHA-256 fingerprint, expiry — with nowhere for key bytes to go. A private key
+  found loose in a trust directory is reported only as a **count** of
+  non-certificate blocks.
+- **No passwords, tokens or keys of any kind.** Nothing here reads a
+  configuration file, an environment block, or a credential store.
+- **No command transcripts.** A step that fails records the step name and a
+  short message, never the output it could not parse.
+- **No process arguments.** A listening socket records the process *name* that
+  holds it, which is the service identity; a command line can contain a password.
+- **No file contents** beyond `/etc/os-release`, the DMI fields listed above,
+  application manifests, and certificate files.
+
+#### Reading the result
+
+A collection reports each section as `ok`, `failed` or `unsupported`. This
+matters: a host with no packages listed and `packages: ok` genuinely has none,
+while `packages: failed` means the agent could not look. The two are never
+collapsed, so an unanswered question is not displayed as a clean answer.
+
+#### If a report is too large
+
+A very large host can produce a report the platform will not accept. The agent
+logs this distinctly:
+
+```
+Host inventory NOT submitted — report too large: 41231922 bytes exceeds the
+platform's cap. This will not fix itself: the next collection (in ~24h) will be
+the same size.
+```
+
+That is not a transient failure and the agent does not retry it — the same host
+produces the same size every run. Either reduce what is collected on that host
+or raise the platform's cap. The cap is 32 MiB, which is roughly three times the
+largest report the collector's own limits can produce (20,000 packages and 1,500
+trust-store certificates), so reaching it means something unusual: check the
+package count in `--host-inventory-once` output first.
+
+#### What appears in the inventory after a collection
+
+One **asset** per host, and everything the collection learned about it:
+
+| You will see | Where |
+|---|---|
+| The host, awaiting approval | **Discovery → Approvals**, class *Unknown host* |
+| Its OS, kernel, hardware vendor/model/serial and interfaces | The asset's **Facts** |
+| One entry per listening socket, with the process holding it and whether it is reachable from the network | The asset's **Endpoints** |
+| Its installed packages | The asset's **Software** tab, and the Inventory **Software** lens |
+| "Last host inventory: 2h ago — 412 packages, 18 listeners" | **Discovery → Sensors & Agents**, on the agent's row |
+| The same counts per run | **Discovery → Job Logs** |
+
+The asset arrives **pending approval**, like everything else the platform
+discovers: it appears in Approvals for someone to admit deliberately, and does
+not count against your inventory until they do.
+
+**The class is left as *Unknown host*, on purpose.** The agent measures an
+operating system and a hardware model; deciding that those make the machine a
+*server* rather than a *laptop* is a rule, not a measurement, and a
+plausible-looking guess is the kind that gets approved without being read. Set
+the class yourself when you approve the asset.
+
+**A second collection updates the same asset.** It is matched on the agent's own
+installation id, which is the strongest identifier the platform has — so
+re-collections do not create duplicates, and packages that have been uninstalled
+are marked *removed* rather than deleted, which is what keeps "this library was
+here in March and is gone now" answerable.
+
+**If a section failed, nothing is invented for it.** A host whose package
+database could not be read reports no package count and no software changes at
+all — it is not recorded as a host with no software, and its existing software
+list is left exactly as the last successful collection left it. The same applies
+to its listening sockets: a collection that could not read the socket table
+leaves the endpoint list alone rather than reporting every service as stopped.
+
+**A service that stops listening is marked closed, not deleted.** The agent
+reads the machine's own socket table, so it is the only thing that can tell you
+a port is genuinely no longer served — a network scan can only report what
+answered, and silence there might be a firewall. On the next collection a socket
+that has gone shows as **closed** on the asset's Endpoints tab, keeping its
+history; if it comes back it goes active again. Endpoints that something *else*
+found — an active scan, a cloud connector — are never touched by this, because
+the agent is only authoritative about its own host.
+
+**The Endpoints tab's Exposure column has three states, and blank is one of
+them.** "Bound to localhost" and "reachable" are both measurements the host
+itself made. A blank means nobody established it, which is every endpoint found
+by a network scan — a scan sees what answers, not what a socket is bound to. It
+is deliberately not shown as "reachable": that would be an exposure claim nobody
+measured.
+
+**If the same agent id turns up on different hardware** — a restored image, a
+cloned VM, a replacement chassis with the agent's state copied over — the
+platform does **not** silently merge the two. It opens a **merge proposal** in
+Approvals naming both, because two different hardware serials are two different
+machines whatever else they have in common, and asks you to settle it.
+
+> **Collections taken before this shipped are not back-filled.** They are still
+> on the job, complete, and nothing was lost — but they were collected under an
+> older projection and replaying them would produce assets identified by rules
+> that no longer apply. The next scheduled collection from each agent lands
+> normally, so on the default 24-hour interval every agent's host appears within
+> a day of upgrading. There is no reprocess action and none is planned.
+
 ### Heartbeat
 
 The agent sends a heartbeat to the platform every 60 seconds to indicate it's alive and ready for jobs. The heartbeat also reports the agent's binary version and the addresses bound on its host, which is how the fleet list shows a multi-homed agent's full address inventory — the platform cannot observe those itself, because NAT and ingress rewrite the connection source.
@@ -260,6 +497,8 @@ The agent sends a heartbeat to the platform every 60 seconds to indicate it's al
 ### Viewing the fleet
 
 Enrolled agents appear under **Discovery → Sensors & Agents**, in their own **Discovery agents** table below the network sensors. Sensors and agents are different things and are listed separately: the table shows, per agent, the host and its addresses, what the agent is permitted to interrogate, when it last ran a job and how many it has run in total, its version, and whether it is currently checking in.
+
+An agent that has reported a host inventory also shows **"Last host inventory: 2h ago — 412 packages, 18 listeners"** on its row. That is a separate line from the job counts because it answers a different question: a host inventory is not work anybody queued, so an agent busy interrogating firewalls that has never described its own host looks perfectly healthy on "47 jobs · 2h ago". The line is absent when the agent has never reported one, which usually means `HOST_INVENTORY_ENABLED` is not set.
 
 An agent whose last heartbeat is stale shows as offline even if its status column still reads `active` — nothing rewrites that column after enrollment, so the heartbeat is the authority.
 

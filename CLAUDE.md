@@ -119,7 +119,7 @@ cd admin-ui-v2 && npm install && npm run build && npm run test
 ### Linting / formatting
 
 ```bash
-make lint      # golangci-lint (services) + eslint (both UIs)
+make lint      # golangci-lint (every go.work module) + eslint (both UIs)
 make format    # gofmt + npm format
 ```
 

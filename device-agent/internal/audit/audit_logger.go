@@ -3,6 +3,7 @@ package audit
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -48,13 +49,23 @@ func (al *AuditLogger) Log(event AuditEvent) {
 	}
 	data, err := json.Marshal(event)
 	if err != nil {
+		log.Printf("audit: dropping %s event, cannot encode it: %v", event.EventType, err)
 		return
 	}
 	al.mu.Lock()
 	defer al.mu.Unlock()
-	al.file.Write(data)
-	al.file.Write([]byte("\n"))
-	al.file.Sync() // fsync so audit events survive a process crash
+	// A write-side failure here means an audit event is LOST, so it is never
+	// silently discarded: it is reported on the agent's own log. Callers keep
+	// a fire-and-forget signature (the interrogation must not fail because the
+	// audit disk is full), which is why this reports rather than returns.
+	if _, err := al.file.Write(append(data, '\n')); err != nil {
+		log.Printf("audit: failed to write %s event to %s: %v", event.EventType, al.filePath, err)
+		return
+	}
+	// fsync so audit events survive a process crash.
+	if err := al.file.Sync(); err != nil {
+		log.Printf("audit: failed to fsync %s: %v", al.filePath, err)
+	}
 }
 
 // LogInterrogation is a convenience method for device interrogation events

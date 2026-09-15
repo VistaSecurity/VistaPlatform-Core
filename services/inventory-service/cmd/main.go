@@ -12,9 +12,12 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/driftsettings"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/handlers"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/jobs"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
+	aiedition "github.com/vistasecurity/vistaplatform/shared/ai/edition"
+	seams "github.com/vistasecurity/vistaplatform/shared/ai/seams"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
@@ -75,10 +78,36 @@ func main() {
 	cryptoImplService := services.NewCryptoImplementationService(db)
 	cryptoRisksService := services.NewCryptoRisksService(db)
 	remediationService := services.NewRemediationService(db, algorithmService)
+	assetClassService := services.NewAssetClassService(db)
+	savedViewService := services.NewSavedViewService(db)
+	mergeProposalService := services.NewMergeProposalService(db)
 
 	// Initialize handlers
 	assetHandler := handlers.NewAssetHandler(assetService, db)
 	assetApprovalHandler := handlers.NewAssetApprovalHandler(assetService)
+	mergeProposalService.SetEventPublisher(eventPublisher)
+	lifecycleService.SetEventPublisher(eventPublisher)
+	assetPhase1Handler := handlers.NewAssetPhase1Handler(assetService, assetClassService, savedViewService, mergeProposalService)
+	// Settings -> Identification rules: the tenant auto-accept threshold
+	// (workstream 4.6). The model id travels with it so the page can name what
+	// the threshold is a threshold on, and say so when nothing is scoring.
+	identificationSettingsHandler := handlers.NewIdentificationSettingsHandler(
+		services.NewIdentificationSettingsService(db), seams.MatcherModelID(seams.Default().Matcher))
+	// Settings -> Asset Lifecycle: the drift baseline window (workstream 4.7).
+	// Its own endpoint rather than a field on the lifecycle policy, which lives
+	// in a table of its own — see the handler.
+	driftSettingsHandler := handlers.NewDriftSettingsHandler(driftsettings.NewService(db))
+	relationshipHandler := handlers.NewRelationshipHandler(services.NewRelationshipService(db))
+	// The tenant-wide topology (ADR-0006 D4 second half, workstream 3.8) — the
+	// map's "where is everything" view, as a site -> segment -> class tree of
+	// counts rather than the force graph D4 rejects.
+	topologyHandler := handlers.NewTopologyHandler(assetService)
+	classProposalHandler := handlers.NewClassProposalHandler(services.NewClassProposalService(db))
+	// SBOM ingestion (workstream 2.6b): the upload endpoints plus the two
+	// software reads they feed — an asset's Software tab and the tenant
+	// software catalogue behind the Inventory `software` lens.
+	sbomIngest := services.NewSBOMIngestService(db, assetService)
+	sbomHandler := handlers.NewSBOMHandler(sbomIngest)
 	discoveryHandler := handlers.NewDiscoveryHandler(assetService, discoveryService)
 	discoveryHandler.SetDB(db)
 	cryptoAssetsHandler := handlers.NewCryptoAssetsHandler(assetService)
@@ -163,6 +192,11 @@ func main() {
 	auditConfig.PlatformCACertPath = cfg.PlatformCACertPath
 	auditMiddleware := auditmiddleware.NewMiddleware(auditConfig)
 
+	// An auto-accepted merge is the one write on the identification path with
+	// no person behind it (workstream 4.6). It gets an audit event of its own,
+	// actor `matcher`, because there is nobody to ask about it afterwards.
+	assetService.SetAuditLogger(auditMiddleware)
+
 	// Store audit middleware in a way handlers can access it
 	// We'll use a middleware to set it in context
 	r.Use(func(c *gin.Context) {
@@ -178,6 +212,29 @@ func main() {
 	// database.DB wraps *sqlx.DB which embeds *sql.DB; sharedrbac.RequireTenantPermission
 	// needs the raw *sql.DB.
 	rawDB := db.DB.DB
+
+	// ── Query seam (ADR-0008 D1, build-plan 4.4b) ──────────────────────────
+	//
+	// Resolved once at start, like every other seam: the provider environment
+	// and the build tags decide the answer and neither changes between
+	// requests. edition.NewQuery returns seams.NullQuery in Core and in an
+	// Enterprise build with no reachable AI_PROVIDER — never nil — so the
+	// endpoint is wired identically in every edition and answers for itself.
+	//
+	// The catalogue is the PRODUCTION one, the same value the list endpoint
+	// validates and compiles against. Handing the seam a second catalogue would
+	// let it write queries this service then refuses — the 60-vs-70 band drift,
+	// one layer up.
+	//
+	// The sink is the service's audit rail, so the boundary's per-call records
+	// and the seam's own grounding record land together; two sinks would split
+	// one question's trail across two.
+	querySeam, queryDesc := aiedition.NewQuery(
+		services.AssetQueryCatalog(),
+		auditmiddleware.NewAISink(auditMiddleware, "inventory-service"))
+	askHandler := handlers.NewAskHandlers(querySeam, assetService, assetClassService, rawDB, 0)
+	log.Printf("🔎 natural-language query (query seam): implementation=%s state=%s linked=%t",
+		queryDesc.Implementation, queryDesc.State, aiedition.QueryLinked())
 
 	// API routes with JWT middleware
 	// Apply middleware to all routes under /api/v1
@@ -199,6 +256,11 @@ func main() {
 		api.POST("/inventory-service/assets", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsCreate), assetHandler.CreateAsset)
 		api.POST("/inventory-service/assets/bulk", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsCreate), assetHandler.CreateAssetsBulk)
 		api.GET("/inventory-service/assets/search", assetHandler.SearchAssets)
+		// A question in words, answered as a query you can edit plus the rows it
+		// selected (ADR-0006 D2/D9). Gated on assets.read — the same permission
+		// the MCP asset tools declare — because it reads the same rows the list
+		// reads and spends the tenant's model budget doing it.
+		api.POST("/inventory-service/ask", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsRead), askHandler.Ask)
 		api.GET("/inventory-service/assets/facets", assetHandler.GetAssetFacets)             // Before /:id
 		api.GET("/inventory-service/assets/stats", assetHandler.GetAssetStats)               // Before /:id to avoid route conflict
 		api.GET("/inventory-service/assets/recent-count", assetHandler.GetRecentAssetsCount) // Before /:id to avoid route conflict
@@ -213,6 +275,65 @@ func main() {
 		api.POST("/inventory-service/assets/:id/restore", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetHandler.RestoreAsset)
 		api.GET("/inventory-service/assets/:id/crypto", assetHandler.GetAssetCrypto)
 		api.GET("/inventory-service/assets/:id/history", assetHandler.GetAssetHistory)
+		api.GET("/inventory-service/assets/:id/class-history", assetHandler.GetAssetClassHistory)
+		// Phase-1 sub-resources: an asset's endpoints and identifiers are
+		// children now, not columns, so they are their own reads.
+		api.GET("/inventory-service/assets/:id/endpoints", assetPhase1Handler.GetAssetEndpoints)
+		api.GET("/inventory-service/assets/:id/identifiers", assetPhase1Handler.GetAssetIdentifiers)
+		// Relationships (ADR-0003): the asset's own edges, the neighbourhood the
+		// map draws, and the impact closure. Reads are JWT- and tenant-scoped
+		// like every other inventory read on this group — there is no
+		// `assets.read` middleware here, so do not write one into a comment
+		// and leave a reader believing the gate exists. Declaring or deleting
+		// an edge is an inventory write, so those take assets.update.
+		api.GET("/inventory-service/assets/:id/relationships", relationshipHandler.ListAssetRelationships)
+		api.POST("/inventory-service/assets/:id/relationships", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), relationshipHandler.CreateAssetRelationship)
+		api.DELETE("/inventory-service/assets/:id/relationships/:edgeId", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), relationshipHandler.DeleteAssetRelationship)
+		api.GET("/inventory-service/assets/:id/neighbourhood", relationshipHandler.GetNeighbourhood)
+		api.GET("/inventory-service/assets/:id/impact", relationshipHandler.GetImpact)
+		api.GET("/inventory-service/assets/:id/software", sbomHandler.GetAssetSoftware)
+		api.POST("/inventory-service/assets/:id/sbom", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), sbomHandler.UploadAssetSBOM)
+		api.POST("/inventory-service/sbom", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsCreate), sbomHandler.UploadSBOM)
+		api.GET("/inventory-service/software/products", sbomHandler.GetSoftwareProducts)
+		// The class taxonomy, for the facet rail and the class picker.
+		api.GET("/inventory-service/asset-classes", assetPhase1Handler.GetAssetClasses)
+		// Saved views: named query strings. Read needs assets.read (the group's
+		// default); writing one is a tenant-visible object, so it needs
+		// assets.update like any other inventory write.
+		api.GET("/inventory-service/saved-views", assetPhase1Handler.ListSavedViews)
+		api.POST("/inventory-service/saved-views", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.CreateSavedView)
+		api.GET("/inventory-service/saved-views/:id", assetPhase1Handler.GetSavedView)
+		api.PUT("/inventory-service/saved-views/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.UpdateSavedView)
+		api.DELETE("/inventory-service/saved-views/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.DeleteSavedView)
+		// Merge proposals live under the existing approvals surface: deciding
+		// one is an approval act and takes the same permission as approving an
+		// asset.
+		api.GET("/inventory-service/approvals/merge-proposals", assetPhase1Handler.ListMergeProposals)
+		// What the matcher merged WITHOUT asking, in the last 30 days. Not a
+		// queue — nothing here needs deciding — but a tenant who let the
+		// platform merge on its own has to be able to see what it did.
+		api.GET("/inventory-service/approvals/merge-proposals/auto-accepted", assetPhase1Handler.ListAutoAcceptedMerges)
+		// Settings -> Identification rules. Reading the threshold is an ordinary
+		// inventory read; CHANGING it grants the platform permission to merge two
+		// of the tenant's assets unasked, so it takes the same permission as any
+		// other inventory write.
+		api.GET("/inventory-service/settings/identification", identificationSettingsHandler.GetIdentificationSettings)
+		api.PUT("/inventory-service/settings/identification", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), identificationSettingsHandler.UpdateIdentificationSettings)
+		api.GET("/inventory-service/settings/drift", driftSettingsHandler.GetDriftSettings)
+		api.PUT("/inventory-service/settings/drift", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), driftSettingsHandler.UpdateDriftSettings)
+		api.POST("/inventory-service/approvals/merge-proposals/:id/accept", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.AcceptMergeProposal)
+		api.POST("/inventory-service/approvals/merge-proposals/:id/keep-separate", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.KeepMergeProposalSeparate)
+		// Relationship proposals are the same surface and the same permission:
+		// "no second queue anywhere" (ADR-0006 D6).
+		api.GET("/inventory-service/approvals/relationships", relationshipHandler.ListRelationshipProposals)
+		api.POST("/inventory-service/approvals/relationships/:edgeId/accept", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), relationshipHandler.AcceptRelationshipProposal)
+		api.POST("/inventory-service/approvals/relationships/:edgeId/reject", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), relationshipHandler.RejectRelationshipProposal)
+		// Class proposals: the same surface and the same permission again
+		// (workstream 2.10b). A class the rules argued about an asset that
+		// already has one is a proposal, never a write — ADR-0008 D3.
+		api.GET("/inventory-service/approvals/classes", classProposalHandler.ListClassProposals)
+		api.POST("/inventory-service/approvals/classes/:id/accept", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), classProposalHandler.AcceptClassProposal)
+		api.POST("/inventory-service/approvals/classes/:id/reject", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), classProposalHandler.RejectClassProposal)
 		api.GET("/inventory-service/risk/summary", assetHandler.GetRiskSummary)
 		api.GET("/inventory-service/risk/posture/trend", assetHandler.GetPostureTrend)
 		api.GET("/inventory-service/pqc/summary", assetHandler.GetPQCReadinessSummary)
@@ -355,6 +476,14 @@ func main() {
 		api.POST("/assets/:id/restore", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetHandler.RestoreAsset)
 		api.GET("/assets/:id/crypto", assetHandler.GetAssetCrypto)
 		api.GET("/assets/:id/history", assetHandler.GetAssetHistory)
+		api.GET("/assets/:id/class-history", assetHandler.GetAssetClassHistory)
+		api.GET("/assets/:id/endpoints", assetPhase1Handler.GetAssetEndpoints)
+		api.GET("/assets/:id/identifiers", assetPhase1Handler.GetAssetIdentifiers)
+		api.GET("/assets/:id/software", sbomHandler.GetAssetSoftware)
+		api.POST("/assets/:id/sbom", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), sbomHandler.UploadAssetSBOM)
+		api.POST("/sbom", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsCreate), sbomHandler.UploadSBOM)
+		api.GET("/software/products", sbomHandler.GetSoftwareProducts)
+		api.GET("/asset-classes", assetPhase1Handler.GetAssetClasses)
 		api.GET("/risk/summary", assetHandler.GetRiskSummary)
 		api.GET("/risk/posture/trend", assetHandler.GetPostureTrend)
 		// Direct crypto
@@ -429,9 +558,52 @@ func main() {
 		apiv2.POST("/inventory-service/infrastructure-assets", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsCreate), assetHandler.CreateAsset)
 		apiv2.POST("/inventory-service/infrastructure-assets/bulk", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsCreate), assetHandler.CreateAssetsBulk)
 		apiv2.GET("/inventory-service/infrastructure-assets/search", assetHandler.SearchAssets)
+		apiv2.POST("/inventory-service/ask", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsRead), askHandler.Ask)
 		apiv2.GET("/inventory-service/infrastructure-assets/facets", assetHandler.GetAssetFacets)
+		// Static segment, registered beside `facets` and `stale`: gin routes
+		// static children ahead of the `:id` parameter, so this does not shadow
+		// the per-asset paths and they do not swallow it.
+		apiv2.GET("/inventory-service/infrastructure-assets/topology", topologyHandler.GetTopology)
 		apiv2.GET("/inventory-service/infrastructure-assets/stats", assetHandler.GetAssetStats)
 		apiv2.GET("/inventory-service/infrastructure-assets/recent-count", assetHandler.GetRecentAssetsCount)
+		apiv2.GET("/inventory-service/infrastructure-assets/:id/endpoints", assetPhase1Handler.GetAssetEndpoints)
+		apiv2.GET("/inventory-service/infrastructure-assets/:id/identifiers", assetPhase1Handler.GetAssetIdentifiers)
+		// Relationships (ADR-0003). This is the spelling the spec documents and
+		// the UI calls; the v1 `/assets/...` twins above exist for parity with
+		// the rest of the legacy surface.
+		apiv2.GET("/inventory-service/infrastructure-assets/:id/relationships", relationshipHandler.ListAssetRelationships)
+		apiv2.POST("/inventory-service/infrastructure-assets/:id/relationships", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), relationshipHandler.CreateAssetRelationship)
+		apiv2.DELETE("/inventory-service/infrastructure-assets/:id/relationships/:edgeId", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), relationshipHandler.DeleteAssetRelationship)
+		apiv2.GET("/inventory-service/infrastructure-assets/:id/neighbourhood", relationshipHandler.GetNeighbourhood)
+		apiv2.GET("/inventory-service/infrastructure-assets/:id/impact", relationshipHandler.GetImpact)
+		// Software: what is installed on this asset (workstream 2.6b). The
+		// upload needs assets.update — it changes what the inventory says about
+		// an existing asset — while the asset-less upload below CREATES one and
+		// needs assets.create.
+		apiv2.GET("/inventory-service/infrastructure-assets/:id/software", sbomHandler.GetAssetSoftware)
+		apiv2.POST("/inventory-service/infrastructure-assets/:id/sbom", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), sbomHandler.UploadAssetSBOM)
+		apiv2.POST("/inventory-service/sbom", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsCreate), sbomHandler.UploadSBOM)
+		apiv2.GET("/inventory-service/software/products", sbomHandler.GetSoftwareProducts)
+		apiv2.GET("/inventory-service/asset-classes", assetPhase1Handler.GetAssetClasses)
+		apiv2.GET("/inventory-service/saved-views", assetPhase1Handler.ListSavedViews)
+		apiv2.POST("/inventory-service/saved-views", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.CreateSavedView)
+		apiv2.GET("/inventory-service/saved-views/:id", assetPhase1Handler.GetSavedView)
+		apiv2.PUT("/inventory-service/saved-views/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.UpdateSavedView)
+		apiv2.DELETE("/inventory-service/saved-views/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.DeleteSavedView)
+		apiv2.GET("/inventory-service/approvals/merge-proposals", assetPhase1Handler.ListMergeProposals)
+		apiv2.GET("/inventory-service/approvals/merge-proposals/auto-accepted", assetPhase1Handler.ListAutoAcceptedMerges)
+		apiv2.GET("/inventory-service/settings/identification", identificationSettingsHandler.GetIdentificationSettings)
+		apiv2.PUT("/inventory-service/settings/identification", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), identificationSettingsHandler.UpdateIdentificationSettings)
+		apiv2.GET("/inventory-service/settings/drift", driftSettingsHandler.GetDriftSettings)
+		apiv2.PUT("/inventory-service/settings/drift", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), driftSettingsHandler.UpdateDriftSettings)
+		apiv2.POST("/inventory-service/approvals/merge-proposals/:id/accept", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.AcceptMergeProposal)
+		apiv2.POST("/inventory-service/approvals/merge-proposals/:id/keep-separate", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.KeepMergeProposalSeparate)
+		apiv2.GET("/inventory-service/approvals/relationships", relationshipHandler.ListRelationshipProposals)
+		apiv2.POST("/inventory-service/approvals/relationships/:edgeId/accept", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), relationshipHandler.AcceptRelationshipProposal)
+		apiv2.POST("/inventory-service/approvals/relationships/:edgeId/reject", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), relationshipHandler.RejectRelationshipProposal)
+		apiv2.GET("/inventory-service/approvals/classes", classProposalHandler.ListClassProposals)
+		apiv2.POST("/inventory-service/approvals/classes/:id/accept", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), classProposalHandler.AcceptClassProposal)
+		apiv2.POST("/inventory-service/approvals/classes/:id/reject", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), classProposalHandler.RejectClassProposal)
 		apiv2.POST("/inventory-service/infrastructure-assets/approve", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetApprovalHandler.ApproveAssets)
 		apiv2.POST("/inventory-service/infrastructure-assets/deny", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetApprovalHandler.DenyAssets)
 		apiv2.GET("/inventory-service/infrastructure-assets/stale", assetLifecycleHandler.GetStaleAssets)
@@ -449,6 +621,7 @@ func main() {
 		apiv2.GET("/inventory-service/infrastructure-assets/:id/crypto", assetHandler.GetAssetCrypto)
 		apiv2.GET("/inventory-service/infrastructure-assets/:id/certificates", certificateHandler.GetCertificatesByAsset)
 		apiv2.GET("/inventory-service/infrastructure-assets/:id/history", assetHandler.GetAssetHistory)
+		apiv2.GET("/inventory-service/infrastructure-assets/:id/class-history", assetHandler.GetAssetClassHistory)
 		// Hard delete is destructive and irrecoverable — require assets.manage,
 		// not just assets.delete, to mark it as elevated.
 		apiv2.DELETE("/inventory-service/infrastructure-assets/:id/hard", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsManage), assetHandler.HardDeleteAsset)
@@ -599,9 +772,27 @@ func main() {
 		if hooks.RegisterCMDBSyncRoutes != nil {
 			hooks.RegisterCMDBSyncRoutes(apiv2, db, rawDB, assetService, os.Getenv("ENCRYPTION_MASTER_KEY"))
 		}
+
+		// The connector CATALOGUE is Core: a Core install can see the whole
+		// shape of the product, including what it would get by upgrading.
+		// What it cannot do is configure a paid connector.
+		apiv2.GET("/inventory-service/connectors", handlers.NewConnectorCatalogueHandler(rawDB).List)
+
+		// The NetBox network-source-of-truth connector (workstream 2.7) is
+		// Enterprise. Exactly one of these two branches registers the route
+		// shape: the real handlers, or 402 stubs at the same paths. Core
+		// answering 402 rather than 404 is deliberate — see
+		// internal/handlers/connector_edition.go.
+		if hooks.RegisterNetBoxRoutes != nil {
+			hooks.RegisterNetBoxRoutes(apiv2, db, rawDB, assetService, os.Getenv("ENCRYPTION_MASTER_KEY"))
+		} else {
+			handlers.RegisterUnavailableConnectorRoutes(apiv2)
+		}
 	}
 
-	// Health check server (HTTP, port 8080)
+	// Health check server (HTTP, port 8080). Answers a static body and never
+	// calls a seam, so it keeps its own short timeout — see
+	// seams.GenerativeWriteTimeout for why the API server below does not.
 	healthRouter := gin.New()
 	healthRouter.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -635,7 +826,7 @@ func main() {
 		apiServer.Addr = cfg.Server.Host + ":" + cfg.TLSPort
 		apiServer.ReadHeaderTimeout = 5 * time.Second
 		apiServer.ReadTimeout = 10 * time.Second
-		apiServer.WriteTimeout = 15 * time.Second
+		apiServer.WriteTimeout = seams.GenerativeWriteTimeout
 		apiServer.IdleTimeout = 60 * time.Second
 	} else {
 		// Fallback to HTTP if mTLS disabled
@@ -644,7 +835,7 @@ func main() {
 			Handler:           r,
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       10 * time.Second,
-			WriteTimeout:      15 * time.Second,
+			WriteTimeout:      seams.GenerativeWriteTimeout,
 			IdleTimeout:       60 * time.Second,
 		}
 	}
@@ -676,6 +867,44 @@ func main() {
 	certExpiryJob := jobs.NewCertificateExpiryScanJob(db, bypassDB, eventPublisher)
 	go certExpiryJob.Start(ctx)
 	log.Println("Certificate expiry scan job started")
+
+	// The `eol` and `vulnerability` finding producers (ADR-0005 D3, workstreams
+	// 3.3/3.4 part 2). Nightly over every tenant, because the catalogues move
+	// under a static inventory; and triggered after an SBOM upload, because the
+	// inventory moves under static catalogues.
+	//
+	// A failure to construct is logged and NOT fatal: the producers are one
+	// source of findings, and an inventory service that refused to start
+	// because a producer key was wrong would take the whole tenant UI down for
+	// a background pass.
+	if producerJob, err := jobs.NewFindingProducerJob(db.DB.DB, bypassDB); err != nil {
+		log.Printf("WARNING: finding producers not started: %v", err)
+	} else {
+		go producerJob.Start(ctx)
+		// An SBOM upload re-runs the producers for that tenant. Through the
+		// job's own subscribe method rather than a bare OnIngested call, so the
+		// wiring has a name a test can assert on — see
+		// TestFindingProducerJob_MainWiresTheSBOMTrigger.
+		producerJob.SubscribeToSoftwareChanges(sbomIngest)
+		// A discovery that wrote a crypto configuration re-runs them too.
+		// Ingest no longer rolls risk up itself (ADR-0005 D4: the score is MAX
+		// over the asset's open findings, and the finding is the producer's to
+		// write), so without this line a newly-observed TLS 1.0 endpoint would
+		// not move its asset's score until the nightly pass — see
+		// TestFindingProducerJob_MainWiresTheCryptoTrigger.
+		producerJob.SubscribeToCryptoChanges(assetService)
+		log.Println("Finding producers started (eol, vulnerability, crypto)")
+	}
+
+	// Scheduled NetBox imports (Enterprise; nil hook in Core). The loop LOOKS
+	// for due work every five minutes — the per-connection cadence is the
+	// connection's own `schedule`. A stored schedule with no runner is worse
+	// than no schedule, because the tenant believes their inventory is being
+	// refreshed; this is the runner.
+	if hooks.StartNetBoxScheduler != nil {
+		go hooks.StartNetBoxScheduler(ctx, db, rawDB, bypassDB, assetService,
+			os.Getenv("ENCRYPTION_MASTER_KEY"), 5*time.Minute)
+	}
 
 	// Start health check server (only when mTLS is enabled - API server on different port)
 	// When mTLS is disabled, API server includes /health endpoint on same port

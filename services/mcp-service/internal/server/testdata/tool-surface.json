@@ -1,0 +1,545 @@
+[
+  {
+    "name": "vistaplatform_ask",
+    "description": "Ask a question about this tenant's inventory in plain words and get back the GROUNDED answer: the query-language predicate the platform wrote and ran, the rows it selected, and a summary in which every sentence cites a returned row as `[row:\u003casset id\u003e]`. Sentences that cited nothing, or cited a row that was not returned, were dropped before you saw them.\nPREFER THIS over composing a predicate yourself when you are not sure of the field names: the platform's translator is validated against the live catalogue and a query that does not validate is refused with diagnostics rather than guessed at. Use vistaplatform_query_assets directly when you already know the predicate you want — it is one call instead of several, and the answer is yours to summarise.\nRead the result in order of authority: `query` first (the CANONICAL predicate that ran, including the default scope the platform AND-s in — repeat THAT string, not the question), then `rows`, then `text`. `provenance.model_id` names what wrote the summary; `source_kind` is always `inferred`.\nENTERPRISE, and provider-dependent. When this deployment cannot answer, the result is `{\"available\": false, \"reason\": …}` — an honest refusal naming which of edition / provider / a tenant switch is in the way, and never a fabricated answer. Treat it as \"use vistaplatform_query_assets instead\", not as \"the inventory is empty\", and do not retry.\nHONESTY: `risk_score` 0 with an EMPTY `risk_assessed_by` means NOT ASSESSED — nobody looked. 0 with a non-empty `risk_assessed_by` means assessed and clean. Never report the first as \"no risk\".",
+    "read_only": true,
+    "title": "Ask about inventory",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "question": {
+          "description": "A question about this tenant's inventory, in plain words. Not a query-language predicate — use vistaplatform_query_assets for one of those.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_asset_facets",
+    "description": "Count assets by one or more facets over the set a query selects — the way to answer \"how many, broken down by …?\" without paging through rows. Returns, per requested facet, its buckets as {key, count}, plus `query`: the canonical query the counts were taken over. The counts and vistaplatform_query_assets run the SAME predicate, so a total here and a list there always describe the same set.\nQUERY LANGUAGE. One line of text; adjacent terms mean AND. Operators: `:` loose/case-insensitive (substring on text fields, subtree on `class`), `=` exact, `!=`, `\u003c` `\u003c=` `\u003e` `\u003e=`, `in (a, b)`, `~ \"regex\"`, `field:[lo to hi]`, `*` wildcard, `exists(field)`, `not`/`-` to negate, parentheses to group. Child collections are EXISTS sub-predicates: `endpoint:(…)`, `cert:(…)`, `crypto:(…)`, `software:(…)`, `finding:(…)`, `identifier:(…)`. Dates: `now`, `now-30d`, `now+7d` (units s m h d w mo y). There is no null literal — use `exists(field)`.\nFIELD NAMESPACES: bare names are first-class asset columns (class, display_name, hostname, primary_address, environment, business_unit, owner_email, support_group, site, region, zone, status, ownership, stale_status, source, risk, risk_score, risk_assessed_by, confidence_score, first_seen, last_seen); `attr.` a class attribute (attr.os_version); `fact.` a registered fact key (fact.os.name); `id.` an identifier kind (id.serial_number, id.mac, id.any); `tag.` a tenant tag (tag.owner). A bare name NEVER resolves to an attribute, fact, identifier or tag — the prefix is required.\nEXAMPLES:\n  1. environment:production class:hardware.computer.server not exists(owner_email)\n     — production servers nobody owns.\n  2. cert:(not_after \u003c now+30d)\n     — anything with a certificate expiring in the next 30 days.\n  3. risk \u003e= high and last_seen \u003e now-7d\n     — high or critical risk, seen in the last week.\n  4. crypto:(algorithm.deprecated:true) and environment in (production, staging)\n     — deprecated algorithms outside dev.\n  5. risk:not_assessed and class:hardware\n     — hardware NOBODY HAS SCORED. This is not `risk:informational`, which means \"we looked and it scored zero\". The two are different sets and neither implies the other.\nA query that does not validate is REFUSED, never guessed at: the tool returns the diagnostics (code, message, byte span, suggestion) and no rows. Read them, fix the query, call again.\nDEFAULT SCOPE: with no `status` term the platform adds `status:monitoring` — approved inventory only. It is a default, not a floor: name `status` yourself and it steps aside, so `status:pending_approval` reaches the approval queue and `status:archived` reaches assets that were archived or merged away. The echoed query is how you tell which happened.\nNOTE ON `risk`: the risk facet bands the persisted per-asset score. Assets nobody has scored land in the not-assessed bucket rather than in the zero bucket — do not add them to \"low risk\".",
+    "read_only": true,
+    "title": "Count assets by facet",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "facets": {
+          "description": "Facet names to count, 1-8 of: class, risk, status, environment, ownership, stale_status, site, region, zone, segment, owner_email, business_unit, support_group, operating_system, source, proposed_by, tag, has_findings, has_endpoints",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "null",
+            "array"
+          ]
+        },
+        "limit": {
+          "description": "Maximum buckets per facet, 1-200 (default 50)",
+          "type": "integer"
+        },
+        "query": {
+          "description": "The same query-language predicate the asset list takes. The counts describe exactly the set that query selects; empty means all of inventory.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "facets"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_compare_cbom_artifacts",
+    "description": "Diff two CBOM artifacts of the same tenant. Components are matched by purl/OID/fingerprint and every change is categorized as improvement, regression, drift or neutral with a one-phrase reason — ideal for answering \"did our crypto posture regress since the last snapshot?\".",
+    "read_only": true,
+    "title": "Compare CBOM artifacts",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "base_id": {
+          "description": "UUID of the older (baseline) CBOM artifact",
+          "type": "string"
+        },
+        "head_id": {
+          "description": "UUID of the newer CBOM artifact to compare against the baseline",
+          "type": "string"
+        }
+      },
+      "required": [
+        "base_id",
+        "head_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_get_asset",
+    "description": "Fetch one asset by UUID with full detail: its class and how the class was decided (`class_source_kind` measured/declared/imported/inferred, `class_source_ref`, `class_confidence`), all of its identifiers (serial number, MAC, cloud resource id, …), all of its endpoints (address, port, transport, protocol, service), its class attributes and tags, its risk, and its crypto configurations and linked certificates. An empty `endpoints` array is a real answer, not a gap — an at-rest cloud resource has no endpoint at all. If the result carries `merged_into`, this id is a TOMBSTONE: the asset was merged into the one that field names, and it answers 200 with `asset_status: archived` rather than 404 so a stale id still resolves. Follow the pointer and report the survivor — never present a tombstone as live inventory.\nHONESTY: `risk_score` 0 with an EMPTY `risk_assessed_by` means NOT ASSESSED — nobody looked. 0 with a non-empty `risk_assessed_by` means assessed and clean. Never report the first as \"no risk\".",
+    "read_only": true,
+    "title": "Get asset detail",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "description": "UUID of the asset",
+          "type": "string"
+        }
+      },
+      "required": [
+        "asset_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_get_asset_history",
+    "description": "The change history of one asset, newest first: what changed, who or what changed it (`source`, `actor_user_id`), and when. Use it to answer \"when did this move / get re-classified / change owner?\" and to date a posture change. History records what the platform observed or was told; it is not an audit log of user sessions.",
+    "read_only": true,
+    "title": "Get asset history",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "description": "UUID of the asset",
+          "type": "string"
+        }
+      },
+      "required": [
+        "asset_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_get_asset_impact",
+    "description": "What is affected if this asset changes — the blast radius. Returns the reachable assets with the hop distance of each, a per-depth breakdown, and `total`.\nDIRECTION: `downstream` (the default) is the DEPENDENTS — what breaks if you take this asset down. `upstream` is what this asset itself rests on. People asking \"what depends on this\" want downstream.\nThe walk follows the NINE impact-bearing relationship types, echoed back as `types`. `connects_to` is the one exclusion: an observed network flow is not a dependency, and including it would make almost any asset's blast radius the entire tenant. Quote the answer as being over those types, not as \"everything related\".\nEach type is walked in the direction its own meaning implies, so `downstream` of a controller lists the access points it manages and `downstream` of a virtual network lists the subnets it contains, while `downstream` of a server lists the applications that run on it. A user-declared `impacts` edge to a business service is included as the LAST hop; the walk does not continue past the service.\nOnly ACTIVE edges count, so an impact answer never rests on a proposal nobody has agreed to. The asset itself is excluded from its own result. Depth is 1-10, default 6. If `truncated` is true the closure hit the 500-node cap and `total` is a floor — say so rather than reporting a count as complete.\nThis is a read of recorded relationships, not a prediction. It can only know what has been collected or declared: an empty result means no impact-bearing edges are RECORDED, which is not the same as \"nothing depends on this\".",
+    "read_only": true,
+    "title": "Get asset impact",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "description": "UUID of the asset",
+          "type": "string"
+        },
+        "depth": {
+          "description": "Hops to follow, 1-10 (default 6)",
+          "type": "integer"
+        },
+        "direction": {
+          "description": "downstream (default) for what depends on this asset, upstream for what this asset depends on",
+          "type": "string"
+        }
+      },
+      "required": [
+        "asset_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_get_asset_neighbourhood",
+    "description": "The graph around one asset to N hops: the assets reached and the edges between them. Use it to answer \"what is this connected to\" and to describe a segment's shape; use vistaplatform_get_asset_impact for \"what breaks if this changes\", which is a narrower and different walk.\nEach node carries its SHORTEST hop count from the root, so a node reachable by several routes appears once.\nCAPS ARE REAL AND MUST BE REPORTED. Depth is 1-3. At most 500 nodes and 2000 edges come back; past that the response sets `truncated: true` and still reports `total_nodes` and `total_edges` — the true sizes. When `truncated` is true you are looking at a PREFIX: say so, give the real totals, and never describe the result as the complete picture.\nActive edges only unless `include_pending` is set. A pending edge is a proposal nobody has agreed to; if you include them, label them as proposals rather than as connections that exist.",
+    "read_only": true,
+    "title": "Get asset neighbourhood",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "description": "UUID of the asset at the centre",
+          "type": "string"
+        },
+        "depth": {
+          "description": "Hops from the asset, 1-3 (default 2). Larger is refused, not clamped.",
+          "type": "integer"
+        },
+        "include_pending": {
+          "description": "Also draw pending (unapproved) edges and the assets only they reach. Default false.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "asset_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_get_asset_relationships",
+    "description": "The typed relationships attached to one asset — what it runs on, hosts, depends on, connects to, is a member of, manages, and is used by. Returns each edge with the PEER's summary (id, display name, class, status, strongest identifier), the provenance, the confidence, and when it was first and last seen, plus `total`.\nDIRECTION AND LABEL ARE RELATIVE TO THE ASSET YOU ASKED ABOUT, not properties of the edge. An edge is stored once in its canonical direction and the reverse label is derived, so the same edge reads `runs_on` from one end and `runs` from the other. Report the `label`, which is already correct for the asset in your request.\nPROVENANCE decides how much the edge is worth: `measured` was observed by a collector, `declared` was asserted by a user, `imported` came from a CMDB, `inferred` is the platform's own guess and is NOT agreed fact — an inferred edge sits `pending` until a person accepts it in Approvals. Say which when it matters.\nRead `total`, not the array's length: the page stops at `limit`. Rejected edges are excluded unless you ask for `status: \"rejected\"` — someone decided those were wrong.",
+    "read_only": true,
+    "title": "Get asset relationships",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "description": "UUID of the asset",
+          "type": "string"
+        },
+        "direction": {
+          "description": "out (this asset is the from end), in (it is the to end), or both (default)",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Edges to return, 1-200 (default 50)",
+          "type": "integer"
+        },
+        "offset": {
+          "description": "Edges to skip, for paging through total",
+          "type": "integer"
+        },
+        "status": {
+          "description": "pending, active, rejected or stale. Omit to get everything except rejected.",
+          "type": "string"
+        },
+        "type": {
+          "description": "One relationship type: runs_on, hosted_on, virtualized_by, depends_on, connects_to, member_of, contains, manages, sends_data_to or impacts",
+          "type": "string"
+        }
+      },
+      "required": [
+        "asset_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_get_cbom_artifact",
+    "description": "Fetch one CBOM artifact's metadata by UUID: scope snapshot, content hash, size, component count, data freshness and signature info. (Metadata only — download the CycloneDX document itself from the Vista Platform UI.)",
+    "read_only": true,
+    "title": "Get CBOM artifact",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "description": "UUID of the CBOM artifact",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_get_compliance_summary",
+    "description": "Evaluate one licensed framework against the tenant's inventory: overall score, failing-control count, affected assets, per-family pass/warn/fail rollup and the per-control status list. Use vistaplatform_get_control_findings to drill into a failing control.",
+    "read_only": true,
+    "title": "Get compliance summary",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "environment": {
+          "description": "Restrict evaluation to one environment, e.g. production",
+          "type": "string"
+        },
+        "framework_id": {
+          "description": "UUID of the platform framework to evaluate (from vistaplatform_list_compliance_frameworks)",
+          "type": "string"
+        },
+        "severity": {
+          "description": "Restrict to one severity: CRITICAL, HIGH, MEDIUM or LOW",
+          "type": "string"
+        }
+      },
+      "required": [
+        "framework_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_get_control_findings",
+    "description": "Drill into one compliance control: its description, rationale, evidence summary by severity, the paginated findings (each tied to a concrete subject) and any active overrides. On an embedded asset, `asset_type` is the asset's CLASS KEY from the class tree (e.g. `server`, `network_device.switch`) — resolve it with vistaplatform_list_asset_classes, and use vistaplatform_get_asset for its identifiers and endpoints. The finding's own `subject_type` is a different field: it says which KIND of object the measurement was taken on (asset or certificate), and `subject_id` is that object's id. A cryptographic-configuration measurement is taken per ASSET; the configurations it was read from are listed in `evidence.crypto_implementation_ids`, so follow those to reach them rather than reading `subject_id` as one. `producer` says which producer judged it; compliance findings also carry `control_id`. A control with no findings is not automatically a pass — check its status, because a control nothing was measured for is NOT ASSESSED.",
+    "read_only": true,
+    "title": "Get control findings",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "control_id": {
+          "description": "UUID of the control (from vistaplatform_get_compliance_summary controls list)",
+          "type": "string"
+        },
+        "framework_id": {
+          "description": "UUID of the framework the control belongs to",
+          "type": "string"
+        },
+        "page": {
+          "description": "Page number, starting at 1",
+          "type": "integer"
+        },
+        "page_size": {
+          "description": "Results per page, 1-100 (default 25)",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "control_id",
+        "framework_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_get_pqc_readiness",
+    "description": "Get the tenant's post-quantum readiness: totals of PQC-ready, quantum-safe-symmetric and needs-migration crypto implementations, broken down by algorithm family with suggested migration targets. The four categories are mutually exclusive and sum to the total; `unclassified` means the catalogue could not decide, NOT that the item is safe.",
+    "read_only": true,
+    "title": "Get PQC readiness",
+    "input_schema": {
+      "additionalProperties": false,
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_get_risk_summary",
+    "description": "Get the tenant's top-line risk posture: asset counts by risk band, total crypto implementations and critical findings. Bands are the CVSS qualitative ratings ×10 (Critical ≥90, High 70-89, Medium 40-69, Low 1-39, Informational 0).\nHONESTY: `risk_score` 0 with an EMPTY `risk_assessed_by` means NOT ASSESSED — nobody looked. 0 with a non-empty `risk_assessed_by` means assessed and clean. Never report the first as \"no risk\".",
+    "read_only": true,
+    "title": "Get risk summary",
+    "input_schema": {
+      "additionalProperties": false,
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_list_asset_classes",
+    "description": "The asset class taxonomy: every class with its key, parent, full dotted path, human label, description, the identifier kinds that establish identity for it, and its attribute schema. `is_fixed` distinguishes a platform class from a tenant-defined subclass. Read this BEFORE writing a `class:` term — `class:hardware` matches the whole subtree (server, switch, everything under it) while `class=server` matches that one class exactly, and the attribute schema tells you which `attr.` fields exist for a class.",
+    "read_only": true,
+    "title": "List asset classes",
+    "input_schema": {
+      "additionalProperties": false,
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_list_asset_software",
+    "description": "The software installed on one asset: product name, vendor, version, purl, CPE, licence, where the claim came from (`source_kind` measured/declared/imported/inferred, `source_ref`) and when it was first and last seen. Use it to answer \"is \u003cpackage\u003e on this host?\" and \"what version of \u003clibrary\u003e is this running?\".\nAN EMPTY LIST IS NOT \"NO SOFTWARE\". It means nothing has enumerated software on this asset — no bill of materials uploaded, no host agent. The `sw.package_count` fact is what distinguishes \"we looked and found none\" from \"nobody looked\"; read it with vistaplatform_get_asset before reporting an empty list as a clean one.\nROWS WITH `status: removed` ARE INCLUDED by default and are not current. A removed install is one a later document did not list; its row is kept so \"this library was here last month\" stays answerable. Pass `status: active` for what is present now, and never count removed rows as installed.\n`version` is the raw string the source wrote. `version_sort` is the normalised ordering key, and it is null when the version has no numeric component — which means a version comparison against that product has no answer rather than a false one.",
+    "read_only": true,
+    "title": "List asset software",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "description": "UUID of the asset",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Rows to return, 1-200 (default 50)",
+          "type": "integer"
+        },
+        "offset": {
+          "description": "Rows to skip, for paging. The result's total describes the whole match, not the page.",
+          "type": "integer"
+        },
+        "query": {
+          "description": "Case-insensitive substring matched against the product name, vendor, purl and CPE. Empty means every install on the asset.",
+          "type": "string"
+        },
+        "status": {
+          "description": "Filter to one install status: active, stale or removed. Omit for all three.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "asset_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_list_cbom_artifacts",
+    "description": "List the tenant's bill-of-materials artifacts — immutable, content-hashed CycloneDX snapshots, newest first. Each entry includes the scope it was generated from, its content hash, entry count, signing status, and its `artifact_kind`: `cbom` (cryptographic), `sbom` (software), `hbom` (hardware) or `inventory` (every asset with endpoints, relationships and open vulnerabilities). Read the kind before drawing a conclusion — an SBOM listing no certificates means it is not a CBOM, not that the tenant has none.",
+    "read_only": true,
+    "title": "List CBOM artifacts",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "description": "Maximum artifacts to return, 1-100 (default 25)",
+          "type": "integer"
+        },
+        "scope_id": {
+          "description": "Only artifacts generated from this scope UUID",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_list_cbom_scopes",
+    "description": "List the tenant's CBOM scopes — named, versioned asset-boundary predicates (e.g. All, Production) that define what a CBOM artifact includes.",
+    "read_only": true,
+    "title": "List CBOM scopes",
+    "input_schema": {
+      "additionalProperties": false,
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_list_compliance_frameworks",
+    "description": "List compliance frameworks visible to the tenant: published frameworks with subscription/licensing state, plus per-framework evaluation status and scores for the frameworks the tenant is licensed for. Note: full control detail and evaluation require an active subscription to the framework.",
+    "read_only": true,
+    "title": "List compliance frameworks",
+    "input_schema": {
+      "additionalProperties": false,
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_query_algorithms",
+    "description": "Look up the platform's authoritative cryptographic algorithm assessments: strength, deprecation status, post-quantum classification, risk score, migration guidance and recommended alternatives. This catalog is the source of truth for whether an algorithm is considered weak or quantum-vulnerable — cite it rather than judging an algorithm yourself.",
+    "read_only": true,
+    "title": "Query algorithm assessments",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "description": "Algorithm category, e.g. symmetric, asymmetric, hash, kem, signature",
+          "type": "string"
+        },
+        "deprecation_status": {
+          "description": "Deprecation filter, e.g. active, deprecated, forbidden",
+          "type": "string"
+        },
+        "pqc": {
+          "description": "Only post-quantum (true) or classical (false) algorithms",
+          "type": [
+            "null",
+            "boolean"
+          ]
+        },
+        "strength": {
+          "description": "Assessment filter: weak, acceptable, strong or recommended",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_query_assets",
+    "description": "Search the tenant's asset inventory with a query-language predicate. An asset is any configuration item the platform tracks — servers, network devices, cloud resources, applications, endpoints — classified into a hierarchical class tree (see vistaplatform_list_asset_classes). Returns a page of assets with their class, primary endpoint, identifiers, risk and counts, plus `query`: THE CANONICAL QUERY THAT ACTUALLY RAN. Show that string, not the one you sent — the platform AND-s its own default scope in (normally `status:monitoring`, i.e. approved inventory only), so the two differ. Use vistaplatform_asset_facets for counts rather than paging through rows.\nQUERY LANGUAGE. One line of text; adjacent terms mean AND. Operators: `:` loose/case-insensitive (substring on text fields, subtree on `class`), `=` exact, `!=`, `\u003c` `\u003c=` `\u003e` `\u003e=`, `in (a, b)`, `~ \"regex\"`, `field:[lo to hi]`, `*` wildcard, `exists(field)`, `not`/`-` to negate, parentheses to group. Child collections are EXISTS sub-predicates: `endpoint:(…)`, `cert:(…)`, `crypto:(…)`, `software:(…)`, `finding:(…)`, `identifier:(…)`. Dates: `now`, `now-30d`, `now+7d` (units s m h d w mo y). There is no null literal — use `exists(field)`.\nFIELD NAMESPACES: bare names are first-class asset columns (class, display_name, hostname, primary_address, environment, business_unit, owner_email, support_group, site, region, zone, status, ownership, stale_status, source, risk, risk_score, risk_assessed_by, confidence_score, first_seen, last_seen); `attr.` a class attribute (attr.os_version); `fact.` a registered fact key (fact.os.name); `id.` an identifier kind (id.serial_number, id.mac, id.any); `tag.` a tenant tag (tag.owner). A bare name NEVER resolves to an attribute, fact, identifier or tag — the prefix is required.\nEXAMPLES:\n  1. environment:production class:hardware.computer.server not exists(owner_email)\n     — production servers nobody owns.\n  2. cert:(not_after \u003c now+30d)\n     — anything with a certificate expiring in the next 30 days.\n  3. risk \u003e= high and last_seen \u003e now-7d\n     — high or critical risk, seen in the last week.\n  4. crypto:(algorithm.deprecated:true) and environment in (production, staging)\n     — deprecated algorithms outside dev.\n  5. risk:not_assessed and class:hardware\n     — hardware NOBODY HAS SCORED. This is not `risk:informational`, which means \"we looked and it scored zero\". The two are different sets and neither implies the other.\nA query that does not validate is REFUSED, never guessed at: the tool returns the diagnostics (code, message, byte span, suggestion) and no rows. Read them, fix the query, call again.\nDEFAULT SCOPE: with no `status` term the platform adds `status:monitoring` — approved inventory only. It is a default, not a floor: name `status` yourself and it steps aside, so `status:pending_approval` reaches the approval queue and `status:archived` reaches assets that were archived or merged away. The echoed query is how you tell which happened.\nHONESTY: `risk_score` 0 with an EMPTY `risk_assessed_by` means NOT ASSESSED — nobody looked. 0 with a non-empty `risk_assessed_by` means assessed and clean. Never report the first as \"no risk\".",
+    "read_only": true,
+    "title": "Query assets",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "description": "Opaque continuation token. Pass back the next_cursor from a previous result of this tool; do not construct one.",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Rows to return, 1-100 (default 25)",
+          "type": "integer"
+        },
+        "query": {
+          "description": "A query-language predicate over assets. Empty means every asset in inventory. See the tool description for the grammar and examples.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_query_certificates",
+    "description": "Search the tenant's X.509 certificate inventory. Filter by expiry window, issuer, key algorithm/size or self-signed status. PEM bodies are omitted; fingerprints, subjects, validity windows and key parameters are included. To find the ASSETS behind expiring certificates instead, use vistaplatform_query_assets with `cert:(not_after \u003c now+30d)`.",
+    "read_only": true,
+    "title": "Query certificates",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "description": "Public key algorithm filter, e.g. RSA, ECDSA",
+          "type": "string"
+        },
+        "expiring_days": {
+          "description": "Only certificates expiring within this many days",
+          "type": "integer"
+        },
+        "issuer": {
+          "description": "Substring match on the issuer DN",
+          "type": "string"
+        },
+        "key_size_min": {
+          "description": "Minimum public key size in bits",
+          "type": "integer"
+        },
+        "page": {
+          "description": "Page number, starting at 1",
+          "type": "integer"
+        },
+        "page_size": {
+          "description": "Results per page, 1-100 (default 25)",
+          "type": "integer"
+        },
+        "search": {
+          "description": "Free-text search across subject, issuer and common name",
+          "type": "string"
+        },
+        "self_signed": {
+          "description": "Only self-signed (true) or CA-issued (false) certificates",
+          "type": [
+            "null",
+            "boolean"
+          ]
+        },
+        "sort_by": {
+          "description": "Sort column, default not_after (expiry)",
+          "type": "string"
+        },
+        "sort_order": {
+          "description": "asc or desc",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_query_crypto_configurations",
+    "description": "List the tenant's discovered cryptographic configurations (protocol, version, cipher suite, key exchange, signature and hash algorithms per asset). Paginated. A configuration's `risk_score` is the worst score of its linked catalogue algorithms.\nHONESTY: `risk_score` 0 with an EMPTY `risk_assessed_by` means NOT ASSESSED — nobody looked. 0 with a non-empty `risk_assessed_by` means assessed and clean. Never report the first as \"no risk\".",
+    "read_only": true,
+    "title": "Query crypto configurations",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "page": {
+          "description": "Page number, starting at 1",
+          "type": "integer"
+        },
+        "page_size": {
+          "description": "Results per page, 1-100 (default 25)",
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_search",
+    "description": "Find assets by free text when you do not know a field to filter on — a hostname fragment, a serial number, a service name, a tag. Matches, case-insensitively and as a substring: display name, hostname, every identifier value, and tag keys and values. It matches NOTHING ELSE — not descriptions, not finding summaries — so a search cannot silently widen. This is the query language's free-text term with the text quoted for you; use vistaplatform_query_assets when you can name a field, because a field term is exact and this is not.\nHONESTY: `risk_score` 0 with an EMPTY `risk_assessed_by` means NOT ASSESSED — nobody looked. 0 with a non-empty `risk_assessed_by` means assessed and clean. Never report the first as \"no risk\".",
+    "read_only": true,
+    "title": "Search assets by free text",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "description": "Rows to return, 1-100 (default 25)",
+          "type": "integer"
+        },
+        "text": {
+          "description": "What to look for. Matched case-insensitively as a substring.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
+    }
+  }
+]

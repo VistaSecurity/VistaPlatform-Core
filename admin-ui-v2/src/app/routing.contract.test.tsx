@@ -224,13 +224,36 @@ describe('admin console route table (react-router v8)', () => {
     },
   );
 
+  // Grandchildren: a rail entry one level deeper, at /<section>/<child>/<gc>.
+  // Catalog ▸ End-of-life is the first live one (ADR-0008 4.5b), and its three
+  // views are exactly the two-segment-under-a-splat shape the synthetic test
+  // below was left here to guard. Both run: this one proves the real rail
+  // entries route, that one proves the react-router property they depend on.
+  const grandchildURLs = SECTIONS.flatMap((s) =>
+    (s.children ?? []).flatMap((c) =>
+      (c.children ?? []).map((g) => [`${s.id}/${c.id}/${g.id}`, `${s.id}:${c.id}/${g.id}`] as const),
+    ),
+  );
+  it.each(grandchildURLs)('left-rail grandchild /%s resolves to its own sub-route', (url, expected) => {
+    expect(leaf(`/${url}`)).toBe(expected);
+  });
+
+  it('every declared grandchild has a route (and there is at least one)', () => {
+    // Guards the guard twice over: a grandchild added to nav.ts with no route
+    // is a dead rail entry that silently redirects to the section root, and an
+    // empty list here would make the case above vacuously green.
+    expect(grandchildURLs.length).toBeGreaterThan(0);
+    for (const [url] of grandchildURLs) {
+      expect(leaf(`/${url}`), `rail entry /${url} falls through to the section catch-all`)
+        .not.toMatch(/:\*$/);
+    }
+  });
+
   it('a multi-segment child under a splat still resolves', () => {
     // A two-segment RELATIVE path inside the descendant <Routes> of a
     // splat-mounted section is the exact shape `v7_relativeSplatPath` changed.
-    // No live section declares one right now (the last of them, Catalog →
-    // Artifacts → Tenant Overrides, went with artifact-service), so the shape
-    // is exercised synthetically rather than dropped: the hazard is a property
-    // of react-router, and the next grandchild sub-view must land on it safely.
+    // The hazard is a property of react-router, so it is exercised
+    // synthetically as well as through the live grandchildren above.
     const Section = () =>
       createElement(
         Routes,

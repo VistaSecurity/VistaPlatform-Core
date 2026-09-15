@@ -16,12 +16,12 @@ import { OnboardingNudge } from '../sections/onboarding/onboarding-nudge';
 import { ErrorBoundary } from './error-boundary';
 import { NotificationBell } from './notification-bell';
 import { CommandPalette } from './command-palette';
-import { SECTIONS, type NavSection } from './nav';
+import { SECTIONS, type NavSection, type NavSubItem } from './nav';
 import { Icon as LensIcon } from '../components/ui';
 import { usePlatformBranding, BrandLogo } from './platform-branding';
-import { INVENTORY_LENSES, DEFAULT_LENS, type InventoryLens } from '../sections/inventory/lenses';
+import { INVENTORY_LENSES, DEFAULT_LENS } from '../sections/inventory/lenses';
 import { SettingsRail } from '../sections/settings/settings-rail';
-import { FINDINGS_LENSES, DEFAULT_FINDINGS_LENS, SCOPE_LABEL } from '../sections/findings/lenses';
+import { FINDINGS_LENSES, DEFAULT_FINDINGS_LENS, SCOPE_LABEL, SCOPE_ORDER } from '../sections/findings/lenses';
 import { POSTURE_TABS, DEFAULT_POSTURE_TAB } from '../sections/posture/tabs';
 
 const ICONS: Record<string, LucideIcon> = {
@@ -50,22 +50,34 @@ function ContextSubLink({ to, icon, label, active }: { to: string; icon: string;
   );
 }
 
-function LensLink({ lens, active }: { lens: InventoryLens; active: boolean }) {
+/**
+ * One Inventory sub-nav item, driven by the nav registry (ADR-0006 D1).
+ *
+ * The registry is the single source for what Inventory contains; the ICON comes
+ * from the lens catalogue, because a lens already declares one and a second copy
+ * in the nav registry is a second thing to keep in step. An item with no lens
+ * (the Pending cross-link) borrows the section it points at.
+ */
+function InventoryNavLink({ item, active }: { item: NavSubItem; active: boolean }) {
+  const lens = item.lens ? INVENTORY_LENSES.find((l) => l.key === item.lens) : undefined;
+  const icon = lens?.icon ?? 'inbox';
+  const pending = !!item.crossLink;
   return (
     <Link
-      to={`/inventory?lens=${lens.key}`}
+      to={item.path}
       className="nav-sub"
-      title={lens.live ? '' : 'Built next'}
+      title={lens?.placeholder ? `Arrives in ${lens.placeholder.phase}` : pending ? 'Review in Discovery → Approvals' : ''}
       style={{
         display: 'flex', alignItems: 'center', gap: 9, width: '100%',
         padding: '6px 10px 6px 39px', borderRadius: 8, textDecoration: 'none',
         background: active ? 'var(--rail-active)' : 'transparent',
         color: active ? 'var(--rail-accent)' : 'var(--rail-t2)',
         fontFamily: 'var(--font-body)', fontSize: 12.5, fontWeight: active ? 600 : 500,
-        opacity: lens.live ? 1 : 0.55,
+        opacity: lens && !lens.live ? 0.55 : 1,
       }}
     >
-      <LensIcon name={lens.icon} size={14} /><span>{lens.label}</span>
+      <LensIcon name={icon} size={14} /><span style={{ flex: 1 }}>{item.label}</span>
+      {pending && <LensIcon name="arrow-up-right" size={12} />}
     </Link>
   );
 }
@@ -125,7 +137,10 @@ function Sidebar() {
                 <span>{s.label}</span>
               </NavLink>
 
-              {active && s.groups && (
+              {/* Inventory's groups are rendered by their own block below: its
+                  items differ by `?lens=`, which a pathname-matching NavLink
+                  cannot tell apart — every one of them would light up at once. */}
+              {active && s.groups && s.id !== 'inventory' && (
                 <div className="fade-up" style={{ margin: '3px 0 7px', display: 'flex', flexDirection: 'column', gap: 1 }}>
                   {s.groups.map((g, gi) => (
                     <div key={gi}>
@@ -166,7 +181,7 @@ function Sidebar() {
                                     compliance findings) — switching groups changes what
                                     "Open" is counting, and that needs to be visible right
                                     where the user makes the switch. */}
-                                {(['compliance', 'crypto'] as const).map((scope) => (
+                                {SCOPE_ORDER.map((scope) => (
                                   <div key={scope}>
                                     <LensGroupLabel indent={54}>{SCOPE_LABEL[scope]}</LensGroupLabel>
                                     {FINDINGS_LENSES.filter((l) => l.scope === scope).map((l) => (
@@ -193,15 +208,28 @@ function Sidebar() {
                 </div>
               )}
 
-              {active && s.id === 'inventory' && (
+              {active && s.id === 'inventory' && s.groups && (
                 <div className="fade-up" style={{ margin: '3px 0 7px', display: 'flex', flexDirection: 'column', gap: 1 }}>
-                  <LensGroupLabel>Lenses</LensGroupLabel>
-                  {INVENTORY_LENSES.filter((l) => l.primary).map((l) => (
-                    <LensLink key={l.key} lens={l} active={pathname === '/inventory' && currentLens === l.key} />
-                  ))}
-                  <LensGroupLabel>By Protocol</LensGroupLabel>
-                  {INVENTORY_LENSES.filter((l) => !l.primary).map((l) => (
-                    <LensLink key={l.key} lens={l} active={pathname === '/inventory' && currentLens === l.key} />
+                  {s.groups.map((g, gi) => (
+                    <div key={g.label ?? gi}>
+                      {g.label && <LensGroupLabel>{g.label}</LensGroupLabel>}
+                      {g.items.map((item) => (
+                        <InventoryNavLink
+                          key={item.path}
+                          item={item}
+                          // An asset PAGE (`/inventory/assets/:id`) keeps "All
+                          // assets" lit: the page is where a row from that list
+                          // leads, and dropping the highlight there would make
+                          // the rail say you had left the inventory.
+                          active={
+                            item.lens
+                              ? (pathname === '/inventory' && currentLens === item.lens)
+                                || (pathname.startsWith('/inventory/assets/') && item.lens === 'assets')
+                              : false
+                          }
+                        />
+                      ))}
+                    </div>
                   ))}
                 </div>
               )}
@@ -266,7 +294,7 @@ function ProfileChip() {
   const signOut = async () => {
     setOpen(false);
     await logout(); // clears session → RequireAuth redirects to /login
-    navigate('/login', { replace: true });
+    void navigate('/login', { replace: true });
   };
 
   const MenuItem = ({ icon, label, onClick, danger }: { icon: string; label: string; onClick: () => void; danger?: boolean }) => (
@@ -302,11 +330,11 @@ function ProfileChip() {
               </div>
             </div>
             {showGettingStarted && (
-              <MenuItem icon="list-checks" label="Getting Started" onClick={() => { setOpen(false); navigate('/getting-started'); }} />
+              <MenuItem icon="list-checks" label="Getting Started" onClick={() => { setOpen(false); void navigate('/getting-started'); }} />
             )}
-            <MenuItem icon="user" label="My Profile" onClick={() => { setOpen(false); navigate('/profile'); }} />
-            <MenuItem icon="building-2" label="Organization Settings" onClick={() => { setOpen(false); navigate('/settings'); }} />
-            <MenuItem icon="info" label="About" onClick={() => { setOpen(false); navigate('/about'); }} />
+            <MenuItem icon="user" label="My Profile" onClick={() => { setOpen(false); void navigate('/profile'); }} />
+            <MenuItem icon="building-2" label="Organization Settings" onClick={() => { setOpen(false); void navigate('/settings'); }} />
+            <MenuItem icon="info" label="About" onClick={() => { setOpen(false); void navigate('/about'); }} />
             <MenuItem icon={theme === 'dark' ? 'sun' : 'moon'} label={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'} onClick={toggleTheme} />
             <div style={{ height: 1, background: 'var(--app-border)', margin: '5px 6px' }} />
             <MenuItem icon="log-out" label="Sign out" onClick={signOut} danger />

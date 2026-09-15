@@ -1,9 +1,56 @@
 import { describe, expect, it } from 'vitest';
-import { DASHBOARD_COMPLIANCE_FINDINGS_ROUTE, getDashboardPqcMetric, getDiscoveryFleetMetric, isAgentRow } from './dashboard-metrics';
+import { check, defaultOptions, newRegistryCatalog, CVSS_LADDER, withLadder } from '@vistasecurity/primitives/query';
+import {
+  DASHBOARD_COMPLIANCE_FINDINGS_ROUTE, DASHBOARD_HIGH_RISK_ASSETS_ROUTE, DASHBOARD_HIGH_RISK_QUERY,
+  DASHBOARD_UNSCORED_ASSETS_ROUTE, DASHBOARD_UNSCORED_QUERY,
+  getDashboardPqcMetric, getDiscoveryFleetMetric, isAgentRow,
+} from './dashboard-metrics';
+import { queryToFacets } from '../inventory/facet-query';
+import { INVENTORY_LENSES } from '../inventory/lenses';
 
 describe('dashboard findings links', () => {
   it('deep-links compliance-derived finding counts to the compliance lens', () => {
     expect(DASHBOARD_COMPLIANCE_FINDINGS_ROUTE).toBe('/risk-compliance/findings?lens=framework');
+  });
+});
+
+describe('dashboard risk tiles link to what they counted (gate1 C7)', () => {
+  // Both tiles used to link at `/inventory?lens=infrastructure` — a retired lens
+  // key that redirects to the UNFILTERED list. "High-risk assets: 12" landed the
+  // user on every asset in the tenant with nothing saying which twelve.
+  const CATALOG = newRegistryCatalog();
+  const OPTIONS = withLadder(defaultOptions(), CVSS_LADDER);
+
+  it('carries a query, not just a lens', () => {
+    expect(DASHBOARD_HIGH_RISK_ASSETS_ROUTE).toContain('query=');
+    expect(DASHBOARD_UNSCORED_ASSETS_ROUTE).toContain('query=');
+  });
+
+  it('names a lens that still exists', () => {
+    for (const route of [DASHBOARD_HIGH_RISK_ASSETS_ROUTE, DASHBOARD_UNSCORED_ASSETS_ROUTE]) {
+      const lens = new URLSearchParams(route.split('?')[1]).get('lens');
+      expect(INVENTORY_LENSES.some((l) => l.key === lens), `no such lens: ${lens}`).toBe(true);
+    }
+  });
+
+  it('filters to the assets the tile counted', () => {
+    // `high_risk` is the ≥ High band, which includes Critical.
+    expect(queryToFacets(DASHBOARD_HIGH_RISK_QUERY).facets.risk).toEqual(['critical', 'high']);
+    // "Unscored" is the ABSENCE of a score, which the language spells
+    // `not_assessed` — never "low".
+    expect(queryToFacets(DASHBOARD_UNSCORED_QUERY).facets.risk).toEqual(['not_assessed']);
+  });
+
+  it('writes a query the server would accept', () => {
+    for (const q of [DASHBOARD_HIGH_RISK_QUERY, DASHBOARD_UNSCORED_QUERY]) {
+      const res = check(q, 'asset', CATALOG, OPTIONS);
+      expect(res.ok, `invalid query: ${q} — ${res.ok ? '' : res.errors.map((e) => e.message).join('; ')}`).toBe(true);
+    }
+  });
+
+  it('URL-encodes the query so the parentheses survive the address bar', () => {
+    const parsed = new URLSearchParams(DASHBOARD_HIGH_RISK_ASSETS_ROUTE.split('?')[1]);
+    expect(parsed.get('query')).toBe(DASHBOARD_HIGH_RISK_QUERY);
   });
 });
 

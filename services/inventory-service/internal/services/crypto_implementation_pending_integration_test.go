@@ -29,8 +29,8 @@ func TestIntegration_CryptoConfigurations_ExcludesPendingApprovalAssets(t *testi
 
 	monitoring := uuid.New()
 	if _, err := db.Exec(`
-		INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,'monitored.example.test','server','monitoring',NOW(),NOW(),NOW(),NOW())`, monitoring, tenant); err != nil {
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, 'monitored.example.test', 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`, monitoring, tenant); err != nil {
 		t.Fatalf("insert monitoring asset: %v", err)
 	}
 	if _, err := db.Exec(`
@@ -41,8 +41,8 @@ func TestIntegration_CryptoConfigurations_ExcludesPendingApprovalAssets(t *testi
 
 	pending := uuid.New()
 	if _, err := db.Exec(`
-		INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,'pending.example.test','server','pending_approval',NOW(),NOW(),NOW(),NOW())`, pending, tenant); err != nil {
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, 'pending.example.test', 'server', 'hardware.computer.server', 'pending_approval', NOW(), NOW(), NOW(), NOW())`, pending, tenant); err != nil {
 		t.Fatalf("insert pending asset: %v", err)
 	}
 	if _, err := db.Exec(`

@@ -251,9 +251,17 @@ func (s *PlatformFrameworkService) PublishFramework(id uuid.UUID, input *models.
 // ListFrameworks lists all platform frameworks with optional status filter
 // Best Practices framework (platform default) is returned first
 // Controls are loaded for each framework
+//
+// description and organization are COALESCEd to the empty string: both columns are
+// NULLABLE (scripts/database/schema.sql), but models.PlatformFramework reads
+// them into plain Go strings. A NULL fails the row's scan outright, which
+// used to take down this whole list (and GetFramework and
+// GetPlatformDefaultFramework below, and every other reader of this table —
+// see framework_license_service.go for the same fix applied there first) for
+// one framework somebody created without naming an organization.
 func (s *PlatformFrameworkService) ListFrameworks(statusFilter string) ([]models.PlatformFramework, error) {
 	query := `
-		SELECT id, code, name, version, description, organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at
+		SELECT id, code, name, version, COALESCE(description, '') AS description, COALESCE(organization, '') AS organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at
 		FROM platform_frameworks
 	`
 	args := []interface{}{}
@@ -289,7 +297,7 @@ func (s *PlatformFrameworkService) ListFrameworks(statusFilter string) ([]models
 // GetFramework gets a platform framework by ID with controls loaded
 func (s *PlatformFrameworkService) GetFramework(id uuid.UUID) (*models.PlatformFramework, error) {
 	query := `
-		SELECT id, code, name, version, description, organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at
+		SELECT id, code, name, version, COALESCE(description, '') AS description, COALESCE(organization, '') AS organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at
 		FROM platform_frameworks
 		WHERE id = $1
 	`
@@ -319,7 +327,7 @@ func (s *PlatformFrameworkService) GetFramework(id uuid.UUID) (*models.PlatformF
 // getFrameworkControls loads all controls for a platform framework
 func (s *PlatformFrameworkService) getFrameworkControls(frameworkID uuid.UUID) ([]models.PlatformFrameworkControl, error) {
 	query := `
-		SELECT id, framework_id, family_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at
+		SELECT ` + models.FrameworkControlColumns + `
 		FROM platform_framework_controls
 		WHERE framework_id = $1
 		ORDER BY control_id
@@ -337,7 +345,7 @@ func (s *PlatformFrameworkService) getFrameworkControls(frameworkID uuid.UUID) (
 // GetPlatformDefaultFramework returns the framework marked as platform default (Best Practices)
 func (s *PlatformFrameworkService) GetPlatformDefaultFramework() (*models.PlatformFramework, error) {
 	query := `
-		SELECT id, code, name, version, description, organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at
+		SELECT id, code, name, version, COALESCE(description, '') AS description, COALESCE(organization, '') AS organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at
 		FROM platform_frameworks
 		WHERE is_platform_default = true
 		LIMIT 1
@@ -408,24 +416,29 @@ func (s *PlatformFrameworkService) CreateControl(frameworkID uuid.UUID, input *m
 		Description:      input.Description,
 		BaselineSeverity: input.BaselineSeverity,
 		CryptoRelevant:   input.CryptoRelevant,
+		SourceKind:       ControlSourceKind(input.SourceKind),
+		SourceRef:        input.SourceRef,
 		CreatedAt:        time.Now(),
 		UpdatedAt:        time.Now(),
 	}
 
 	query := `
-		INSERT INTO platform_framework_controls (id, framework_id, family_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		RETURNING id, framework_id, family_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at
+		INSERT INTO platform_framework_controls (id, framework_id, family_id, control_id, title, description, baseline_severity, crypto_relevant, source_kind, source_ref, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		RETURNING id, framework_id, family_id, control_id, title, description, baseline_severity, crypto_relevant,
+		          COALESCE(source_kind, '') AS source_kind, COALESCE(source_ref, '') AS source_ref, created_at, updated_at
 	`
 
 	err := s.db.QueryRow(
 		query,
 		control.ID, control.FrameworkID, control.FamilyID, control.ControlID,
 		control.Title, control.Description, control.BaselineSeverity, control.CryptoRelevant,
+		control.SourceKind, NullableSourceRef(control.SourceRef),
 		control.CreatedAt, control.UpdatedAt,
 	).Scan(
 		&control.ID, &control.FrameworkID, &control.FamilyID, &control.ControlID,
 		&control.Title, &control.Description, &control.BaselineSeverity, &control.CryptoRelevant,
+		&control.SourceKind, &control.SourceRef,
 		&control.CreatedAt, &control.UpdatedAt,
 	)
 
@@ -439,11 +452,16 @@ func (s *PlatformFrameworkService) CreateControl(frameworkID uuid.UUID, input *m
 
 // UpdateControl updates a platform framework control
 func (s *PlatformFrameworkService) UpdateControl(controlID uuid.UUID, input *models.PlatformFrameworkControlInput) (*models.PlatformFrameworkControl, error) {
+	// source_kind / source_ref are deliberately NOT in the SET list: provenance
+	// records where a row came from, and editing a drafted control does not
+	// make it a hand-written one. They are in the RETURNING list so the client
+	// still sees the badge after an edit.
 	query := `
 		UPDATE platform_framework_controls
 		SET family_id = $1, control_id = $2, title = $3, description = $4, baseline_severity = $5, crypto_relevant = $6, updated_at = NOW()
 		WHERE id = $7
-		RETURNING id, framework_id, family_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at
+		RETURNING id, framework_id, family_id, control_id, title, description, baseline_severity, crypto_relevant,
+		          COALESCE(source_kind, '') AS source_kind, COALESCE(source_ref, '') AS source_ref, created_at, updated_at
 	`
 
 	control := &models.PlatformFrameworkControl{}
@@ -454,6 +472,7 @@ func (s *PlatformFrameworkService) UpdateControl(controlID uuid.UUID, input *mod
 	).Scan(
 		&control.ID, &control.FrameworkID, &control.FamilyID, &control.ControlID,
 		&control.Title, &control.Description, &control.BaselineSeverity, &control.CryptoRelevant,
+		&control.SourceKind, &control.SourceRef,
 		&control.CreatedAt, &control.UpdatedAt,
 	)
 
@@ -497,6 +516,38 @@ func NullableSeverity(severity string) interface{} {
 		return nil
 	}
 	return severity
+}
+
+// ControlSourceKindDeclared is what a control created through an authoring API
+// with no explicit provenance is recorded as: a person filled in the form.
+const ControlSourceKindDeclared = "declared"
+
+// ControlSourceKind resolves the source_kind a newly created control is stored
+// under.
+//
+// An absent value becomes "declared" rather than NULL, and the difference
+// matters: NULL is reserved for rows that predate the column, so defaulting a
+// NEW row to NULL would destroy the one thing the column can say about history.
+// Every route that reaches here is an authenticated human authoring action, so
+// "declared" is a fact and not a guess — the one non-declared case (accepting a
+// draft from the Author seam) sends "inferred" explicitly.
+func ControlSourceKind(kind string) string {
+	if kind == "" {
+		return ControlSourceKindDeclared
+	}
+	return kind
+}
+
+// NullableSourceRef maps an absent source_ref to SQL NULL.
+//
+// Unlike source_kind there is no sensible default: a declared control has no
+// reference to give, and storing "" would make "no reference" and "a reference
+// that is the empty string" the same row. The matching reads COALESCE it back.
+func NullableSourceRef(ref string) interface{} {
+	if ref == "" {
+		return nil
+	}
+	return ref
 }
 
 // AddControlMeasurement adds a measurement mapping to a control

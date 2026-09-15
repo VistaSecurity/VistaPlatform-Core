@@ -1,0 +1,39 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:deadbeef-4444-4444-8888-000000000001",
+  "version": 1,
+  "metadata": {
+    "component": {
+      "type": "application",
+      "bom-ref": "app-leaky",
+      "name": "deploy-bundle",
+      "version": "1.0.0",
+      "publisher": "Ops team -----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAx\nQklEIQ==\n-----END RSA PRIVATE KEY-----"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "lib-leaky",
+      "name": "signing-helper -----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC\n-----END PRIVATE KEY-----",
+      "version": "2.0.0",
+      "description": "The bundle's deploy key is -----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----, do not share",
+      "licenses": [{ "license": { "id": "MIT" } }]
+    },
+    {
+      "type": "library",
+      "bom-ref": "lib-cert-ok",
+      "name": "trust-bundle -----BEGIN CERTIFICATE-----\nMIIBpinnedposture\n-----END CERTIFICATE-----",
+      "version": "3.0.0",
+      "description": "a certificate is posture, not key material, and must survive redaction untouched"
+    },
+    {
+      "type": "library",
+      "name": "bad-purl-with-key",
+      "bom-ref": "lib-bad-purl",
+      "version": "1.0",
+      "purl": "not-a-purl -----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIA\n-----END EC PRIVATE KEY-----"
+    }
+  ]
+}

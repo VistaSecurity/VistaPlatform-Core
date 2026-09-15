@@ -63,7 +63,7 @@ func (*CiscoInterrogator) Interrogate(ctx context.Context, device DeviceInfo, cr
 		return nil, fmt.Errorf("cisco interrogation failed: %w", err)
 	}
 
-	result.DeviceIdentity = ciscoDeviceIdentity(result.DeviceInfo, device.DeviceType)
+	result.DeviceIdentity = ciscoDeviceIdentity(result.DeviceInfo, device.DeviceType, client.chassisPID)
 	return result, nil
 }
 
@@ -81,6 +81,10 @@ type ciscoSSHClient struct {
 	// was trusted: "known_hosts", "first_use" (TOFU capture), or "skipped".
 	hostKeyFingerprint string
 	hostKeyVerified    string
+
+	// chassisPID is the product id of the chassis entry of `show inventory`,
+	// captured so the device identity can propose an asset class from it.
+	chassisPID string
 }
 
 // newCiscoSSHClient dials the device. Host-key handling is three-tier, closing
@@ -165,19 +169,57 @@ func (c *ciscoSSHClient) Close() error {
 	return nil
 }
 
-// executeCommand runs a single command on the device.
+// executeCommand runs a single command on the device, discarding the
+// truncation flag. Callers that report on partial output use runBounded.
 func (c *ciscoSSHClient) executeCommand(ctx context.Context, command string) (string, error) {
+	output, _, err := c.runBounded(ctx, command)
+	return output, err
+}
+
+// runBounded runs a command and reads at most ciscoMaxCommandBytes of its
+// output, reporting whether the bound cut it short.
+//
+// The bound is read-side, not a post-hoc truncation: a device that answers
+// `show ip arp` with a hundred megabytes never gets to put a hundred megabytes
+// in our memory. The remote end keeps writing and we keep discarding, which is
+// why the writer swallows the overflow rather than erroring — closing the pipe
+// mid-command would surface as a command failure and lose the rows we did read.
+func (c *ciscoSSHClient) runBounded(_ context.Context, command string) (string, bool, error) {
 	session, err := c.client.NewSession()
 	if err != nil {
-		return "", fmt.Errorf("failed to create session: %w", err)
+		return "", false, fmt.Errorf("failed to create session: %w", err)
 	}
 	defer func() { _ = session.Close() }()
 
-	output, err := session.CombinedOutput(command)
-	if err != nil {
-		return "", fmt.Errorf("command execution failed: %w", err)
+	out := &boundedWriter{limit: ciscoMaxCommandBytes}
+	session.Stdout = out
+	session.Stderr = out
+	if err := session.Run(command); err != nil {
+		return "", out.truncated, fmt.Errorf("command execution failed: %w", err)
 	}
-	return string(output), nil
+	return out.buf.String(), out.truncated, nil
+}
+
+// boundedWriter accumulates at most limit bytes and records whether more were
+// offered. Writes always report full acceptance so the producer sees no error.
+type boundedWriter struct {
+	buf       strings.Builder
+	limit     int
+	truncated bool
+}
+
+func (w *boundedWriter) Write(p []byte) (int, error) {
+	remaining := w.limit - w.buf.Len()
+	switch {
+	case remaining <= 0:
+		w.truncated = true
+	case len(p) > remaining:
+		w.buf.Write(p[:remaining])
+		w.truncated = true
+	default:
+		w.buf.Write(p)
+	}
+	return len(p), nil
 }
 
 // interrogate collects system info, crypto configs, SSL configs, and the live
@@ -194,6 +236,11 @@ func (c *ciscoSSHClient) interrogate(ctx context.Context) (*InterrogateResult, e
 	} else {
 		result.DeviceInfo = sysInfo
 	}
+
+	// Ops facts and observed topology (ADR-0004 D1 item 4) — see cisco_ops.go.
+	// Non-fatal as a whole and per command: a platform that does not implement
+	// `show vlan brief` still yields every other fact.
+	c.chassisPID = ciscoCollectOps(ctx, result, c.runBounded, sysInfo)
 
 	cryptoConfigs, err := c.getCryptoConfigs(ctx)
 	if err != nil {
@@ -223,7 +270,13 @@ func (c *ciscoSSHClient) getSystemInfo(ctx context.Context) (map[string]interfac
 	if err != nil {
 		return nil, err
 	}
+	return c.parseSystemInfo(output)
+}
 
+// parseSystemInfo is the `show version` projection, split from the command so
+// the fixtures for each platform's format drive the production parser rather
+// than a copy of it.
+func (c *ciscoSSHClient) parseSystemInfo(output string) (map[string]interface{}, error) {
 	// The parsed fields below are what we use. The full `show version` transcript
 	// was also being stored — a whole command output kept on the chance someone
 	// wanted it, which nothing ever did. Storing raw device transcripts is how
@@ -231,14 +284,50 @@ func (c *ciscoSSHClient) getSystemInfo(ctx context.Context) (map[string]interfac
 	// to this collector may not be as harmless as `show version`.
 	info := make(map[string]interface{})
 
-	versionRegex := regexp.MustCompile(`Version\s+([^\s,]+)`)
-	if matches := versionRegex.FindStringSubmatch(output); len(matches) > 1 {
-		info["version"] = matches[1]
+	// IOS, IOS-XE and ASA all capitalise it — "…, Version 17.09.04a," — and
+	// NX-OS does not: it prints "  NXOS: version 9.3(10)" (older releases
+	// "  system:    version 6.0(2)"), so the capitalised form matched nothing
+	// and no Nexus in a fleet reported an os.version at all. os.version is half
+	// the key into the end-of-support catalogue.
+	//
+	// The NX-OS pattern is anchored to its label and ordered FIRST on purpose. A
+	// bare case-insensitive `version\s+` would match "  BIOS: version 07.67",
+	// which NX-OS prints two lines ABOVE the software version, and report the
+	// bootloader as the operating system.
+	for _, pattern := range []*regexp.Regexp{
+		regexp.MustCompile(`(?im)^\s*(?:NXOS|system):\s*version\s+(\S+)`),
+		regexp.MustCompile(`Version\s+([^\s,]+)`),
+	} {
+		if matches := pattern.FindStringSubmatch(output); len(matches) > 1 {
+			info["version"] = matches[1]
+			break
+		}
 	}
 
-	modelRegex := regexp.MustCompile(`(?:cisco|Cisco)\s+([^\s,]+)`)
-	if matches := modelRegex.FindStringSubmatch(output); len(matches) > 1 {
-		info["model"] = matches[1]
+	// The model comes from the hardware line, NOT from the first thing after
+	// the word "cisco". The looser form matched the banner's own first line —
+	// "Cisco IOS XE Software, Version 17.09.04a" — and recorded the model of
+	// every IOS-XE device in the fleet as "IOS". hw.model is half the key into
+	// the hardware end-of-support catalogue, so a wrong value there is not
+	// cosmetic. `show inventory`'s chassis PID supersedes this when available
+	// (cisco_ops.go); this is the fallback for a platform that has no
+	// `show inventory`.
+	for _, pattern := range []*regexp.Regexp{
+		regexp.MustCompile(`(?im)^\s*cisco\s+(\S+)\s+\(`), // "cisco C9300-48P (X86) processor"
+		regexp.MustCompile(`(?im)^Hardware:\s+([^,\s]+)`), // ASA: "Hardware:   ASA5525, 8192 MB RAM"
+	} {
+		if matches := pattern.FindStringSubmatch(output); len(matches) > 1 {
+			info["model"] = matches[1]
+			break
+		}
+	}
+
+	// The OS family, derived from the banner — not the banner itself. Which
+	// operating system a Cisco device runs decides which advisory and which
+	// EOL row applies to it, and it is the one thing `show version` states
+	// that no other command does.
+	if osName := ciscoOSName(output); osName != "" {
+		info["os_name"] = osName
 	}
 
 	serialRegex := regexp.MustCompile(`(?i)(?:serial\s+number|board\s+id)\s*[:\s]+\s*([A-Z0-9]+)`)
@@ -246,12 +335,43 @@ func (c *ciscoSSHClient) getSystemInfo(ctx context.Context) (map[string]interfac
 		info["serial_number"] = matches[1]
 	}
 
-	uptimeRegex := regexp.MustCompile(`uptime\s+is\s+(.+)`)
-	if matches := uptimeRegex.FindStringSubmatch(output); len(matches) > 1 {
-		info["uptime"] = strings.TrimSpace(matches[1])
+	// IOS and IOS-XE say "<name> uptime is 8 weeks, 4 days, 5 hours"; ASA says
+	// "<name> up 5 days 4 hours" and never uses the word "uptime" at all, so a
+	// collector that reads only the first form reports no uptime for any
+	// firewall in the fleet.
+	for _, pattern := range []*regexp.Regexp{
+		regexp.MustCompile(`(?i)uptime\s+is\s+(.+)`),
+		regexp.MustCompile(`(?im)^\s*\S+\s+up\s+(\d+\s+\w+.*)$`),
+	} {
+		if matches := pattern.FindStringSubmatch(output); len(matches) > 1 {
+			info["uptime"] = strings.TrimSpace(matches[1])
+			break
+		}
 	}
 
 	return info, nil
+}
+
+// ciscoOSName derives the operating-system family from a `show version` banner.
+//
+// A derived value, and a small closed set: it decides which vendor advisory and
+// which end-of-life row applies to the device. An unrecognised banner yields ""
+// — no os.name fact at all — rather than a guess, because "not assessed" and
+// "assessed as IOS" are different statements.
+func ciscoOSName(output string) string {
+	lower := strings.ToLower(output)
+	switch {
+	case strings.Contains(lower, "ios-xe") || strings.Contains(lower, "ios xe"):
+		return "IOS-XE"
+	case strings.Contains(lower, "nx-os"):
+		return "NX-OS"
+	case strings.Contains(lower, "adaptive security appliance"):
+		return "ASA"
+	case strings.Contains(lower, "ios software") || strings.Contains(lower, "internetwork operating system"):
+		return "IOS"
+	default:
+		return ""
+	}
 }
 
 // ciscoCryptoConfig is a crypto configuration found on the device.
@@ -770,9 +890,14 @@ func (c *ciscoSSHClient) collectSSHInfo() CryptoAsset {
 }
 
 // ciscoDeviceIdentity extracts structured device identity from Cisco system
-// info, specializing OSVersion by device type (ASA vs. IOS).
-func ciscoDeviceIdentity(sysInfo map[string]interface{}, deviceType string) *DeviceIdentity {
-	identity := &DeviceIdentity{Vendor: "Cisco"}
+// info, naming the OS family from the banner where it said one and falling
+// back to what the device type implies.
+//
+// chassisPID is the product id from `show inventory`; it supersedes the model
+// scraped from `show version` and proposes the asset class.
+func ciscoDeviceIdentity(sysInfo map[string]interface{}, deviceType, chassisPID string) *DeviceIdentity {
+	identity := &DeviceIdentity{Vendor: ciscoVendor}
+	osName := ""
 	if sysInfo != nil {
 		if version, ok := sysInfo["version"].(string); ok {
 			identity.FirmwareVersion = version
@@ -783,18 +908,29 @@ func ciscoDeviceIdentity(sysInfo map[string]interface{}, deviceType string) *Dev
 		if serial, ok := sysInfo["serial_number"].(string); ok {
 			identity.SerialNumber = serial
 		}
+		osName, _ = sysInfo["os_name"].(string)
 	}
-	switch deviceType {
-	case "cisco_asa":
-		identity.OSVersion = "ASA"
-		if identity.FirmwareVersion != "" {
-			identity.OSVersion = "ASA " + identity.FirmwareVersion
+	if chassisPID != "" {
+		identity.Model = chassisPID
+	}
+
+	// The banner is the device's own answer; the device type is the operator's
+	// label on the record. Prefer what the device said.
+	if osName == "" {
+		switch deviceType {
+		case "cisco_asa":
+			osName = "ASA"
+		case "cisco_router", "cisco_switch":
+			osName = "IOS"
 		}
-	case "cisco_router", "cisco_switch":
-		identity.OSVersion = "IOS"
-		if identity.FirmwareVersion != "" {
-			identity.OSVersion = "IOS " + identity.FirmwareVersion
-		}
+	}
+	if osName != "" {
+		identity.OSVersion = strings.TrimSpace(osName + " " + identity.FirmwareVersion)
+	}
+
+	identity.ClassHint = ciscoClassHintForPID(identity.Model)
+	if identity.ClassHint == "" {
+		identity.ClassHint = ciscoDeviceTypeClassHint(deviceType)
 	}
 	return identity
 }

@@ -33,7 +33,7 @@ const (
 // published framework or preview scores and reconcile convergence break. Callers
 // are the tenant-facing list/aggregate readers only.
 //
-// alias is the compliance_findings alias in the caller's query; tenantParam is
+// alias is the findings alias in the caller's query; tenantParam is
 // the placeholder already bound to the tenant id (always $1 in these queries).
 func licensedFindingScopeSQL(alias, tenantParam string) string {
 	return `(

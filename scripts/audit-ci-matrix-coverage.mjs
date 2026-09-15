@@ -170,6 +170,7 @@ export function auditJsPackageCoverage({
       continue;
     }
     const hasBuild = Boolean(manifest.scripts && manifest.scripts.build);
+    const hasTypecheck = Boolean(manifest.scripts && manifest.scripts.typecheck);
 
     if (!hasBuild) {
       if (!exemptions.has(pkg)) {
@@ -177,6 +178,18 @@ export function auditJsPackageCoverage({
           `${pkg} has a package.json with no \`build\` script and no recorded reason — ` +
             `nothing in the PR gate compiles it. Give it a build script and a ci.yml leg, ` +
             `or add it to UNBUILT_JS_PACKAGES with why it ships nothing.`
+        );
+      }
+      // A package can be legitimately exempt from having its OWN build (it's
+      // consumed as source by something else) while still owning a real,
+      // independently-checkable `typecheck` script — e.g. packages/primitives,
+      // which now carries generated TS (src/facts/keys.gen.ts) nothing else
+      // verifies. That script is exactly as easy to leave unwired as a build
+      // script, so hold it to the same "named somewhere in the PR gate" bar.
+      if (hasTypecheck && !workflow.includes(pkg)) {
+        errors.push(
+          `${pkg} has a \`typecheck\` script but is never named in ${workflowFile} — ` +
+            `no PR-gate job type-checks it on its own.`
         );
       }
       continue;

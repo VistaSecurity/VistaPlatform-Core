@@ -72,6 +72,15 @@ func newThresholdFixture(t *testing.T) *thresholdFixture {
 		t.Fatalf("seed control measurement: %v", err)
 	}
 
+	// And, for the same reason, drop the scope certificate newEvalFixture seeds.
+	// This fixture reasons about ONE certificate's remaining life against one
+	// predicate; a second, long-lived certificate in the tenant would make every
+	// score here a fraction over two subjects rather than a verdict on the one
+	// the test is about.
+	if _, err := db.Exec(`DELETE FROM certificates WHERE tenant_id = $1`, f.tenant); err != nil {
+		t.Fatalf("clear the fixture certificate: %v", err)
+	}
+
 	// A certificate with ~60 days left: comfortably inside the platform threshold.
 	if _, err := db.Exec(`
 		INSERT INTO certificates (id, tenant_id, subject_dn, issuer_dn, common_name, fingerprint_sha256,
@@ -169,8 +178,11 @@ func TestIntegration_ThresholdOverride_SeverityOverrideApplied(t *testing.T) {
 	if len(res.Findings) != 1 {
 		t.Fatalf("findings = %d, want 1", len(res.Findings))
 	}
-	if res.Findings[0].Severity != "Low" {
-		t.Fatalf("finding severity = %q, want Low (the override re-rates it from High)", res.Findings[0].Severity)
+	// The override is AUTHORED as "Low" — the control-authoring vocabulary — and
+	// the finding stores the registry ladder's `low`. The normalization is the
+	// writer's, so the override keeps working whichever spelling an author used.
+	if res.Findings[0].Severity != "low" {
+		t.Fatalf("finding severity = %q, want low (the override re-rates it from high)", res.Findings[0].Severity)
 	}
 	// A violated control FAILS whatever the severity. This expectation
 	// has now moved twice — "warn" under the live path's own mapping, then

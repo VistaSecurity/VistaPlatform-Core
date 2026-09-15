@@ -115,6 +115,31 @@ export function deviceTypeLabel(t?: string | null): string | undefined {
     .join(' ');
 }
 
+// Human labels for `job_type`. Job Logs and the job list rendered the raw enum,
+// so a run showed as `device_interrogation` — a database value, not a thing the
+// customer asked for. `host_inventory` made that worse: it is the first job type
+// whose name does not read as English at all.
+//
+// Same fall-through as deviceTypeLabel: a type we have not met yet is
+// title-cased rather than shown as snake_case, so a new job type added
+// server-side is readable before anyone edits this file.
+const JOB_TYPE_LABELS: Record<string, string> = {
+  device_interrogation: 'Device interrogation',
+  cloud_discovery: 'Cloud discovery',
+  host_inventory: 'Host inventory',
+};
+
+/** Human label for a `job_type`; undefined when there is nothing to show. */
+export function jobTypeLabel(t?: string | null): string | undefined {
+  if (!t || !t.trim()) return undefined;
+  const key = t.trim().toLowerCase();
+  const known = JOB_TYPE_LABELS[key];
+  if (known) return known;
+  const words = key.split(/[_\-\s]+/).filter(Boolean);
+  if (words.length === 0) return undefined;
+  return words.map((w, i) => (i === 0 ? w.charAt(0).toUpperCase() + w.slice(1) : w)).join(' ');
+}
+
 export interface FleetMember {
   status?: string | null;
   last_heartbeat?: string | null;
@@ -220,10 +245,38 @@ export function Note({ icon, tone, title, message, panel }: { icon: string; tone
   return panel ? <div className="panel" style={{ borderRadius: 14 }}>{body}</div> : body;
 }
 
-// Standard query-state guard: returns the Note to render, or null when data is ready.
-export function queryNote(q: { isLoading: boolean; isError: boolean; error: unknown }, empty: boolean, names: { thing: string; emptyTitle?: string; emptyMessage?: string }): React.ReactNode | null {
-  if (q.isError) return <Note panel icon="alert-triangle" tone="var(--danger-text)" title={`Couldn't load ${names.thing}`} message={q.error instanceof Error ? q.error.message : 'Request failed'} />;
-  if (q.isLoading) return <Note panel icon="loader" tone="var(--app-t3)" title={`Loading ${names.thing}…`} message=" " />;
-  if (empty) return <Note panel icon="radar" tone="var(--app-t3)" title={names.emptyTitle || `No ${names.thing}`} message={names.emptyMessage || `No ${names.thing} for this tenant yet.`} />;
+export interface QueryState { isLoading: boolean; isError: boolean; error?: unknown }
+
+/**
+ * Which note a page owes the user, given every query that feeds its list.
+ *
+ * It takes a LIST of queries because "nothing here" is a claim about all of
+ * them. The Approvals page asks for pending assets and for merge proposals,
+ * and judged its empty state on the first alone — so a failed merge-proposal
+ * read rendered as "Nothing awaiting review" over an unknown number of merges
+ * waiting for a person. An error anywhere outranks an empty everywhere.
+ */
+export function queryNoteKind(queries: QueryState | QueryState[], empty: boolean): 'error' | 'loading' | 'empty' | null {
+  const all = Array.isArray(queries) ? queries : [queries];
+  if (all.some((q) => q.isError)) return 'error';
+  if (all.some((q) => q.isLoading)) return 'loading';
+  if (empty) return 'empty';
   return null;
+}
+
+// Standard query-state guard: returns the Note to render, or null when data is ready.
+export function queryNote(queries: QueryState | QueryState[], empty: boolean, names: { thing: string; emptyTitle?: string; emptyMessage?: string }): React.ReactNode | null {
+  const all = Array.isArray(queries) ? queries : [queries];
+  switch (queryNoteKind(all, empty)) {
+    case 'error': {
+      const failed = all.find((q) => q.isError);
+      return <Note panel icon="alert-triangle" tone="var(--danger-text)" title={`Couldn't load ${names.thing}`} message={failed?.error instanceof Error ? failed.error.message : 'Request failed'} />;
+    }
+    case 'loading':
+      return <Note panel icon="loader" tone="var(--app-t3)" title={`Loading ${names.thing}…`} message=" " />;
+    case 'empty':
+      return <Note panel icon="radar" tone="var(--app-t3)" title={names.emptyTitle || `No ${names.thing}`} message={names.emptyMessage || `No ${names.thing} for this tenant yet.`} />;
+    default:
+      return null;
+  }
 }

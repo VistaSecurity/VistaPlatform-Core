@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
@@ -32,6 +32,9 @@ type DeviceInterrogationService struct {
 	// so it calls them directly rather than growing a second copy that can drift.
 	resultProcessor *ResultProcessor
 	registry        *di.Registry
+	// observations writes the ops facts and observed relationships a collector
+	// emitted. Shared with the agent path so both runtimes persist one shape.
+	observations *ObservationSink
 }
 
 // NewDeviceInterrogationService creates a new device interrogation service. db is
@@ -46,6 +49,7 @@ func NewDeviceInterrogationService(db, bypassDB *sql.DB, masterKey string) *Devi
 		discoveryIntegration: NewDiscoveryIntegrationService(db, bypassDB),
 		resultProcessor:      NewResultProcessor(db, bypassDB),
 		registry:             di.NewRegistry(),
+		observations:         NewObservationSink(db),
 	}
 }
 
@@ -80,6 +84,8 @@ func (s *DeviceInterrogationService) InterrogateDevice(
 	}
 
 	jobMetadata := map[string]interface{}{
+		"asset_id": deviceID.String(),
+		// Deprecated alias, one release: the value IS the asset id.
 		"device_id":   deviceID.String(),
 		"device_type": device.DeviceType,
 		"source":      "device_interrogation",
@@ -179,14 +185,13 @@ func (s *DeviceInterrogationService) InterrogateDevice(
 		}
 	}
 
-	// Persist the identity the interrogator observed (vendor/model/firmware/
-	// serial) back onto the device row. Without this the finding carries it
-	// (see "device_identity" above) but the Devices page — which reads straight
-	// off `devices` — keeps showing "—" for firmware forever, even after a
-	// successful interrogation that plainly reported one (L-7).
-	if result.DeviceIdentity != nil {
-		s.updateDeviceIdentity(ctx, tenantID, deviceID, result.DeviceIdentity)
-	}
+	// Persist what the interrogator observed about the device itself: its
+	// hardware identity as measured facts and a serial identifier, plus the ops
+	// facts and the edges the collectors emitted. Without the identity
+	// half the finding carries it (see "device_identity" above) but the Devices
+	// page keeps showing "—" for firmware forever, even after a successful
+	// interrogation that plainly reported one (L-7).
+	s.persistObservations(ctx, tenantID, deviceID, jobID, result)
 
 	s.updateDeviceInterrogationTime(ctx, tenantID, deviceID)
 	if err := s.discoveryIntegration.MarkJobCompleted(ctx, jobID); err != nil {
@@ -226,7 +231,8 @@ func (s *DeviceInterrogationService) materializeInterrogatedAsset(
 	result *di.InterrogateResult,
 ) bool {
 	details := map[string]interface{}{
-		"device_id":         deviceID.String(),
+		"asset_id":          deviceID.String(),
+		"device_id":         deviceID.String(), // deprecated alias, same value
 		"asset_type":        asset.AssetType,
 		"protocol_version":  diDerefStr(asset.ProtocolVersion),
 		"cipher_suite":      diDerefStr(asset.CipherSuite),
@@ -422,34 +428,55 @@ func diDerefInt(i *int) int {
 	return *i
 }
 
-// getDevice retrieves a device by ID, scoped to tenantID (devices is RLS-scoped).
-func (s *DeviceInterrogationService) getDevice(ctx context.Context, tenantID, deviceID uuid.UUID) (*models.Device, error) {
+// getDevice retrieves a managed asset by id, scoped to tenantID.
+//
+// It does NOT go through DeviceService.GetDevice, which masks the password: the
+// value this caller needs is the real stored ciphertext, because
+// getDeviceCredentials decrypts it to log into the device. Handing it a mask is
+//and the split between the two readers is what keeps the API response
+// masked and the interrogator working.
+func (s *DeviceInterrogationService) getDevice(ctx context.Context, tenantID, assetID uuid.UUID) (*models.Device, error) {
 	query := `
-		SELECT id, tenant_id, device_type, vendor, model, hostname, ip_address,
-		       management_url, serial_number, firmware_version, discovery_method,
-		       credential_id, username, password, tls_insecure_skip_verify,
-		       connection_status, metadata, tags, created_at, updated_at
-		FROM devices
-		WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+		SELECT a.id, a.tenant_id, a.metadata->>'device_type',
+		       a.hostname, host(a.primary_address),
+		       m.management_url, m.tls_insecure_skip_verify, m.connection_status,
+		       a.metadata, a.tags, a.created_at, a.updated_at,
+		       c.credential_id, c.username, c.password_enc
+		FROM public.assets a
+		JOIN public.asset_management m ON m.tenant_id = a.tenant_id AND m.asset_id = a.id
+		LEFT JOIN public.asset_credentials c ON c.tenant_id = a.tenant_id AND c.asset_id = a.id
+		WHERE a.id = $1 AND a.tenant_id = $2 AND a.deleted_at IS NULL
 	`
 
 	var device models.Device
 	var metadataJSON, tagsJSON []byte
+	var deviceType, hostname, ipAddress, managementURL sql.NullString
 	var credentialID, username, password sql.NullString
 
 	err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, query, deviceID, tenantID).Scan(
-			&device.ID, &device.TenantID, &device.DeviceType, &device.Vendor, &device.Model,
-			&device.Hostname, &device.IPAddress, &device.ManagementURL, &device.SerialNumber,
-			&device.FirmwareVersion, &device.DiscoveryMethod, &credentialID, &username, &password,
-			&device.TLSInsecureSkipVerify,
-			&device.ConnectionStatus, &metadataJSON, &tagsJSON, &device.CreatedAt, &device.UpdatedAt,
+		return tx.QueryRowContext(ctx, query, assetID, tenantID).Scan(
+			&device.ID, &device.TenantID, &deviceType,
+			&hostname, &ipAddress,
+			&managementURL, &device.TLSInsecureSkipVerify, &device.ConnectionStatus,
+			&metadataJSON, &tagsJSON, &device.CreatedAt, &device.UpdatedAt,
+			&credentialID, &username, &password,
 		)
 	})
 	if err != nil {
 		return nil, err
 	}
 
+	device.AssetID = device.ID
+	device.DeviceType = deviceType.String
+	if hostname.Valid && hostname.String != "" {
+		device.Hostname = &hostname.String
+	}
+	if ipAddress.Valid && ipAddress.String != "" {
+		device.IPAddress = &ipAddress.String
+	}
+	if managementURL.Valid && managementURL.String != "" {
+		device.ManagementURL = &managementURL.String
+	}
 	if credentialID.Valid {
 		id, _ := uuid.Parse(credentialID.String)
 		device.CredentialID = &id
@@ -461,7 +488,17 @@ func (s *DeviceInterrogationService) getDevice(ctx context.Context, tenantID, de
 		device.Password = &password.String
 	}
 
-	if err := json.Unmarshal(metadataJSON, &device.Metadata); err != nil {
+	var meta map[string]interface{}
+	if err := json.Unmarshal(metadataJSON, &meta); err != nil {
+		meta = map[string]interface{}{}
+	}
+	// The vendor-specific addressing a collector needs (UniFi's site_id, the
+	// cloud collectors' arn/region) lives under the nested device key; the rest
+	// of assets.metadata is pipeline state that has no business reaching a
+	// vendor client.
+	if nested, ok := meta[deviceMetadataKey].(map[string]interface{}); ok {
+		device.Metadata = nested
+	} else {
 		device.Metadata = models.JSONB{}
 	}
 	if err := json.Unmarshal(tagsJSON, &device.Tags); err != nil {
@@ -479,12 +516,11 @@ func (s *DeviceInterrogationService) getDeviceCredentials(
 ) (username, password, baseURL string, insecureSkipVerify bool, err error) {
 	// Priority 1: Device-embedded credentials (new approach for network devices)
 	if device.Username != nil && device.Password != nil && *device.Username != "" && *device.Password != "" {
-		enc, err := encryption.NewService(s.masterKey)
-		if err != nil {
-			return "", "", "", false, fmt.Errorf("failed to initialize encryption: %w", err)
-		}
-
-		password, err = enc.Decrypt(*device.Password)
+		// asset_credentials.password_enc is written by the shared credentials
+		// helper and carries its `enc:v1:` tag, so the reader never has to guess
+		// whether a value is encrypted. openStoredCredential branches on the tag
+		// and keeps the untagged path for a value written before this release.
+		password, err = openStoredCredential(s.masterKey, *device.Password)
 		if err != nil {
 			return "", "", "", false, fmt.Errorf("failed to decrypt device password: %w", err)
 		}
@@ -572,58 +608,51 @@ func deviceHost(device *models.Device) string {
 	return "localhost"
 }
 
-// updateDeviceInterrogationTime updates the device's last_interrogated_at
-// timestamp, under the resolved tenantID (devices is RLS-scoped).
-func (s *DeviceInterrogationService) updateDeviceInterrogationTime(ctx context.Context, tenantID, deviceID uuid.UUID) {
-	query := `
-		UPDATE devices
-		SET last_interrogated_at = NOW(), connection_status = 'connected',
-		    interrogation_error = NULL, updated_at = NOW()
-		WHERE id = $1 AND tenant_id = $2
-	`
-	_ = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		_, e := tx.ExecContext(ctx, query, deviceID, tenantID)
-		return e
-	})
+// updateDeviceInterrogationTime records that the device was reached, on its
+// asset_management row.
+func (s *DeviceInterrogationService) updateDeviceInterrogationTime(ctx context.Context, tenantID, assetID uuid.UUID) {
+	now := time.Now().UTC()
+	connected := "connected"
+	if err := upsertManagementOwnTx(ctx, s.db, tenantID, assetID, managementUpsert{
+		ConnectionStatus:        &connected,
+		LastInterrogatedAt:      &now,
+		ClearInterrogationError: true,
+	}); err != nil {
+		log.Printf("device-interrogation: failed to record interrogation time for asset %s: %v", assetID, err)
+	}
 }
 
-// updateDeviceIdentity writes the vendor/model/firmware/serial an interrogation
-// observed back onto the device row, under the resolved tenantID (devices is
-// RLS-scoped). Only non-empty fields are set — an interrogator that doesn't
-// populate a given field must not blank out a value a prior run recorded.
-func (s *DeviceInterrogationService) updateDeviceIdentity(ctx context.Context, tenantID, deviceID uuid.UUID, identity *di.DeviceIdentity) {
-	setClauses, args := deviceIdentitySetClauses(identity.Vendor, identity.Model, identity.FirmwareVersion, identity.SerialNumber, 1)
-	if len(setClauses) == 0 {
+// persistObservations writes the identity, ops facts and observed edges an
+// in-cluster interrogation produced.
+//
+// Identical destination and identical rules to the agent path
+// (ResultProcessor.recordInterrogationObservations) because they share the
+// sink — the two runtimes writing the same observation two ways is the drift
+// that made the sensor and its in-cluster twin diverge.
+func (s *DeviceInterrogationService) persistObservations(ctx context.Context, tenantID, assetID, jobID uuid.UUID, result *di.InterrogateResult) {
+	obs := InterrogationObservations{
+		DeviceIdentity: result.DeviceIdentity,
+		Facts:          result.Facts,
+		Relationships:  result.Relationships,
+	}
+	if obs.Empty() {
 		return
 	}
-	setClauses = append(setClauses, "updated_at = NOW()")
-	argIdx := len(args) + 1
-
-	//nolint:gosec // intentional — placeholder concatenation only; values are parameterized via args slice
-	query := fmt.Sprintf(
-		"UPDATE devices SET %s WHERE id = $%d AND tenant_id = $%d",
-		strings.Join(setClauses, ", "), argIdx, argIdx+1,
-	)
-	args = append(args, deviceID, tenantID)
-
-	_ = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		_, e := tx.ExecContext(ctx, query, args...)
-		return e
-	})
+	if err := s.observations.Persist(ctx, tenantID, assetID, interrogationSource(jobID), obs); err != nil {
+		log.Printf("device-interrogation: failed to persist observations for asset %s: %v", assetID, err)
+	}
 }
 
-// updateDeviceError updates the device's error status, under the resolved
-// tenantID (devices is RLS-scoped).
-func (s *DeviceInterrogationService) updateDeviceError(ctx context.Context, tenantID, deviceID uuid.UUID, errorMsg string) {
-	query := `
-		UPDATE devices
-		SET connection_status = 'error', interrogation_error = $1, updated_at = NOW()
-		WHERE id = $2 AND tenant_id = $3
-	`
-	_ = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		_, e := tx.ExecContext(ctx, query, errorMsg, deviceID, tenantID)
-		return e
-	})
+// updateDeviceError records why the device could not be reached, on its
+// asset_management row.
+func (s *DeviceInterrogationService) updateDeviceError(ctx context.Context, tenantID, assetID uuid.UUID, errorMsg string) {
+	status := "error"
+	if err := upsertManagementOwnTx(ctx, s.db, tenantID, assetID, managementUpsert{
+		ConnectionStatus:   &status,
+		InterrogationError: &errorMsg,
+	}); err != nil {
+		log.Printf("device-interrogation: failed to record interrogation error for asset %s: %v", assetID, err)
+	}
 }
 
 // interrogateDatabase runs the shared core's database interrogation, persists
@@ -659,7 +688,8 @@ func (s *DeviceInterrogationService) interrogateDatabase(
 	}
 
 	details := map[string]interface{}{
-		"device_id":                  device.ID.String(),
+		"asset_id":                   device.ID.String(),
+		"device_id":                  device.ID.String(), // deprecated alias, same value
 		"db_engine":                  finding.Engine,
 		"db_version":                 finding.Version,
 		"ssl_enabled":                finding.SSLEnabled,

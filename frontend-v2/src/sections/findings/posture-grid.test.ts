@@ -1,6 +1,6 @@
 // Regression test for H-9 (live QA): the Posture control grid pivoted
 // findings against /infrastructure-assets rows only, so any finding whose
-// asset_id pointed at a certificate or crypto-configuration (not an
+// subject was a certificate or crypto configuration (not an
 // infrastructure asset) vanished from every grid cell and every row total —
 // contradicting the scorecards and Top Exposures panel fed by the same
 // finding set. See buildControlGrid in posture-grid.ts for the fix.
@@ -16,8 +16,20 @@ function facts(entries: Array<[string, Partial<AssetFacts>]>): Map<string, Asset
   return m;
 }
 
-function finding(assetId: string, controlId: string, severity: string): BatchFinding {
-  return { id: `${controlId}-${assetId}`, control_id: controlId, asset_id: assetId, severity, summary: 'test finding' };
+function finding(
+  subjectId: string,
+  controlId: string,
+  severity: BatchFinding['severity'],
+  subjectType: BatchFinding['subject_type'] = 'asset',
+): BatchFinding {
+  return {
+    id: `${controlId}-${subjectId}`,
+    control_id: controlId,
+    subject_id: subjectId,
+    subject_type: subjectType,
+    severity,
+    summary: 'test finding',
+  };
 }
 
 const cols: GridCol[] = [{ id: 'ctrl-1', fwId: 'fw-1', name: 'Control 1', fw: 'PCI-DSS' }];
@@ -25,7 +37,7 @@ const cols: GridCol[] = [{ id: 'ctrl-1', fwId: 'fw-1', name: 'Control 1', fw: 'P
 describe('buildControlGrid', () => {
   it('counts a finding against a known infrastructure asset normally', () => {
     const f = facts([['asset-1', { environment: 'production', riskScore: 50 }]]);
-    const findingsByControl = new Map([['ctrl-1', [finding('asset-1', 'ctrl-1', 'High')]]]);
+    const findingsByControl = new Map([['ctrl-1', [finding('asset-1', 'ctrl-1', 'high')]]]);
     const rows = buildControlGrid(f, cols, findingsByControl, 'environment');
     expect(rows).toHaveLength(1);
     expect(rows[0].key).toBe('production');
@@ -33,16 +45,15 @@ describe('buildControlGrid', () => {
     expect(rows[0].totFail).toBe(1);
   });
 
-  it('does NOT drop findings whose asset_id is not an infrastructure asset (H-9)', () => {
+  it('does NOT drop findings whose subject is not an infrastructure asset (H-9)', () => {
     const f = facts([['asset-1', { environment: 'production', riskScore: 50 }]]);
-    // 3 of these 4 findings target certificate/crypto-config ids that never
-    // appear in `facts` — the live ratio (15 of 19) reproduced at
-    // smaller scale.
+    // 3 of these 4 findings are about certificates, whose ids never appear in
+    // `facts` — the live ratio (15 of 19) reproduced at smaller scale.
     const findingsByControl = new Map([['ctrl-1', [
-      finding('asset-1', 'ctrl-1', 'High'),
-      finding('cert-1', 'ctrl-1', 'Critical'),
-      finding('cert-2', 'ctrl-1', 'Medium'),
-      finding('cfg-1', 'ctrl-1', 'Low'),
+      finding('asset-1', 'ctrl-1', 'high'),
+      finding('cert-1', 'ctrl-1', 'critical', 'certificate'),
+      finding('cert-2', 'ctrl-1', 'medium', 'certificate'),
+      finding('cert-3', 'ctrl-1', 'low', 'certificate'),
     ]]]);
     const rows = buildControlGrid(f, cols, findingsByControl, 'environment');
 
@@ -64,7 +75,7 @@ describe('buildControlGrid', () => {
 
   it('omits the unattributed row entirely when every finding resolves', () => {
     const f = facts([['asset-1', { environment: 'production', riskScore: 10 }]]);
-    const findingsByControl = new Map([['ctrl-1', [finding('asset-1', 'ctrl-1', 'Low')]]]);
+    const findingsByControl = new Map([['ctrl-1', [finding('asset-1', 'ctrl-1', 'low')]]]);
     const rows = buildControlGrid(f, cols, findingsByControl, 'environment');
     expect(rows.find((r) => r.key === UNATTRIBUTED_ROW_KEY)).toBeUndefined();
   });
@@ -124,7 +135,7 @@ describe('buildControlGrid', () => {
 
     it('flags the unattributed row’s cells the same way', () => {
       const f = facts([['asset-1', { environment: 'production' }]]);
-      const findingsByControl = new Map([['ctrl-1', [finding('cert-1', 'ctrl-1', 'High')]]]);
+      const findingsByControl = new Map([['ctrl-1', [finding('cert-1', 'ctrl-1', 'high')]]]);
       const rows = buildControlGrid(f, [passCol, naCol], findingsByControl, 'environment');
       const unattributed = rows.find((r) => r.key === UNATTRIBUTED_ROW_KEY);
       expect(unattributed).toBeDefined();
@@ -134,7 +145,7 @@ describe('buildControlGrid', () => {
 
     it('does not let a not-assessed column inflate the row fail total', () => {
       const f = facts([['asset-1', { environment: 'production' }]]);
-      const findingsByControl = new Map([['ctrl-1', [finding('asset-1', 'ctrl-1', 'Low')]]]);
+      const findingsByControl = new Map([['ctrl-1', [finding('asset-1', 'ctrl-1', 'low')]]]);
       const rows = buildControlGrid(f, [passCol, naCol], findingsByControl, 'environment');
       expect(rows[0].totFail).toBe(1);
       expect(rows[0].cells[1].fail).toBe(0);

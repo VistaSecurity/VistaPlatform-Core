@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { profileLabel, jobsSummary, hostSummary, addressTooltip, isPlatformManaged } from './agent-fleet';
+import { profileLabel, jobsSummary, hostSummary, addressTooltip, isPlatformManaged, hostInventorySummary } from './agent-fleet';
 
 // A discovery agent used to be rendered through the sensor table, which had no
 // column for any of this — so every one of these values existed in the database
@@ -177,5 +177,61 @@ describe('isPlatformManaged', () => {
   it('does not key on profile — those values are legitimate for a tenant sensor', () => {
     expect(isPlatformManaged({ platform: 'linux', tags: ['discovery'] })).toBe(false);
     expect(isPlatformManaged({ platform: 'darwin', tags: ['device_interrogation'] })).toBe(false);
+  });
+});
+
+describe('hostInventorySummary', () => {
+  // A host-inventory collection is the agent describing its OWN host, on its own
+  // timer, with nobody having queued it. The jobs column therefore cannot say
+  // whether it is happening: an agent busy interrogating firewalls that has
+  // never reported its own host reads as perfectly healthy on "47 jobs · 2h ago".
+
+  it('says nothing at all for an agent that has never reported one', () => {
+    // Rather than "never": an agent deployed purely to interrogate network
+    // devices is not misconfigured, and a permanent "never" on every such row
+    // trains people to ignore the line.
+    expect(hostInventorySummary({ job_count: 47, last_host_inventory_at: null })).toBeNull();
+    expect(hostInventorySummary({ job_count: 0 })).toBeNull();
+  });
+
+  it('reports when, and what it found', () => {
+    const s = hostInventorySummary({
+      job_count: 3,
+      last_host_inventory_at: minutesAgo(120),
+      host_inventory_packages: 412,
+      host_inventory_listeners: 18,
+    });
+    expect(s).toBe('Last host inventory: 2h ago — 412 packages, 18 listeners');
+  });
+
+  it('omits the package count when the package step failed, rather than saying zero', () => {
+    // The three-valued rule, at the last place it can still be broken. A host
+    // whose dpkg could not be read has NOT been enumerated; rendering "0
+    // packages" would make that indistinguishable from a host with none.
+    const s = hostInventorySummary({
+      job_count: 1,
+      last_host_inventory_at: minutesAgo(30),
+      host_inventory_packages: null,
+      host_inventory_listeners: 18,
+    });
+    expect(s).toBe('Last host inventory: 30m ago — 18 listeners');
+  });
+
+  it('keeps an explicit zero, which is an answer', () => {
+    // Zero packages from a step that SUCCEEDED is a real measurement — a
+    // minimal container image genuinely has no package-database entries — and
+    // it must not be dropped the way an absent count is.
+    const s = hostInventorySummary({
+      job_count: 1,
+      last_host_inventory_at: minutesAgo(5),
+      host_inventory_packages: 0,
+      host_inventory_listeners: 1,
+    });
+    expect(s).toBe('Last host inventory: 5m ago — 0 packages, 1 listener');
+  });
+
+  it('still reports the time when it has no counts to show', () => {
+    expect(hostInventorySummary({ job_count: 1, last_host_inventory_at: minutesAgo(10) }))
+      .toBe('Last host inventory: 10m ago');
   });
 });

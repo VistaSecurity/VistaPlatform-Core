@@ -167,6 +167,25 @@ func recordPlatformAudit(c *gin.Context, entry PlatformAuditEntry) {
 	platformAuditor.Emit(c, entry)
 }
 
+// PlatformAuditActivityLogger exposes the emitter's underlying audit client as
+// the narrow ActivityLogger interface, for wiring an [audit.AISink].
+//
+// admin-service has no request-logging audit middleware (it emits platform
+// events through this emitter instead), so the AI provider-call sink — which
+// takes an ActivityLogger — has nothing else to hang off. *audit.Client already
+// satisfies the interface; this is only the accessor.
+//
+// Returns nil before InitializePlatformAuditor has run, or when auditing is
+// disabled. audit.NewAISink turns a nil logger into a nil sink, which is still
+// safe to call, so a deployment with audit off wires the provider boundary
+// identically and simply records nothing.
+func PlatformAuditActivityLogger() audit.ActivityLogger {
+	if platformAuditor == nil || !platformAuditor.enabled || platformAuditor.client == nil {
+		return nil
+	}
+	return platformAuditor.client
+}
+
 // RecordPlatformAudit is the exported form of recordPlatformAudit, for handlers
 // that live outside this package. The emitter is package-level state wired once
 // from NewServer, so out-of-package callers cannot hold their own — they go

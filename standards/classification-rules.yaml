@@ -1,0 +1,1193 @@
+# Classification rules — the evidence behind every class proposal.
+#
+# ADR-0004 D6 (asset-inventory): class proposals are produced by a rule table
+# seeded from OUI → vendor → likely class, SNMP sysObjectID → vendor and model,
+# EtherNet/IP identity → OT class, cloud resource type → cloud class, service
+# identification → application class, and banner regexes. Rules are DATA a
+# platform admin curates, not code, so the catalogue grows without a release and
+# the learned classifier of workstream 4.2 has features to train on.
+#
+# This file is the source of truth. `make generate` writes:
+#   shared/classify/rules_gen.go   — the Go table the engine loads by default
+#   scripts/database/seed.sql      — one generated region, the seeded rows
+# and `make audit` runs the same generator with --check and fails on drift.
+#
+# A rule NEVER decides anything on its own. Everything here produces a
+# PROPOSAL that goes through Approvals (ADR-0008 D3), and a proposal nobody
+# approves leaves the asset unclassified.
+#
+# ---------------------------------------------------------------------------
+# The one rule that governs every rule: A WRONG CLASS IS WORSE THAN NO CLASS.
+# ---------------------------------------------------------------------------
+#
+# An absent class shows as unclassified, which reads as "we have not worked
+# this out yet" and invites someone to look. A wrong class shows as a fact, and
+# a plausible-looking wrong proposal is the one that gets bulk-approved. So:
+#
+#   * When a vendor's products span several classes, give the rule a VENDOR and
+#     NO CLASS. Most OUI rules here are vendor-only, deliberately: Dell, HP,
+#     Netgear, Ubiquiti and MikroTik each sell things from three or four
+#     different classes under one OUI, and picking the most common one is a
+#     guess wearing a decimal.
+#   * Prefer a broad class that is certainly right (`network_device`) over a
+#     narrow one that is probably right (`switch`). The taxonomy is a tree and
+#     a later, better-evidenced rule can refine an ancestor without
+#     contradicting it — see the conflict rule in shared/classify.
+#   * If two rules disagree about the class at similar confidence, the engine
+#     proposes NO class and reports both. That is the intended outcome, not a
+#     failure to handle.
+#
+# ---------------------------------------------------------------------------
+# Fields
+# ---------------------------------------------------------------------------
+#
+#   kind         one of the kinds listed below. Decides how `pattern` matches.
+#   pattern      the thing matched, in the kind's own syntax. Unique per kind.
+#   class        an asset-class key from standards/asset-classes.yaml. OPTIONAL
+#                — omit it for a vendor-only rule.
+#   vendor       the manufacturer this pattern identifies. Optional.
+#   model        the specific model, where the pattern pins one. Rarely set:
+#                most patterns identify a family, not a product.
+#   confidence   0.50–0.95. What the rule asserts, not how sure we are that the
+#                pattern matched. See the ladder below.
+#   source_url   REQUIRED. Where the mapping comes from. A rule that cannot
+#                cite anything is somebody's memory, and this file is read by
+#                people who were not in the room.
+#
+# Confidence ladder, applied consistently:
+#
+#   0.90–0.95  the thing DECLARED its identity in a vocabulary with exactly one
+#              meaning (a cloud provider's resource type).
+#   0.80–0.89  a registered identifier belonging to a vendor with one product
+#              line, or a model prefix that names a product family.
+#   0.70–0.79  a registered identifier for a vendor whose products span a
+#              family, narrowed only to a broad class; the collector's own
+#              platform identity; or a device's standardised self-declaration
+#              of what it DOES, where that declaration has one meaning (an
+#              802.1AB WLAN-access-point bit, an advertised print service).
+#   0.50–0.69  an inference from observed behaviour — a banner, a port profile,
+#              or a self-declared function that several kinds of device make
+#              (a CDP `switch` bit: true of a switch, and of a router with a
+#              switch module).
+#
+# A vendor-only rule carries the confidence of its VENDOR claim (0.85 for an
+# IEEE assignment), because that is all it asserts.
+#
+# ---------------------------------------------------------------------------
+# Rule kinds
+# ---------------------------------------------------------------------------
+#
+#   oui           pattern is the 24-bit IEEE assignment as 6 uppercase hex
+#                 digits, no separators ("00000C"). Matches the first three
+#                 octets of any MAC in the input, in any spelling.
+#
+#   sysobjectid   pattern is an OID prefix under 1.3.6.1.4.1 — the IANA
+#                 private-enterprise arc. Matched on ARC boundaries, so
+#                 1.3.6.1.4.1.9 does not match enterprise 99, and the LONGEST
+#                 matching prefix wins so a vendor can add product-tree rules
+#                 under their enterprise rule without disturbing it.
+#
+#   enip          pattern is an ODVA vendor id in decimal, from the
+#                 EtherNet/IP List Identity response. Exact match.
+#
+#   cloud_type    pattern is a provider resource type as the cloud collectors
+#                 spell it ("aws_s3_bucket"). Exact, case-insensitive.
+#
+#   banner        pattern is an RE2 regexp matched against every banner the
+#                 collectors captured. The regexp carries its own anchoring —
+#                 there is no separate "which banner" field, so write patterns
+#                 that could only match the protocol they mean.
+#
+#   port_profile  pattern is a comma-separated ascending port list. It matches
+#                 only when EVERY listed port is open. One open port is not a
+#                 profile; these exist for combinations that mean one thing.
+#
+#   model         pattern is a case-insensitive PREFIX of the model or product
+#                 id the device stated. Longest matching prefix wins. When the
+#                 rule names a vendor AND the input names one, they must agree
+#                 — so a Cisco PID prefix cannot fire on another vendor's model
+#                 string that happens to start the same way.
+#
+#   platform      pattern is the collector path's own identity for the device:
+#                 the management API it answered ("panos"), or the device
+#                 profile it was registered under ("cisco_asa"). Exact,
+#                 case-insensitive. This is the kind that carries "a box
+#                 answering the FortiOS API is a FortiGate, and a FortiGate is
+#                 a firewall" WITHOUT letting that conclusion leak onto every
+#                 device an OUI merely attributes to Fortinet.
+#
+#   cdp_capabilities   pattern is an ascending comma-separated SET of Cisco CDP
+#                 capability names ("router,switch"), spelled as
+#                 shared/hostobs' CDP decoder spells them. A rule matches only
+#                 when EVERY name is advertised, and only the matching rules
+#                 naming the MOST capabilities are returned — so a rule for a
+#                 combination REFINES the single-capability rules under it
+#                 rather than arguing with them.
+#
+#   lldp_capability   the same matching, over IEEE 802.1AB system capabilities.
+#                 Two kinds and not one because the vocabularies are different
+#                 words for overlapping ideas: CDP's `switch` says the device
+#                 switches, while 802.1AB's `bridge` is the bridging FUNCTION,
+#                 which an access point and a desk phone also perform. One
+#                 shared kind would let a rule written for one protocol fire on
+#                 the other's advertisement.
+#
+#   mdns_service  pattern is one DNS-SD service type in its registry spelling
+#                 ("_ipp._tcp"), lowercase. Exact, case-insensitive. What the
+#                 host advertises about ITSELF on the segment, which is why
+#                 this is a rule and an SSH banner is not.
+
+version: 1
+
+kinds:
+  - oui
+  - sysobjectid
+  - enip
+  - cloud_type
+  - banner
+  - port_profile
+  - model
+  - platform
+  - cdp_capabilities
+  - lldp_capability
+  - mdns_service
+
+# Citations reused across whole blocks, so the rules below stay readable.
+# (YAML anchors; the generator resolves them before it sees a rule.)
+sources:
+  ieee: &ieee https://standards-oui.ieee.org/
+  iana_pen: &iana_pen https://www.iana.org/assignments/enterprise-numbers/
+  odva: &odva https://www.odva.org/subscriptions-services/vendor-id-list/
+
+# ---------------------------------------------------------------------------
+# oui — one table, one owner
+# ---------------------------------------------------------------------------
+#
+# OUI → VENDOR lives in standards/oui-vendors.csv and nowhere else. That table
+# is workstream 2.5's (shared/hostobs compiles it into the sensor so a passive
+# capture can name a manufacturer with no network call), it is curated, and it
+# already covers 462 prefixes across 118 manufacturers.
+#
+# This file does NOT restate any of it. A second copy of the same mapping is a
+# second copy that drifts — and it already had: a first cut of this file
+# carried 123 hand-written OUI rules, and when the CSV landed 27 of them
+# disagreed with it about the vendor's own name (Netgear/NETGEAR,
+# Brother/Brother Industries, Rockwell Automation/Allen-Bradley for the same
+# prefix). Nothing would have failed; the two tables would simply have told a
+# customer two different things.
+#
+# So `oui_classes` maps a VENDOR — spelled exactly as the CSV spells it — onto
+# the class its products are, and the generator emits one `oui` rule per CSV
+# prefix:
+#
+#   * a vendor in this map     → a rule with that vendor AND that class
+#   * a vendor not in this map → a rule with that vendor and NO class
+#
+# The second case is the majority and the default, which is the rule of thumb
+# working as intended: of 462 prefixes only about a third carry a class.
+#
+# The generator FAILS on a vendor here that the CSV does not contain, because a
+# typo would otherwise be a class that silently never applies to anything.
+#
+# What belongs in this map: a vendor whose networked products are all one
+# thing. What does not, with the reason, because these are the judgement calls
+# somebody will want to revisit:
+#
+#   * Dell, HP, Intel, IBM, Apple, Supermicro — servers, laptops, workstations
+#     and (Dell, HP) switches and printers under one assignment. Supermicro is
+#     the near miss: almost every Supermicro NIC is in a server, and "almost" is
+#     not "unambiguous".
+#   * NETGEAR, TP-Link, D-Link, Linksys — switches and APs, but also NAS
+#     (ReadyNAS) and cameras on the same prefixes.
+#   * Ubiquiti Networks — UniFi is network gear, but UniFi Protect cameras and
+#     Access readers carry the same assignments.
+#   * Cisco Meraki — the same shape as Ubiquiti, and excluded for the same
+#     reason: MS switches, MR access points and MX appliances share their
+#     assignments with MV cameras and MT environmental sensors, which are not
+#     network devices at all.
+#   * Zebra Technologies — label printers, but the Motorola enterprise line came
+#     with them: TC/MC handheld computers and wireless barcode scanners are on
+#     the same prefixes, and a warehouse has far more of those than printers.
+#   * Fortinet — FortiSwitch and FortiAP share FortiGate's prefixes. The
+#     FortiGate conclusion is earned by ANSWERING the FortiOS API, and lives in
+#     a `platform` rule where that evidence is.
+#   * Siemens — four prefixes spanning industrial, building technology and
+#     medical imaging.
+#   * Moxa, Lantronix, Digi International — serial device servers and protocol
+#     gateways: network infrastructure on one side, an OT bus on the other.
+#   * Xerox — 00:00:01 is Xerox's original Ethernet assignment and predates
+#     their print business entirely.
+#   * Raspberry Pi — a computer, an IoT controller, a kiosk or a PLC gateway
+#     depending entirely on what somebody did with it.
+#   * American Power Conversion — UPSs and rack PDUs, for which the taxonomy has
+#     no class and `iot_device` would be a category error.
+#
+# Confidence follows the same ladder as everything else in this file, and a
+# vendor-only rule gets `oui_vendor_only_confidence` below.
+
+# What a rule asserts when it names only the manufacturer: an IEEE assignment
+# is a strong claim about who made the thing and no claim at all about what it
+# is.
+oui_vendor_only_confidence: 0.85
+
+# ---------------------------------------------------------------------------
+# Vendor names: one manufacturer, one spelling
+# ---------------------------------------------------------------------------
+#
+# Every `vendor:` a rule below names must be spelled EXACTLY as
+# standards/oui-vendors.csv spells it, and the generator fails on any that is
+# not. This is not tidiness. The engine refuses to choose between two rules
+# naming DIFFERENT vendors at similar confidence, so two spellings of one
+# manufacturer do not disagree loudly — they CANCEL. `Dell` on the OUI rule
+# against `Dell Inc.` on the sysObjectID rule meant a Dell server seen by both
+# MAC and SNMP came back with no vendor AND no class; `Ubiquiti` against
+# `Ubiquiti Networks` did the same to every UniFi device. Both also break the
+# hw.vendor join the end-of-life catalogue exists for.
+#
+# A manufacturer with no prefix in the CSV is legitimate — these three are
+# reached over SNMP and have never appeared in the MAC table — but it has to be
+# DECLARED here, so that adding their OUI later cannot quietly introduce a
+# second spelling.
+vendors_outside_oui_table:
+  - Zyxel
+  - Brocade
+  - Citrix
+  - H3C
+
+# ---------------------------------------------------------------------------
+# Citations for prefixes IEEE did not assign
+# ---------------------------------------------------------------------------
+#
+# An OUI rule cites the IEEE registry, because that is where OUI → vendor comes
+# from. For a LOCALLY-ADMINISTERED prefix that citation is false: the U/L bit
+# means nobody registered it, and `FA:16:3E → OpenStack` is a convention of that
+# platform's own. A citation that does not say what the rule says is worse than
+# no citation, because it is aimed at a reader who will not go and check.
+#
+# The generator REQUIRES an entry here for every locally-administered prefix in
+# the CSV, and accepts one for a universally-administered prefix whose registrant
+# is not the name the table uses.
+oui_sources:
+  # Locally administered — required.
+  '52:54:00': https://libvirt.org/formatdomain.html
+  'FA:16:3E': https://docs.openstack.org/neutron/latest/configuration/neutron.html
+  '02:42:AC': https://docs.docker.com/engine/network/drivers/bridge/
+  # Registered to Cadmus Computer Systems; every frame carrying it in practice
+  # is a VirtualBox guest, which is what the table names it.
+  '08:00:27': https://www.virtualbox.org/manual/ch06.html
+
+oui_classes:
+
+  # --- virtualisation --------------------------------------------------------
+  # A hypervisor-assigned MAC is the strongest OUI evidence there is: the
+  # address was minted BY the thing that decides what the guest is. Note that
+  # plain "Microsoft" is absent and "Microsoft Hyper-V" is present — only the
+  # 00:15:5D pool is a guest NIC; the rest are Surface hardware and Xbox.
+  VMware:             { class: virtual_machine, confidence: 0.85 }
+  Microsoft Hyper-V:  { class: virtual_machine, confidence: 0.85 }
+  Xen:                { class: virtual_machine, confidence: 0.80 }
+  Oracle VirtualBox:  { class: virtual_machine, confidence: 0.85 }
+  Parallels:          { class: virtual_machine, confidence: 0.85 }
+  QEMU virtual NIC:   { class: virtual_machine, confidence: 0.80 }
+  OpenStack:          { class: virtual_machine, confidence: 0.75 }
+  Docker:             { class: container,       confidence: 0.75 }
+
+  # --- network infrastructure ------------------------------------------------
+  # `network_device` and not `switch` or `router`: each of these sells both, and
+  # the common ancestor is certainly right where either leaf is only probably
+  # right. A model rule or an SNMP walk refines it later, and the engine treats
+  # that refinement as agreement rather than as a conflict.
+  Cisco Systems:      { class: network_device, confidence: 0.70 }
+  Juniper Networks:   { class: network_device, confidence: 0.70 }
+  Arista Networks:    { class: network_device, confidence: 0.75 }
+  Extreme Networks:   { class: network_device, confidence: 0.70 }
+  Allied Telesis:     { class: network_device, confidence: 0.70 }
+  Aruba Networks:     { class: network_device, confidence: 0.75 }
+  Ruckus Wireless:    { class: network_device, confidence: 0.75 }
+  Cambium Networks:   { class: network_device, confidence: 0.70 }
+  MikroTik:           { class: network_device, confidence: 0.75 }
+  Hirschmann:         { class: network_device, confidence: 0.75 }
+
+  # --- security appliances ---------------------------------------------------
+  Palo Alto Networks:   { class: firewall,      confidence: 0.85 }
+  Check Point Software: { class: firewall,      confidence: 0.80 }
+  SonicWall:            { class: firewall,      confidence: 0.80 }
+  WatchGuard Technologies: { class: firewall,   confidence: 0.80 }
+  F5 Networks:          { class: load_balancer, confidence: 0.85 }
+
+  # --- storage ---------------------------------------------------------------
+  # Western Digital is here rather than under a disk maker's heading: a bare
+  # drive has no MAC, so a WD assignment on the wire is a My Cloud NAS.
+  NetApp:          { class: storage_device, confidence: 0.85 }
+  Pure Storage:    { class: storage_device, confidence: 0.85 }
+  Synology:        { class: storage_device, confidence: 0.85 }
+  QNAP Systems:    { class: storage_device, confidence: 0.85 }
+  EMC:             { class: storage_device, confidence: 0.75 }
+  Western Digital: { class: storage_device, confidence: 0.80 }
+
+  # --- printers --------------------------------------------------------------
+  # A networked device from a print vendor is a printer.
+  Brother Industries: { class: printer, confidence: 0.85 }
+  Ricoh:              { class: printer, confidence: 0.85 }
+  Lexmark:            { class: printer, confidence: 0.85 }
+  Konica Minolta:     { class: printer, confidence: 0.85 }
+  Canon:              { class: printer, confidence: 0.80 }
+  Seiko Epson:        { class: printer, confidence: 0.80 }
+  Kyocera:            { class: printer, confidence: 0.80 }
+  Fuji Xerox:         { class: printer, confidence: 0.80 }
+
+  # --- cameras and building IoT ----------------------------------------------
+  # `iot_device` rather than a camera class: the taxonomy has no camera leaf,
+  # and each of these also ships NVRs, intercoms and access controllers on the
+  # same assignments. iot_device is their common ancestor and right for all.
+  Hikvision:           { class: iot_device, confidence: 0.80 }
+  Dahua Technology:    { class: iot_device, confidence: 0.80 }
+  Axis Communications: { class: iot_device, confidence: 0.80 }
+  Espressif:           { class: iot_device, confidence: 0.75 }
+
+  # --- industrial control ----------------------------------------------------
+  # `ot_device` and not `plc`: these vendors ship PLCs, but also drives, I/O
+  # heads, HMIs and gateways on the same assignments. The EtherNet/IP identity
+  # and the OT probers are what narrow an OT device to a PLC; an OUI is not.
+  Rockwell Automation: { class: ot_device, confidence: 0.80 }
+  Beckhoff Automation: { class: ot_device, confidence: 0.75 }
+  Phoenix Contact:     { class: ot_device, confidence: 0.75 }
+  WAGO:                { class: ot_device, confidence: 0.75 }
+  Omron:               { class: ot_device, confidence: 0.70 }
+  Schneider Electric:  { class: ot_device, confidence: 0.70 }
+
+rules:
+  # ===========================================================================
+  # sysobjectid — IANA private-enterprise numbers
+  # ===========================================================================
+  #
+  # sysObjectID is 1.3.6.1.4.1.<enterprise>.<the vendor's own product tree>.
+  # The enterprise number is the one part with a registry behind it, so these
+  # rules stop there. The product tree beneath it is the vendor's own and has
+  # no public registry — a rule that read it would be reverse-engineering, and
+  # the LONGEST-prefix match exists so a platform admin who HAS reverse-
+  # engineered one for their own fleet can add it here without disturbing the
+  # enterprise rule above it.
+  #
+  # Net-SNMP (8072) and UCD-SNMP (2021) are deliberately absent: they identify
+  # the AGENT, not the hardware it runs on. Reporting "Net-SNMP" as a hardware
+  # vendor would put a software package in hw.vendor and break the
+  # end-of-life catalogue join that key exists for.
+  #
+  # Class is omitted where the enterprise number genuinely does not imply one:
+  # HP, Dell and VMware each sell servers, switches and printers under a single
+  # number, and choosing between them would be a fabricated fact.
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.9
+    class: network_device
+    vendor: Cisco Systems
+    confidence: 0.70
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.11
+    vendor: Hewlett Packard
+    confidence: 0.85
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.43
+    vendor: 3Com
+    confidence: 0.85
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.171
+    class: network_device
+    vendor: D-Link
+    confidence: 0.70
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.207
+    class: network_device
+    vendor: Allied Telesis
+    confidence: 0.70
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.318
+    vendor: American Power Conversion
+    confidence: 0.85
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.674
+    vendor: Dell
+    confidence: 0.85
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.789
+    class: storage_device
+    vendor: NetApp
+    confidence: 0.80
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.890
+    class: network_device
+    vendor: Zyxel
+    confidence: 0.70
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.1916
+    class: network_device
+    vendor: Extreme Networks
+    confidence: 0.70
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.1991
+    class: network_device
+    vendor: Brocade
+    confidence: 0.70
+    source_url: *iana_pen
+  # Huawei is the HP/Dell case with a different flag on it: enterprise 2011 is
+  # the whole company's arc — CloudEngine switches, NetEngine routers, USG
+  # firewalls, FusionServer servers and OceanStor arrays all sit under it — so
+  # `network_device` would be wrong for every server and every array. Vendor
+  # only.
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.2011
+    vendor: Huawei Technologies
+    confidence: 0.85
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.2636
+    class: network_device
+    vendor: Juniper Networks
+    confidence: 0.70
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.3375
+    class: load_balancer
+    vendor: F5 Networks
+    confidence: 0.80
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.4526
+    class: network_device
+    vendor: NETGEAR
+    confidence: 0.70
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.5951
+    class: load_balancer
+    vendor: Citrix
+    confidence: 0.75
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.6876
+    vendor: VMware
+    confidence: 0.85
+    source_url: *iana_pen
+  # Fortinet is VENDOR-ONLY here, and the reason is the same one that keeps the
+  # Fortinet OUI rules vendor-only: FortiSwitch, FortiAP, FortiAnalyzer and
+  # FortiManager all answer SNMP under enterprise 12356, so `firewall` would be
+  # asserted for every one of them. The FortiGate conclusion is earned by
+  # ANSWERING the FortiOS API and lives in the `platform` rule where that
+  # evidence is. A platform admin who has worked out the FortiGate product arc
+  # for their own fleet can add it as a longer prefix; longest wins.
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.12356
+    vendor: Fortinet
+    confidence: 0.85
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.14988
+    class: network_device
+    vendor: MikroTik
+    confidence: 0.70
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.20916
+    class: iot_device
+    vendor: Hikvision
+    confidence: 0.75
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.25461
+    class: firewall
+    vendor: Palo Alto Networks
+    confidence: 0.80
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.25506
+    class: network_device
+    vendor: H3C
+    confidence: 0.70
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.30065
+    class: network_device
+    vendor: Arista Networks
+    confidence: 0.70
+    source_url: *iana_pen
+  - kind: sysobjectid
+    pattern: 1.3.6.1.4.1.41112
+    class: network_device
+    vendor: Ubiquiti Networks
+    confidence: 0.70
+    source_url: *iana_pen
+
+  # ===========================================================================
+  # enip — ODVA vendor ids from the EtherNet/IP List Identity response
+  # ===========================================================================
+  #
+  # One rule, and that is not an oversight. A device answering List Identity is
+  # certainly industrial, but the ODVA vendor-id list is a subscriber document
+  # and this file's rule is that a mapping has to be citable. Vendor id 1 is
+  # the one every EtherNet/IP reference states outright. The rest belong here
+  # too — added from the ODVA list by a platform admin who has it, through
+  # Catalog ▸ Classification rules, which is exactly the growth path ADR-0004
+  # D6 asks for.
+  - kind: enip
+    pattern: "1"
+    class: ot_device
+    vendor: Rockwell Automation
+    confidence: 0.80
+    source_url: *odva
+
+  # ===========================================================================
+  # cloud_type — what a cloud provider says a resource IS
+  # ===========================================================================
+  #
+  # The highest-confidence evidence in this file. A resource type is not
+  # inferred from anything: the provider's own API states it, in a closed
+  # vocabulary, and it maps onto exactly one class.
+  #
+  # Only the 18 types the cloud collectors actually emit today are here.
+  # `compute_instance` and `serverless_function` are declared in
+  # standards/connectors.yaml but nothing produces them yet, and a rule with no
+  # producer is a layer shipped without its consumer — it lands with the
+  # collector, not before it.
+  - kind: cloud_type
+    pattern: aws_alb
+    class: cloud_load_balancer
+    confidence: 0.95
+    source_url: https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html
+  - kind: cloud_type
+    pattern: aws_nlb
+    class: cloud_load_balancer
+    confidence: 0.95
+    source_url: https://docs.aws.amazon.com/elasticloadbalancing/latest/network/introduction.html
+  - kind: cloud_type
+    pattern: aws_elb
+    class: cloud_load_balancer
+    confidence: 0.95
+    source_url: https://docs.aws.amazon.com/elasticloadbalancing/latest/classic/introduction.html
+  - kind: cloud_type
+    pattern: aws_api_gateway
+    class: api_gateway
+    confidence: 0.95
+    source_url: https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html
+  - kind: cloud_type
+    pattern: aws_cloudfront
+    class: cdn_distribution
+    confidence: 0.95
+    source_url: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Introduction.html
+  - kind: cloud_type
+    pattern: aws_kms
+    class: key_store
+    confidence: 0.95
+    source_url: https://docs.aws.amazon.com/kms/latest/developerguide/overview.html
+  - kind: cloud_type
+    pattern: aws_s3_bucket
+    class: object_storage
+    confidence: 0.95
+    source_url: https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html
+  - kind: cloud_type
+    pattern: aws_rds_instance
+    class: managed_database
+    confidence: 0.95
+    source_url: https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Welcome.html
+  - kind: cloud_type
+    pattern: azure_load_balancer
+    class: cloud_load_balancer
+    confidence: 0.95
+    source_url: https://learn.microsoft.com/azure/load-balancer/load-balancer-overview
+  - kind: cloud_type
+    pattern: azure_application_gateway
+    class: cloud_load_balancer
+    confidence: 0.95
+    source_url: https://learn.microsoft.com/azure/application-gateway/overview
+  - kind: cloud_type
+    pattern: azure_keyvault_key
+    class: key_store
+    confidence: 0.95
+    source_url: https://learn.microsoft.com/azure/key-vault/general/overview
+  - kind: cloud_type
+    pattern: azure_storage_account
+    class: object_storage
+    confidence: 0.95
+    source_url: https://learn.microsoft.com/azure/storage/common/storage-account-overview
+  - kind: cloud_type
+    pattern: azure_sql_database
+    class: managed_database
+    confidence: 0.95
+    source_url: https://learn.microsoft.com/azure/azure-sql/database/sql-database-paas-overview
+  - kind: cloud_type
+    pattern: gcp_https_load_balancer
+    class: cloud_load_balancer
+    confidence: 0.95
+    source_url: https://cloud.google.com/load-balancing/docs/https
+  - kind: cloud_type
+    pattern: gcp_ssl_proxy
+    class: cloud_load_balancer
+    confidence: 0.95
+    source_url: https://cloud.google.com/load-balancing/docs/ssl
+  - kind: cloud_type
+    pattern: gcp_kms_crypto_key
+    class: key_store
+    confidence: 0.95
+    source_url: https://cloud.google.com/kms/docs/key-management-service
+  - kind: cloud_type
+    pattern: gcp_storage_bucket
+    class: object_storage
+    confidence: 0.95
+    source_url: https://cloud.google.com/storage/docs/buckets
+  - kind: cloud_type
+    pattern: gcp_cloudsql_instance
+    class: managed_database
+    confidence: 0.95
+    source_url: https://cloud.google.com/sql/docs/introduction
+
+  # ===========================================================================
+  # banner — what a service said about itself
+  # ===========================================================================
+  #
+  # The weakest evidence here, and scoped accordingly. Each pattern anchors on
+  # an HTTP `Server:` header family and proposes `web_application` — the thing
+  # answering on that port is a web application, which is a statement about the
+  # SERVICE and is true whatever host it runs on.
+  #
+  # Three families are deliberately absent:
+  #
+  #   * SSH. `SSH-2.0-OpenSSH_9.6` says the host runs sshd. It says nothing
+  #     about what the host IS — every class in the taxonomy from `server` to
+  #     `switch` to `plc` runs one — and `service_daemon` would be proposing a
+  #     class for the host on the strength of a login service.
+  #   * Reverse proxies and CDNs. `Server: cloudflare` describes the thing
+  #     ANSWERING, which is not the asset. A rule here would classify the
+  #     customer's origin as somebody else's edge.
+  #   * Anything that identifies a device by an embedded web server. "HP HTTP
+  #     Server" is on printers and on iLO service processors alike, and the two
+  #     are different classes.
+  #
+  # Vendors are omitted throughout: the vendor of a web application is a
+  # SOFTWARE vendor, and writing "Apache Software Foundation" into a proposal
+  # that intake may land in hw.vendor would break the hardware end-of-life
+  # join that key exists for.
+  - kind: banner
+    pattern: '(?i)^server:\s*apache(?:[/ ]|$)'
+    class: web_application
+    confidence: 0.65
+    source_url: https://httpd.apache.org/docs/current/mod/core.html#servertokens
+  - kind: banner
+    pattern: '(?i)^server:\s*nginx(?:[/ ]|$)'
+    class: web_application
+    confidence: 0.65
+    source_url: https://nginx.org/en/docs/http/ngx_http_core_module.html#server_tokens
+  - kind: banner
+    pattern: '(?i)^server:\s*microsoft-iis(?:[/ ]|$)'
+    class: web_application
+    confidence: 0.65
+    source_url: https://learn.microsoft.com/iis/get-started/introduction-to-iis/introduction-to-iis-architecture
+  - kind: banner
+    pattern: '(?i)^server:\s*apache-coyote(?:[/ ]|$)'
+    class: web_application
+    confidence: 0.65
+    source_url: https://tomcat.apache.org/tomcat-10.1-doc/config/http.html
+  - kind: banner
+    pattern: '(?i)^server:\s*jetty(?:[/( ]|$)'
+    class: web_application
+    confidence: 0.65
+    source_url: https://jetty.org/docs/jetty/12/operations-guide/server/index.html
+  - kind: banner
+    pattern: '(?i)^server:\s*gunicorn(?:[/ ]|$)'
+    class: web_application
+    confidence: 0.65
+    source_url: https://docs.gunicorn.org/en/stable/settings.html
+  - kind: banner
+    pattern: '(?i)^server:\s*kestrel(?:[/ ]|$)'
+    class: web_application
+    confidence: 0.65
+    source_url: https://learn.microsoft.com/aspnet/core/fundamentals/servers/kestrel
+  - kind: banner
+    pattern: '(?i)^server:\s*(?:openresty|litespeed)(?:[/ ]|$)'
+    class: web_application
+    confidence: 0.65
+    source_url: https://openresty.org/en/
+
+  # ===========================================================================
+  # port_profile — combinations that mean one thing
+  # ===========================================================================
+  #
+  # Two rules, both printers, because a port profile has to be UNMISTAKABLE to
+  # be worth anything and almost none are. 9100 with 631 is a network printer
+  # speaking raw JetDirect and IPP; 9100 with 515 is the same printer speaking
+  # LPD. Nothing else ships that pair.
+  #
+  # What was considered and left out:
+  #
+  #   * 623 (IPMI) → `bmc`. IPMI is UDP, and the open-port list carries no
+  #     protocol, so the rule would fire on a TCP service that happens to sit
+  #     on 623.
+  #   * 502 (Modbus/TCP) → `ot_device`. One open port is not a profile. Modbus
+  #     on 502 is genuinely industrial, but a single port is also what a
+  #     honeypot, a port-forward and a protocol gateway look like, and the OT
+  #     probers measure the protocol rather than guessing from the number.
+  #   * 3389 (RDP) → anything. RDP says the host runs Windows, which is an OS
+  #     fact and belongs in os.name, not a class.
+  - kind: port_profile
+    pattern: 631,9100
+    class: printer
+    confidence: 0.80
+    source_url: https://www.pwg.org/ipp/everywhere.html
+  - kind: port_profile
+    pattern: 515,9100
+    class: printer
+    confidence: 0.75
+    source_url: https://datatracker.ietf.org/doc/html/rfc1179
+
+  # ===========================================================================
+  # model — product id prefixes
+  # ===========================================================================
+  #
+  # A product id is structured — "C9300-48P", "WS-C3750X-48P", "ISR4331/K9",
+  # "ASA5525" — and the family is the part before the SKU detail, which is what
+  # decides whether the box switches, routes or filters. Prefixes, not exact
+  # matches: the SKU tail enumerates port counts, PoE variants and licence
+  # bundles and there are thousands of them.
+  #
+  # Longest prefix wins, so C9800 (a wireless controller) is not read as a
+  # C9000-series switch. Every rule names its vendor, so a prefix cannot fire
+  # on another manufacturer's model string that happens to start the same way.
+  #
+  # Not exhaustive and not meant to be. A product id no rule matches produces
+  # no proposal at all.
+
+  # --- Cisco: Catalyst and Nexus switching ---------------------------------
+  - kind: model
+    pattern: WS-C
+    class: switch
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/switches/index.html
+  - kind: model
+    pattern: C9200
+    class: switch
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/switches/catalyst-9200-series-switches/index.html
+  - kind: model
+    pattern: C9300
+    class: switch
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/switches/catalyst-9300-series-switches/index.html
+  - kind: model
+    pattern: C9400
+    class: switch
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/switches/catalyst-9400-series-switches/index.html
+  - kind: model
+    pattern: C9500
+    class: switch
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/switches/catalyst-9500-series-switches/index.html
+  - kind: model
+    pattern: C9600
+    class: switch
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/switches/catalyst-9600-series-switches/index.html
+  - kind: model
+    pattern: IE-
+    class: switch
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/switches/industrial-ethernet-switches/index.html
+  - kind: model
+    pattern: N2K-
+    class: switch
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/switches/nexus-2000-series-fabric-extenders/index.html
+  - kind: model
+    pattern: N3K-
+    class: switch
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/switches/nexus-3000-series-switches/index.html
+  - kind: model
+    pattern: N5K-
+    class: switch
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/switches/nexus-5000-series-switches/index.html
+  - kind: model
+    pattern: N7K-
+    class: switch
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/switches/nexus-7000-series-switches/index.html
+  - kind: model
+    pattern: N9K-
+    class: switch
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/switches/nexus-9000-series-switches/index.html
+
+  # --- Cisco: routing ------------------------------------------------------
+  - kind: model
+    pattern: ISR
+    class: router
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/routers/index.html
+  - kind: model
+    pattern: ASR
+    class: router
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/routers/index.html
+  - kind: model
+    pattern: CISCO29
+    class: router
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/routers/index.html
+  - kind: model
+    pattern: CISCO39
+    class: router
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/routers/index.html
+  - kind: model
+    pattern: C1111
+    class: router
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/routers/1000-series-integrated-services-routers-isr/index.html
+  - kind: model
+    pattern: C1121
+    class: router
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/routers/1000-series-integrated-services-routers-isr/index.html
+  - kind: model
+    pattern: C8200
+    class: router
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/routers/catalyst-8200-series-edge-platforms/index.html
+  - kind: model
+    pattern: C8300
+    class: router
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/routers/catalyst-8300-series-edge-platforms/index.html
+  - kind: model
+    pattern: C8500
+    class: router
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/routers/catalyst-8500-series-edge-platforms/index.html
+
+  # --- Cisco: security and wireless ----------------------------------------
+  - kind: model
+    pattern: ASA
+    class: firewall
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/security/adaptive-security-appliance-asa-software/index.html
+  - kind: model
+    pattern: FPR
+    class: firewall
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/security/firewalls/index.html
+  - kind: model
+    pattern: C9800
+    class: wireless_controller
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/wireless/catalyst-9800-series-wireless-controllers/index.html
+  - kind: model
+    pattern: AIR-CT
+    class: wireless_controller
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/wireless/index.html
+  # AIR- must sort AFTER AIR-CT: longest prefix wins, so a 5520 controller is a
+  # wireless_controller and a 3802 is an access point.
+  - kind: model
+    pattern: AIR-
+    class: access_point
+    vendor: Cisco Systems
+    confidence: 0.85
+    source_url: https://www.cisco.com/c/en/us/products/wireless/access-points/index.html
+
+  # --- Ubiquiti: the UniFi controller's device `type` vocabulary ------------
+  # The controller states a short, stable product-family code for every device
+  # it has adopted. It is not the model string, but it is what the controller
+  # says the device IS, and it is matched here as a model prefix because that
+  # is the field the collector has it in.
+  #
+  # A type no rule matches — "uph" (UniFi phone), for one — produces no
+  # proposal, which is right: the taxonomy has no class for it.
+  - kind: model
+    pattern: uap
+    class: access_point
+    vendor: Ubiquiti Networks
+    confidence: 0.85
+    source_url: https://help.ui.com/hc/en-us/articles/360012192813
+  - kind: model
+    pattern: usw
+    class: switch
+    vendor: Ubiquiti Networks
+    confidence: 0.85
+    source_url: https://help.ui.com/hc/en-us/articles/360012192813
+  - kind: model
+    pattern: ugw
+    class: router
+    vendor: Ubiquiti Networks
+    confidence: 0.85
+    source_url: https://help.ui.com/hc/en-us/articles/360012192813
+  # A Dream Machine routes, switches and serves wireless. It is catalogued as a
+  # gateway because that is the role it cannot be deployed without.
+  - kind: model
+    pattern: udm
+    class: router
+    vendor: Ubiquiti Networks
+    confidence: 0.80
+    source_url: https://help.ui.com/hc/en-us/articles/360012192813
+  - kind: model
+    pattern: uxg
+    class: router
+    vendor: Ubiquiti Networks
+    confidence: 0.85
+    source_url: https://help.ui.com/hc/en-us/articles/360012192813
+  - kind: model
+    pattern: uck
+    class: wireless_controller
+    vendor: Ubiquiti Networks
+    confidence: 0.85
+    source_url: https://help.ui.com/hc/en-us/articles/360012192813
+
+  # ===========================================================================
+  # platform — what the collector reached, and how
+  # ===========================================================================
+  #
+  # The kind that carries a conclusion the collection path EARNED. A box that
+  # answered the FortiOS REST API is a FortiGate: FortiSwitch and FortiAP are
+  # managed THROUGH one and do not serve that API themselves. That is a much
+  # stronger statement than "its MAC is in a Fortinet OUI", which is why the
+  # Fortinet OUI rules above assert only a vendor and this one asserts a class.
+  #
+  # The `cisco_*` patterns are the device profile a tenant registered the
+  # device under. They are the LAST resort in the Cisco path — used only when
+  # the chassis product id is missing or matches no model rule — and they sit
+  # at 0.70 because an operator's label is a declaration, not a measurement.
+  - kind: platform
+    pattern: panos
+    class: firewall
+    vendor: Palo Alto Networks
+    confidence: 0.80
+    source_url: https://docs.paloaltonetworks.com/pan-os/11-1/pan-os-panorama-api
+  - kind: platform
+    pattern: fortios
+    class: firewall
+    vendor: Fortinet
+    confidence: 0.80
+    source_url: https://docs.fortinet.com/document/fortigate/7.4.0/administration-guide
+  - kind: platform
+    pattern: icontrol
+    class: load_balancer
+    vendor: F5 Networks
+    confidence: 0.80
+    source_url: https://clouddocs.f5.com/api/icontrol-rest/
+  - kind: platform
+    pattern: unifi_controller
+    class: wireless_controller
+    vendor: Ubiquiti Networks
+    confidence: 0.80
+    source_url: https://help.ui.com/hc/en-us/articles/360012192813
+  - kind: platform
+    pattern: cisco_router
+    class: router
+    vendor: Cisco Systems
+    confidence: 0.70
+    source_url: https://www.cisco.com/c/en/us/products/routers/index.html
+  - kind: platform
+    pattern: cisco_switch
+    class: switch
+    vendor: Cisco Systems
+    confidence: 0.70
+    source_url: https://www.cisco.com/c/en/us/products/switches/index.html
+  - kind: platform
+    pattern: cisco_asa
+    class: firewall
+    vendor: Cisco Systems
+    confidence: 0.70
+    source_url: https://www.cisco.com/c/en/us/products/security/adaptive-security-appliance-asa-software/index.html
+
+  # ===========================================================================
+  # cdp_capabilities — what a Cisco device says it DOES
+  # ===========================================================================
+  #
+  # These three replace a hardcoded switch statement in
+  # shared/deviceinterrogation/cisco_ops.go, which read a CDP neighbour's
+  # advertised capability string and returned `switch` or `router` from Go. It
+  # was the last class hint left outside this table after 2.10a, and it was in
+  # the worst place for one: a rule nobody could see, curate or cite.
+  #
+  # The ANSWERS are unchanged, deliberately — `TestClassHintParity_…` compares
+  # this table against a verbatim transcription of the pre-move behaviour, and a
+  # refactor that quietly re-decided what a device is would be the wrong-fact-
+  # that-looks-right this file exists to avoid.
+  #
+  # Note the combination rule and why it is not a contradiction. A device that
+  # both switches and routes advertises both bits, and the engine returns only
+  # the MOST SPECIFIC matching set, so `router,switch` is the only rule
+  # consulted for it — not an argument with the two single-capability rules
+  # underneath.
+  #
+  # Its class is `network_device`, their common ancestor, and this is the ONE
+  # answer the move out of Go deliberately changed. The Go switch statement
+  # returned `switch` for "Router Switch", on the reasoning that the more
+  # specific answer is the one it forwards at. That is true of a Catalyst doing
+  # inter-VLAN routing and false of an ISR with a built-in or modular switch —
+  # which advertises exactly the same two bits and is a router. So `switch` is
+  # PROBABLY right, and the rule of thumb at the top of this file says prefer a
+  # broad class that is CERTAINLY right over a narrow one that is probably
+  # right. `network_device` is certainly right for both.
+  #
+  # It also makes the two capability kinds agree. `lldp_capability`
+  # `bridge,router` — the same device seen over the other protocol — already
+  # answers `network_device`, with that argument spelled out below. Two
+  # opposite answers for one evidence shape in one table is itself the
+  # curation bug this file exists to catch, and a reviewer reading both would
+  # not know which principle was live.
+  #
+  # Nothing is lost where the evidence is better: a recognised Catalyst PID is
+  # an 0.85 `model` rule, `network_device` is its ancestor and therefore
+  # dropped as a refinement, and the answer is still `switch`.
+  #
+  # What is deliberately absent:
+  #
+  #   * `host` → anything. Every end station sets it, from a server to a
+  #     laptop to a badge reader, and the taxonomy's honest answer for "some
+  #     computer" is the one the fallback already gives.
+  #   * `voip_phone` / `cvta_phone` → a phone class. There isn't one:
+  #     standards/asset-classes.yaml has no `ip_phone`, and `iot_device` would
+  #     be a category error for a desk telephone. Adding the class is a
+  #     taxonomy decision, not a rule.
+  #   * `igmp_capable`, `repeater`, `remotely_managed`, `two_port_mac_relay`
+  #     and the two bridge bits → anything. They describe a FEATURE, not a
+  #     kind of device.
+  - kind: cdp_capabilities
+    pattern: router
+    class: router
+    confidence: 0.65
+    source_url: https://www.cisco.com/c/en/us/support/docs/network-management/discovery-protocol-cdp/13414-103.html
+  - kind: cdp_capabilities
+    pattern: router,switch
+    class: network_device
+    confidence: 0.70
+    source_url: https://www.cisco.com/c/en/us/support/docs/network-management/discovery-protocol-cdp/13414-103.html
+  - kind: cdp_capabilities
+    pattern: switch
+    class: switch
+    confidence: 0.65
+    source_url: https://www.cisco.com/c/en/us/support/docs/network-management/discovery-protocol-cdp/13414-103.html
+
+  # ===========================================================================
+  # lldp_capability — IEEE 802.1AB system capabilities
+  # ===========================================================================
+  #
+  # Table 8-4 of 802.1AB. A wired segment is full of these and they are the
+  # strongest passive class signal on it — but only two of the eleven bits mean
+  # one thing on their own, and the restraint is most of the value here.
+  #
+  #   * `bridge` alone → NOTHING. It is the bridging function, and an access
+  #     point bridges, a desk phone's built-in two-port switch bridges, and a
+  #     hypervisor's vSwitch bridges. "Bridge means switch" is the single
+  #     easiest wrong rule to write in this file.
+  #   * `bridge` WITH `router` → `network_device`, their common ancestor, and
+  #     not `switch` or `router`. The device does both; both leaves would be
+  #     half right, and the tree exists so that a broad answer can be certainly
+  #     right (see the rule of thumb at the top of this file). The engine
+  #     returns only this rule for such a device, so it refines the `router`
+  #     rule below rather than arguing with it.
+  #   * `wlan_access_point` → `access_point`. Nothing but an access point sets
+  #     it; this is the one genuinely unambiguous bit.
+  #   * `router` alone → `router`. It forwards at layer 3 and does not bridge.
+  #   * `telephone` → no rule, for the same reason CDP's `voip_phone` gets
+  #     none: the taxonomy has no phone class.
+  #   * `station_only` → no rule. It says the device neither bridges nor
+  #     routes, which is true of a server, a laptop, a printer and a camera
+  #     alike, so there is no class it narrows to.
+  #   * `repeater`, `docsis_cable_device`, `c_vlan_component`,
+  #     `s_vlan_component`, `two_port_mac_relay`, `other` → no rule. A feature
+  #     or, for `other`, an explicit refusal to say.
+  - kind: lldp_capability
+    pattern: bridge,router
+    class: network_device
+    confidence: 0.70
+    source_url: https://standards.ieee.org/ieee/802.1AB/7514/
+  - kind: lldp_capability
+    pattern: router
+    class: router
+    confidence: 0.65
+    source_url: https://standards.ieee.org/ieee/802.1AB/7514/
+  - kind: lldp_capability
+    pattern: wlan_access_point
+    class: access_point
+    confidence: 0.75
+    source_url: https://standards.ieee.org/ieee/802.1AB/7514/
+
+  # ===========================================================================
+  # mdns_service — what a host advertises about itself
+  # ===========================================================================
+  #
+  # A DNS-SD advertisement is the host describing its own function to the
+  # segment, unprompted. That makes it a statement about the HOST, which is
+  # exactly what an SSH banner is not — every class in the taxonomy runs sshd,
+  # and none of them advertise `_ipp._tcp` unless they accept print jobs.
+  #
+  # Printers only, and that is not an oversight. The DNS-SD registry is large
+  # and almost every other entry describes software rather than a kind of
+  # device: `_smb._tcp` is a NAS, a server, a workstation and a printer with
+  # scan-to-share; `_workstation._tcp` is whatever Avahi is installed on;
+  # `_ssh._tcp` is the banner problem with a different transport.
+  #
+  # Two the taxonomy simply cannot express yet, left out rather than
+  # approximated:
+  #
+  #   * `_airplay._tcp` / `_googlecast._tcp` → a media-device class. There is
+  #     none, and `iot_device` for a television is a category error of the same
+  #     shape as calling a desk phone one.
+  #   * `_hap._tcp` (HomeKit) → `iot_device` is arguably right, but a HomeKit
+  #     BRIDGE advertises it on behalf of accessories that are not themselves
+  #     on the network, so the advertiser is not reliably the thing.
+  - kind: mdns_service
+    pattern: _ipp._tcp
+    class: printer
+    confidence: 0.75
+    source_url: https://www.rfc-editor.org/rfc/rfc8011.html
+  - kind: mdns_service
+    pattern: _ipps._tcp
+    class: printer
+    confidence: 0.75
+    source_url: https://www.rfc-editor.org/rfc/rfc8010.html
+  - kind: mdns_service
+    pattern: _pdl-datastream._tcp
+    class: printer
+    confidence: 0.70
+    source_url: https://www.pwg.org/ipp/everywhere.html
+  - kind: mdns_service
+    pattern: _printer._tcp
+    class: printer
+    confidence: 0.75
+    source_url: https://datatracker.ietf.org/doc/html/rfc1179

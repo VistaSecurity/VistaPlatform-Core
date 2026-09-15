@@ -1,0 +1,39 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:aa11bb22-3333-4444-8888-cccccccccccc",
+  "version": 1,
+  "metadata": {
+    "component": "this should be an object, not a string"
+  },
+  "components": [
+    "a component that is a bare string",
+    42,
+    null,
+    { "type": "library", "name": "good-one", "version": "1.0.0", "bom-ref": "good-1" },
+    { "type": "library", "version": "2.0.0", "bom-ref": "no-name" },
+    { "type": "library", "name": "", "version": "2.0.0" },
+    {
+      "type": "library",
+      "name": "wrong-typed-version",
+      "version": 7,
+      "bom-ref": "good-2",
+      "purl": "pkg:npm/wrong-typed-version@7"
+    },
+    {
+      "type": "library",
+      "name": "bad-identifiers",
+      "version": "1.0",
+      "bom-ref": "good-3",
+      "purl": "definitely-not-a-purl",
+      "cpe": "cpe:2.3:a:only:three"
+    },
+    { "type": "library", "name": "licenses-not-an-array", "bom-ref": "good-4", "licenses": "MIT" }
+  ],
+  "dependencies": [
+    "not an object",
+    { "dependsOn": ["good-1"] },
+    { "ref": "good-1", "dependsOn": "not-an-array" },
+    { "ref": "good-1", "dependsOn": ["good-1", "good-2", "ghost"] }
+  ]
+}

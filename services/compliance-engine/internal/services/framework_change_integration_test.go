@@ -75,17 +75,16 @@ func newAuthoringFixture(t *testing.T, status string) *authoringFixture {
 	// indistinguishable from a successful read unless the restriction bites.
 	const mtCode = "authoring_fixture_days"
 	if _, err := db.Exec(`
-		INSERT INTO measurement_types (code, name, description, data_type, extraction_query, units,
+		INSERT INTO measurement_types (code, name, description, data_type, units,
 		                               valid_range, allowed_rule_types, enum_values, valid_operators, predicate_schema, category)
-		VALUES ($1, 'Authoring fixture (days)', 'integration fixture', 'integer', 'SELECT 1', 'days',
+		VALUES ($1, 'Authoring fixture (days)', 'integration fixture', 'integer', 'days',
 		        '{}'::jsonb, '["threshold"]'::jsonb, '[]'::jsonb, '[">=", "<=", ">", "<", "=="]'::jsonb, '{}'::jsonb, 'certificate')
 		ON CONFLICT (code) DO UPDATE SET
 		  valid_range = EXCLUDED.valid_range,
 		  allowed_rule_types = EXCLUDED.allowed_rule_types,
 		  enum_values = EXCLUDED.enum_values,
 		  valid_operators = EXCLUDED.valid_operators,
-		  predicate_schema = EXCLUDED.predicate_schema,
-		  extraction_query = EXCLUDED.extraction_query`, mtCode); err != nil {
+		  predicate_schema = EXCLUDED.predicate_schema`, mtCode); err != nil {
 		t.Fatalf("seed measurement type: %v", err)
 	}
 	var typeID uuid.UUID
@@ -287,9 +286,9 @@ func TestIntegration_NewControl_IsNotAssessedUntilEvaluated(t *testing.T) {
 	f.seedMeasurementRow(t, existing)
 	seedTenantInventory(t, f.db, f.tenant)
 	if _, err := f.db.Exec(`
-		INSERT INTO compliance_findings
-			(id, tenant_id, control_id, asset_id, asset_type, severity, summary, detection_state, workflow_status)
-		VALUES ($1, $2, $3, $4, 'certificate', 'Low', 'expires soon', 'ACTIVE', 'NEW')`,
+		INSERT INTO findings
+			(id, tenant_id, producer, kind, control_id, subject_id, subject_type, severity, summary, detection_state, workflow_status)
+		VALUES ($1, $2, 'compliance', 'control_noncompliant', $3, $4, 'certificate', 'low', 'expires soon', 'ACTIVE', 'NEW')`,
 		uuid.New(), f.tenant, existing, uuid.New()); err != nil {
 		t.Fatalf("seed finding: %v", err)
 	}
@@ -543,17 +542,16 @@ func TestIntegration_MeasurementTypeRead_PopulatesJSONBFields(t *testing.T) {
 
 // TestIntegration_MeasurementTypeRead_ToleratesNullColumns pins the other
 // polarity, which is the shape EVERY seeded measurement type actually has:
-// scripts/database/seed.sql never sets extraction_query, and leaves units,
-// valid_range, enum_values and valid_operators NULL on most rows. NULL scans
-// into a Go string no better than jsonb does, so a fix that only re-typed the
-// jsonb fields would still fail on all 18 real rows while passing against a
-// fully-populated fixture.
+// scripts/database/seed.sql leaves units, valid_range, enum_values and
+// valid_operators NULL on most rows. NULL scans into a Go string no better than
+// jsonb does, so a fix that only re-typed the jsonb fields would still fail on
+// every real row while passing against a fully-populated fixture.
 func TestIntegration_MeasurementTypeRead_ToleratesNullColumns(t *testing.T) {
 	f := newAuthoringFixture(t, "published")
 	controlID := f.newControl(t, "MTR-2", "High")
 
-	// Mirrors seed.sql's `cert_algorithm`: enum, no extraction_query, no units,
-	// no valid_range, no valid_operators, no predicate_schema.
+	// Mirrors seed.sql's `cert_algorithm`: enum, no units, no valid_range, no
+	// valid_operators, no predicate_schema.
 	const code = "authoring_fixture_nulls"
 	var typeID uuid.UUID
 	if err := f.db.Get(&typeID, `

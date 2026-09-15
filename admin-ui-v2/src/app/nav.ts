@@ -229,11 +229,36 @@ export const SECTIONS: NavItem[] = [
       { id: 'announcements', label: 'Announcements', title: 'Announcements', subtitle: 'Platform-wide announcements' },
       { id: 'maintenance', label: 'Maintenance', title: 'Maintenance Windows', subtitle: 'Scheduled maintenance windows' },
     ] },
+  // Catalog — the platform's curated reference data. Crypto is ONE catalogue
+  // among several (ADR-0006 D7), which is why End-of-life and Vulnerability feed
+  // sit here beside Algorithms and Frameworks rather than in a section of their
+  // own. All four are platform-scoped: no tenant_id, every tenant evaluated
+  // against the same rows.
+  //
+  // `anyOf` rather than a single permission: the two new catalogues are gated on
+  // `catalogs.manage` server-side, because curating crypto ratings and
+  // re-pointing the platform at a vulnerability source are different trust
+  // decisions. Both are granted to super_admin and platform_admin today, so
+  // nothing changes in practice until someone splits them.
   { id: 'catalog', label: 'Catalog', icon: 'Library', group: 'Platform',
-    title: 'Catalog', subtitle: 'Algorithm source of truth and framework catalog', source: 'measurement-templates/compliance-frameworks', permission: P.algorithms.manage,
+    title: 'Catalog', subtitle: 'Algorithms, frameworks, end-of-life and vulnerability data', source: 'measurement-templates/compliance-frameworks',
+    anyOf: [P.algorithms.manage, P.catalogs.manage],
     children: [
       { id: 'ratings', label: 'Algorithms', title: 'Algorithms', subtitle: 'Crypto-assessment source of truth' },
       { id: 'frameworks', label: 'Frameworks', title: 'Framework Catalog', subtitle: 'Compliance framework authoring' },
+      // Three views of one catalogue (ADR-0008 workstream 4.5b). Sub-navigation
+      // in this console lives in the LEFT rail — see the NavChild doc comment —
+      // so Proposals and Gaps are grandchildren with their own routes, not
+      // in-page tabs. They are Core: a Core deployment has the lookup, the gap
+      // list and the review queue, and an empty queue.
+      { id: 'eol', label: 'End-of-life', title: 'End-of-life Catalogue', subtitle: 'Release cycles and their support dates, mirrored from endoflife.date',
+        children: [
+          { id: 'catalogue', label: 'Catalogue', title: 'End-of-life Catalogue', subtitle: 'Release cycles and their support dates, mirrored from endoflife.date' },
+          { id: 'proposals', label: 'Proposals', title: 'End-of-life Proposals', subtitle: 'AI-proposed catalogue rows awaiting review — nothing here is in the catalogue yet' },
+          { id: 'gaps', label: 'Gaps', title: 'End-of-life Gaps', subtitle: 'Products the catalogue could not answer for, ordered by how often they were asked about' },
+        ] },
+      { id: 'vulnerabilities', label: 'Vulnerability feed', title: 'Vulnerability Catalogue', subtitle: 'CVEs mirrored from NVD and OSV, and the health of both feeds' },
+      { id: 'classification-rules', label: 'Classification rules', title: 'Classification Rules', subtitle: 'The fingerprint rules behind every class proposal — OUI, sysObjectID, cloud type, banner, model, platform' },
     ] },
   { id: 'settings', label: 'Settings', icon: 'Settings2', group: 'Platform',
     title: 'Settings', subtitle: 'Platform configuration — email, branding, and notification delivery', source: 'settings-page', permission: P.platform.settings,
@@ -293,8 +318,12 @@ export function resolveActive(pathname: string): {
   let grandchild: NavChild | undefined;
   if (section?.children?.length) {
     child = section.children.find((c) => c.id === seg2) ?? section.children[0];
-    if (child?.children?.length && seg3) {
-      grandchild = child.children.find((g) => g.id === seg3);
+    if (child?.children?.length) {
+      // Same fallback as the line above, one level down: /<section>/<child>
+      // with no third segment shows the child's DEFAULT sub-view, so the rail
+      // highlights it and the topbar names it. Without this, the bare URL
+      // rendered a page whose rail entry looked unselected.
+      grandchild = (seg3 ? child.children.find((g) => g.id === seg3) : undefined) ?? child.children[0];
     }
   }
   // The active "leaf" (grandchild if on a /<section>/<child>/<grandchild> path,

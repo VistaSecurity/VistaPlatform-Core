@@ -64,6 +64,108 @@ Azure Load Balancer (Standard and Basic SKUs).
 
 ---
 
+## What is enumerated
+
+Alongside the cryptographic resources above, a run **inventories the
+subscription's compute and network estate**: virtual machines, virtual networks,
+their subnets, and NSG membership. This is inventory rather than cryptography —
+a VM negotiates no protocol and states no at-rest encryption — and it is what
+makes the rest of a run legible.
+
+It is controlled by one switch per integration, **Inventory compute, networks and
+subnets** in Discovery → Cloud → Edit integration. It is **on by default**,
+including for integrations created before this feature existed.
+
+### Exact API calls
+
+| Call | Scope | Produces |
+|---|---|---|
+| `VirtualMachines.ListAll` | Subscription, paginated | One asset per VM |
+| `VirtualNetworks.ListAll` | Subscription, paginated | One asset per VNet — **and its subnets, which ARM returns inline** |
+| `NetworkSecurityGroups.ListAll` | Subscription, paginated | NSG **membership** — never the rules |
+| `NetworkInterfaces.ListAll` | Subscription, paginated | MAC, private addresses, and the VM ↔ subnet link |
+
+The NIC listing is not optional on Azure: a VM's own payload carries **no
+addressing at all** — it names its NICs by resource id and nothing else — so
+without it a VM is recorded with no address and no subnet.
+
+Subnets cost no call of their own.
+
+**Cost.** Four extra subscription-wide calls per run, each paginated. Azure
+enumeration is not per-region, so the number does not grow with the number of
+regions you use.
+
+### Azure RBAC actions to add
+
+```json
+"Microsoft.Compute/virtualMachines/read",
+"Microsoft.Network/virtualNetworks/read",
+"Microsoft.Network/networkSecurityGroups/read",
+"Microsoft.Network/networkInterfaces/read"
+```
+
+All four are covered by the built-in **Reader** role. `virtualNetworks/read` and
+`networkSecurityGroups/read` may already be in your custom role.
+
+### What lands in the inventory
+
+| Azure resource | Asset class | Identified by |
+|---|---|---|
+| Virtual machine | Compute instance | its `/subscriptions/…/virtualMachines/<name>` resource id |
+| Virtual network | Virtual network | its `/subscriptions/…/virtualNetworks/<name>` resource id |
+| Subnet | Subnet | its `…/virtualNetworks/<vnet>/subnets/<name>` resource id |
+| Network security group | *not an asset* | recorded as membership on the VM and the subnet |
+
+Each VM carries its private addresses, its NICs (name, MAC, addresses), its VM
+size, its image reference, its tags, its **`vmId`** (Azure's per-VM UUID, which
+is what the guest reads back through IMDS — the join between a VM seen from
+outside and the same machine reporting from inside), and the `cloud.*` placement
+facts. The relationships **VNet contains subnet** and **subnet contains VM** are
+drawn from the provider's own placement, and a subnet's address prefix becomes a
+network segment.
+
+A VM inherits membership of **both** its NIC's NSG and its subnet's NSG, because
+both govern it.
+
+New assets arrive in **Pending approval**. A re-run matches on the resource id
+and updates.
+
+### Two machines that share a private address
+
+A private address is not unique in a subscription, and the inventory is built so that
+it never has to be.
+
+- **Two virtual networks using the same CIDR** are two separate network segments, tagged
+  with the virtual network they belong to. Two VMs at the same private address in two
+  different virtual networks are **two assets**, and neither is affected by the other.
+- **An address reused inside one subnet** — the provider gives a freed address to
+  the next VM created — is genuinely the same segment, and the platform cannot
+  tell from outside whether an address that changed hands means a new machine or
+  a rebuilt one. So it does not guess: the new VM is recorded as its own asset
+  in Pending approval, and a **review item appears in Approvals** asking whether
+  it is the machine that used to answer to that address. You decide; nothing is
+  merged on your behalf.
+
+  The previous asset is left exactly as it was, so its history, tags and
+  findings stay with the machine they were recorded against.
+
+### What is deliberately NOT collected
+
+- **`osProfile`.** `adminPassword` and `customData` (Azure's user-data, base64
+  of whatever bootstrap script you wrote) are never projected, and neither is
+  the SSH public-key block.
+- **NSG rules.** `properties.securityRules` is not read. Only the group's
+  identity is recorded — membership, not policy.
+- **A NIC's public IP.** Public exposure is a posture question answered by
+  probing, and the reference points at a separate resource whose payload is not
+  read.
+- **Guest operating system.** Azure states an OS **family** on the OS disk
+  ("Linux", "Windows"), which is not a product name, and an image reference says
+  what the VM booted from rather than what it runs now. The OS fields stay empty
+  rather than carrying a guess.
+- **Power state.** `ListAll` returns the *provisioning* state; the running state
+  needs a per-VM `InstanceView` call, which would be one call per VM.
+
 ## Workflow
 
 ### 1. Configure Azure Integration

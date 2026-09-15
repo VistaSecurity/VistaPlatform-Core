@@ -18,7 +18,7 @@ import (
 // stubs — no database — per the spec-first contract recipe (ADR-0001).
 type lifecycleStore interface {
 	GetStaleAssets(tenantID uuid.UUID, filters models.StaleAssetFilters) ([]models.StaleAsset, int, error)
-	UpdateStaleStatus(tenantID uuid.UUID, assetIDs []uuid.UUID, status string) error
+	UpdateStaleStatus(tenantID uuid.UUID, assetIDs []uuid.UUID, status string, actorUserID uuid.UUID) error
 	GetLifecyclePolicy(tenantID uuid.UUID) (*models.AssetLifecyclePolicy, error)
 	UpdateLifecyclePolicy(tenantID uuid.UUID, input models.AssetLifecyclePolicyInput) (*models.AssetLifecyclePolicy, error)
 }
@@ -278,7 +278,7 @@ func (h *AssetLifecycleHandler) ArchiveAssets(c *gin.Context) {
 		return
 	}
 
-	if err := h.lifecycleService.UpdateStaleStatus(tenantUUID, assetIDs, "archived"); err != nil {
+	if err := h.lifecycleService.UpdateStaleStatus(tenantUUID, assetIDs, "archived", lifecycleActor(c)); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to archive assets"})
 		return
 	}
@@ -406,4 +406,19 @@ func (h *AssetLifecycleHandler) UpdatePolicy(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"policy": policy})
+}
+
+// lifecycleActor is the person archiving, or uuid.Nil when no session is
+// attached — which is what the automatic staleness sweep passes, and is the
+// honest value: empty is "no person was involved", not "the system".
+func lifecycleActor(c *gin.Context) uuid.UUID {
+	v, ok := c.Get("userID")
+	if !ok {
+		return uuid.Nil
+	}
+	id, ok := v.(uuid.UUID)
+	if !ok {
+		return uuid.Nil
+	}
+	return id
 }

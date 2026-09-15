@@ -615,9 +615,8 @@ func (s *Server) buildRouter(auditMiddleware *auditmiddleware.Middleware) *gin.E
 
 		// Admin status endpoints
 		admin := api.Group("/admin-service/status")
-		// Apply authentication middleware to admin status routes
-		admin.Use(middleware.RequireAuth(s.config.JWTSecret), middleware.StringifyUserID())
-		// Note: Admin routes don't require tenant context as they're platform-level
+		admin.Use(middleware.RequirePlatformAuth(s.config.JWTSecret), middleware.StringifyUserID())
+		admin.Use(sharedrbac.RequirePlatformPermission(s.db, rbac.PermissionPlatformHealth))
 		{
 			admin.GET("/system", s.getAdminSystemStatus)
 			admin.GET("/metrics", s.getAdminSystemMetrics)
@@ -692,10 +691,8 @@ func (s *Server) buildRouter(auditMiddleware *auditmiddleware.Middleware) *gin.E
 		// NOTE: The /admin-service/status/... routes above are NOT dead code (an
 		// earlier version of this comment said so): the registry's admin_plane
 		// service_overrides deliberately routes /admin-service/status/** to THIS
-		// service, and the admin host serves it. They carry only RequireAuth —
-		// the tenant-host deny is the control keeping their cross-tenant data
-		// off the public host. This group is the same data on the conventional
-		// /monitoring-service prefix, with the platform gate applied directly.
+		// service, and the admin host serves it. Both spellings are app-gated so
+		// a routing or hostname mistake cannot expose cross-tenant status data.
 		adminStatus := api.Group("/monitoring-service/admin")
 		adminStatus.Use(middleware.RequirePlatformAuth(s.config.JWTSecret), middleware.StringifyUserID())
 		adminStatus.Use(sharedrbac.RequirePlatformPermission(s.db, rbac.PermissionPlatformHealth))
@@ -706,8 +703,10 @@ func (s *Server) buildRouter(auditMiddleware *auditmiddleware.Middleware) *gin.E
 
 		// Tenant performance endpoints - For tenant health service
 		tenantMetrics := api.Group("/monitoring-service/tenant")
-		tenantMetrics.Use(middleware.RequireAuth(s.config.JWTSecret), middleware.StringifyUserID())
-		// Note: These routes are for admin platform use, not tenant UI
+		tenantMetrics.Use(middleware.RequirePlatformAuth(s.config.JWTSecret), middleware.StringifyUserID())
+		tenantMetrics.Use(sharedrbac.RequireAnyPlatformPermission(s.db, rbac.PermissionPlatformAnalytics, rbac.PermissionPlatformHealth))
+		// These routes are for platform/internal use, not tenant UI. HMAC-signed
+		// internal calls bypass the per-user RBAC check inside the shared gate.
 		{
 			tenantMetrics.GET("/:id/performance-summary", s.getTenantPerformanceSummary)
 		}

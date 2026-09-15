@@ -68,7 +68,7 @@ export function NotificationBell() {
   const { data, refetch } = useInAppNotifications();
 
   // Fresh list every time the panel opens (on top of the 60s poll).
-  useEffect(() => { if (open) refetch(); }, [open, refetch]);
+  useEffect(() => { if (open) void refetch(); }, [open, refetch]);
 
   const items = data ?? [];
   const unread = items.filter((n) => !n.read_at).length;

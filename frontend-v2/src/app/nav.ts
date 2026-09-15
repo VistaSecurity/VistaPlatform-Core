@@ -5,6 +5,17 @@
 export interface NavSubItem {
   path: string;
   label: string;
+  /**
+   * Inventory only: the lens this item selects. The Inventory section's items
+   * all live at `/inventory` and differ by `?lens=`, so active state cannot be
+   * decided from the pathname alone — the shell compares this against the URL's
+   * lens instead of doing a string match on the query part of `path`.
+   */
+  lens?: string;
+  /** A cross-link OUT of this section (Inventory → Discovery → Approvals). It
+   *  renders with an arrow so it is visibly a departure, not a sub-page, and it
+   *  never takes the active state from the section it points at. */
+  crossLink?: boolean;
 }
 export interface NavGroup {
   label?: string;
@@ -47,11 +58,57 @@ export const SECTIONS: NavSection[] = [
         items: [
           { path: '/discovery/cloud', label: 'Cloud' },
           { path: '/discovery/pcap', label: 'PCAP Upload' },
+          // Sources is a GROUP, not a page, so SBOM upload is a sibling of PCAP
+          // Upload rather than a card on a "Sources page" that does not exist.
+          // Both are the same shape of intake: bring us a file, we turn it into
+          // inventory.
+          { path: '/discovery/sbom', label: 'SBOM Upload' },
         ],
       },
     ],
   },
-  { id: 'inventory', label: 'Inventory', icon: 'Database', path: '/inventory' },
+  {
+    // ADR-0006 D1: Inventory becomes the general inventory's home and gains
+    // sub-groups, mirroring how Discovery is grouped. Crypto keeps every lens it
+    // had, grouped under one label so it reads as a module of the inventory
+    // rather than as the whole of it.
+    id: 'inventory',
+    label: 'Inventory',
+    icon: 'Database',
+    path: '/inventory',
+    groups: [
+      {
+        label: 'Assets',
+        items: [
+          { path: '/inventory?lens=assets', label: 'All assets', lens: 'assets' },
+          { path: '/inventory?lens=map', label: 'Map', lens: 'map' },
+          { path: '/inventory?lens=software', label: 'Software', lens: 'software' },
+        ],
+      },
+      {
+        label: 'Cryptography',
+        items: [
+          { path: '/inventory?lens=certificate', label: 'Certificates', lens: 'certificate' },
+          { path: '/inventory?lens=keys', label: 'Keys', lens: 'keys' },
+          { path: '/inventory?lens=configuration', label: 'Configuration', lens: 'configuration' },
+          { path: '/inventory?lens=tls', label: 'TLS', lens: 'tls' },
+          { path: '/inventory?lens=ssh', label: 'SSH', lens: 'ssh' },
+          { path: '/inventory?lens=data-protection', label: 'Data Protection', lens: 'data-protection' },
+          { path: '/inventory?lens=connections', label: '3rd Party', lens: 'connections' },
+        ],
+      },
+      {
+        label: 'Lifecycle',
+        items: [
+          { path: '/inventory?lens=stale', label: 'Stale', lens: 'stale' },
+          // Pending is a CROSS-LINK, not a second queue (ADR-0006 D1). Pending
+          // assets are reviewed in one place; listing them here as well would
+          // be the second inbox the ADR rules out.
+          { path: '/discovery/approvals', label: 'Pending', crossLink: true },
+        ],
+      },
+    ],
+  },
   {
     id: 'rc',
     label: 'Risk & Compliance',
@@ -62,7 +119,13 @@ export const SECTIONS: NavSection[] = [
         items: [
           { path: '/risk-compliance/posture', label: 'Posture' },
           { path: '/risk-compliance/findings', label: 'Findings' },
-          { path: '/risk-compliance/cbom', label: 'CBOM' },
+          // "CBOM" until the artifact pipeline gained kinds (ADR-0005 D6). It
+          // now lists software, hardware and full-inventory snapshots too, and
+          // a user wanting an SBOM would never have looked under "CBOM" — an
+          // unreachable feature, which is the failure the reachability check
+          // exists to catch. The ROUTE stays /cbom: it is a URL people have
+          // bookmarked, and renaming it would buy nothing.
+          { path: '/risk-compliance/cbom', label: 'Bills of Materials' },
         ],
       },
     ],

@@ -33,16 +33,30 @@ func newRLSAgentService(app, owner *sql.DB) *AgentService {
 	return NewAgentService(app, owner, nil)
 }
 
-// seedDevice inserts a minimal device so a job can name a target. The devices
-// table's device_identifier CHECK requires one of hostname / ip_address /
-// management_url, hence the RFC 5737 documentation address.
+// seedDevice inserts a minimal managed asset so a job can name a target.
+//
+// A "device" is an asset with an asset_management row (ADR-0002 D5), so the
+// fixture writes both: the asset carries the address the agent connects to, the
+// management row is what makes it a device. The address is an RFC 5737
+// documentation range so the export's leak gate cannot object to it.
+//
+// Written directly rather than through DeviceService.CreateDevice because these
+// tests are about the agent paths, and going through the identification engine
+// would make every one of them depend on identification behaviour they are not
+// testing.
 func seedDevice(t *testing.T, owner *sql.DB, tenant uuid.UUID) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
 	if _, err := owner.Exec(`
-		INSERT INTO devices (id, tenant_id, device_type, ip_address)
-		VALUES ($1, $2, 'unifi', '192.0.2.10')`, id, tenant); err != nil {
-		t.Fatalf("seed device: %v", err)
+		INSERT INTO assets (id, tenant_id, class_key, class_path, primary_address, metadata)
+		VALUES ($1, $2, 'wireless_controller', 'hardware.network_device.wireless_controller',
+		        '192.0.2.10', '{"device_type": "unifi"}'::jsonb)`, id, tenant); err != nil {
+		t.Fatalf("seed asset: %v", err)
+	}
+	if _, err := owner.Exec(`
+		INSERT INTO asset_management (tenant_id, asset_id, management_protocol)
+		VALUES ($1, $2, 'https')`, tenant, id); err != nil {
+		t.Fatalf("seed asset_management: %v", err)
 	}
 	return id
 }
@@ -86,7 +100,7 @@ func TestIntegration_DeleteAgent_SoftDeletesAndSettlesJobs(t *testing.T) {
 	deviceID := seedDevice(t, owner, tenant)
 	pendingJob, orphanJob, runningJob := uuid.New(), uuid.New(), uuid.New()
 	if _, err := owner.Exec(`
-		INSERT INTO device_jobs (id, tenant_id, job_type, agent_id, device_id, status)
+		INSERT INTO device_jobs (id, tenant_id, job_type, agent_id, asset_id, status)
 		VALUES ($1, $2, 'device_interrogation', $3, $4, 'pending')`,
 		pendingJob, tenant, agentID, deviceID); err != nil {
 		t.Fatalf("seed pending job: %v", err)

@@ -49,11 +49,52 @@ async function main() {
     }
     if (!t.source) fail(`${t.id}: source required`);
     if (t.severity_model === 'ladder') {
+      // Two ladder shapes, mutually exclusive.
+      //
+      //   baseline_rung  a TUNABLE ladder. The rung is a product default the
+      //                  tenant may replace and an activated framework may add
+      //                  to, so the registry declares one rung and the effective
+      //                  ladder is assembled per tenant (alertcatalog.BuildLadder).
+      //   rungs          a FIXED ladder. The boundaries come from a published
+      //                  standard or from the finding ladder the alert is driven
+      //                  by, so there is nothing for a tenant to tune and the
+      //                  registry declares the whole thing.
+      //
+      // Both, or neither, would leave "what is this type's ladder?" with two
+      // answers or none — so exactly one is required.
       const r = t.baseline_rung;
-      if (!r || !r.severity) fail(`${t.id}: ladder types need baseline_rung with severity`);
-      if (r.days === undefined && r.percent === undefined) fail(`${t.id}: baseline_rung needs days or percent`);
-    } else if (!t.default_severity || !VALID.severity.includes(t.default_severity)) {
-      fail(`${t.id}: fixed types need a valid default_severity`);
+      const rungs = t.rungs;
+      if (r && rungs) fail(`${t.id}: baseline_rung and rungs are mutually exclusive`);
+      if (r) {
+        if (!r.severity) fail(`${t.id}: ladder types need baseline_rung with severity`);
+        if (r.days === undefined && r.percent === undefined) fail(`${t.id}: baseline_rung needs days or percent`);
+      } else if (Array.isArray(rungs) && rungs.length) {
+        for (const rung of rungs) {
+          if (!rung || typeof rung.threshold !== 'string' || !rung.threshold.trim()) {
+            fail(`${t.id}: every rung needs a threshold label`);
+          }
+          if (!VALID.severity.includes(rung.severity)) {
+            fail(`${t.id}: rung ${rung.threshold}: invalid severity: ${rung.severity}`);
+          }
+        }
+      } else {
+        fail(`${t.id}: ladder types need either a baseline_rung or a rungs list`);
+      }
+    } else {
+      if (!t.default_severity || !VALID.severity.includes(t.default_severity)) {
+        fail(`${t.id}: fixed types need a valid default_severity`);
+      }
+      // A fixed-severity type has ONE severity, so a rungs list on it has no
+      // meaning — and the emitter below is unconditional, so an unvalidated
+      // `rungs:` here reached the generated Go verbatim: an empty threshold and
+      // a severity outside the vocabulary both passed, and alertcatalog.FixedRung
+      // reads Rungs without consulting SeverityModel, so a detector could open an
+      // alert at a severity the alerts table's CHECK constraint rejects. Refused
+      // rather than ignored: silently dropping it would leave the YAML claiming
+      // a ladder the product does not have.
+      if (t.rungs !== undefined) {
+        fail(`${t.id}: rungs is only meaningful for severity_model: ladder (this is ${t.severity_model})`);
+      }
     }
   }
 
@@ -64,6 +105,15 @@ async function main() {
     // Field names are padded to the longest key (BaselineSeverity /
     // EnabledByDefault) so the emitted literal is gofmt-clean — gofmt aligns
     // composite-literal values, and CI's format check runs on this file.
+    //
+    // Rungs is emitted LAST and only when present: a multi-line value ends
+    // gofmt's alignment run, so anything after it would be padded to a
+    // different width and the generated file would not be gofmt-clean.
+    const rungs = Array.isArray(t.rungs) && t.rungs.length
+      ? `\n		Rungs: []LadderRung{\n${t.rungs
+          .map((r) => `			{Threshold: ${goStr(r.threshold)}, Severity: ${goStr(r.severity)}},`)
+          .join('\n')}\n		},`
+      : '';
     return `	{
 		ID:               ${goStr(t.id)},
 		Track:            ${goStr(t.track)},
@@ -78,7 +128,7 @@ async function main() {
 		BaselineSeverity: ${goStr(rungSeverity)},
 		AutoResolve:      ${goStr(t.auto_resolve ?? '')},
 		EnabledByDefault: ${t.enabled_by_default !== false},
-		Description:      ${goStr((t.description ?? '').trim())},
+		Description:      ${goStr((t.description ?? '').trim())},${rungs}
 	},`;
   });
 
@@ -86,6 +136,25 @@ async function main() {
 // standards/alert-registry.yaml. DO NOT EDIT — edit the YAML and run
 // \`make generate\`.
 package alertcatalog
+
+// LadderRung is one step of a FIXED ladder — a ladder whose boundaries come
+// from a published standard (the CVSS qualitative bands) or from the finding
+// ladder the alert is driven by, rather than from a tenant preference.
+//
+// Threshold is the boundary in the detector's own units, as a label a person
+// reads ("CVSS 7.0 or higher"). It is deliberately free text and deliberately
+// NOT parsed: the producer owns the numbers, the registry owns what a rung
+// MEANS, and parsing an integer back out of an English sentence would make a
+// typo in the YAML a silent change of behaviour. (Same split, and the same
+// reasoning, as the findings registry's rungs.)
+//
+// Distinct from [Rung], which is a rung of a TUNABLE day ladder assembled per
+// tenant by BuildLadder and carries a Source saying where it came from. A
+// fixed rung has no source to report: it is the product's, always.
+type LadderRung struct {
+	Threshold string \`json:"threshold"\`
+	Severity  string \`json:"severity"\`
+}
 
 // Entry is one registry alert type (the catalog row).
 type Entry struct {
@@ -103,6 +172,10 @@ type Entry struct {
 	AutoResolve      string \`json:"auto_resolve,omitempty"\`
 	EnabledByDefault bool   \`json:"enabled_by_default"\`
 	Description      string \`json:"description"\`
+
+	// Rungs is the fixed ladder, worst-last. Empty for a fixed-severity type
+	// and for a ladder type that declares a tunable baseline_rung instead.
+	Rungs []LadderRung \`json:"rungs,omitempty"\`
 }
 
 // Registry is the generated alert-type catalog, in YAML order.

@@ -1,0 +1,1283 @@
+# Asset class registry — THE single source of truth for the class taxonomy.
+#
+# Encodes ADR-0002 D2 (docsv4/internal/developer/design/asset-inventory/adr/
+# 0002-asset-identity-and-class-taxonomy.md). Everything below is generated
+# from this file by `scripts/generate-asset-classes.mjs` (run via
+# `make generate`; `make audit` runs it with `--check` and fails on drift):
+#
+#   1. scripts/database/seed-asset-classes.sql
+#        idempotent upserts for the platform (tenant_id IS NULL) rows of the
+#        `asset_classes` table. NOT applied anywhere yet — the table lands in
+#        workstream 0.2, which is what consumes this file.
+#   2. shared/assetclass/classes_gen.go
+#        Go constants + the Class struct + All/Get/IsAncestor/Children.
+#   3. shared/assetclass/attribute_schemas_gen.json
+#        effective (inherited + own) JSON-schema fragment per class, embedded
+#        into the Go package via //go:embed.
+#   4. packages/primitives/src/assets/classes.gen.ts
+#        AssetClassKey union, ASSET_CLASSES record, CLASS_TREE for facets.
+#   5. api/openapi/inventory-service.openapi.yaml
+#        the `AssetClassKey` reusable schema enum (generated region).
+#
+# DO NOT hand-edit any of those. Edit here and run `make generate`.
+# How to add a class: docsv4/internal/developer/standards/ASSET_CLASS_REGISTRY.md
+#
+# ---------------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------------
+# * The TOP LEVEL IS FIXED. Tenants may add leaf subclasses beneath any class
+#   here at runtime (rows with tenant_id set, is_fixed = false); they may not
+#   add top-level classes or reparent these. That keeps the CMDB sync mapping,
+#   the map colouring and the compliance predicates stable (ADR-0002 D2).
+# * `parent` is the parent class key, or null for a top-level class. The
+#   materialised `path` (e.g. `hardware.computer.server`) is DERIVED by the
+#   generator — it is not stored here, so it cannot drift from `parent`.
+# * Every class here is assignable to an asset, including the intermediate
+#   ones. Classifying a box as `hardware` when we know no more than that is
+#   the honest answer; the class is what tells the user how much is known.
+# * `attribute_schema` declares only the attributes this class ADDS. Children
+#   inherit their ancestors' properties; the generator emits the merged
+#   effective schema (with `additionalProperties: false`). A child may not
+#   redeclare an ancestor's property — the generator fails on that.
+#   These are CLASS-SPECIFIC attributes only: everything on the base `assets`
+#   row (hostname, environment, owner, tags, status, risk …) is not repeated
+#   here. Attribute values live in `assets.attributes jsonb`, validated
+#   against the effective schema.
+#   An attribute may NOT restate an identifier. The ten identifier kinds and
+#   their obvious synonyms (`resource_id`, `serial`, `sys_id`, `mac`, …) are
+#   rejected by the generator: an identifier belongs in `asset_identifiers`,
+#   where it is unique across assets and carries its own source, confidence
+#   and first/last-seen. Two homes for one value is the reconciliation bug of
+#   ADR-0002 D4 written into the schema.
+# * `identifier_precedence` is an ordered subset of `identifier_kinds` below
+#   (ADR-0002 D3), highest-confidence first. An EMPTY list means the class has
+#   no independent identity at all — nothing can identify it, so every
+#   observation of one is refused. The `service` branch used to be empty and is
+#   now `[name]` (ADR-0002 D3 erratum: "services identify by (tenant, class,
+#   name), realised as the `name` identifier kind"); applications are still
+#   dependent identity, resolved under their host. Classes may drop and reorder
+#   kinds: a cloud resource never identifies by MAC, a container never by
+#   serial number, and only the service branch identifies by name.
+# * `cmdb_ci_type` is the DEFAULT ServiceNow class for the CMDB sync. `null`
+#   means "no confident default": the sync resolves to the nearest ancestor
+#   that has one, and a sync profile may override per class. A wrong default
+#   is worse than none, so branches we have not verified against a real
+#   ServiceNow instance are left null rather than guessed.
+# * `cyclonedx_type` is the CycloneDX component type used when the class is
+#   emitted into an xBOM. `service` is not a CycloneDX *component* type — a
+#   class carrying it is emitted into the CycloneDX `services` array instead.
+# * `legacy_asset_type` maps the class onto the four values of the existing
+#   `public.asset_type` enum (server | endpoint | service | appliance). It is
+#   reference-only: it feeds the derived, read-only `asset_type` field kept
+#   for one release (ADR-0002 D6) and the import wizard's fix-up. It is NOT a
+#   column of `asset_classes`.
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# Vocabularies. Every value used below must come from these lists.
+# ---------------------------------------------------------------------------
+
+# ADR-0002 D3, in default precedence order (highest confidence first), plus
+# `name` — which is NOT in the default order and is never used by a class that
+# does not list it explicitly.
+identifier_kinds:
+  - agent_id                    # a host agent's own installation id
+  - cloud_resource_id           # ARN, Azure resource id, GCP self-link
+  - serial_number
+  - cmdb_sys_id                 # per CMDB sync profile
+  - ssh_host_key_fingerprint
+  - mac_address
+  - fqdn
+  - hostname                    # within a segment or site, else the tenant default
+  - ip_address                  # within a non-dynamic segment, else the tenant default
+  - name                        # DECLARED, scoped by class key; the service branch only
+
+# CycloneDX 1.6 component types we allow, plus `service` (see note above).
+cyclonedx_types:
+  - device
+  - operating-system
+  - application
+  - platform
+  - container
+  - data
+  - service
+  - machine-learning-model
+  - library
+  - firmware
+  - file
+
+# public.asset_type enum values (scripts/database/schema.sql).
+legacy_asset_types:
+  - server
+  - endpoint
+  - service
+  - appliance
+
+# JSON-schema property types an attribute may declare.
+attribute_types:
+  - string
+  - integer
+  - number
+  - boolean
+  - array
+
+# ---------------------------------------------------------------------------
+# The taxonomy. Order here is the order emitted everywhere downstream.
+# ---------------------------------------------------------------------------
+classes:
+
+  # === hardware ============================================================
+  - key: hardware
+    parent: null
+    label: Hardware
+    description: >-
+      A physical thing with a chassis. Use this class directly when a device
+      is known to be physical but nothing narrows it further.
+    icon: CircuitBoard
+    cmdb_ci_type: cmdb_ci_hardware
+    cyclonedx_type: device
+    legacy_asset_type: appliance
+    identifier_precedence:
+      [serial_number, cmdb_sys_id, mac_address, fqdn, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        vendor:
+          type: string
+          description: Manufacturer or brand as reported by the device.
+        model:
+          type: string
+          description: Manufacturer model designation.
+        asset_tag:
+          type: string
+          description: Organisation's own inventory tag, if one is affixed.
+
+  - key: computer
+    parent: hardware
+    label: Computer
+    description: A general-purpose machine running an operating system.
+    icon: Computer
+    cmdb_ci_type: cmdb_ci_computer
+    cyclonedx_type: device
+    legacy_asset_type: endpoint
+    identifier_precedence:
+      [agent_id, serial_number, cmdb_sys_id, ssh_host_key_fingerprint,
+       mac_address, fqdn, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        operating_system:
+          type: string
+          description: OS product name, e.g. "Ubuntu", "Windows Server".
+        os_version:
+          type: string
+          description: OS version string as reported.
+        architecture:
+          type: string
+          description: CPU architecture, e.g. amd64, arm64.
+        cpu_count:
+          type: integer
+          description: Logical CPU count.
+        memory_mb:
+          type: integer
+          description: Installed memory in mebibytes.
+
+  - key: server
+    parent: computer
+    label: Server
+    description: A computer providing services to other machines.
+    icon: Server
+    cmdb_ci_type: cmdb_ci_server
+    cyclonedx_type: device
+    legacy_asset_type: server
+    identifier_precedence:
+      [agent_id, serial_number, cmdb_sys_id, ssh_host_key_fingerprint,
+       mac_address, fqdn, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        server_role:
+          type: string
+          description: >-
+            Primary role the server plays, e.g. web, database, file, domain
+            controller. Free text; the relationship graph is authoritative.
+
+  - key: workstation
+    parent: computer
+    label: Workstation
+    description: A desktop computer used by a person.
+    icon: Monitor
+    cmdb_ci_type: cmdb_ci_pc_hardware
+    cyclonedx_type: device
+    legacy_asset_type: endpoint
+    identifier_precedence:
+      [agent_id, serial_number, cmdb_sys_id, mac_address, fqdn, hostname]
+    attribute_schema:
+      type: object
+      properties:
+        assigned_user:
+          type: string
+          description: Primary user, by email or directory name.
+
+  - key: laptop
+    parent: computer
+    label: Laptop
+    description: A portable computer used by a person.
+    icon: Laptop
+    cmdb_ci_type: cmdb_ci_pc_hardware
+    cyclonedx_type: device
+    legacy_asset_type: endpoint
+    identifier_precedence:
+      [agent_id, serial_number, cmdb_sys_id, mac_address, hostname]
+    attribute_schema:
+      type: object
+      properties:
+        assigned_user:
+          type: string
+          description: Primary user, by email or directory name.
+
+  - key: mobile
+    parent: computer
+    label: Mobile device
+    description: A phone or tablet.
+    icon: Smartphone
+    cmdb_ci_type: null
+    cyclonedx_type: device
+    legacy_asset_type: endpoint
+    identifier_precedence:
+      [agent_id, serial_number, cmdb_sys_id, mac_address, hostname]
+    attribute_schema:
+      type: object
+      properties:
+        platform:
+          type: string
+          enum: [ios, android, other]
+          description: Mobile platform family.
+        mdm_enrolled:
+          type: boolean
+          description: Whether the device is enrolled in mobile device management.
+
+  - key: network_device
+    parent: hardware
+    label: Network device
+    description: Equipment whose job is moving or filtering traffic.
+    icon: Network
+    cmdb_ci_type: cmdb_ci_netgear
+    cyclonedx_type: device
+    legacy_asset_type: appliance
+    identifier_precedence:
+      [serial_number, cmdb_sys_id, ssh_host_key_fingerprint, mac_address,
+       fqdn, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        firmware_version:
+          type: string
+          description: Running firmware or network-OS version.
+        # management_address lives on asset_management (DATA_MODEL §2), not here:
+        # one home for the management plane address, next to its credentials.
+
+  - key: switch
+    parent: network_device
+    label: Switch
+    description: A layer-2 (or layer-3) forwarding device.
+    icon: EthernetPort
+    cmdb_ci_type: cmdb_ci_ip_switch
+    cyclonedx_type: device
+    legacy_asset_type: appliance
+    identifier_precedence:
+      [serial_number, cmdb_sys_id, ssh_host_key_fingerprint, mac_address,
+       fqdn, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        switch_layer:
+          type: integer
+          description: 2 or 3, per the forwarding the switch performs.
+        port_count:
+          type: integer
+          description: Physical port count.
+
+  - key: router
+    parent: network_device
+    label: Router
+    description: A device routing between networks.
+    icon: Router
+    cmdb_ci_type: cmdb_ci_ip_router
+    cyclonedx_type: device
+    legacy_asset_type: appliance
+    identifier_precedence:
+      [serial_number, cmdb_sys_id, ssh_host_key_fingerprint, mac_address,
+       fqdn, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        routing_protocols:
+          type: array
+          items:
+            type: string
+          description: Routing protocols observed in the configuration.
+
+  - key: firewall
+    parent: network_device
+    label: Firewall
+    description: A policy-enforcing filter between network zones.
+    icon: Shield
+    cmdb_ci_type: cmdb_ci_ip_firewall
+    cyclonedx_type: device
+    legacy_asset_type: appliance
+    identifier_precedence:
+      [serial_number, cmdb_sys_id, ssh_host_key_fingerprint, mac_address,
+       fqdn, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        ha_role:
+          type: string
+          enum: [standalone, active, passive, unknown]
+          description: Role in a high-availability pair.
+
+  - key: load_balancer
+    parent: network_device
+    label: Load balancer
+    description: >-
+      A device distributing connections across backends. Often the tenant's
+      largest concentration of TLS termination.
+    icon: Split
+    cmdb_ci_type: cmdb_ci_lb
+    cyclonedx_type: device
+    legacy_asset_type: appliance
+    identifier_precedence:
+      [serial_number, cmdb_sys_id, ssh_host_key_fingerprint, mac_address,
+       fqdn, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        virtual_server_count:
+          type: integer
+          description: Number of configured virtual servers or listeners.
+        ssl_offload_enabled:
+          type: boolean
+          description: Whether the device terminates TLS on behalf of backends.
+
+  - key: wireless_controller
+    parent: network_device
+    label: Wireless controller
+    description: A controller managing a fleet of access points.
+    icon: RadioTower
+    cmdb_ci_type: null
+    cyclonedx_type: device
+    legacy_asset_type: appliance
+    identifier_precedence:
+      [serial_number, cmdb_sys_id, ssh_host_key_fingerprint, mac_address,
+       fqdn, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        managed_ap_count:
+          type: integer
+          description: Access points the controller reports managing.
+
+  - key: access_point
+    parent: network_device
+    label: Access point
+    description: A wireless access point.
+    icon: Wifi
+    cmdb_ci_type: cmdb_ci_wap_network
+    cyclonedx_type: device
+    legacy_asset_type: appliance
+    identifier_precedence:
+      [serial_number, cmdb_sys_id, mac_address, fqdn, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        radio_bands:
+          type: array
+          items:
+            type: string
+          description: Radio bands in service, e.g. 2.4GHz, 5GHz, 6GHz.
+        controller_managed:
+          type: boolean
+          description: Whether a wireless controller manages this AP.
+
+  - key: vpn_gateway
+    parent: network_device
+    label: VPN gateway
+    description: A device terminating remote-access or site-to-site tunnels.
+    icon: ShieldCheck
+    cmdb_ci_type: null
+    cyclonedx_type: device
+    legacy_asset_type: appliance
+    identifier_precedence:
+      [serial_number, cmdb_sys_id, ssh_host_key_fingerprint, mac_address,
+       fqdn, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        vpn_types:
+          type: array
+          items:
+            type: string
+          description: Tunnel families terminated, e.g. ipsec, ssl, wireguard.
+
+  - key: storage_device
+    parent: hardware
+    label: Storage device
+    description: A storage array, NAS or SAN appliance.
+    icon: HardDrive
+    cmdb_ci_type: cmdb_ci_storage_device
+    cyclonedx_type: device
+    legacy_asset_type: appliance
+    identifier_precedence:
+      [serial_number, cmdb_sys_id, mac_address, fqdn, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        firmware_version:
+          type: string
+          description: Running firmware version.
+        capacity_gb:
+          type: integer
+          description: Raw capacity in gigabytes.
+        storage_protocols:
+          type: array
+          items:
+            type: string
+          description: Protocols served, e.g. iscsi, nfs, smb, fc.
+
+  - key: printer
+    parent: hardware
+    label: Printer
+    description: A printer or multifunction device.
+    icon: Printer
+    cmdb_ci_type: cmdb_ci_printer
+    cyclonedx_type: device
+    legacy_asset_type: appliance
+    identifier_precedence:
+      [serial_number, cmdb_sys_id, mac_address, fqdn, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        firmware_version:
+          type: string
+          description: Running firmware version.
+        print_protocols:
+          type: array
+          items:
+            type: string
+          description: Print protocols offered, e.g. ipp, lpd, raw9100.
+
+  - key: ot_device
+    parent: hardware
+    label: OT device
+    description: >-
+      Operational-technology equipment on a plant or substation network.
+      Rarely carries an agent and often cannot be actively probed safely.
+    icon: Factory
+    cmdb_ci_type: null
+    cyclonedx_type: device
+    legacy_asset_type: appliance
+    identifier_precedence:
+      [serial_number, cmdb_sys_id, mac_address, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        firmware_version:
+          type: string
+          description: Running firmware version.
+        purdue_level:
+          type: integer
+          description: Purdue model level 0-5 the device sits at.
+        industrial_protocols:
+          type: array
+          items:
+            type: string
+          description: Industrial protocols spoken, e.g. modbus, dnp3, ethernet-ip.
+
+  - key: plc
+    parent: ot_device
+    label: PLC
+    description: A programmable logic controller.
+    icon: Cpu
+    cmdb_ci_type: null
+    cyclonedx_type: device
+    legacy_asset_type: appliance
+    identifier_precedence:
+      [serial_number, cmdb_sys_id, mac_address, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties: {}
+
+  - key: rtu
+    parent: ot_device
+    label: RTU
+    description: A remote terminal unit relaying field telemetry.
+    icon: Radio
+    cmdb_ci_type: null
+    cyclonedx_type: device
+    legacy_asset_type: appliance
+    identifier_precedence:
+      [serial_number, cmdb_sys_id, mac_address, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        telemetry_protocol:
+          type: string
+          description: Primary telemetry protocol, e.g. dnp3, iec-101.
+
+  - key: hmi
+    parent: ot_device
+    label: HMI
+    description: A human-machine interface panel or station.
+    icon: Gauge
+    cmdb_ci_type: null
+    cyclonedx_type: device
+    legacy_asset_type: appliance
+    identifier_precedence:
+      [serial_number, cmdb_sys_id, mac_address, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        hmi_software:
+          type: string
+          description: HMI/SCADA software product running on the panel.
+        hmi_software_version:
+          type: string
+          description: Version of that software.
+
+  - key: ied
+    parent: ot_device
+    label: IED
+    description: An intelligent electronic device, typically in a substation.
+    icon: Zap
+    cmdb_ci_type: null
+    cyclonedx_type: device
+    legacy_asset_type: appliance
+    identifier_precedence:
+      [serial_number, cmdb_sys_id, mac_address, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        iec61850_edition:
+          type: string
+          description: IEC 61850 edition the device implements, if any.
+
+  - key: iot_device
+    parent: hardware
+    label: IoT device
+    description: >-
+      A network-attached embedded device that is not OT — cameras, sensors,
+      badge readers, building controls.
+    icon: Cctv
+    cmdb_ci_type: null
+    cyclonedx_type: device
+    legacy_asset_type: appliance
+    identifier_precedence:
+      [serial_number, cmdb_sys_id, mac_address, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        firmware_version:
+          type: string
+          description: Running firmware version.
+        device_category:
+          type: string
+          description: What the thing is, e.g. camera, badge reader, thermostat.
+
+  - key: bmc
+    parent: hardware
+    label: Management controller
+    description: >-
+      An out-of-band management controller (iDRAC, iLO, IPMI, Redfish). It has
+      its own address, its own crypto, and its own lifecycle from the host it
+      manages.
+    icon: ServerCog
+    cmdb_ci_type: null
+    cyclonedx_type: device
+    legacy_asset_type: appliance
+    identifier_precedence:
+      [serial_number, cmdb_sys_id, mac_address, fqdn, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        firmware_version:
+          type: string
+          description: Running controller firmware version.
+        bmc_protocol:
+          type: string
+          enum: [ipmi, redfish, proprietary, unknown]
+          description: Management protocol the controller answers.
+
+  # === virtual =============================================================
+  - key: virtual
+    parent: null
+    label: Virtual
+    description: >-
+      Something running on top of someone else's hardware, inside this
+      tenant's own estate. Cloud-provider resources have their own top-level
+      class.
+    icon: Layers
+    cmdb_ci_type: null
+    cyclonedx_type: platform
+    legacy_asset_type: server
+    # cloud_resource_id here means the hypervisor's own object id (a vSphere
+    # MoRef or instance UUID, a Proxmox VMID): a provider-assigned handle, not
+    # a public-cloud ARN. The identifier kind is "the platform's id for it".
+    identifier_precedence:
+      [agent_id, cloud_resource_id, cmdb_sys_id, ssh_host_key_fingerprint,
+       mac_address, fqdn, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        cpu_count:
+          type: integer
+          description: Allocated virtual CPUs.
+        memory_mb:
+          type: integer
+          description: Allocated memory in mebibytes.
+
+  - key: virtual_machine
+    parent: virtual
+    label: Virtual machine
+    description: A guest machine running on a hypervisor.
+    icon: Box
+    cmdb_ci_type: cmdb_ci_vm_instance
+    cyclonedx_type: platform
+    legacy_asset_type: server
+    identifier_precedence:
+      [agent_id, cloud_resource_id, cmdb_sys_id, ssh_host_key_fingerprint,
+       mac_address, fqdn, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        operating_system:
+          type: string
+          description: Guest OS product name.
+        os_version:
+          type: string
+          description: Guest OS version string.
+        guest_tools_version:
+          type: string
+          description: Hypervisor guest-tools version, if installed.
+
+  - key: container
+    parent: virtual
+    label: Container
+    description: >-
+      A running container. Identified by its image and orchestration
+      identity, never by serial number, MAC or address — all three are
+      ephemeral for containers.
+    icon: Container
+    cmdb_ci_type: null
+    cyclonedx_type: container
+    legacy_asset_type: service
+    identifier_precedence: [agent_id, cloud_resource_id, cmdb_sys_id, hostname]
+    attribute_schema:
+      type: object
+      properties:
+        image:
+          type: string
+          description: Image reference the container runs.
+        image_digest:
+          type: string
+          description: Immutable digest of that image.
+        runtime:
+          type: string
+          description: Container runtime, e.g. containerd, docker, cri-o.
+        namespace:
+          type: string
+          description: Orchestrator namespace the container runs in.
+
+  - key: cluster
+    parent: virtual
+    label: Cluster
+    description: A group of nodes managed as one scheduling or failover unit.
+    icon: Boxes
+    cmdb_ci_type: cmdb_ci_cluster
+    cyclonedx_type: platform
+    legacy_asset_type: service
+    identifier_precedence: [cloud_resource_id, cmdb_sys_id, fqdn, hostname]
+    attribute_schema:
+      type: object
+      properties:
+        orchestrator:
+          type: string
+          description: Cluster technology, e.g. kubernetes, vsphere, nomad.
+        orchestrator_version:
+          type: string
+          description: Version of that technology.
+        node_count:
+          type: integer
+          description: Member nodes reported by the cluster.
+
+  - key: hypervisor
+    parent: virtual
+    label: Hypervisor
+    description: A host running guest machines.
+    icon: SquareStack
+    cmdb_ci_type: cmdb_ci_server
+    cyclonedx_type: platform
+    legacy_asset_type: server
+    identifier_precedence:
+      [agent_id, serial_number, cmdb_sys_id, ssh_host_key_fingerprint,
+       mac_address, fqdn, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        product:
+          type: string
+          description: Hypervisor product, e.g. ESXi, Hyper-V, KVM, Proxmox.
+        product_version:
+          type: string
+          description: Version of that product.
+
+  # === cloud_resource ======================================================
+  - key: cloud_resource
+    parent: null
+    label: Cloud resource
+    description: >-
+      A resource managed by a cloud provider's control plane. Identified by
+      its provider resource id; never by MAC address.
+    icon: Cloud
+    cmdb_ci_type: null
+    cyclonedx_type: platform
+    legacy_asset_type: service
+    identifier_precedence: [cloud_resource_id, cmdb_sys_id, fqdn]
+    attribute_schema:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum: [aws, azure, gcp, oci, other]
+          description: Cloud provider.
+        account_id:
+          type: string
+          description: Account, subscription or project the resource belongs to.
+        region:
+          type: string
+          description: Provider region.
+        # NB: the provider-native resource id (ARN, Azure resource id, GCP
+        # self-link) is deliberately NOT an attribute here. It is the
+        # `cloud_resource_id` identifier kind and belongs in asset_identifiers,
+        # where it is unique across assets and carries source and confidence
+        # (ADR-0002 D3). Declaring it here as well would give one value two
+        # homes with no rule for which wins — the RESERVED_ATTRIBUTE_NAMES
+        # guard in scripts/generate-asset-classes.mjs now rejects it.
+
+  - key: compute_instance
+    parent: cloud_resource
+    label: Compute instance
+    description: A provider-managed virtual machine.
+    icon: CloudCog
+    cmdb_ci_type: cmdb_ci_vm_instance
+    cyclonedx_type: platform
+    legacy_asset_type: server
+    identifier_precedence:
+      [agent_id, cloud_resource_id, cmdb_sys_id, ssh_host_key_fingerprint,
+       fqdn, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        instance_type:
+          type: string
+          description: Provider instance size, e.g. m6i.large.
+        image_id:
+          type: string
+          description: Machine image the instance booted from.
+        operating_system:
+          type: string
+          description: Guest OS product name.
+        os_version:
+          type: string
+          description: Guest OS version string.
+
+  - key: managed_database
+    parent: cloud_resource
+    label: Managed database
+    description: A provider-operated database service instance.
+    icon: Database
+    cmdb_ci_type: cmdb_ci_db_instance
+    cyclonedx_type: application
+    legacy_asset_type: service
+    identifier_precedence: [cloud_resource_id, cmdb_sys_id, fqdn]
+    attribute_schema:
+      type: object
+      properties:
+        engine:
+          type: string
+          description: Database engine, e.g. postgres, mysql, sqlserver.
+        engine_version:
+          type: string
+          description: Engine version.
+        # Posture facts (TLS minimums, encryption state) are measured at endpoints
+        # and land as facts/findings (ADR-0005), not as inventory attributes.
+
+  - key: object_storage
+    parent: cloud_resource
+    label: Object storage
+    description: A bucket or container of objects.
+    icon: Archive
+    cmdb_ci_type: null
+    cyclonedx_type: data
+    legacy_asset_type: service
+    identifier_precedence: [cloud_resource_id, cmdb_sys_id, fqdn]
+    attribute_schema:
+      type: object
+      properties:
+        # Posture facts (TLS minimums, encryption state) are measured at endpoints
+        # and land as facts/findings (ADR-0005), not as inventory attributes.
+        encryption_algorithm:
+          type: string
+          description: Algorithm the provider reports for default encryption.
+        public_access_blocked:
+          type: boolean
+          description: Whether public access is blocked at the resource level.
+
+  - key: key_store
+    parent: cloud_resource
+    label: Key store
+    description: >-
+      A KMS, key vault, HSM or secrets manager. We inventory its posture —
+      never the key material it holds.
+    icon: KeyRound
+    cmdb_ci_type: null
+    cyclonedx_type: platform
+    legacy_asset_type: service
+    identifier_precedence: [cloud_resource_id, cmdb_sys_id, fqdn]
+    attribute_schema:
+      type: object
+      properties:
+        key_store_kind:
+          type: string
+          enum: [kms, key_vault, hsm, secrets_manager, other]
+          description: What kind of store this is.
+        certification_level:
+          type: string
+          description: Certification claimed, e.g. "FIPS 140-3 Level 3".
+        key_count:
+          type: integer
+          description: Number of keys the store reports holding.
+
+  - key: cloud_load_balancer
+    parent: cloud_resource
+    label: Cloud load balancer
+    description: A provider-managed load balancer.
+    icon: Scale
+    cmdb_ci_type: cmdb_ci_lb
+    cyclonedx_type: platform
+    legacy_asset_type: appliance
+    identifier_precedence: [cloud_resource_id, cmdb_sys_id, fqdn]
+    attribute_schema:
+      type: object
+      properties:
+        scheme:
+          type: string
+          enum: [internet_facing, internal, unknown]
+          description: Whether the balancer is reachable from the internet.
+        listener_count:
+          type: integer
+          description: Configured listeners.
+        tls_policy:
+          type: string
+          description: Provider TLS security policy applied to listeners.
+
+  - key: api_gateway
+    parent: cloud_resource
+    label: API gateway
+    description: A provider-managed API front door.
+    icon: Webhook
+    cmdb_ci_type: null
+    cyclonedx_type: application
+    legacy_asset_type: service
+    identifier_precedence: [cloud_resource_id, cmdb_sys_id, fqdn]
+    attribute_schema:
+      type: object
+      properties:
+        endpoint_type:
+          type: string
+          enum: [regional, edge, private, unknown]
+          description: Deployment type of the gateway endpoint.
+        # Posture facts (TLS minimums, encryption state) are measured at endpoints
+        # and land as facts/findings (ADR-0005), not as inventory attributes.
+
+  - key: cdn_distribution
+    parent: cloud_resource
+    label: CDN distribution
+    description: A content delivery distribution fronting one or more origins.
+    icon: Globe
+    cmdb_ci_type: null
+    cyclonedx_type: platform
+    legacy_asset_type: service
+    identifier_precedence: [cloud_resource_id, cmdb_sys_id, fqdn]
+    attribute_schema:
+      type: object
+      properties:
+        origin_count:
+          type: integer
+          description: Configured origins.
+        # Posture facts (TLS minimums, encryption state) are measured at endpoints
+        # and land as facts/findings (ADR-0005), not as inventory attributes.
+
+  - key: serverless_function
+    parent: cloud_resource
+    label: Serverless function
+    description: A function executed on demand by the provider.
+    icon: CloudLightning
+    cmdb_ci_type: null
+    cyclonedx_type: application
+    legacy_asset_type: service
+    identifier_precedence: [cloud_resource_id, cmdb_sys_id]
+    attribute_schema:
+      type: object
+      properties:
+        runtime:
+          type: string
+          description: Execution runtime, e.g. nodejs, python, go.
+        runtime_version:
+          type: string
+          description: Runtime version.
+        memory_mb:
+          type: integer
+          description: Configured memory in mebibytes.
+
+  - key: virtual_network
+    parent: cloud_resource
+    label: Virtual network
+    description: >-
+      A provider-managed network (VPC, VNet). CycloneDX has no network
+      component type, so it is emitted as `platform`.
+    icon: Waypoints
+    cmdb_ci_type: cmdb_ci_network
+    cyclonedx_type: platform
+    legacy_asset_type: service
+    identifier_precedence: [cloud_resource_id, cmdb_sys_id]
+    attribute_schema:
+      type: object
+      properties:
+        cidr_blocks:
+          type: array
+          items:
+            type: string
+          description: CIDR blocks assigned to the network.
+
+  - key: subnet
+    parent: cloud_resource
+    label: Subnet
+    description: A subdivision of a virtual network.
+    icon: Share2
+    cmdb_ci_type: cmdb_ci_ip_network
+    cyclonedx_type: platform
+    legacy_asset_type: service
+    identifier_precedence: [cloud_resource_id, cmdb_sys_id]
+    attribute_schema:
+      type: object
+      properties:
+        cidr_block:
+          type: string
+          description: CIDR block of the subnet.
+        availability_zone:
+          type: string
+          description: Provider availability zone.
+        is_public:
+          type: boolean
+          description: Whether the subnet routes to an internet gateway.
+
+  # === application =========================================================
+  - key: application
+    parent: null
+    label: Application
+    description: >-
+      Software running on a host. Dependent identity: matched by its host
+      asset plus product plus instance name, not by an address of its own.
+    icon: AppWindow
+    cmdb_ci_type: cmdb_ci_appl
+    cyclonedx_type: application
+    legacy_asset_type: service
+    # `name` carries the DEPENDENT-identity key of ADR-0002 D3, not a label: an
+    # application is identified by its host plus product plus instance, and that
+    # tuple is written into a `name` identifier scoped by the class key (see
+    # identity.ResolveDependent / applicationDependentIdentifier).
+    #
+    # Without it these classes had `[cmdb_sys_id]` alone, so an application from
+    # any source but a CMDB could never be matched a second time: the first
+    # sighting created an asset carrying a hostname identifier that was not
+    # allowed to vote, and every sighting after that hit the floor and opened
+    # ANOTHER merge proposal. A poller on a fifteen-minute schedule produced
+    # ninety-six a day.
+    #
+    # hostname/fqdn are deliberately NOT added: they would match the HOST asset,
+    # and an application is not its host.
+    identifier_precedence: [cmdb_sys_id, name]
+    attribute_schema:
+      type: object
+      properties:
+        product:
+          type: string
+          description: Software product name.
+        version:
+          type: string
+          description: Product version.
+        vendor:
+          type: string
+          description: Publisher of the software.
+
+  - key: web_application
+    parent: application
+    label: Web application
+    description: An application served over HTTP(S).
+    icon: Globe
+    cmdb_ci_type: null
+    cyclonedx_type: application
+    legacy_asset_type: service
+    # `name` carries the DEPENDENT-identity key of ADR-0002 D3, not a label: an
+    # application is identified by its host plus product plus instance, and that
+    # tuple is written into a `name` identifier scoped by the class key (see
+    # identity.ResolveDependent / applicationDependentIdentifier).
+    #
+    # Without it these classes had `[cmdb_sys_id]` alone, so an application from
+    # any source but a CMDB could never be matched a second time: the first
+    # sighting created an asset carrying a hostname identifier that was not
+    # allowed to vote, and every sighting after that hit the floor and opened
+    # ANOTHER merge proposal. A poller on a fifteen-minute schedule produced
+    # ninety-six a day.
+    #
+    # hostname/fqdn are deliberately NOT added: they would match the HOST asset,
+    # and an application is not its host.
+    identifier_precedence: [cmdb_sys_id, name]
+    attribute_schema:
+      type: object
+      properties:
+        base_url:
+          type: string
+          description: Root URL the application is served from.
+        framework:
+          type: string
+          description: Application framework, if identified.
+        server_software:
+          type: string
+          description: Server banner or identified server software.
+
+  - key: database_instance
+    parent: application
+    label: Database instance
+    description: A database engine running on a host the tenant operates.
+    icon: Database
+    cmdb_ci_type: cmdb_ci_db_instance
+    cyclonedx_type: application
+    legacy_asset_type: service
+    # `name` carries the DEPENDENT-identity key of ADR-0002 D3, not a label: an
+    # application is identified by its host plus product plus instance, and that
+    # tuple is written into a `name` identifier scoped by the class key (see
+    # identity.ResolveDependent / applicationDependentIdentifier).
+    #
+    # Without it these classes had `[cmdb_sys_id]` alone, so an application from
+    # any source but a CMDB could never be matched a second time: the first
+    # sighting created an asset carrying a hostname identifier that was not
+    # allowed to vote, and every sighting after that hit the floor and opened
+    # ANOTHER merge proposal. A poller on a fifteen-minute schedule produced
+    # ninety-six a day.
+    #
+    # hostname/fqdn are deliberately NOT added: they would match the HOST asset,
+    # and an application is not its host.
+    identifier_precedence: [cmdb_sys_id, name]
+    attribute_schema:
+      type: object
+      properties:
+        engine:
+          type: string
+          description: Database engine, e.g. postgres, mysql, oracle.
+        engine_version:
+          type: string
+          description: Engine version.
+        instance_name:
+          type: string
+          description: Instance or SID name that distinguishes it on its host.
+        tls_required:
+          type: boolean
+          description: Whether the engine requires TLS for client connections.
+
+  - key: service_daemon
+    parent: application
+    label: Service daemon
+    description: A long-running background process, usually with a listening port.
+    icon: Cog
+    cmdb_ci_type: null
+    cyclonedx_type: application
+    legacy_asset_type: service
+    # `name` carries the DEPENDENT-identity key of ADR-0002 D3, not a label: an
+    # application is identified by its host plus product plus instance, and that
+    # tuple is written into a `name` identifier scoped by the class key (see
+    # identity.ResolveDependent / applicationDependentIdentifier).
+    #
+    # Without it these classes had `[cmdb_sys_id]` alone, so an application from
+    # any source but a CMDB could never be matched a second time: the first
+    # sighting created an asset carrying a hostname identifier that was not
+    # allowed to vote, and every sighting after that hit the floor and opened
+    # ANOTHER merge proposal. A poller on a fifteen-minute schedule produced
+    # ninety-six a day.
+    #
+    # hostname/fqdn are deliberately NOT added: they would match the HOST asset,
+    # and an application is not its host.
+    identifier_precedence: [cmdb_sys_id, name]
+    attribute_schema:
+      type: object
+      properties:
+        process_name:
+          type: string
+          description: Executable or unit name.
+        service_account:
+          type: string
+          description: Account the process runs as.
+
+  - key: middleware
+    parent: application
+    label: Middleware
+    description: >-
+      Software other software talks through — message brokers, application
+      servers, API proxies.
+    icon: Blocks
+    cmdb_ci_type: null
+    cyclonedx_type: application
+    legacy_asset_type: service
+    # `name` carries the DEPENDENT-identity key of ADR-0002 D3, not a label: an
+    # application is identified by its host plus product plus instance, and that
+    # tuple is written into a `name` identifier scoped by the class key (see
+    # identity.ResolveDependent / applicationDependentIdentifier).
+    #
+    # Without it these classes had `[cmdb_sys_id]` alone, so an application from
+    # any source but a CMDB could never be matched a second time: the first
+    # sighting created an asset carrying a hostname identifier that was not
+    # allowed to vote, and every sighting after that hit the floor and opened
+    # ANOTHER merge proposal. A poller on a fifteen-minute schedule produced
+    # ninety-six a day.
+    #
+    # hostname/fqdn are deliberately NOT added: they would match the HOST asset,
+    # and an application is not its host.
+    identifier_precedence: [cmdb_sys_id, name]
+    attribute_schema:
+      type: object
+      properties:
+        middleware_kind:
+          type: string
+          enum: [message_broker, application_server, api_proxy, cache, other]
+          description: What role the middleware plays.
+
+  # === service =============================================================
+  - key: service
+    parent: null
+    label: Service
+    description: >-
+      A declared service, never discovered. Dependent identity: a service is
+      identified by its name within the tenant and nothing else.
+    icon: Workflow
+    cmdb_ci_type: cmdb_ci_service
+    cyclonedx_type: service
+    legacy_asset_type: service
+    identifier_precedence: [name]
+    attribute_schema:
+      type: object
+      properties:
+        criticality:
+          type: string
+          enum: [critical, high, medium, low]
+          description: How badly the organisation is hurt when this is down.
+
+  - key: business_service
+    parent: service
+    label: Business service
+    description: A service the organisation offers to people, stated in their terms.
+    icon: Briefcase
+    cmdb_ci_type: cmdb_ci_service_business
+    cyclonedx_type: service
+    legacy_asset_type: service
+    identifier_precedence: [name]
+    attribute_schema:
+      type: object
+      properties:
+        business_capability:
+          type: string
+          description: Capability the service delivers, e.g. "online banking".
+
+  - key: technical_service
+    parent: service
+    label: Technical service
+    description: A service other services consume, stated in technical terms.
+    icon: Settings
+    cmdb_ci_type: cmdb_ci_service_technical
+    cyclonedx_type: service
+    legacy_asset_type: service
+    identifier_precedence: [name]
+    attribute_schema:
+      type: object
+      properties:
+        technology_domain:
+          type: string
+          description: Domain the service belongs to, e.g. messaging, identity.
+
+  # === leaves ==============================================================
+  - key: external
+    parent: null
+    label: External party
+    description: >-
+      An endpoint belonging to somebody else. Today's external-connections
+      destination. Never actively probed (active-probing scope rule).
+    icon: ExternalLink
+    cmdb_ci_type: null
+    cyclonedx_type: service
+    legacy_asset_type: endpoint
+    identifier_precedence: [fqdn, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        organization:
+          type: string
+          description: Organisation the endpoint is attributed to, if known.
+        relationship:
+          type: string
+          enum: [vendor, partner, customer, unknown]
+          description: How the tenant relates to that organisation.
+
+  - key: unknown_host
+    parent: null
+    label: Unknown host
+    description: >-
+      A reachable address inside the tenant's own space that nothing has
+      identified further, or a serial nothing has classified yet. A real asset
+      with a real gap, not a placeholder — it is what makes "how much don't we
+      know" answerable.
+    icon: CircleQuestionMark
+    cmdb_ci_type: null
+    cyclonedx_type: device
+    legacy_asset_type: endpoint
+    # The two STRONGEST identifiers the product has lead here — especially here.
+    #
+    # The class says what a thing IS, not how it is recognised, and the two are
+    # independent: a host an agent is INSTALLED ON but nothing has classified
+    # still carries the strongest identifier the product has. Omitting agent_id
+    # (as this list did until 2.11b) meant a host-inventory report whose only
+    # durable identity was its agent id could never DECIDE a match, so every
+    # collection either created another asset or — once the agent id was owned
+    # by the first one — opened a merge proposal on every run.
+    #
+    # `serial_number` leads for the same reason, resolved (ADR-0002
+    # D3 erratum). A serial is a globally unique SINGLETON: two observations
+    # sharing one are one device whatever their class, so refusing to match on
+    # it does not make the class more honest, it makes the class unable to
+    # recognise something it has already met. Refusing it produced a fresh merge
+    # proposal per run for every serial-only device — a NetBox estate's spare
+    # chassis, which have a serial and nothing else — and forced the NetBox
+    # connector to skip them (its classCanMatch) and workstream 2.11b to work
+    # around it.
+    #
+    # Neither widens what LANDS as unknown_host: only a host we issued an agent
+    # id to has one, and a serial arrives from a CMDB, a DCIM or the hardware
+    # itself. Both widen what can be RECOGNISED again, which is the whole job.
+    # The singleton guard is unaffected — a serial that DISAGREES with the one
+    # the matched asset carries is still outcome three, at every class.
+    identifier_precedence:
+      [serial_number, agent_id, ssh_host_key_fingerprint, mac_address, fqdn,
+       hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties: {}

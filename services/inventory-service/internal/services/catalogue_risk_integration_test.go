@@ -40,8 +40,8 @@ func newCatRiskFixture(t *testing.T) catRiskFixture {
 	tenant := testdb.NewTenant(t, raw)
 	asset := uuid.New()
 	if _, err := db.Exec(`
-		INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,'catrisk.example.test','server','monitoring',NOW(),NOW(),NOW(),NOW())`, asset, tenant); err != nil {
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, 'catrisk.example.test', 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`, asset, tenant); err != nil {
 		t.Fatalf("insert asset: %v", err)
 	}
 	return catRiskFixture{db: db, tenant: tenant, asset: asset}

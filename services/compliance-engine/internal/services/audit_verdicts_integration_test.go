@@ -90,8 +90,8 @@ func (f verdictFixture) addTLSImplementation(t *testing.T, hostname, keyExchange
 	t.Helper()
 	asset := uuid.New()
 	if _, err := f.db.Exec(`
-		INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,$3,'server','monitoring',NOW(),NOW(),NOW(),NOW())`, asset, f.tenant, hostname); err != nil {
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`, asset, f.tenant, hostname); err != nil {
 		t.Fatalf("insert asset %s: %v", hostname, err)
 	}
 	if _, err := f.db.Exec(`
@@ -114,7 +114,7 @@ func (f verdictFixture) flaggedAssets(t *testing.T, controlID uuid.UUID) map[uui
 	}
 	flagged := make(map[uuid.UUID]bool, len(res.Findings))
 	for _, finding := range res.Findings {
-		flagged[finding.AssetID] = true
+		flagged[finding.SubjectID] = true
 	}
 	return flagged
 }
@@ -213,9 +213,9 @@ func TestIntegration_CertExpiryMeasurementIsStampedWithNow(t *testing.T) {
 	notAfter := time.Now().Add(200 * 24 * time.Hour)
 	certID := f.addCertificate(t, "expiry.example.test", "RSA", 2048, false, notAfter)
 
-	values, err := NewMeasurementExtractor(f.db).GetCertificateExpirationDays(f.tenant, certID)
+	values, err := NewMeasurementExtractor(f.db).ExtractMeasurementsForAsset(f.tenant, certID, "cert_expiration_days")
 	if err != nil {
-		t.Fatalf("GetCertificateExpirationDays: %v", err)
+		t.Fatalf("extract cert_expiration_days: %v", err)
 	}
 	if len(values) != 1 {
 		t.Fatalf("got %d measurements, want 1", len(values))

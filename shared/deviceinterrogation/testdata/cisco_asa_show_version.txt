@@ -1,0 +1,14 @@
+Cisco Adaptive Security Appliance Software Version 9.12(4)56
+SSP Operating System Version 2.6(1.192)
+Device Manager Version 7.13(1)
+
+Compiled on Tue 17-Nov-20 15:31 GMT by builders
+System image file is "disk0:/asa9-12-4-56-smp-k8.bin"
+Config file at boot was "startup-config"
+
+fw-edge-01 up 5 days 4 hours
+
+Hardware:   ASA5525, 8192 MB RAM, CPU Lynnfield 2400 MHz, 1 CPU (4 cores)
+            Internal ATA Compact Flash, 8192MB
+
+Serial Number: FCH1934ABCD

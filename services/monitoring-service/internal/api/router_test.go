@@ -78,20 +78,7 @@ func TestProductionRouter_AdminStatusRejectsTenantPlatformRoleToken(t *testing.T
 	mw := newTestAuditMiddleware(t)
 	r := newProductionRouter(t, mw)
 
-	claims := &models.JWTClaims{
-		UserID:   uuid.New(),
-		TenantID: uuid.New(),
-		Email:    "tenant@example.com",
-		Role:     "platform_admin",
-		Type:     "access",
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
-		},
-	}
-	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte("test-jwt-secret"))
-	if err != nil {
-		t.Fatalf("sign token: %v", err)
-	}
+	token := tenantTokenWithRole(t, "platform_admin")
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/monitoring-service/admin/status", nil)
@@ -101,4 +88,55 @@ func TestProductionRouter_AdminStatusRejectsTenantPlatformRoleToken(t *testing.T
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("tenant token with platform role string = %d, want 403; body=%s", w.Code, w.Body.String())
 	}
+}
+
+func TestProductionRouter_LegacyAdminStatusRejectsTenantPlatformRoleToken(t *testing.T) {
+	mw := newTestAuditMiddleware(t)
+	r := newProductionRouter(t, mw)
+
+	token := tenantTokenWithRole(t, "platform_admin")
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin-service/status/tenants", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("legacy admin status with tenant platform role string = %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestProductionRouter_TenantPerformanceRejectsCrossTenantToken(t *testing.T) {
+	mw := newTestAuditMiddleware(t)
+	r := newProductionRouter(t, mw)
+
+	token := tenantTokenWithRole(t, "tenant_admin")
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/monitoring-service/tenant/"+uuid.NewString()+"/performance-summary", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("tenant performance summary with tenant token = %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func tenantTokenWithRole(t *testing.T, role string) string {
+	t.Helper()
+	claims := &models.JWTClaims{
+		UserID:   uuid.New(),
+		TenantID: uuid.New(),
+		Email:    "tenant@example.com",
+		Role:     role,
+		Type:     "access",
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+		},
+	}
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte("test-jwt-secret"))
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+	return token
 }

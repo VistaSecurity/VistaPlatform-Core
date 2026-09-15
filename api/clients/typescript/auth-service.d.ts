@@ -99,6 +99,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/tenant/ai": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Settings → AI assistant — provider status, live seams, tenant controls
+         * @description What this deployment has turned on for AI, and the two switches the tenant owns. Drives `frontend-v2` Settings → AI assistant.
+         *
+         *     The page is **Core**: it exists in every edition and explains the edition rather than being gated by it.
+         *
+         *     **GET needs authentication only** — no permission. It carries no credential and no endpoint address, and it is the answer to "why is there no written summary here", which any member of the tenant can end up asking in front of any surface a generative capability would have appeared on. `PUT` requires `settings.update` (tenant admin), because the two switches change what every capability does for everyone in the organization. The Settings rail entry is on `settings.update`, so the page itself is still the administrator's.
+         *
+         *     `seams` carries one row per AI seam (ADR-0008 D1), with the deterministic behaviour that answers when no model does. `live` means something can actually answer through the seam here: for a classical seam that a deterministic implementation ships; for a generative one that this build links the Enterprise providers AND `AI_PROVIDER` names a reachable one. A seam no edition implements yet reports `live: false` whatever the provider says.
+         *
+         *     **No credential and no endpoint ever crosses.** `provider_name` is the provider KIND; the base URL and the name of the variable holding the API key are deliberately absent, and `ai.ProviderConfig` has no key field at all.
+         */
+        get: operations["getTenantAISettings"];
+        /**
+         * Update the tenant's AI assistant controls
+         * @description Sets `assistant_disabled` (the tenant kill switch — every generative seam call made for this tenant is refused while it is on) and `record_questions` (ADR-0008 D4.7's opt-in: the audit trail stores the text a user typed only when this is on; the prompt HASH is recorded either way).
+         *
+         *     Both fields are optional and an omitted one is left unchanged — a read-modify-write, so a client sending one switch does not reset the other. At least one must be present. The write merges into `tenant_admin_settings.config`, so the tenant's unrelated settings are preserved and the `log_tenant_admin_settings_change` trigger records the change against the acting user.
+         *
+         *     Returns the same body as GET, so a client can replace its state from the response rather than re-fetching.
+         */
+        put: operations["updateTenantAISettings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/register": {
         parameters: {
             query?: never;
@@ -925,7 +961,7 @@ export interface paths {
         put?: never;
         /**
          * Accept a member invitation with a password (public)
-         * @description Public password-path acceptance: creates the member with the invited role and signs them in (sets httpOnly cookies). SSO acceptance instead rides the token through /auth/sso/{provider}/authorize?invitation_token=..
+         * @description Public password-path acceptance: creates the member with the invited role and signs them in (sets httpOnly cookies). SSO acceptance instead rides the token through /auth/sso/{provider}/authorize?invitation_token=.
          */
         post: operations["acceptInvitation"];
         delete?: never;
@@ -1813,6 +1849,55 @@ export interface components {
             features: components["schemas"]["FeatureFlags"];
             limits: components["schemas"]["UsageLimits"];
         };
+        /** @description The deployment's AI status plus the calling tenant's own controls. Response body of both `GET` and `PUT /tenant/ai`. */
+        TenantAIStatus: {
+            /** @description A model endpoint is configured AND this build can construct it. False in Core even when `AI_PROVIDER` names one — a Core build has no provider implementations, which is the honest answer and a different one from "nobody configured anything". */
+            provider_configured: boolean;
+            /**
+             * @description The provider KIND. Absent when nothing is configured. Never the base URL and never the name of the environment variable holding the credential.
+             * @enum {string}
+             */
+            provider_name?: "anthropic" | "openai_compat";
+            /** @description The configured model id. Absent when the operator left it to the provider's default. */
+            model_id?: string;
+            /** @description Whether this build links the Enterprise generative providers at all. It is what lets the page say "not part of this edition" rather than "nobody configured this" — different problems, different fixes, and only one of them is the reader's. */
+            edition_linked: boolean;
+            /** @description One row per AI seam (ADR-0008 D1), sorted by key. */
+            seams: components["schemas"]["TenantAISeam"][];
+            tenant: components["schemas"]["TenantAIControls"];
+        };
+        TenantAISeam: {
+            /** @enum {string} */
+            key: "matcher" | "classifier" | "drift_detector" | "enricher" | "narrator" | "query" | "author" | "remediator";
+            /** @description Something can actually answer through this seam here. For a classical seam that means a deterministic implementation ships; for a generative one it additionally means the build links the Enterprise providers and `AI_PROVIDER` names a reachable one. A seam nothing implements yet is always false. */
+            live: boolean;
+            /** @description An implementation a user can reach exists in the product at all, in ANY edition — independent of this build's edition and of whether a provider is configured. It is beside `live` because the two reasons `live` can be false are "your edition does not have it" and "nobody has written it yet", and those need different answers from the reader. Without it a Core build labelled an unbuilt seam "Enterprise", which is a capability claim nothing backs. */
+            built: boolean;
+            /** @enum {string} */
+            edition_required: "core" | "enterprise";
+            /**
+             * @description Only `generative` seams send anything to a provider. ADR-0008 D2.
+             * @enum {string}
+             */
+            family: "classical" | "generative";
+            /** @description Where a user meets this seam. Absent when nothing consumes it yet. */
+            surface?: string;
+            /** @description What answers when no model does. Never empty — it is the product's central claim, stated per seam. */
+            rule_default: string;
+        };
+        TenantAIControls: {
+            /** @description ADR-0008 D4.7's opt-in. When on, the audit trail stores the text a user typed alongside the call; when off (the default) it stores the prompt HASH and the platform's own derived artefacts only. */
+            record_questions: boolean;
+            /** @description The tenant kill switch. While on, every generative seam call made for this tenant is refused — at the call site, and again at the provider boundary. */
+            assistant_disabled: boolean;
+            /** @description READ-ONLY, and NOT a tenant decision: the interim, deployment-wide disable of custom-policy authoring. Reported here so the page can give one honest list of what is switched off; `PUT` ignores it. */
+            authoring_disabled: boolean;
+        };
+        /** @description The writable half. Both fields optional; an omitted one is left unchanged. At least one must be present. */
+        TenantAIControlsUpdate: {
+            assistant_disabled?: boolean;
+            record_questions?: boolean;
+        };
         /** @description Closed-shape feature-flag map. Every flag in the platform's `knownFeatures` list is present; values are booleans. Adding a new flag is a coordinated server + client + spec change. */
         FeatureFlags: {
             /** @description Tenant may author custom (non-platform) compliance frameworks. */
@@ -1831,6 +1916,8 @@ export interface components {
             custom_branding: boolean;
             /** @description Tenant may sync inventory to an external CMDB/ITSM (ServiceNow, Device42, SolarWinds). */
             cmdb_sync: boolean;
+            /** @description Tenant may connect a NetBox network source of truth and pull its sites, prefixes, VLANs, device types and devices, and see the drift between NetBox and discovered inventory. Pull only: the platform never writes to NetBox. */
+            connector_netbox: boolean;
             /** @description Tenant may forward audit events to an external SIEM (Splunk, Datadog, Elastic, webhook). */
             siem_export: boolean;
             /** @description Tenant-facing self-service billing — subscription, invoices, plan change and the payment portal (admin-service `/my-billing/**`). Core mounts none of it; usage-against-limits stays unconditional. */
@@ -2806,6 +2893,58 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    getTenantAISettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The deployment's AI status and this tenant's controls. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantAIStatus"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    updateTenantAISettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TenantAIControlsUpdate"];
+            };
+        };
+        responses: {
+            /** @description The saved controls, with the deployment status alongside. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantAIStatus"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
             500: components["responses"]["LegacyServerError"];
         };
     };

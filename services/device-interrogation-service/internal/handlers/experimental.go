@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/riskbands"
 )
 
 // ExperimentalHandlers handles experimental encryption detection feature endpoints
@@ -59,9 +60,11 @@ type kmsKeyRow struct {
 }
 
 type dbEncryptionStateRow struct {
-	ID                       uuid.UUID  `json:"id"`
-	TenantID                 uuid.UUID  `json:"tenant_id"`
-	DeviceID                 *uuid.UUID `json:"device_id,omitempty"`
+	ID       uuid.UUID `json:"id"`
+	TenantID uuid.UUID `json:"tenant_id"`
+	// AssetID is the one link to the host. The row used to carry BOTH
+	// device_id (-> the retired `devices`) and asset_id (-> the retired
+	// `network_assets`) for what was the same machine; phase 1 merged them.
 	AssetID                  *uuid.UUID `json:"asset_id,omitempty"`
 	DBEngine                 string     `json:"db_engine"`
 	DBVersion                *string    `json:"db_version,omitempty"`
@@ -218,7 +221,10 @@ func (h *ExperimentalHandlers) ListDatabaseEncryptionStates(c *gin.Context) {
 	page, pageSize, offset := parsePagination(c)
 
 	query := `
-		SELECT id, tenant_id, device_id, asset_id,
+		-- One asset link, not two: devices merged into assets in phase 1, so the
+		-- device_id this used to also select and the asset_id beside it were two
+		-- names for the same host. device_id is gone from the table.
+		SELECT id, tenant_id, asset_id,
 		       db_engine, db_version, hostname, port, instance_name,
 		       ssl_enabled, ssl_version, ssl_cipher, ssl_enforced, certificate_id,
 		       encryption_at_rest_enabled, encryption_method, encryption_algorithm, encryption_key_source,
@@ -269,7 +275,7 @@ func (h *ExperimentalHandlers) ListDatabaseEncryptionStates(c *gin.Context) {
 		for rows.Next() {
 			var s dbEncryptionStateRow
 			if scanErr := rows.Scan(
-				&s.ID, &s.TenantID, &s.DeviceID, &s.AssetID,
+				&s.ID, &s.TenantID, &s.AssetID,
 				&s.DBEngine, &s.DBVersion, &s.Hostname, &s.Port, &s.InstanceName,
 				&s.SSLEnabled, &s.SSLVersion, &s.SSLCipher, &s.SSLEnforced, &s.CertificateID,
 				&s.EncryptionAtRestEnabled, &s.EncryptionMethod, &s.EncryptionAlgorithm, &s.EncryptionKeySource,
@@ -394,18 +400,27 @@ func (h *ExperimentalHandlers) GetExperimentalStats(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	// Use a single query with sub-selects for efficiency
-	statsQuery := `
+	// `high` is the ONE ladder, from shared/riskbands — not `risk_score >= 70`
+	// written out three times here.
+	//
+	// That literal is exactly the drift the band table exists to end: the
+	// platform banded High at >= 60 for a while and at >= 70 elsewhere, so one
+	// asset rendered "High" and was counted "Medium". These three counters sat
+	// in a different MODULE from the table, which was an `internal` package
+	// they could not import — so they re-invented it, which is what any rule
+	// only one module can reach will always get.
+	high := riskbands.MustRiskAtLeastSQL("risk_score", "High")
+	statsQuery := fmt.Sprintf(`
 		SELECT
 		(SELECT COUNT(*) FROM kms_keys WHERE tenant_id = $1 AND deleted_at IS NULL),
-		(SELECT COUNT(*) FROM kms_keys WHERE tenant_id = $1 AND deleted_at IS NULL AND risk_score >= 70),
+		(SELECT COUNT(*) FROM kms_keys WHERE tenant_id = $1 AND deleted_at IS NULL AND %[1]s),
 		(SELECT COUNT(*) FROM kms_keys WHERE tenant_id = $1 AND deleted_at IS NULL AND rotation_enabled = false),
 		(SELECT COUNT(*) FROM database_encryption_states WHERE tenant_id = $1 AND deleted_at IS NULL),
 		(SELECT COUNT(*) FROM database_encryption_states WHERE tenant_id = $1 AND deleted_at IS NULL AND ssl_enabled = false),
-		(SELECT COUNT(*) FROM database_encryption_states WHERE tenant_id = $1 AND deleted_at IS NULL AND risk_score >= 70),
+		(SELECT COUNT(*) FROM database_encryption_states WHERE tenant_id = $1 AND deleted_at IS NULL AND %[1]s),
 		(SELECT COUNT(*) FROM ssh_keys WHERE tenant_id = $1 AND deleted_at IS NULL),
 		(SELECT COUNT(*) FROM ssh_keys WHERE tenant_id = $1 AND deleted_at IS NULL AND is_weak = true)
-	`
+	`, high)
 
 	var kmsCount, weakKMSKeys, unrotatedKMS int
 	var dbStatesCount, sslDisabledDBs, highRiskDBs int

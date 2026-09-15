@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -140,6 +141,21 @@ func newEngine(store scopeStore) *gin.Engine {
 	return r
 }
 
+// newEngineWithCounter is newEngine with the inventory-service hop stubbed, for
+// the preview paths that actually count.
+func newEngineWithCounter(store scopeStore, counter assetCounter) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	grp := r.Group("/api/v1/cbom-service")
+	grp.Use(func(c *gin.Context) {
+		c.Set("tenantID", uuid.New().String())
+		c.Set("userID", uuid.New().String())
+		c.Next()
+	})
+	NewHandler(store).WithAssetCounter(counter).RegisterRoutes(grp)
+	return r
+}
+
 func do(engine *gin.Engine, method, path string, body io.Reader) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, body)
 	if body != nil {
@@ -157,7 +173,7 @@ func sampleScope() Scope {
 		TenantID:    uuid.New(),
 		Name:        "Production",
 		Description: "prod assets",
-		Predicate:   Predicate{Include: &PredicateClause{Environment: []string{"production"}}},
+		Query:       "environment:production",
 		Version:     2,
 		IsDefault:   false,
 		IsSystem:    true,
@@ -219,7 +235,7 @@ func TestContract_GetScope_400_badID(t *testing.T) {
 func TestContract_CreateScope_201(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newEngine(&stubStore{})
-	body := strings.NewReader(`{"name":"My Scope","description":"x","predicate":{"include":{"environment":["prod"]}}}`)
+	body := strings.NewReader(`{"name":"My Scope","description":"x","query":"environment:production"}`)
 	w := do(eng, http.MethodPost, "/api/v1/cbom-service/scopes", body)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body=%s", w.Code, w.Body.String())
@@ -248,6 +264,22 @@ func TestContract_DeleteScope_204(t *testing.T) {
 	}
 }
 
+// stubCounter stands in for inventory-service on the preview's S2S hop.
+type stubCounter struct {
+	count int64
+	err   error
+	// gotQuery records what was actually asked, so the test can check the
+	// preview counts the SCOPE's query rather than something it rebuilt.
+	gotQuery string
+}
+
+func (s *stubCounter) CountAssets(_ context.Context, _, _, assetQuery string) (int64, error) {
+	s.gotQuery = assetQuery
+	return s.count, s.err
+}
+
+// TestContract_PreviewScope_200 covers the preview with no inventory client
+// wired: it answers `unavailable` with a null count rather than inventing one.
 func TestContract_PreviewScope_200(t *testing.T) {
 	sv := loadSpec(t)
 	s := sampleScope()
@@ -257,6 +289,99 @@ func TestContract_PreviewScope_200(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "PreviewResult", w.Body.Bytes())
+	if !strings.Contains(w.Body.String(), `"status":"unavailable"`) {
+		t.Errorf("with no inventory client the preview must say so, got %s", w.Body.String())
+	}
+}
+
+// TestContract_PreviewScope_CountsThroughInventory is the preview doing its job.
+//
+// The count has to come from inventory-service compiling the SAME query a CBOM
+// generation will send it — that is the whole reason it is a round trip and not
+// a local calculation. A preview that counted here, against cbom-service's own
+// idea of what a scope means, is exactly the second opinion this workstream
+// deleted, and it would promise a boundary the generation then disagreed with.
+func TestContract_PreviewScope_CountsThroughInventory(t *testing.T) {
+	sv := loadSpec(t)
+	s := sampleScope()
+	counter := &stubCounter{count: 42}
+	eng := newEngineWithCounter(&stubStore{getResult: &s}, counter)
+
+	w := do(eng, http.MethodPost, "/api/v1/cbom-service/scopes/"+aUUID+"/preview", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "PreviewResult", w.Body.Bytes())
+	if !strings.Contains(w.Body.String(), `"matched_count":42`) {
+		t.Errorf("the preview must report the count inventory-service gave, got %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"status":"ok"`) {
+		t.Errorf("a successful count is status ok, got %s", w.Body.String())
+	}
+	if counter.gotQuery != s.Query {
+		t.Errorf("the preview asked inventory for %q, want the scope's own query %q",
+			counter.gotQuery, s.Query)
+	}
+}
+
+// TestContract_PreviewScope_UnreachableIsNotZero is the polarity that matters.
+//
+// "Your scope matches nothing" is the worst possible wrong answer for an
+// attestation boundary, and a fail-soft zero is exactly how a service that
+// cannot be reached comes to give it.
+func TestContract_PreviewScope_UnreachableIsNotZero(t *testing.T) {
+	sv := loadSpec(t)
+	s := sampleScope()
+	eng := newEngineWithCounter(&stubStore{getResult: &s},
+		&stubCounter{err: errors.New("connection refused")})
+
+	w := do(eng, http.MethodPost, "/api/v1/cbom-service/scopes/"+aUUID+"/preview", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "PreviewResult", w.Body.Bytes())
+	if strings.Contains(w.Body.String(), `"matched_count":0`) {
+		t.Fatalf("an unreachable inventory must NOT read as zero matches: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"status":"unavailable"`) {
+		t.Errorf("status must say the count is unavailable, got %s", w.Body.String())
+	}
+}
+
+// TestContract_PreviewScope_422OnAStoredQueryThatStoppedValidating: a preview
+// answers the same way generation does, with the §10 diagnostics, so the person
+// who has to go and fix the scope knows WHICH term broke.
+func TestContract_PreviewScope_422OnAStoredQueryThatStoppedValidating(t *testing.T) {
+	s := sampleScope()
+	s.Query = "hostnaem:web-1"
+	eng := newEngineWithCounter(&stubStore{getResult: &s}, &stubCounter{count: 1})
+
+	w := do(eng, http.MethodPost, "/api/v1/cbom-service/scopes/"+aUUID+"/preview", nil)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", w.Code, w.Body.String())
+	}
+	for _, want := range []string{`"code":"unknown_field"`, `"span"`, `"suggestion"`} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Errorf("the 422 must carry the structured diagnostics (missing %s): %s", want, w.Body.String())
+		}
+	}
+}
+
+// TestContract_CreateScope_400CarriesDiagnostics: the same on the write path.
+// A scope editor needs a span to underline, and flattening the list into one
+// sentence is what "invalid query" looks like from the outside.
+func TestContract_CreateScope_400CarriesDiagnostics(t *testing.T) {
+	eng := newEngine(&stubStore{})
+	w := do(eng, http.MethodPost, "/api/v1/cbom-service/scopes",
+		bytes.NewReader([]byte(`{"name":"Broken","query":"hostnaem:web-1"}`)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	for _, want := range []string{`"code":"unknown_field"`, `"span"`, `"query":"hostnaem:web-1"`} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Errorf("the 400 must carry the structured diagnostics (missing %s): %s", want, w.Body.String())
+		}
+	}
 }
 
 // TestContract_DriftIsCaught proves the guardrail actually validates: a body

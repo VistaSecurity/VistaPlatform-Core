@@ -1,0 +1,35 @@
+-------------------------
+Device ID: core-sw-1.example.net
+Entry address(es):
+  IP address: 198.51.100.1
+Platform: cisco WS-C3750X-48P,  Capabilities: Switch IGMP
+Interface: GigabitEthernet1/0/1,  Port ID (outgoing port): GigabitEthernet1/0/24
+Holdtime : 145 sec
+
+Version :
+Cisco IOS Software, C3750E Software (C3750E-UNIVERSALK9-M), Version 15.2(4)E10
+enable secret 5 $1$MUST-NOT-BE-COLLECTED
+snmp-server community MUST-NOT-BE-COLLECTED RO
+
+advertisement version: 2
+VTP Management Domain: ''
+Native VLAN: 1
+Duplex: full
+Management address(es):
+  IP address: 198.51.100.1
+
+-------------------------
+Device ID: rtr-edge-1.example.net
+Entry address(es):
+  IP address: 198.51.100.9
+Platform: cisco ISR4331/K9,  Capabilities: Router Source-Route-Bridge
+Interface: GigabitEthernet1/0/2,  Port ID (outgoing port): GigabitEthernet0/0/1
+Holdtime : 133 sec
+
+Version :
+Cisco IOS XE Software, Version 17.09.04a
+
+advertisement version: 2
+Duplex: full
+
+Total cdp entries displayed : 2

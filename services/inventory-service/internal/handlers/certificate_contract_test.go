@@ -49,6 +49,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
+
+	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 )
 
 // --- in-memory stub store --------------------------------------------------
@@ -238,7 +240,7 @@ func TestContract_ExpiringCertificates_200(t *testing.T) {
 	cert.RelatedAssets = []models.Asset{{
 		ID:                uuid.New(),
 		TenantID:          cert.TenantID,
-		AssetType:         "server",
+		ClassKey:          assetclass.KeyServer,
 		Tags:              map[string]interface{}{},
 		Metadata:          map[string]interface{}{},
 		AssetOwnership:    "owned",

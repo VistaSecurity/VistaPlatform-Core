@@ -34,8 +34,8 @@ func newAtRestFixture(t *testing.T) (*AssetService, uuid.UUID, uuid.UUID) {
 
 	asset := uuid.New()
 	if _, err := db.Exec(`
-		INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,'socialupkeep-marketing','service','monitoring',NOW(),NOW(),NOW(),NOW())`, asset, tenant); err != nil {
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+		VALUES ($1,$2,'socialupkeep-marketing','application','application','monitoring',NOW(),NOW(),NOW(),NOW())`, asset, tenant); err != nil {
 		t.Fatalf("insert asset: %v", err)
 	}
 	return &AssetService{db: db, algorithmService: NewAlgorithmService(db)}, tenant, asset

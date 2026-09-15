@@ -74,6 +74,13 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 	// Initialize shared RBAC service for platform permission checks
 	sharedRBACService := sharedrbac.NewRBACService(db)
 
+	// The deployment half of Settings → AI assistant: what AI_PROVIDER names
+	// and whether this build links the Enterprise providers. Resolved once —
+	// neither can change without a pod restart, and ai.NewFromEnv logs a
+	// warning for a misconfigured provider that a per-request call would turn
+	// into a log flood.
+	aiDeploymentStatus := resolveAIDeployment()
+
 	// Initialize tenant storage service for S3 branding uploads
 	if err := InitializeTenantStorageService(db, bypassDB); err != nil {
 		logrus.WithError(err).Warn("Failed to initialize tenant storage service, falling back to local storage")
@@ -323,6 +330,31 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 			tenant.PUT("", middleware.RequirePermission(rbacService, "settings.update"), updateCurrentTenantHandler(db))
 			tenant.GET("/usage", getTenantUsageHandler(db))
 			tenant.GET("/features", getTenantFeaturesHandler(db))
+			// Settings → AI assistant. The two halves are gated DIFFERENTLY and
+			// deliberately, like /tenant and /tenant/features above.
+			//
+			// GET is authentication only. It carries no credential and no
+			// endpoint address (see ai_settings.go) — it is the answer to "why
+			// is there no written summary on this page", which is a question any
+			// member of the tenant can end up asking, in front of any surface a
+			// generative capability would otherwise have appeared on. Gating the
+			// explanation on the permission to CHANGE the thing leaves everyone
+			// else with a blank and no way to find out why.
+			//
+			// PUT is settings.update — the tenant-administrator permission the
+			// rest of this group's writes use. The two switches are the tenant's
+			// configuration and change what every capability does for everyone
+			// in the organization.
+			//
+			// The rail entry is on settings.update, so the PAGE is still the
+			// administrator's; the read being open is what lets any other
+			// surface explain itself. Pinned in both polarities by
+			// ai_settings_route_gate_test.go — a wiring test, because the
+			// handler-level contract test deliberately mounts no middleware.
+			//
+			// The deployment half is resolved once — see resolveAIDeployment.
+			tenant.GET("/ai", getTenantAIHandler(db, aiDeploymentStatus))
+			tenant.PUT("/ai", middleware.RequirePermission(rbacService, "settings.update"), updateTenantAIHandler(db, aiDeploymentStatus))
 			tenant.GET("/trial-status", getTenantTrialStatusHandler(db))
 			// Billing overview is gated by billing.read (tenant_admin +
 			// billing_admin per the seeded role design).

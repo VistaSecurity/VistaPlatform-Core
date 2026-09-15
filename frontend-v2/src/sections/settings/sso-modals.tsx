@@ -59,7 +59,7 @@ const TEMPLATE_URLS = new Set(
 );
 
 function legacyMessage(error: unknown, fallback: string): string {
-  if (error && typeof error === 'object' && 'error' in error) return String((error as { error: unknown }).error);
+  if (error && typeof error === 'object' && 'error' in error) return String(error.error);
   return fallback;
 }
 
@@ -234,8 +234,8 @@ export function SsoProviderModal({ provider, open, onClose }: { provider: SSOPro
       }
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['settings', 'sso-providers'] });
-      queryClient.invalidateQueries({ queryKey: ['settings', 'auth-policy'] });
+      void queryClient.invalidateQueries({ queryKey: ['settings', 'sso-providers'] });
+      void queryClient.invalidateQueries({ queryKey: ['settings', 'auth-policy'] });
       onClose();
     },
   });
@@ -379,8 +379,8 @@ export function SsoProviderDeleteModal({ provider, open, onClose }: { provider: 
       if (error || !response.ok) throw new Error(legacyMessage(error, 'Failed to delete the provider'));
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['settings', 'sso-providers'] });
-      queryClient.invalidateQueries({ queryKey: ['settings', 'auth-policy'] });
+      void queryClient.invalidateQueries({ queryKey: ['settings', 'sso-providers'] });
+      void queryClient.invalidateQueries({ queryKey: ['settings', 'auth-policy'] });
       onClose();
     },
   });

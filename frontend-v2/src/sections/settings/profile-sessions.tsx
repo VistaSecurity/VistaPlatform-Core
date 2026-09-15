@@ -117,7 +117,7 @@ export function ProfileSessionsPage({ meta }: { meta: SettingsNavItem }) {
         description={`Signs out ${others.length} other ${others.length === 1 ? 'device' : 'devices'}. This device stays signed in.`}
         primary={<button className="ui-btn" style={{ background: 'var(--danger)', color: '#fff', borderColor: 'var(--danger)' }} disabled={revoke.isPending} onClick={() => revoke.mutate(others.map((s) => s.id))}>{revoke.isPending ? 'Revoking…' : 'Revoke others'}</button>}
         secondary={<button className="ui-btn" onClick={() => setConfirmOthers(false)} disabled={revoke.isPending}>Cancel</button>}
-        footerNote={revoke.isError ? <span style={{ color: 'var(--danger-text)' }}>{(revoke.error as Error).message}</span> : undefined}
+        footerNote={revoke.isError ? <span style={{ color: 'var(--danger-text)' }}>{revoke.error.message}</span> : undefined}
       />
       <Modal
         open={!!confirmOne} onClose={revoke.isPending ? undefined : () => setConfirmOne(null)} dismissible={!revoke.isPending}
@@ -125,7 +125,7 @@ export function ProfileSessionsPage({ meta }: { meta: SettingsNavItem }) {
         description={confirmOne ? `Signs out ${deviceLabel(confirmOne.user_agent)}${confirmOne.created_from_ip ? ` (${confirmOne.created_from_ip})` : ''}.` : ''}
         primary={<button className="ui-btn" style={{ background: 'var(--danger)', color: '#fff', borderColor: 'var(--danger)' }} disabled={revoke.isPending} onClick={() => confirmOne && revoke.mutate([confirmOne.id])}>{revoke.isPending ? 'Revoking…' : 'Revoke'}</button>}
         secondary={<button className="ui-btn" onClick={() => setConfirmOne(null)} disabled={revoke.isPending}>Cancel</button>}
-        footerNote={revoke.isError ? <span style={{ color: 'var(--danger-text)' }}>{(revoke.error as Error).message}</span> : undefined}
+        footerNote={revoke.isError ? <span style={{ color: 'var(--danger-text)' }}>{revoke.error.message}</span> : undefined}
       />
     </SPage>
   );
@@ -231,7 +231,7 @@ export function ProfileConnectedPage({ meta }: { meta: SettingsNavItem }) {
         description={confirmUnlink ? `${connLabel(confirmUnlink)} will no longer be able to sign in to your account.` : ''}
         primary={<button className="ui-btn" style={{ background: 'var(--danger)', color: '#fff', borderColor: 'var(--danger)' }} disabled={unlink.isPending} onClick={() => confirmUnlink && unlink.mutate(confirmUnlink)}>{unlink.isPending ? 'Unlinking…' : 'Unlink'}</button>}
         secondary={<button className="ui-btn" onClick={() => setConfirmUnlink(null)} disabled={unlink.isPending}>Cancel</button>}
-        footerNote={unlink.isError ? <span style={{ color: 'var(--danger-text)' }}>{(unlink.error as Error).message}</span> : undefined}
+        footerNote={unlink.isError ? <span style={{ color: 'var(--danger-text)' }}>{unlink.error.message}</span> : undefined}
       />
     </SPage>
   );

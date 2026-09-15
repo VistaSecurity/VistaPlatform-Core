@@ -268,8 +268,19 @@ type LifecycleEnvelope struct {
 }
 
 // AssetDiscoveredPayload is the payload for asset.discovered events.
+//
+// AssetID is the HOST, never an endpoint: a subscriber that re-reads the asset
+// gets the thing, with its endpoints underneath. ClassKey travels with it so a
+// consumer can route on what was discovered without a round trip — and so that
+// "a server appeared" and "a cloud storage bucket appeared" are distinguishable
+// events rather than the same one.
+//
+// IPAddress and Port describe the endpoint the discovery observed, when there
+// was one. Both nil is a real answer, not a missing field: an at-rest cloud
+// resource has no endpoint at all.
 type AssetDiscoveredPayload struct {
 	AssetID   uuid.UUID `json:"asset_id"`
+	ClassKey  string    `json:"class_key,omitempty"`
 	Hostname  *string   `json:"hostname,omitempty"`
 	IPAddress *string   `json:"ip_address,omitempty"`
 	Port      *int      `json:"port,omitempty"`
@@ -279,11 +290,28 @@ type AssetDiscoveredPayload struct {
 // AssetEnrichedPayload is the payload for asset.enriched events.
 type AssetEnrichedPayload struct {
 	AssetID          uuid.UUID  `json:"asset_id"`
+	ClassKey         string     `json:"class_key,omitempty"`
 	LocationID       *uuid.UUID `json:"location_id,omitempty"`
 	SegmentID        *uuid.UUID `json:"segment_id,omitempty"`
 	Environment      *string    `json:"environment,omitempty"`
 	ServiceName      *string    `json:"service_name,omitempty"`
 	EnrichmentSource string     `json:"enrichment_source,omitempty"`
+}
+
+// AssetMergedPayload is the payload for asset.merged events.
+//
+// A merge makes one asset id stop being the answer for a thing. Anything
+// holding an id — a downstream cache, a ticket, a dashboard tile — needs to
+// hear about it, which is why this is an event and not just a history row.
+// SurvivorAssetID is what to point at now; MergedAssetID is the id that was
+// archived (not deleted, so a stale reference resolves to a tombstone rather
+// than a 404).
+type AssetMergedPayload struct {
+	SurvivorAssetID uuid.UUID `json:"survivor_asset_id"`
+	MergedAssetID   uuid.UUID `json:"merged_asset_id"`
+	ClassKey        string    `json:"class_key,omitempty"`
+	ProposalID      uuid.UUID `json:"proposal_id"`
+	DecidedBy       string    `json:"decided_by,omitempty"`
 }
 
 // AssetRiskChangedPayload is the payload for asset.risk_changed events.
@@ -350,6 +378,7 @@ const (
 	SubjectLifecycleAssetDiscovered     = "inventory.lifecycle.asset.discovered"
 	SubjectLifecycleAssetEnriched       = "inventory.lifecycle.asset.enriched"
 	SubjectLifecycleAssetRiskChanged    = "inventory.lifecycle.asset.risk_changed"
+	SubjectLifecycleAssetMerged         = "inventory.lifecycle.asset.merged"
 	SubjectLifecycleCryptoConfigAdded   = "inventory.lifecycle.crypto.configuration_added"
 	SubjectLifecycleCertificateExpiring = "inventory.lifecycle.certificate.expiring"
 )

@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -24,13 +26,10 @@ func ConnectAsAppRole(t *testing.T, owner *sql.DB) *sql.DB {
 	t.Helper()
 	EnsureRLSAppRole(t, owner)
 	// ALTER ROLE updates the role's pg_authid tuple; concurrent with another
-	// binary's grant/apply it fails "tuple concurrently updated" — serialize
-	// under the same advisory lock as the other schema-mutating helpers.
-	withSchemaLock(t, owner, func(ctx context.Context, conn *sql.Conn) {
-		if _, err := conn.ExecContext(ctx, `ALTER ROLE `+RLSAppRole+` LOGIN PASSWORD '`+appRolePassword+`'`); err != nil {
-			t.Fatalf("testdb: grant LOGIN to %s: %v", RLSAppRole, err)
-		}
-	})
+	// binary's grant/apply it fails "tuple concurrently updated" — so it takes
+	// the same advisory lock AND the same retry as the grants above it.
+	execUnderSchemaLock(t, owner, "grant LOGIN to "+RLSAppRole,
+		[]string{`ALTER ROLE ` + RLSAppRole + ` LOGIN PASSWORD '` + appRolePassword + `'`})
 	return openAsRole(t, RLSAppRole, appRolePassword)
 }
 
@@ -75,13 +74,7 @@ func ConnectAsBypassRole(t *testing.T, owner *sql.DB) *sql.DB {
 		`GRANT EXECUTE ON FUNCTION public.set_tenant_context(uuid) TO ` + BypassRole,
 		`ALTER ROLE ` + BypassRole + ` LOGIN PASSWORD '` + bypassRolePassword + `'`,
 	}
-	withSchemaLock(t, owner, func(ctx context.Context, conn *sql.Conn) {
-		for _, s := range stmts {
-			if _, err := conn.ExecContext(ctx, s); err != nil {
-				t.Fatalf("testdb: ensure %s: %v\nstmt: %s", BypassRole, err, s)
-			}
-		}
-	})
+	execUnderSchemaLock(t, owner, "ensure "+BypassRole, stmts)
 	return openAsRole(t, BypassRole, bypassRolePassword)
 }
 
@@ -143,13 +136,70 @@ func EnsureRLSAppRole(t *testing.T, db *sql.DB) {
 		`DO $$ BEGIN IF to_regclass('public.tenant_cost_summary') IS NOT NULL THEN
 		   REVOKE ALL ON public.tenant_cost_summary FROM ` + RLSAppRole + `; END IF; END $$;`,
 	}
-	// Serialized under the schema advisory lock: concurrent GRANTs on the same
-	// objects from parallel test binaries fail "tuple concurrently updated".
+	execUnderSchemaLock(t, db, "EnsureRLSAppRole", stmts)
+}
+
+// execUnderSchemaLock runs catalog-mutating statements under the schema
+// advisory lock, retrying — per statement — the cross-binary races
+// [RetryTransient] retries.
+//
+// The lock is necessary and NOT sufficient, which is why the retry is here too.
+// It serializes these statements against schema APPLIERS and against each
+// other, and that is not everything they race with: `GRANT … ON ALL TABLES IN
+// SCHEMA public` rewrites a pg_class row per table and `ALTER ROLE` rewrites a
+// pg_authid tuple, so ANY concurrent catalog update from another binary — a
+// test creating a trigger or an index, a throwaway database being dropped — can
+// lose the tuple under it, and the error names this GRANT rather than the thing
+// that moved. Retried on exactly the class applySQLFiles retries: a real
+// privilege problem is deterministic and still fails after the attempts, while
+// a cross-binary catalog race fails a test that has nothing to do with roles.
+// (Observed repeatedly across the eol, vulnerability and riskrollup legs of
+// `make test-integration-db`.)
+//
+// Per STATEMENT, inside one lock acquisition, rather than re-running the whole
+// block: only the statement that lost its tuple needs another snapshot, and
+// releasing the advisory lock between attempts would let an applier in and make
+// the next attempt race the same way again.
+//
+// ONE helper rather than a loop per caller. The retry first landed inside
+// EnsureRLSAppRole alone, which left the ALTER ROLE one line later in
+// ConnectAsAppRole — and the whole of ConnectAsBypassRole, the same CREATE ROLE
+// + GRANT + ALTER ROLE sequence — exposed to the identical race. Fixing one
+// statement of a sequence only moves the flake along it.
+//
+// ONCE per database, not once per call. Each of these blocks is an idempotent
+// re-assertion of cluster-global catalog state, and `GRANT … ON ALL TABLES IN
+// SCHEMA public` rewrites a pg_class row for EVERY table — so running it at each
+// of the hundreds of ConnectAsAppRole / ConnectAsBypassRole calls in a parallel
+// run was both the slow path and a standing deadlock source against ordinary DML
+// in other binaries. The marker (see applied_marker.go) records the statement
+// block's hash per database; a ForceApply* of schema.sql clears it, because that
+// file rewrites the same ACLs. As with the file appliers, a marker that cannot be
+// read or written means the statements simply run, which is the old behaviour.
+func execUnderSchemaLock(t *testing.T, db *sql.DB, what string, stmts []string) {
+	t.Helper()
+	block := sqlFile{name: grantMarkerPrefix + what, body: strings.Join(stmts, ";\n")}
 	withSchemaLock(t, db, func(ctx context.Context, conn *sql.Conn) {
+		marked := ensureAppliedMarker(ctx, conn)
+		if marked && alreadyApplied(ctx, conn, block) {
+			return
+		}
 		for _, s := range stmts {
-			if _, err := conn.ExecContext(ctx, s); err != nil {
-				t.Fatalf("testdb: EnsureRLSAppRole: %v\nstmt: %s", err, s)
+			const attempts = 4
+			for i := 1; ; i++ {
+				_, err := conn.ExecContext(ctx, s)
+				if err == nil {
+					break
+				}
+				if !IsTransientRace(err) || i == attempts {
+					t.Fatalf("testdb: %s (attempt %d/%d): %v\nstmt: %s", what, i, attempts, err, s)
+				}
+				t.Logf("testdb: %s hit a cross-binary catalog race (attempt %d/%d), retrying: %v", what, i, attempts, err)
+				time.Sleep(time.Duration(i) * 150 * time.Millisecond)
 			}
+		}
+		if marked {
+			recordApplied(ctx, conn, block)
 		}
 	})
 }

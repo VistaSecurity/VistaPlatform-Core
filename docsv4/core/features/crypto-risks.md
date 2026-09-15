@@ -342,7 +342,21 @@ algorithm was *used* rather than on the algorithm itself:
 A score of **0 means "not assessed"** — we did not recognise the cryptography in
 use — which is deliberately different from "assessed and found safe". Those
 configurations show as *Informational* and are worth investigating rather than
-assuming clean.
+assuming clean. A configuration we *did* recognise and found nothing wrong with
+also sits at 0; the **Why this score** panel is what tells the two apart, by
+listing the components it resolved (or saying plainly that it resolved none).
+
+**Scores go down as well as up.** When you fix a service — disable TLS 1.0,
+retire a weak cipher — the next discovery that sees it re-scores the
+configuration from what it now negotiates, and the number falls, including all
+the way to 0. The same is true when an assessment in the algorithm catalogue is
+corrected downwards: the next observation of every configuration using that
+algorithm picks the correction up.
+
+One case leaves the number alone on purpose: a discovery that recognised
+*nothing* about a configuration does not overwrite an earlier verdict with a 0.
+It has no opinion to record, and silently replacing a real score with "not
+assessed" would hide a risk you had already been shown.
 
 ### Seeing why a configuration scored what it did
 
@@ -435,7 +449,7 @@ Risk data is aggregated from:
 - **algorithms** table: the authoritative strength, deprecation status and risk score for each algorithm — this is what drives the score
 - **crypto_implementations** table: Protocol, cipher, key details
 - **crypto_implementation_algorithms**: which catalogue algorithms each configuration actually uses
-- **network_assets** table: Asset context
+- **assets** table: asset context — class, environment, owner, site
 
 ### Event-Driven Updates
 

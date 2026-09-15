@@ -118,31 +118,38 @@ kubectl -n vista logs deployment/notification-service
 
 ### Infrastructure Services
 
-All services depend on:
-- **PostgreSQL**: Database (required by all backend services)
-- **Redis**: Caching and sessions (required by auth-service, cbom-service)
-- **NATS**: Message queue (required by inventory-service, compliance-engine, cbom-service, sensor-manager)
-- **InfluxDB**: Time-series data (required by inventory-service, cbom-service, sensor-manager, monitoring-service)
+> These lists are derived from `standards/service-registry.yaml`, which is the
+> single source of truth the Compose files and the Helm chart are generated
+> from. If a service is added or its datastores change, update the registry —
+> this page is a mirror and will otherwise drift, as it did before v0.12.5.
+
+- **PostgreSQL**: primary datastore — required by 15 service(s): admin-service, audit-service, auth-service, cbom-service, cluster-sensor-service, compliance-engine, device-interrogation-service, discovery-processor-service, inventory-service, monitoring-service, notification-service, pcap-processor, resource-tracker-service, sensor-manager, tenant-health-service
+- **Redis**: caching, sessions, and the JWT revocation denylist — required by 13 service(s): admin-service, audit-service, auth-service, cbom-service, cluster-sensor-service, compliance-engine, device-interrogation-service, inventory-service, monitoring-service, notification-service, resource-tracker-service, sensor-manager, tenant-health-service
+- **NATS**: message queue — required by 14 service(s): admin-service, audit-service, cbom-service, cluster-sensor-service, compliance-engine, device-interrogation-service, discovery-processor-service, inventory-service, monitoring-service, notification-service, pcap-processor, resource-tracker-service, sensor-manager, tenant-health-service
+- **InfluxDB**: time-series data — required by 2 service(s): monitoring-service, sensor-manager
 
 ### Backend Service Dependencies
 
+- **admin-service**: nats, postgres, redis
+- **audit-service**: nats, postgres, redis
 - **auth-service**: postgres, redis
-- **inventory-service**: postgres, influxdb, nats
-- **compliance-engine**: postgres, nats
-- **cbom-service**: postgres, redis, influxdb, nats
-- **sensor-manager**: postgres, influxdb, nats
-- **admin-service**: postgres, redis
-- **cluster-sensor-service**: postgres
+- **cbom-service**: nats, postgres, redis
+- **cluster-sensor-service**: nats, postgres, redis
   - Requires `CLUSTER_SENSOR_SERVICE_TOKEN` for auto-registration
   - Auto-registers platform discovery sensor for all tenants on startup
-- **monitoring-service**: postgres, redis, influxdb
-- **resource-tracker-service**: postgres
-- **tenant-health-service**: postgres
-- **device-interrogation-service**: postgres
+- **compliance-engine**: nats, postgres, redis
+- **device-interrogation-service**: nats, postgres, redis
   - Requires `DEVICE_INTERROGATION_SERVICE_TOKEN` for auto-registration
   - Auto-registers platform device interrogation agent for all tenants on startup
-- **audit-service**: postgres
-- **notification-service**: postgres
+- **discovery-processor-service**: nats, postgres
+- **inventory-service**: nats, postgres, redis
+- **mcp-service**: _none_
+- **monitoring-service**: influxdb, nats, postgres, redis
+- **notification-service**: nats, postgres, redis
+- **pcap-processor**: nats, postgres
+- **resource-tracker-service**: nats, postgres, redis
+- **sensor-manager**: influxdb, nats, postgres, redis
+- **tenant-health-service**: nats, postgres, redis
 
 ### Service-to-Service Dependencies
 

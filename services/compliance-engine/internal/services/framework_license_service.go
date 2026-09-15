@@ -37,6 +37,23 @@ func (s *FrameworkLicenseService) SetReconcileEnqueuer(e *ReconcileEnqueuer) {
 
 // ListLicensedFrameworks returns all licensed frameworks for a tenant with active subscriptions.
 // All tenants automatically have Best Practices licensed via database trigger on tenant creation.
+//
+// # Why description and organization are COALESCEd, here and in every read below
+//
+// Both columns are NULLABLE in platform_frameworks and both are read into plain
+// Go strings (models.PlatformFramework), and NULL does not scan into a string —
+// it fails the row with "converting NULL to string is unsupported". Because the
+// scan error aborts the whole read, ONE such row blanks the tenant's Frameworks
+// page rather than degrading one entry, so every read of them COALESCEs to "",
+// which is also how the API says "this framework names no organization".
+//
+// The alternative — sql.NullString on the model — would push the same decision
+// out to every caller and turn "" into null in the UI's JSON. The seeded
+// frameworks and the CreateFramework path all write a non-NULL value (a Go
+// string cannot be nil), so a NULL arrives from a hand-written INSERT or a row
+// older than the convention — which is exactly the case a read has to survive
+// rather than assume away.
+// TestIntegration_FrameworkLicense_NullOrganizationIsListed pins it.
 func (s *FrameworkLicenseService) ListLicensedFrameworks(tenantID uuid.UUID) ([]models.LicensedFrameworkResponse, error) {
 	query := `
 		SELECT
@@ -56,8 +73,8 @@ func (s *FrameworkLicenseService) ListLicensedFrameworks(tenantID uuid.UUID) ([]
 			pf.code as pf_code,
 			pf.name as pf_name,
 			pf.version as pf_version,
-			pf.description as pf_description,
-			pf.organization as pf_organization,
+			COALESCE(pf.description, '') as pf_description,
+			COALESCE(pf.organization, '') as pf_organization,
 			pf.status as pf_status,
 			pf.is_platform_default as pf_is_platform_default,
 			pf.published_at as pf_published_at,
@@ -193,8 +210,8 @@ func (s *FrameworkLicenseService) ListAllTenantSubscriptionsForAdmin(tenantID uu
 			pf.code as pf_code,
 			pf.name as pf_name,
 			pf.version as pf_version,
-			pf.description as pf_description,
-			pf.organization as pf_organization,
+			COALESCE(pf.description, '') as pf_description,
+			COALESCE(pf.organization, '') as pf_organization,
 			pf.status as pf_status,
 			pf.is_platform_default as pf_is_platform_default,
 			pf.published_at as pf_published_at,
@@ -314,7 +331,10 @@ func (s *FrameworkLicenseService) ListAllTenantSubscriptionsForAdmin(tenantID uu
 // Platform default framework is ALWAYS included regardless of license status.
 func (s *FrameworkLicenseService) GetAvailableFrameworks(tenantID uuid.UUID) ([]models.AvailableFrameworkResponse, error) {
 	publishedQuery := `
-		SELECT f.id, f.code, f.name, f.version, f.description, f.organization, f.status,
+		SELECT f.id, f.code, f.name, f.version,
+		       COALESCE(f.description, '') as description,
+		       COALESCE(f.organization, '') as organization,
+		       f.status,
 		       f.is_platform_default, f.published_at, f.published_by, f.created_by, f.created_at, f.updated_at,
 		       COALESCE(c.controls_count, 0) as controls_count
 		FROM platform_frameworks f
@@ -413,10 +433,11 @@ func (s *FrameworkLicenseService) GetAvailableFrameworks(tenantID uuid.UUID) ([]
 	var openFindings []openFindingsRow
 	err = tx.Select(&openFindings, `
 		SELECT pfc.framework_id AS framework_id, COUNT(DISTINCT cf.control_id) AS count
-		FROM compliance_findings cf
+		FROM findings cf
 		JOIN platform_framework_controls pfc ON pfc.id = cf.control_id
 		WHERE cf.tenant_id = $1
 		  AND cf.detection_state = 'ACTIVE'
+		  AND `+complianceProducerScope("cf")+`
 		  AND (cf.workflow_status <> 'SUPPRESSED' OR cf.workflow_status IS NULL)
 		GROUP BY pfc.framework_id
 	`, tenantID)
@@ -584,7 +605,8 @@ func (s *FrameworkLicenseService) GetDefaultFramework(tenantID uuid.UUID) (*mode
 			tfl.id,
 			tfl.platform_framework_id,
 			tfl.subscription_status,
-			pf.id, pf.code, pf.name, pf.version, pf.description, pf.organization, pf.status,
+			pf.id, pf.code, pf.name, pf.version,
+			COALESCE(pf.description, ''), COALESCE(pf.organization, ''), pf.status,
 			pf.is_platform_default, pf.published_at, pf.published_by, pf.created_by, pf.created_at, pf.updated_at
 		FROM tenant_framework_licenses tfl
 		JOIN platform_frameworks pf ON tfl.platform_framework_id = pf.id

@@ -60,7 +60,8 @@ func insertAssetAndImpl(t *testing.T, db *database.DB, tenant uuid.UUID) (assetI
 	t.Helper()
 	assetID = uuid.New()
 	if _, err := db.Exec(
-		`INSERT INTO network_assets (id, tenant_id, hostname, asset_type) VALUES ($1, $2, $3, 'server')`,
+		`INSERT INTO assets (id, tenant_id, hostname, class_key, class_path)
+			VALUES ($1, $2, $3, 'server', 'hardware.computer.server')`,
 		assetID, tenant, "host-"+assetID.String()[:8]); err != nil {
 		t.Fatalf("insert asset: %v", err)
 	}

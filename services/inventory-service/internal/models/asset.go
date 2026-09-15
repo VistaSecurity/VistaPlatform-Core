@@ -9,52 +9,102 @@ import (
 	"github.com/google/uuid"
 )
 
-// Asset represents a discovered asset in the inventory
+// Asset is one configuration item: a thing, not a listening port (ADR-0002 D1,
+// DATA_MODEL §2).
+//
+// What it no longer carries, and where those went:
+//
+//	port, service_*      → Endpoints. An asset may have zero (an at-rest bucket,
+//	                       a declared service) or many.
+//	asset_type           → ClassKey / ClassPath. The four-value enum is dropped.
+//	operating_system     → Attributes["operating_system"], a class attribute.
+//	fqdns, mac_addresses,
+//	serial_number,
+//	cloud_*              → Identifiers, which is also what the identification
+//	                       engine matches on.
+//	risk_level (stored)  → derived from RiskScore through models.RiskBands. The
+//	                       column never had a writer, so every consumer of it
+//	                       read "Informational" forever.
 type Asset struct {
-	ID                          uuid.UUID              `json:"id" db:"id"`
-	TenantID                    uuid.UUID              `json:"tenant_id" db:"tenant_id"`
-	Hostname                    *string                `json:"hostname" db:"hostname"`
-	IPAddress                   *string                `json:"ip_address" db:"ip_address"`
-	Port                        *int                   `json:"port" db:"port"`
-	AssetType                   string                 `json:"asset_type" db:"asset_type"`
-	OperatingSystem             *string                `json:"operating_system" db:"operating_system"`
-	Environment                 *string                `json:"environment" db:"environment"`
-	BusinessUnit                *string                `json:"business_unit" db:"business_unit"`
-	OwnerEmail                  *string                `json:"owner_email" db:"owner_email"`
-	Description                 *string                `json:"description" db:"description"`
-	FQDNs                       []string               `json:"fqdns,omitempty" db:"fqdns"`
-	MacAddresses                []string               `json:"mac_addresses,omitempty" db:"mac_addresses"`
-	SerialNumber                *string                `json:"serial_number,omitempty" db:"serial_number"`
-	CloudProvider               *string                `json:"cloud_provider,omitempty" db:"cloud_provider"`
-	CloudAccountID              *string                `json:"cloud_account_id,omitempty" db:"cloud_account_id"`
-	CloudInstanceID             *string                `json:"cloud_instance_id,omitempty" db:"cloud_instance_id"`
-	Site                        *string                `json:"site,omitempty" db:"site"`
-	Region                      *string                `json:"region,omitempty" db:"region"`
-	Zone                        *string                `json:"zone,omitempty" db:"zone"`
-	LocationID                  *uuid.UUID             `json:"location_id,omitempty" db:"location_id"`
-	NetworkSegmentID            *uuid.UUID             `json:"network_segment_id,omitempty" db:"network_segment_id"`
-	NetworkSegmentName          *string                `json:"network_segment_name,omitempty" db:"network_segment_name"`
-	ServiceName                 *string                `json:"service_name,omitempty" db:"service_name"`
-	ServiceVersion              *string                `json:"service_version,omitempty" db:"service_version"`
-	ServiceConfidence           *string                `json:"service_confidence,omitempty" db:"service_confidence"`
-	ServiceIdentificationMethod *string                `json:"service_identification_method,omitempty" db:"service_identification_method"`
-	DiscoveryMethod             *string                `json:"discovery_method,omitempty" db:"discovery_method"`
-	ConfidenceScore             *int                   `json:"confidence_score,omitempty" db:"confidence_score"`
-	Tags                        map[string]interface{} `json:"tags" db:"tags"`
-	Metadata                    map[string]interface{} `json:"metadata" db:"metadata"`
-	AssetOwnership              string                 `json:"asset_ownership" db:"asset_ownership"`
-	AssetStatus                 string                 `json:"asset_status" db:"asset_status"`
-	StaleStatus                 *string                `json:"stale_status,omitempty" db:"stale_status"`
-	FirstDiscoveredAt           time.Time              `json:"first_discovered_at" db:"first_discovered_at"`
-	LastSeenAt                  time.Time              `json:"last_seen_at" db:"last_seen_at"`
-	CreatedAt                   time.Time              `json:"created_at" db:"created_at"`
-	UpdatedAt                   time.Time              `json:"updated_at" db:"updated_at"`
-	DeletedAt                   *time.Time             `json:"deleted_at" db:"deleted_at"`
-	RiskScore                   int                    `json:"risk_score" db:"risk_score"`
-	RiskLevel                   string                 `json:"risk_level" db:"risk_level"`
-	CryptoImplementations       []CryptoImplementation `json:"crypto_implementations,omitempty"`
-	HighestRisk                 *int                   `json:"highest_risk,omitempty"`
-	CertificateCount            *int                   `json:"certificate_count,omitempty"`
+	ID       uuid.UUID `json:"id" db:"id"`
+	TenantID uuid.UUID `json:"tenant_id" db:"tenant_id"`
+
+	// Class and its provenance. ClassSourceKind says HOW the class was decided
+	// (measured/declared/imported/inferred); ClassSourceRef says WHO decided it.
+	// ClassConfidence is nil for a fallback class — nothing classified it, and
+	// that is not the same as classifying it with low confidence.
+	ClassKey        string   `json:"class_key" db:"class_key"`
+	ClassPath       string   `json:"class_path" db:"class_path"`
+	ClassSourceKind string   `json:"class_source_kind" db:"class_source_kind"`
+	ClassSourceRef  *string  `json:"class_source_ref,omitempty" db:"class_source_ref"`
+	ClassConfidence *float64 `json:"class_confidence,omitempty" db:"class_confidence"`
+
+	DisplayName *string `json:"display_name,omitempty" db:"display_name"`
+	Hostname    *string `json:"hostname" db:"hostname"`
+	// PrimaryAddress is a convenience for lists. The authoritative addresses are
+	// the endpoints; this is the one to show when there is room for one.
+	PrimaryAddress *string                `json:"primary_address,omitempty" db:"primary_address"`
+	Attributes     map[string]interface{} `json:"attributes" db:"attributes"`
+
+	Environment  *string `json:"environment" db:"environment"`
+	BusinessUnit *string `json:"business_unit" db:"business_unit"`
+	OwnerEmail   *string `json:"owner_email" db:"owner_email"`
+	// SupportGroup is the team on the hook for it — ADR-0001 D3 Q5, the one
+	// context field the CMDB buyer asked for that the old model had no home for.
+	SupportGroup       *string                `json:"support_group,omitempty" db:"support_group"`
+	Description        *string                `json:"description" db:"description"`
+	Site               *string                `json:"site,omitempty" db:"site"`
+	Region             *string                `json:"region,omitempty" db:"region"`
+	Zone               *string                `json:"zone,omitempty" db:"zone"`
+	LocationID         *uuid.UUID             `json:"location_id,omitempty" db:"location_id"`
+	NetworkSegmentID   *uuid.UUID             `json:"network_segment_id,omitempty" db:"network_segment_id"`
+	NetworkSegmentName *string                `json:"network_segment_name,omitempty" db:"network_segment_name"`
+	DiscoveryMethod    *string                `json:"discovery_method,omitempty" db:"discovery_method"`
+	ConfidenceScore    *int                   `json:"confidence_score,omitempty" db:"confidence_score"`
+	Tags               map[string]interface{} `json:"tags" db:"tags"`
+	Metadata           map[string]interface{} `json:"metadata" db:"metadata"`
+	AssetOwnership     string                 `json:"asset_ownership" db:"asset_ownership"`
+	AssetStatus        string                 `json:"asset_status" db:"asset_status"`
+	StaleStatus        *string                `json:"stale_status,omitempty" db:"stale_status"`
+	// MergedInto is the asset this one was merged into — the tombstone pointer.
+	//
+	// Accepting a merge ARCHIVES the observation rather than deleting it, so its
+	// id keeps resolving: `GET /assets/{merged-away-id}` answers 200 with
+	// `asset_status: archived` and this field naming the survivor, instead of a
+	// 404 that tells a stale bookmark nothing. It is a first-class field rather
+	// than a key inside `metadata` because a client has to be able to FOLLOW it,
+	// and a pointer nobody can find in a schema is a pointer nobody follows.
+	//
+	// nil on every asset that was not merged away, which is almost all of them.
+	MergedInto        *uuid.UUID `json:"merged_into,omitempty" db:"merged_into"`
+	FirstDiscoveredAt time.Time  `json:"first_discovered_at" db:"first_discovered_at"`
+	LastSeenAt        time.Time  `json:"last_seen_at" db:"last_seen_at"`
+	CreatedAt         time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at" db:"updated_at"`
+	DeletedAt         *time.Time `json:"deleted_at" db:"deleted_at"`
+
+	// RiskScore is recomputed as the MAX over the asset's scored crypto
+	// configurations (ADR-0005 D4), never the GREATEST(old, new) the old model
+	// wrote — that could only ever go up. RiskAssessedBy names the producers
+	// that have looked: score 0 with an EMPTY array is NOT ASSESSED, score 0
+	// with {crypto} is assessed clean, and collapsing the two is the
+	// three-valued mistake this platform has made sixty times.
+	RiskScore      int      `json:"risk_score" db:"risk_score"`
+	RiskAssessedBy []string `json:"risk_assessed_by" db:"risk_assessed_by"`
+	RiskLevel      string   `json:"risk_level"`
+
+	// Identifiers and Endpoints are the asset's children. They are loaded by the
+	// paths that need them rather than by every list query.
+	Identifiers []Identifier `json:"identifiers,omitempty"`
+	Endpoints   []Endpoint   `json:"endpoints,omitempty"`
+	// PrimaryEndpoint is the one a list row shows: the most recently seen active
+	// one. Nil is a real answer — an at-rest cloud resource has no endpoint at
+	// all, which is what retires the old "AT-REST" port sentinel.
+	PrimaryEndpoint *Endpoint `json:"primary_endpoint,omitempty"`
+
+	CryptoImplementations []CryptoImplementation `json:"crypto_implementations,omitempty"`
+	HighestRisk           *int                   `json:"highest_risk,omitempty"`
+	CertificateCount      *int                   `json:"certificate_count,omitempty"`
 	// CryptoImplementationCount is the number of live crypto configurations on
 	// the asset. Populated by the LIST query so the Inventory row can show an
 	// "N cfg" count without a per-row round trip.
@@ -77,11 +127,80 @@ type AssetProtocolSummary struct {
 	MaxRiskScore int    `json:"max_risk_score"`
 }
 
+// Identifier is one identifier observed for an asset (DATA_MODEL §2).
+//
+// The kinds are the nine of ADR-0002 D3 and are validated in Go against the
+// class registry, not by a database CHECK — the registry owns the vocabulary
+// and the per-class precedence, and a second copy in SQL would drift from it.
+type Identifier struct {
+	ID      uuid.UUID `json:"id" db:"id"`
+	AssetID uuid.UUID `json:"asset_id" db:"asset_id"`
+	Kind    string    `json:"kind" db:"kind"`
+	Value   string    `json:"value" db:"value"`
+	// Scope is the segment for hostname and ip_address and the sync profile for
+	// cmdb_sys_id. Nil for the six globally unique kinds; a scope on one of
+	// those splits the uniqueness key and is rejected upstream.
+	Scope       *string   `json:"scope,omitempty" db:"scope"`
+	SourceKind  string    `json:"source_kind" db:"source_kind"`
+	SourceRef   *string   `json:"source_ref,omitempty" db:"source_ref"`
+	Confidence  float64   `json:"confidence" db:"confidence"`
+	FirstSeenAt time.Time `json:"first_seen_at" db:"first_seen_at"`
+	LastSeenAt  time.Time `json:"last_seen_at" db:"last_seen_at"`
+}
+
+// Endpoint is one network face of an asset: an (address|fqdn, port, transport)
+// it was observed exposing (DATA_MODEL §2, ADR-0002 D1).
+//
+// Port is nil for an at-rest or declared endpoint. The "AT-REST" port sentinel
+// the port-as-asset model needed is retired: an at-rest cloud resource has no
+// endpoint row at all.
+type Endpoint struct {
+	ID       uuid.UUID `json:"id" db:"id"`
+	TenantID uuid.UUID `json:"tenant_id" db:"tenant_id"`
+	AssetID  uuid.UUID `json:"asset_id" db:"asset_id"`
+
+	Address   *string `json:"address,omitempty" db:"address"`
+	FQDN      *string `json:"fqdn,omitempty" db:"fqdn"`
+	Port      *int    `json:"port,omitempty" db:"port"`
+	Transport string  `json:"transport" db:"transport"`
+	Protocol  *string `json:"protocol,omitempty" db:"protocol"`
+
+	ServiceName                 *string `json:"service_name,omitempty" db:"service_name"`
+	ServiceVersion              *string `json:"service_version,omitempty" db:"service_version"`
+	ServiceConfidence           *string `json:"service_confidence,omitempty" db:"service_confidence"`
+	ServiceIdentificationMethod *string `json:"service_identification_method,omitempty" db:"service_identification_method"`
+
+	// BoundLocal says whether the socket is reachable only from the host
+	// itself. THREE-VALUED, which is why it is a pointer AND why `omitempty` is
+	// correct here: nil means nobody established it — every endpoint a network
+	// scan found, because a scan cannot know, it only sees what answers — and
+	// the field is then absent from the JSON rather than false. An explicit
+	// false is a measurement that the service IS exposed to the network, and it
+	// serialises, because `omitempty` on a pointer tests the pointer.
+	//
+	// Only a host's own view of its sockets writes either boolean (the agent's
+	// host inventory, workstream 2.11b).
+	BoundLocal *bool `json:"bound_local,omitempty" db:"bound_local"`
+
+	SourceKind     string     `json:"source_kind" db:"source_kind"`
+	SourceRef      *string    `json:"source_ref,omitempty" db:"source_ref"`
+	Status         string     `json:"status" db:"status"`
+	FirstSeenAt    time.Time  `json:"first_seen_at" db:"first_seen_at"`
+	LastSeenAt     time.Time  `json:"last_seen_at" db:"last_seen_at"`
+	LastScannedAt  *time.Time `json:"last_scanned_at,omitempty" db:"last_scanned_at"`
+	LastScanStatus *string    `json:"last_scan_status,omitempty" db:"last_scan_status"`
+}
+
 // CryptoImplementation represents a cryptographic implementation found on an asset
 type CryptoImplementation struct {
-	ID                   uuid.UUID  `json:"id" db:"id"`
-	TenantID             uuid.UUID  `json:"tenant_id" db:"tenant_id"`
-	AssetID              uuid.UUID  `json:"asset_id" db:"asset_id"`
+	ID       uuid.UUID `json:"id" db:"id"`
+	TenantID uuid.UUID `json:"tenant_id" db:"tenant_id"`
+	AssetID  uuid.UUID `json:"asset_id" db:"asset_id"`
+	// EndpointID is the endpoint this configuration was measured on
+	// (DATA_MODEL §2). Nil for a configuration with no socket behind it — an
+	// at-rest cloud resource — and AssetID stays as the roll-up target either
+	// way.
+	EndpointID           *uuid.UUID `json:"endpoint_id,omitempty" db:"endpoint_id"`
 	Protocol             string     `json:"protocol" db:"protocol"`
 	ProtocolVersion      *string    `json:"protocol_version" db:"protocol_version"`
 	CipherSuite          *string    `json:"cipher_suite" db:"cipher_suite"`
@@ -104,17 +223,24 @@ type CryptoImplementation struct {
 	DeletedAt            *time.Time `json:"deleted_at" db:"deleted_at"`
 	RiskLevel            string     `json:"risk_level" db:"risk_level"`
 	RiskFactors          []string   `json:"risk_factors,omitempty"`
-	// Device information (if asset is linked to a device)
-	DeviceID        *uuid.UUID `json:"device_id,omitempty"`
-	DeviceType      *string    `json:"device_type,omitempty"`
-	DeviceVendor    *string    `json:"device_vendor,omitempty"`
-	DeviceModel     *string    `json:"device_model,omitempty"`
-	DeviceHostname  *string    `json:"device_hostname,omitempty"`
-	DeviceIPAddress *string    `json:"device_ip_address,omitempty"`
+	// The six `device_*` fields are GONE. They were never set by any query in
+	// this service, so they serialised as absent on every crypto configuration
+	// the API has ever returned — six documented fields that could only ever be
+	// missing. `devices` is retired: a device is an asset with an
+	// `asset_management` row, and its vendor, model and firmware are class
+	// ATTRIBUTES of that asset (ADR-0002 D2). A consumer that wants them reads
+	// the asset.
+	//
 	// Asset information
-	AssetHostname     *string         `json:"asset_hostname,omitempty"`
-	AssetIPAddress    *string         `json:"asset_ip_address,omitempty"`
-	AssetType         *string         `json:"asset_type,omitempty"`
+	AssetHostname  *string `json:"asset_hostname,omitempty"`
+	AssetIPAddress *string `json:"asset_ip_address,omitempty"`
+	// AssetClassKey is the owning asset's class (ADR-0002 D2), not the retired
+	// four-value asset_type enum. Renamed rather than left in place because the
+	// VALUE changed meaning: an asset the old model called "appliance" is now
+	// `hardware`, `switch` or `firewall`, and a consumer still reading
+	// `asset_type` would have gone on matching four strings that no longer
+	// appear.
+	AssetClassKey     *string         `json:"asset_class_key,omitempty"`
 	AssetEnvironment  *string         `json:"asset_environment,omitempty"`
 	AssetBusinessUnit *string         `json:"asset_business_unit,omitempty"`
 	Keys              []Key           `json:"keys,omitempty"`
@@ -123,10 +249,21 @@ type CryptoImplementation struct {
 
 // RiskSummary provides an overview of asset risks
 type RiskSummary struct {
-	TotalAssets      int `json:"total_assets" db:"total_assets"`
-	HighRisk         int `json:"high_risk" db:"high_risk"`
-	MediumRisk       int `json:"medium_risk" db:"medium_risk"`
-	LowRisk          int `json:"low_risk" db:"low_risk"`
+	TotalAssets int `json:"total_assets" db:"total_assets"`
+	HighRisk    int `json:"high_risk" db:"high_risk"`
+	MediumRisk  int `json:"medium_risk" db:"medium_risk"`
+	LowRisk     int `json:"low_risk" db:"low_risk"`
+	// Informational is score 0 WITH a producer in risk_assessed_by: somebody
+	// looked and found nothing wrong.
+	Informational int `json:"informational" db:"informational"`
+	// UnknownRisk is score 0 with an EMPTY risk_assessed_by: NOT ASSESSED.
+	//
+	// The two used to be one number. `unknown_risk` counted every asset in the
+	// Informational band with no coverage guard at all, so an asset nobody had
+	// ever scored and an asset scored clean were the same bucket — the
+	// three-valued-logic flattening this platform has made sixty times, in the
+	// summary the dashboard hero reads. The risk FACET has always split them,
+	// which is why the tile and the rail disagreed.
 	UnknownRisk      int `json:"unknown_risk" db:"unknown_risk"`
 	TotalCrypto      int `json:"total_crypto" db:"total_crypto"`
 	CriticalFindings int `json:"critical_findings" db:"critical_findings"`
@@ -166,6 +303,12 @@ type AssetStats struct {
 // AssetFilters defines parameters for filtering asset searches
 // Note: Uses both 'form' tags (for Gin query binding) and 'json' tags (for JSON responses)
 type AssetFilters struct {
+	// Query is a query-language predicate over the `asset` target
+	// (QUERY_LANGUAGE.md). It is the form the facet rail writes, a saved view
+	// stores and the MCP tools take. Everything else in this struct is the
+	// pre-query-language vocabulary, kept working for one release by being
+	// translated into a query string server-side and AND-ed with this one.
+	Query            string   `json:"query" form:"query"`
 	Search           string   `json:"search" form:"search"`
 	AssetType        []string `json:"asset_type" form:"asset_type"`
 	Environment      []string `json:"environment" form:"environment"`
@@ -209,30 +352,121 @@ type AssetFilters struct {
 	SortOrder                string   `json:"sort_order" form:"sort_order"`
 }
 
-// AssetInput defines the input structure for creating or updating an asset
+// AssetInput is what a caller supplies to create or update an asset: a class,
+// identifiers, and context. There is no port — a port is an endpoint, and an
+// endpoint is observed or declared separately (ADR-0002 D1).
+//
+// It is also the shape the bulk import and the CMDB pull build, so the columns
+// those carry (serial, MAC, FQDN, cloud resource id) arrive as Identifiers and
+// go through the identification engine like every other intake.
 type AssetInput struct {
-	Hostname        *string                `json:"hostname"`
-	IPAddress       *string                `json:"ip_address"`
-	Port            *int                   `json:"port"`
-	AssetType       string                 `json:"asset_type" binding:"required"`
-	OperatingSystem *string                `json:"operating_system"`
-	Environment     *string                `json:"environment"`
-	BusinessUnit    *string                `json:"business_unit"`
-	OwnerEmail      *string                `json:"owner_email"`
-	Description     *string                `json:"description"`
-	Tags            map[string]interface{} `json:"tags"`
-	Metadata        map[string]interface{} `json:"metadata"`
-	AssetOwnership  *string                `json:"asset_ownership"`
-	// AssetStatus applies to UPDATES only. Asset CREATION ignores it: a new
-	// asset's approval status is evaluated server-side from the tenant's network
-	// segments (AssetService.evaluateAssetApproval), so no request body can
-	// promote an asset to `monitoring` past the approval queue.
+	// ClassKey is required on create and is validated against the class
+	// registry. The old `asset_type` had four values, no validation in Go, and
+	// an import wizard offering ten of which nine were invalid in the database.
+	ClassKey string `json:"class_key"`
+	// Identifiers are what the asset is known by. Declared identifiers (a
+	// serial typed into the UI, a sys_id from a CMDB) are as much identity as
+	// measured ones; what differs is their source, which the engine reconciles
+	// on.
+	Identifiers []AssetIdentifierInput `json:"identifiers,omitempty"`
+	// Endpoints are optional: a manually created asset usually has none, and an
+	// import may carry one.
+	Endpoints []AssetEndpointInput `json:"endpoints,omitempty"`
+
+	// DisplayName is what a person calls this thing. For most classes it is
+	// cosmetic (the engine derives one from the identifiers). For the SERVICE
+	// branch it is IDENTITY and required: a service identifies by
+	// (tenant, class, name) and has nothing else to be known by
+	// (ADR-0002 D3 erratum).
+	DisplayName *string `json:"display_name"`
+
+	Hostname  *string `json:"hostname"`
+	IPAddress *string `json:"ip_address"`
+	// Attributes are the class-specific typed attributes (operating_system,
+	// vendor, model, firmware_version …), validated against the class's schema.
+	Attributes   map[string]interface{} `json:"attributes"`
+	Environment  *string                `json:"environment"`
+	BusinessUnit *string                `json:"business_unit"`
+	OwnerEmail   *string                `json:"owner_email"`
+	SupportGroup *string                `json:"support_group"`
+	Description  *string                `json:"description"`
+	// Site and Region are the physical placement of the asset, as the source
+	// that supplied it names it — a NetBox site and its region, a CMDB
+	// location. They are free text rather than a FK to `locations` because a
+	// connector cannot be trusted to have created a location row, and an
+	// import that silently invented one would grow a location tree nobody
+	// asked for. A nil pointer is "not stated" and leaves the column alone,
+	// like every other context field.
+	Site   *string `json:"site"`
+	Region *string `json:"region"`
+
+	Tags           map[string]interface{} `json:"tags"`
+	Metadata       map[string]interface{} `json:"metadata"`
+	AssetOwnership *string                `json:"asset_ownership"`
+	// AssetStatus is REFUSED on both paths and exists only so a client that
+	// sends it is told so.
+	//
+	// Creation ignores it: a new asset's approval status is evaluated
+	// server-side from the tenant's network segments
+	// (AssetService.evaluateAssetApproval), so no request body can promote an
+	// asset past the approval queue. Update REJECTS it with a 400 naming the
+	// endpoints that do the work — approving is a cascade (edge promotion,
+	// deferred-finding materialisation) and denying carries a suppression, so
+	// writing the column alone produces a monitored asset with none of it done.
 	AssetStatus *string `json:"asset_status"`
 }
 
-// AssetFacetBucket represents a bucket for asset facets
+// IdentifierUpdateReport says what an update did to an asset's identifiers.
+//
+// It is returned rather than implied because part of the answer is "no". A
+// collector-minted identifier — an agent's installation id, a cloud resource
+// id, anything a sensor measured — is a fact about the world, and an edit form
+// is not where facts get deleted. Reporting those as removed would be a lie the
+// UI repeats; leaving them out of the response entirely would be the same lie
+// by omission, since the row the user deleted would reappear on the next read
+// with nothing to say why.
+type IdentifierUpdateReport struct {
+	Attached []IdentifierChange `json:"attached"`
+	Removed  []IdentifierChange `json:"removed"`
+	Kept     []IdentifierChange `json:"kept"`
+}
+
+// IdentifierChange is one identifier an update attached, retired, or refused to
+// retire. Reason is set only on `kept`, where it is the whole point.
+type IdentifierChange struct {
+	Kind       string `json:"kind"`
+	Value      string `json:"value"`
+	Scope      string `json:"scope,omitempty"`
+	SourceKind string `json:"source_kind,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+// AssetIdentifierInput is one declared identifier on an AssetInput.
+type AssetIdentifierInput struct {
+	Kind  string  `json:"kind"`
+	Value string  `json:"value"`
+	Scope *string `json:"scope,omitempty"`
+}
+
+// AssetEndpointInput is one declared endpoint on an AssetInput.
+type AssetEndpointInput struct {
+	Address   *string `json:"address,omitempty"`
+	FQDN      *string `json:"fqdn,omitempty"`
+	Port      *int    `json:"port,omitempty"`
+	Transport string  `json:"transport,omitempty"`
+	Protocol  *string `json:"protocol,omitempty"`
+}
+
+// AssetFacetBucket represents a bucket for asset facets.
+//
+// Key is what a query term matches on — for the class facet that is the
+// class_path, which is what `class:` compares against. Label is what the rail
+// shows a person; it is empty when the key IS the label, so a rail can render
+// `label || key` and a facet that gains a label later does not need a client
+// change.
 type AssetFacetBucket struct {
 	Key   string `json:"value"`
+	Label string `json:"label,omitempty"`
 	Count int    `json:"count"`
 }
 
@@ -338,6 +572,34 @@ type AssetHistory struct {
 	CreatedAt   time.Time              `json:"created_at" db:"created_at"`
 }
 
+// AssetClassChange is one row of `asset_class_history`: the class an asset
+// moved FROM, the class it moved TO, and how.
+//
+// `FromClassKey` is nil only on the row the asset's creation wrote — there was
+// no previous class. Every other row carries both ends, so a reader never has
+// to look at the neighbouring row to know what changed; a row that needed its
+// predecessor would be wrong the moment a page boundary fell between them.
+type AssetClassChange struct {
+	ID       uuid.UUID `json:"id" db:"id"`
+	AssetID  uuid.UUID `json:"asset_id" db:"asset_id"`
+	TenantID uuid.UUID `json:"tenant_id" db:"tenant_id"`
+
+	FromClassKey   *string `json:"from_class_key,omitempty" db:"from_class_key"`
+	FromClassLabel string  `json:"from_class_label,omitempty"`
+	ToClassKey     string  `json:"to_class_key" db:"to_class_key"`
+	ToClassLabel   string  `json:"to_class_label,omitempty"`
+
+	// Source is the MECHANISM: proposal, manual, import, classifier.
+	Source string `json:"source" db:"source"`
+	// ActorUserID is the person, absent when a machine did it. Absent means
+	// "no person", not "person unknown".
+	ActorUserID *uuid.UUID `json:"actor_user_id,omitempty" db:"actor_user_id"`
+	// Evidence is the argument as identifiers — rule ids, a model id and its
+	// probability, the proposal id. Never a hostname, an address or a secret.
+	Evidence  map[string]interface{} `json:"evidence" db:"evidence"`
+	CreatedAt time.Time              `json:"created_at" db:"created_at"`
+}
+
 // Certificate represents a certificate in the inventory
 type Certificate struct {
 	ID                      uuid.UUID  `json:"id" db:"id"`
@@ -386,7 +648,7 @@ type Certificate struct {
 	CreatedAt     time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at" db:"updated_at"`
 	RelatedAssets []Asset   `json:"related_assets,omitempty"`
-	// DeploymentCount is the number of distinct network_assets currently using
+	// DeploymentCount is the number of distinct assets currently using
 	// this certificate via crypto_implementations. Populated by list queries
 	// via a correlated subquery so the frontend row can show a host count
 	// without expanding the row.
@@ -531,7 +793,7 @@ type CertificateFilters struct {
 	Issuer        *string    `json:"issuer" form:"issuer"`
 	SelfSigned    *bool      `json:"self_signed" form:"self_signed"`
 	// Ownership filters to certs whose owning asset has this asset_ownership
-	// (internal | third_party | unknown), via crypto_implementations → network_assets.
+	// (internal | third_party | unknown), via crypto_implementations → assets.
 	// Drives the "vendor certificates" view of the cert lens.
 	Ownership *string `json:"ownership" form:"ownership"`
 	Search    *string `json:"search" form:"search"`

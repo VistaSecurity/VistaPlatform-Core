@@ -10,6 +10,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import type { inventoryComponents } from '@vistasecurity/api-contract';
+import { ASSET_CLASSES, ASSET_CLASS_KEYS, ATTRIBUTE_SCHEMAS } from '@vistasecurity/primitives/assets';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, ModalSelect, Icon } from '../../components/ui';
 
@@ -22,20 +23,69 @@ export type ImportTarget = 'assets' | 'segments';
 type Phase = 'type' | 'upload' | 'map' | 'preview' | 'result';
 
 // A target field the wizard can populate from a spreadsheet column.
-interface FieldSpec {
+export interface FieldSpec {
   key: string;
   label: string;
   required?: boolean; // must be satisfied by a mapped column OR (for enums) a default
   enumOptions?: string[]; // when set, the field is an enum with a default-value fallback
-  guess: string[]; // lowercased header substrings used to auto-map
+  /** Display labels for `enumOptions`, when the stored value is not the word a
+   *  user recognises (a class key is `network_device`; its label is "Network
+   *  Device"). Absent ⇒ the value is its own label. */
+  enumLabels?: Record<string, string>;
+  /** Header fragments that auto-map a column onto this field. Matched as a
+   *  substring of the header for ordinary fields, and as whole WORDS for
+   *  identifier fields (`identifier: true`) — see `autoGuess`. */
+  guess: string[];
+  /** Guesses that must be the WHOLE header, never a word inside one. "Address"
+   *  on its own is an IP column; "Email Address" is not. */
+  guessWhole?: string[];
+  /** This column becomes an IDENTIFIER, so a wrong guess does not merely
+   *  mis-file a value — it invents identity and merges unrelated machines.
+   *  Identifier guesses are therefore matched on word boundaries only. */
+  identifier?: boolean;
 }
 
-const ASSET_FIELDS: FieldSpec[] = [
-  { key: 'hostname', label: 'Hostname', guess: ['hostname', 'host name', 'fqdn', 'host', 'name', 'server'] },
-  { key: 'ip_address', label: 'IP address', guess: ['ip address', 'ip_addr', 'ipaddress', 'ip', 'address'] },
-  { key: 'asset_type', label: 'Asset type', required: true, enumOptions: ['server', 'workstation', 'network_device', 'firewall', 'load_balancer', 'vm', 'container', 'database', 'application', 'other'], guess: ['asset type', 'type', 'category', 'kind'] },
+// Columns that become IDENTIFIERS rather than plain fields (ADR-0002 D3). A
+// serial in a spreadsheet is as much identity as one a scanner read; mapping it
+// to an identifier is what lets the import recognise a machine the platform has
+// already seen instead of creating a duplicate of it.
+export const IDENTIFIER_COLUMNS: { key: string; kind: string }[] = [
+  { key: 'fqdn', kind: 'fqdn' },
+  { key: 'hostname', kind: 'hostname' },
+  { key: 'ip_address', kind: 'ip_address' },
+  { key: 'mac_address', kind: 'mac_address' },
+  { key: 'serial_number', kind: 'serial_number' },
+];
+
+export const ASSET_FIELDS: FieldSpec[] = [
+  // The class list is the GENERATED registry, not a hand-typed list. The one it
+  // replaced carried nine values that were never class keys at all — `vm`,
+  // `database`, `other` and six more — so every row using one was rejected by
+  // the server with a message about a class it had been offered by this wizard.
+  {
+    key: 'class_key', label: 'Class', required: true,
+    enumOptions: [...ASSET_CLASS_KEYS],
+    enumLabels: Object.fromEntries(ASSET_CLASS_KEYS.map((k) => [k, ASSET_CLASSES[k].label])),
+    guess: ['class', 'asset class', 'asset type', 'type', 'category', 'kind'],
+  },
+  // The IDENTIFIER columns are guessed BEFORE `display_name`, and that order is
+  // load-bearing: auto-mapping takes fields in order and a column can only be
+  // claimed once, so with `display_name` first its `name` guess swallowed a
+  // "Host Name" column by substring — leaving the hostname identifier unmapped
+  // and every row failing the identity floor with no identifier at all.
+  { key: 'fqdn', label: 'FQDN (identifier)', identifier: true, guess: ['fqdn', 'dns name', 'full name'] },
+  { key: 'hostname', label: 'Hostname (identifier)', identifier: true, guess: ['hostname', 'host name', 'host', 'server'] },
+  {
+    key: 'ip_address', label: 'IP address (identifier)', identifier: true,
+    guess: ['ip address', 'ip addr', 'ipaddress', 'ipaddr', 'ipv4', 'ipv6', 'ip'],
+    guessWhole: ['address', 'addr'],
+  },
+  { key: 'mac_address', label: 'MAC address (identifier)', identifier: true, guess: ['mac address', 'mac addr', 'macaddress', 'mac', 'hardware address'] },
+  { key: 'serial_number', label: 'Serial number (identifier)', identifier: true, guess: ['serial number', 'serial no', 'serialnumber', 'serial', 'sn', 'service tag'] },
+  { key: 'display_name', label: 'Display name', guess: ['display name', 'asset name', 'label', 'name'] },
   { key: 'environment', label: 'Environment', enumOptions: ['production', 'staging', 'development', 'test'], guess: ['environment', 'env', 'tier'] },
   { key: 'operating_system', label: 'Operating system', guess: ['operating system', 'os', 'platform'] },
+  { key: 'support_group', label: 'Support group', guess: ['support group', 'support_group', 'support team', 'assignment group'] },
   { key: 'business_unit', label: 'Business unit', guess: ['business unit', 'business_unit', 'bu', 'department', 'team', 'org'] },
   { key: 'owner_email', label: 'Owner email', guess: ['owner email', 'owner', 'email', 'contact'] },
   { key: 'description', label: 'Description', guess: ['description', 'notes', 'comment', 'desc'] },
@@ -52,15 +102,41 @@ const SEGMENT_FIELDS: FieldSpec[] = [
   { key: 'description', label: 'Description', guess: ['description', 'notes', 'comment'] },
 ];
 
-type Row = Record<string, unknown>;
+export type Row = Record<string, unknown>;
 
-function autoGuess(fields: FieldSpec[], columns: string[]): Record<string, string> {
+/** Lowercase a header and reduce every run of non-alphanumerics to one space,
+ *  so `IP_Addr`, `ip-addr` and "IP Addr" are the same three-word sequence. */
+function headerWords(header: string): string[] {
+  return header.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
+}
+
+/** Does `guess` appear in `header` as a consecutive run of WHOLE words?
+ *  "Management IP" contains the word `ip`; "Description" and "Equipment" only
+ *  contain the letters. */
+function matchesWords(header: string, guess: string): boolean {
+  const hw = headerWords(header);
+  const gw = headerWords(guess);
+  if (gw.length === 0) return false;
+  for (let i = 0; i + gw.length <= hw.length; i++) {
+    if (gw.every((w, j) => hw[i + j] === w)) return true;
+  }
+  return false;
+}
+
+export function autoGuess(fields: FieldSpec[], columns: string[]): Record<string, string> {
   const map: Record<string, string> = {};
   const used = new Set<string>();
   for (const f of fields) {
     const hit = columns.find((c) => {
       if (used.has(c)) return false;
       const lc = c.trim().toLowerCase();
+      // A whole-header guess is the same for every field: the header IS the word.
+      if (f.guessWhole?.some((g) => lc === g)) return true;
+      // Identifier columns are matched on word boundaries, never as substrings.
+      // Substring matching put "Description", "Equipment" and "Email Address"
+      // on the `ip_address` IDENTIFIER — which does not mis-file a value, it
+      // invents identity, and identity is what merges two assets into one.
+      if (f.identifier) return f.guess.some((g) => matchesWords(c, g));
       return f.guess.some((g) => lc === g || lc.includes(g));
     });
     if (hit) {
@@ -82,29 +158,65 @@ const CIDR_RE = /^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/;
 
 // Build a typed input object for one spreadsheet row from the column mapping and
 // enum defaults. Returns the object plus a per-row validation error (or null).
-function buildAsset(row: Row, mapping: Record<string, string>, defaults: Record<string, string>): { input: AssetInput; error: string | null } {
+export function buildAsset(row: Row, mapping: Record<string, string>, defaults: Record<string, string>): { input: AssetInput; error: string | null } {
   const get = (key: string) => {
     const col = mapping[key];
     const v = col ? cellStr(row[col]) : '';
     return v || defaults[key] || '';
   };
-  const hostname = get('hostname');
-  const ip = get('ip_address');
-  const assetType = get('asset_type');
+  const classKey = get('class_key');
+  // Identifier columns become IDENTIFIERS, in the registry's order — which is
+  // also the engine's precedence order, strongest first. A spreadsheet that
+  // carries a serial can be re-imported without duplicating the machine,
+  // which the old shape (hostname and IP as plain columns) could not do.
+  const identifiers = IDENTIFIER_COLUMNS
+    .map(({ key, kind }) => ({ kind, value: get(key) }))
+    .filter((i) => i.value !== '');
+  const displayName = get('display_name');
+
+  // `operating_system` is a class ATTRIBUTE now, and only on the classes that
+  // declare one. Sending it for a class that does not have it would be rejected
+  // by the schema, so it is dropped rather than smuggled through — the column
+  // mapper offers it because most imported rows are computers.
+  const attributes: Record<string, unknown> = {};
+  const os = get('operating_system');
+  if (os && classDeclaresOs(classKey)) attributes.operating_system = os;
+
   const input: AssetInput = {
-    asset_type: assetType,
-    hostname: hostname || undefined,
-    ip_address: ip || undefined,
+    class_key: classKey,
+    display_name: displayName || undefined,
+    identifiers: identifiers.length > 0 ? identifiers : undefined,
+    ...(Object.keys(attributes).length > 0 ? { attributes } : {}),
     environment: get('environment') || undefined,
-    operating_system: get('operating_system') || undefined,
+    support_group: get('support_group') || undefined,
     business_unit: get('business_unit') || undefined,
     owner_email: get('owner_email') || undefined,
     description: get('description') || undefined,
   };
   let error: string | null = null;
-  if (!assetType) error = 'asset type is required';
-  else if (!hostname && !ip) error = 'a hostname or IP is required';
+  if (!classKey) error = 'a class is required';
+  else if (!ASSET_CLASS_KEYS.includes(classKey as (typeof ASSET_CLASS_KEYS)[number])) error = `“${classKey}” is not a known class`;
+  else if (isServiceClass(classKey)) {
+    // A service identifies by (tenant, class, name): it has no address or serial
+    // to be known by, so its name IS its identity (ADR-0002 D3).
+    if (!displayName) error = 'a service needs a name';
+  } else if (identifiers.length === 0) {
+    error = 'at least one identifier is required (FQDN, hostname, IP, MAC or serial)';
+  }
   return { input, error };
+}
+
+/** Does this class declare an `operating_system` attribute? */
+function classDeclaresOs(classKey: string): boolean {
+  const schema = ATTRIBUTE_SCHEMAS[classKey as (typeof ASSET_CLASS_KEYS)[number]];
+  return !!schema && 'operating_system' in schema.properties;
+}
+
+/** Classes under the `service` branch, derived from the class path so a
+ *  subclass added later inherits the rule. */
+function isServiceClass(classKey: string): boolean {
+  const cls = ASSET_CLASSES[classKey as (typeof ASSET_CLASS_KEYS)[number]];
+  return !!cls && (cls.path === 'service' || cls.path.startsWith('service.'));
 }
 
 function buildSegment(row: Row, mapping: Record<string, string>, defaults: Record<string, string>): { input: NetworkSegmentInput; error: string | null } {
@@ -403,7 +515,7 @@ export function ImportSpreadsheetModal({
                 {f.enumOptions && (
                   <ModalField label={`Default ${f.label.toLowerCase()}`} hint="used when unmapped/blank">
                     <ModalSelect value={defaults[f.key] || f.enumOptions[0]} onChange={(e) => setDefaults((d) => ({ ...d, [f.key]: e.target.value }))}>
-                      {f.enumOptions.map((o) => <option key={o} value={o}>{o}</option>)}
+                      {f.enumOptions.map((o) => <option key={o} value={o}>{f.enumLabels?.[o] ?? o}</option>)}
                     </ModalSelect>
                   </ModalField>
                 )}
@@ -508,7 +620,7 @@ function PreviewTable({ target, built }: { target: ImportTarget; built: { input:
           <tr style={{ position: 'sticky', top: 0, background: 'var(--app-panel)' }}>
             <th style={thStyle}>#</th>
             {target === 'assets' ? (
-              <><th style={thStyle}>Hostname</th><th style={thStyle}>IP</th><th style={thStyle}>Type</th></>
+              <><th style={thStyle}>Name</th><th style={thStyle}>Identifiers</th><th style={thStyle}>Class</th></>
             ) : (
               <><th style={thStyle}>Name</th><th style={thStyle}>Value</th><th style={thStyle}>Seg type</th></>
             )}
@@ -523,7 +635,7 @@ function PreviewTable({ target, built }: { target: ImportTarget; built: { input:
               <tr key={i} style={{ borderTop: '1px solid var(--app-border)' }}>
                 <td style={tdStyle}>{i + 1}</td>
                 {target === 'assets' ? (
-                  <><td style={tdStyle}>{a.hostname || '—'}</td><td style={tdStyle}>{a.ip_address || '—'}</td><td style={tdStyle}>{a.asset_type || '—'}</td></>
+                  <><td style={tdStyle}>{a.display_name || a.identifiers?.[0]?.value || '—'}</td><td style={tdStyle}>{(a.identifiers ?? []).map((i) => `${i.kind}=${i.value}`).join(', ') || '—'}</td><td style={tdStyle}>{a.class_key ? (ASSET_CLASSES[a.class_key as (typeof ASSET_CLASS_KEYS)[number]]?.label ?? a.class_key) : '—'}</td></>
                 ) : (
                   <><td style={tdStyle}>{s.name || '—'}</td><td style={tdStyle}>{s.value || '—'}</td><td style={tdStyle}>{s.segment_type || '—'}</td></>
                 )}

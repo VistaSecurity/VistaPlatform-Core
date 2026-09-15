@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -34,6 +35,7 @@ type assetStore interface {
 	GetAssetByID(tenantID, assetID uuid.UUID) (*models.Asset, error)
 	GetCryptoImplementations(tenantID, assetID uuid.UUID) ([]models.CryptoImplementation, error)
 	GetAssetHistory(tenantID, assetID uuid.UUID) ([]models.AssetHistory, error)
+	GetAssetClassHistory(tenantID, assetID uuid.UUID) ([]models.AssetClassChange, error)
 	GetRiskSummary(tenantID uuid.UUID) (*models.RiskSummary, error)
 	GetPostureTrend(tenantID uuid.UUID, days int) ([]models.PostureTrendPoint, error)
 	GetPQCReadinessSummary(tenantID uuid.UUID) (*models.PQCReadinessSummary, error)
@@ -43,7 +45,7 @@ type assetStore interface {
 	GetTenantActivitySummary(tenantID uuid.UUID) (*services.TenantActivitySummary, error)
 	CreateAsset(tenantID uuid.UUID, input models.AssetInput) (*models.Asset, error)
 	BulkCreateAssets(tenantID uuid.UUID, inputs []models.AssetInput) *models.BulkImportResult
-	UpdateAsset(tenantID, assetID uuid.UUID, input models.AssetInput) (*models.Asset, error)
+	UpdateAsset(tenantID, assetID uuid.UUID, input models.AssetInput, actorUserID uuid.UUID) (*models.Asset, *models.IdentifierUpdateReport, error)
 	UpdateAssetService(tenantID, assetID uuid.UUID, input models.UpdateAssetServiceInput) (*models.Asset, error)
 	EnrichAllAssets(tenantID uuid.UUID) (int, error)
 	DeleteAsset(tenantID, assetID uuid.UUID) error
@@ -150,6 +152,13 @@ func (h *AssetHandler) GetAssets(c *gin.Context) {
 
 	assets, total, err := h.assetService.GetAssets(tenantUUID, filters)
 	if err != nil {
+		// A query the user typed answers 400 with the FULL diagnostic list of
+		// QUERY_LANGUAGE §10 — code, message, span, suggestion, one per error —
+		// because the caller is a person with a caret in a text box. Collapsing
+		// them into one string is what "invalid query" looks like from inside.
+		if writeQueryError(c, err) {
+			return
+		}
 		// Check if it's a validation error (bad request)
 		errStr := err.Error()
 		if strings.Contains(errStr, "invalid asset_type") {
@@ -172,8 +181,30 @@ func (h *AssetHandler) GetAssets(c *gin.Context) {
 		"assets":     assets,
 		"pagination": sharedapi.BuildPaginationMeta(pg, int64(total)),
 	}
+	addCanonicalQuery(response, filters)
 
 	c.JSON(http.StatusOK, response)
+}
+
+// addCanonicalQuery attaches the canonical form of the predicate that selected
+// the rows, so the caller can show the query it got rather than the query it
+// typed. The facet rail renders it; an MCP agent repeats it beside its answer
+// (ADR-0008 D4.4).
+//
+// A failure here is silently omitted rather than surfaced: the read that just
+// succeeded compiled the identical predicate, so the only way this can fail is
+// a bug, and turning a bug in the echo into a failed read would be the worse
+// outcome. An empty canonical (an empty predicate) is omitted for the same
+// reason it is empty — there is nothing to show.
+func addCanonicalQuery(response gin.H, filters models.AssetFilters) {
+	canonical, err := services.CanonicalAssetQuery(filters)
+	if err != nil {
+		log.Printf("[AssetHandler] canonicalizing the query for the echo failed (rows were returned anyway): %v", err)
+		return
+	}
+	if canonical != "" {
+		response["query"] = canonical
+	}
 }
 
 // GetAssetByID handles GET /api/v1/assets/:id
@@ -269,6 +300,43 @@ func (h *AssetHandler) GetAssetHistory(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"history": history})
 }
 
+// GetAssetClassHistory handles GET /api/v{1,2}/.../assets/:id/class-history.
+//
+// Read-only. A class change is made through Approvals (accepting a proposal) or
+// through the asset edit form; there is no write here, and there should not be
+// — a history you can POST to is not a history.
+func (h *AssetHandler) GetAssetClassHistory(c *gin.Context) {
+	tenantID, exists := c.Get("tenantID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Tenant ID not found"})
+		return
+	}
+	tenantUUID, ok := tenantID.(uuid.UUID)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
+		return
+	}
+	assetID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid asset ID"})
+		return
+	}
+
+	changes, err := h.assetService.GetAssetClassHistory(tenantUUID, assetID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get asset class history"})
+		return
+	}
+	// An asset nobody has reclassified still has the row its creation wrote, so
+	// an empty list means the asset is gone or was written before this table
+	// existed — not "it has always been what it is". The UI says so rather than
+	// rendering an empty panel that reads as a claim.
+	if changes == nil {
+		changes = []models.AssetClassChange{}
+	}
+	c.JSON(http.StatusOK, gin.H{"class_history": changes})
+}
+
 // SearchAssets handles GET /api/v1/assets/search
 // Uses GetAssets under the hood with a search query and limit to return quick results.
 func (h *AssetHandler) SearchAssets(c *gin.Context) {
@@ -290,11 +358,17 @@ func (h *AssetHandler) SearchAssets(c *gin.Context) {
 		return
 	}
 
-	// Parse optional parameters
+	// Parse optional parameters. CAPPED at the platform page size: `limit` went
+	// straight into PageSize, so `?limit=100000` asked Postgres for a hundred
+	// thousand rows, each carrying its protocol-summary sub-select, over a
+	// tenant-scoped connection — a denial of service one query string long.
 	limitStr := c.DefaultQuery("limit", "10")
 	limit, err := strconv.Atoi(limitStr)
 	if err != nil || limit < 1 {
 		limit = 10
+	}
+	if limit > sharedapi.MaxPageSize {
+		limit = sharedapi.MaxPageSize
 	}
 
 	filters := models.AssetFilters{
@@ -305,6 +379,13 @@ func (h *AssetHandler) SearchAssets(c *gin.Context) {
 
 	assets, total, err := h.assetService.GetAssets(tenantUUID, filters)
 	if err != nil {
+		// A malformed query is the CALLER's, and it comes back as the 400 with
+		// spans and suggestions that §10 specifies. Flattening it into a 500
+		// "Search failed" told a person typing a query that the server had
+		// broken, and gave them nothing to correct.
+		if writeQueryError(c, err) {
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Search failed"})
 		return
 	}
@@ -463,6 +544,10 @@ func (h *AssetHandler) GetRecentAssetsCount(c *gin.Context) {
 
 	count, err := h.assetService.GetRecentAssetsCount(tenantUUID, days, filters)
 	if err != nil {
+		// Same as the search: an invalid `?query=` is the caller's, with a caret.
+		if writeQueryError(c, err) {
+			return
+		}
 		log.Printf("[ERROR] GetRecentAssetsCount handler - Service error: %v, tenantID: %v, days: %d", err, tenantUUID, days)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get recent assets count"})
 		return
@@ -487,6 +572,14 @@ func (h *AssetHandler) GetRecentAssetsCount(c *gin.Context) {
 	}
 	if len(filters.RiskLevel) > 0 {
 		filtersApplied["risk_level"] = filters.RiskLevel
+	}
+	if len(filters.DiscoverySource) > 0 {
+		// Named here because the canonical `query` echo CANNOT carry it:
+		// discovery_source is pipeline state inside assets.metadata and is not
+		// a field of the query language, so a caller reading the echo back
+		// would be reading a predicate narrower than the one that ran. See
+		// discoverySourcePredicate.
+		filtersApplied["discovery_source"] = filters.DiscoverySource
 	}
 	if len(filters.BusinessUnit) > 0 {
 		filtersApplied["business_unit"] = filters.BusinessUnit
@@ -546,6 +639,14 @@ func (h *AssetHandler) CreateAsset(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
+	// The class is required on CREATE and optional on UPDATE, so it is checked
+	// here rather than with a `binding:"required"` tag on the shared input
+	// struct — one struct serves both, and requiring it on update would force
+	// every owner-email edit to restate the class.
+	if strings.TrimSpace(input.ClassKey) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "class_key is required"})
+		return
+	}
 
 	// Enforce the tenant's subscription asset cap before inserting.
 	// Plan limits are otherwise display-only, so an over-limit tenant could
@@ -576,10 +677,10 @@ func (h *AssetHandler) CreateAsset(c *gin.Context) {
 	// Log audit event
 	resourceType := "asset"
 	logAuditActivity(c, "asset.created", "asset", "create", &resourceType, &asset.ID, nil, map[string]interface{}{
-		"hostname":   asset.Hostname,
-		"ip_address": asset.IPAddress,
-		"asset_type": asset.AssetType,
-		"status":     asset.AssetStatus,
+		"hostname":  asset.Hostname,
+		"address":   asset.PrimaryAddress,
+		"class_key": asset.ClassKey,
+		"status":    asset.AssetStatus,
 	}, []string{}, map[string]interface{}{
 		"created_via": "manual",
 	})
@@ -685,8 +786,42 @@ func (h *AssetHandler) UpdateAsset(c *gin.Context) {
 		return
 	}
 
-	asset, err := h.assetService.UpdateAsset(tenantUUID, assetID, input)
+	// The actor, when the session has one. An identifier edit is attributable:
+	// "somebody declared this serial" is not an audit trail.
+	var actorUserID uuid.UUID
+	if v, ok := c.Get("userID"); ok {
+		if id, ok := v.(uuid.UUID); ok {
+			actorUserID = id
+		}
+	}
+
+	asset, identifierReport, err := h.assetService.UpdateAsset(tenantUUID, assetID, input, actorUserID)
 	if err != nil {
+		if conflict, ok := services.AsIdentifierConflict(err); ok {
+			// 409, not 400: the request was well-formed and the server
+			// understood it. The answer is that two assets now claim one
+			// identifier, and a human has to say whether they are one thing —
+			// so the proposal that asks them is named here. It was committed
+			// separately and survives this refusal.
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "Identifier already belongs to another asset",
+				"message": fmt.Sprintf(
+					"%s %q is already an identifier of another asset. A merge proposal was opened in Approvals so you can say whether these are the same thing.",
+					conflict.Kind, conflict.Value),
+				"kind":                 conflict.Kind,
+				"value":                conflict.Value,
+				"conflicting_asset_id": conflict.OwnerAssetID.String(),
+				"merge_proposal_id":    conflict.ProposalID.String(),
+			})
+			return
+		}
+		if errors.Is(err, services.ErrIdentifierFloor) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "An asset must keep at least one identifier",
+				"message": "removing these identifiers would leave the asset with none, and it could never be matched again",
+			})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to update asset"})
 		return
 	}
@@ -703,10 +838,10 @@ func (h *AssetHandler) UpdateAsset(c *gin.Context) {
 			newValues["hostname"] = *input.Hostname
 			changedFields = append(changedFields, "hostname")
 		}
-		if input.IPAddress != nil && oldAsset.IPAddress != nil && *input.IPAddress != *oldAsset.IPAddress {
-			oldValues["ip_address"] = *oldAsset.IPAddress
-			newValues["ip_address"] = *input.IPAddress
-			changedFields = append(changedFields, "ip_address")
+		if input.IPAddress != nil && oldAsset.PrimaryAddress != nil && *input.IPAddress != *oldAsset.PrimaryAddress {
+			oldValues["primary_address"] = *oldAsset.PrimaryAddress
+			newValues["primary_address"] = *input.IPAddress
+			changedFields = append(changedFields, "primary_address")
 		}
 		if input.AssetStatus != nil && *input.AssetStatus != oldAsset.AssetStatus {
 			oldValues["asset_status"] = oldAsset.AssetStatus
@@ -718,7 +853,32 @@ func (h *AssetHandler) UpdateAsset(c *gin.Context) {
 
 	logAuditActivity(c, "asset.updated", "asset", "update", &resourceType, &assetID, oldValues, newValues, changedFields, nil)
 
-	c.JSON(http.StatusOK, gin.H{"asset": asset})
+	body := gin.H{"asset": asset}
+	if identifierReport != nil {
+		// Always present, even when empty: a client that has to distinguish
+		// "nothing was kept back" from "this server does not report" would have
+		// to guess, and guessing is how a refused deletion reads as a
+		// successful one.
+		body["identifiers"] = normalizeIdentifierReport(identifierReport)
+	}
+	c.JSON(http.StatusOK, body)
+}
+
+// normalizeIdentifierReport gives the three lists their empty-array form. A
+// null where an array is documented is the difference between "none" and "the
+// server did not say".
+func normalizeIdentifierReport(r *models.IdentifierUpdateReport) *models.IdentifierUpdateReport {
+	out := *r
+	if out.Attached == nil {
+		out.Attached = []models.IdentifierChange{}
+	}
+	if out.Removed == nil {
+		out.Removed = []models.IdentifierChange{}
+	}
+	if out.Kept == nil {
+		out.Kept = []models.IdentifierChange{}
+	}
+	return &out
 }
 
 // UpdateAssetService handles PUT /inventory-service/infrastructure-assets/:id/service (manual service override).
@@ -810,7 +970,7 @@ func (h *AssetHandler) DeleteAsset(c *gin.Context) {
 	oldValues := make(map[string]interface{})
 	if oldAsset != nil {
 		oldValues["hostname"] = oldAsset.Hostname
-		oldValues["ip_address"] = oldAsset.IPAddress
+		oldValues["primary_address"] = oldAsset.PrimaryAddress
 		oldValues["asset_status"] = oldAsset.AssetStatus
 	}
 	logAuditActivity(c, "asset.deleted", "asset", "delete", &resourceType, &assetID, oldValues, nil, []string{"deleted_at"}, nil)
@@ -973,6 +1133,9 @@ func (h *AssetHandler) GetAssetFacets(c *gin.Context) {
 	if err != nil || limit < 1 {
 		limit = 50
 	}
+	if limit > sharedapi.MaxPageSize {
+		limit = sharedapi.MaxPageSize
+	}
 
 	var filters models.AssetFilters
 	if err := c.ShouldBindQuery(&filters); err != nil {
@@ -980,13 +1143,26 @@ func (h *AssetHandler) GetAssetFacets(c *gin.Context) {
 		return
 	}
 
+	// The facets endpoint takes the SAME ?query= the list takes, so the counts
+	// describe the filtered set rather than the whole inventory. A rail whose
+	// numbers do not move when you filter is a rail nobody trusts twice.
 	buckets, err := h.assetService.GetAssetFacets(tenantUUID, filters, level, limit)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to get facets"})
+		if writeQueryError(c, err) {
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Failed to get facets",
+			"message": err.Error(),
+			"levels":  services.AssetFacetLevels(),
+		})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"level": level, "buckets": buckets})
+	response := gin.H{"level": level, "buckets": buckets}
+	addCanonicalQuery(response, filters)
+	addFiltersOutsideTheLanguage(response, filters)
+	c.JSON(http.StatusOK, response)
 }
 
 // GetTenantActivitySummary handles GET /api/v1/inventory-service/tenant/:id/activity-summary
@@ -1008,4 +1184,23 @@ func (h *AssetHandler) GetTenantActivitySummary(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, summary)
+}
+
+// addFiltersOutsideTheLanguage names every honoured filter the canonical
+// `query` echo cannot express.
+//
+// Today that is exactly one: `discovery_source`, which reads pipeline state out
+// of `assets.metadata` rather than a modelled property, so it has no field in
+// the catalogue and cannot appear in the compiled predicate a read echoes back.
+// A caller that trusted the echo as "the query I ran" would be trusting a
+// predicate WIDER than the one that ran.
+//
+// Saying so is the honest interim. The field belongs in the catalogue — a jsonb
+// accessor over `metadata` translates exactly as `attr.*` already does — and
+// when it lands this function should go.
+func addFiltersOutsideTheLanguage(response gin.H, filters models.AssetFilters) {
+	if len(filters.DiscoverySource) == 0 {
+		return
+	}
+	response["filters_applied"] = gin.H{"discovery_source": filters.DiscoverySource}
 }

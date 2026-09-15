@@ -256,6 +256,15 @@ type CBOMLibraryDetails struct {
 // CBOM Component (wraps all asset types)
 // ========================================================================
 
+// CBOMProperty is one name/value statement about a component — the internal
+// mirror of a CycloneDX property. Repeated names are legal (that is how several
+// installed packages are listed under one name), so this is a slice, not a map,
+// and it is kept sorted by (name, value) by whoever builds it.
+type CBOMProperty struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
 // CBOMComponent represents a single cryptographic asset in the bill of materials.
 type CBOMComponent struct {
 	// Unique identifier for this CBOM entry (UUID string).
@@ -292,6 +301,17 @@ type CBOMComponent struct {
 	// CycloneDX dependency references
 	DependsOn []string `json:"depends_on,omitempty"` // bom-refs this component depends on
 	Provides  []string `json:"provides,omitempty"`   // bom-refs this component provides/implements
+
+	// Properties carries the name/value pairs the xBOM kinds state about a
+	// component — class, identifiers, facts, tags (internal/xbom). Unset on the
+	// crypto path, where every field has a typed home in one of the five detail
+	// structs above.
+	//
+	// Its purpose is the COMPARISON: without it a diff of two inventory
+	// snapshots could see only that a component exists, never that its OS
+	// version, its owner or its risk score moved — which is the whole question
+	// an ops user opens a comparison to answer.
+	Properties []CBOMProperty `json:"properties,omitempty"`
 
 	// Source metadata
 	DiscoveredAt time.Time `json:"discovered_at,omitempty"`

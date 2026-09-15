@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { deviceInterrogationComponents } from '@vistasecurity/api-contract';
-import { PageWrap, queryNote, jobMeta, relTime, durationFmt, shortId } from './kit';
+import { PageWrap, queryNote, jobMeta, relTime, durationFmt, shortId, jobTypeLabel } from './kit';
 import { useJobs } from './queries';
 import { JobDetailModal } from './job-detail-modal';
 
@@ -13,6 +13,63 @@ import { JobDetailModal } from './job-detail-modal';
 // discovered.
 
 type Job = deviceInterrogationComponents['schemas']['InterrogationJob'];
+type EnumerationCounts = deviceInterrogationComponents['schemas']['CloudEnumerationCounts'];
+type HostInventoryCounts = deviceInterrogationComponents['schemas']['HostInventoryCounts'];
+
+/**
+ * The enumeration half of a cloud discovery run, as one log-line fragment.
+ *
+ * `undefined` means the run did not enumerate — the integration has it off, or
+ * the job is not a cloud discovery — and the fragment is omitted. All-zero
+ * means it ran and the account was empty, which is a different statement and
+ * says so ("no compute found"). Flattening the two would make "we did not
+ * look" and "there was nothing there" the same line.
+ *
+ * Exported for the unit test: this is the only place the two are told apart.
+ */
+export function enumerationSummary(e: EnumerationCounts | undefined): string | null {
+  if (!e) return null;
+  const count = (n: number, one: string, many: string) => (n === 1 ? `1 ${one}` : `${n} ${many}`);
+  const parts = [
+    e.instances ? count(e.instances, 'instance', 'instances') : null,
+    e.networks ? count(e.networks, 'network', 'networks') : null,
+    e.subnets ? count(e.subnets, 'subnet', 'subnets') : null,
+    e.security_groups ? count(e.security_groups, 'security group', 'security groups') : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(', ') : 'no compute found';
+}
+
+/**
+ * The host-inventory half of a run, as one log-line fragment.
+ *
+ * `undefined` means the job is not a host inventory (or never reached the
+ * consumer) and the fragment is omitted. A run that DID reach it always says
+ * something, even when every number is zero — "collected nothing" is a real
+ * outcome and the line has to be able to report it, because the failure this
+ * whole workstream exists to avoid is a feature that silently does nothing.
+ *
+ * The package count is omitted when the collector's package step FAILED, rather
+ * than rendered as "0 packages": a host whose package database could not be
+ * read has not been enumerated, and saying zero would make the two look alike.
+ *
+ * `contested` leads, because it changes what the rest of the line MEANS: the
+ * numbers describe a pending asset the engine created beside a merge proposal,
+ * not a settled host.
+ *
+ * Exported for the unit test, like enumerationSummary above it.
+ */
+export function hostInventorySummary(h: HostInventoryCounts | undefined): string | null {
+  if (!h) return null;
+  const count = (n: number, one: string, many: string) => (n === 1 ? `1 ${one}` : `${n} ${many}`);
+  const parts = [
+    h.contested ? 'identity contested — merge proposal waiting' : null,
+    h.packages != null ? count(h.packages, 'package', 'packages') : null,
+    h.endpoints ? count(h.endpoints, 'listener', 'listeners') : null,
+    h.facts ? count(h.facts, 'fact', 'facts') : null,
+    h.installs_removed ? `${h.installs_removed} removed` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(', ') : 'collected nothing';
+}
 
 export function LogsPage() {
   const q = useJobs();
@@ -50,8 +107,14 @@ export function LogsPage() {
                     <span className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>{relTime(j.started_at || j.created_at)}</span>
                   </div>
                   <div className="mono" style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {[j.job_type, j.device_name || j.integration_name ? `→ ${j.device_name || j.integration_name}` : null,
-                      j.assets_discovered != null ? `${j.assets_discovered} assets` : null,
+                    {[jobTypeLabel(j.job_type), j.device_name || j.integration_name ? `→ ${j.device_name || j.integration_name}` : null,
+                      // A host inventory reports its own counts instead of
+                      // "N assets": it materialises ONE host, and "1 assets"
+                      // beside 412 packages is the least informative thing the
+                      // line could say.
+                      j.host_inventory ? null : (j.assets_discovered != null ? `${j.assets_discovered} assets` : null),
+                      enumerationSummary(j.enumeration),
+                      hostInventorySummary(j.host_inventory),
                       j.duration_seconds != null ? durationFmt(j.duration_seconds) : null,
                     ].filter(Boolean).join(' · ')}
                   </div>

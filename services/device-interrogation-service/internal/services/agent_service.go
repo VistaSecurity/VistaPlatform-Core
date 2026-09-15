@@ -259,7 +259,8 @@ func (s *AgentService) ListAgents(ctx context.Context, tenantID uuid.UUID) ([]*m
 		SELECT a.id, a.tenant_id, a.name, a.description, a.platform, a.profile, a.version,
 		       a.status, a.ip_address, a.last_heartbeat, a.created_at, a.updated_at,
 		       COALESCE(j.job_count, 0), j.last_job_at,
-		       addr.addresses
+		       addr.addresses,
+		       hi.at, hi.packages, hi.listeners
 		FROM device_agents a
 		LEFT JOIN LATERAL (
 			SELECT COUNT(*) AS job_count,
@@ -267,6 +268,25 @@ func (s *AgentService) ListAgents(ctx context.Context, tenantID uuid.UUID) ([]*m
 			FROM device_jobs dj
 			WHERE dj.agent_id = a.id AND dj.deleted_at IS NULL
 		) j ON TRUE
+		-- The agent's most recent HOST INVENTORY, read from the processing
+		-- summary the consumer wrote onto the job row (workstream 2.11b).
+		--
+		-- Scoped to a job that actually MATERIALISED: a run whose summary has no
+		-- host_inventory block either failed before the consumer ran or predates
+		-- it, and reporting its timestamp as "last host inventory" would tell an
+		-- operator the agent is reporting when it is not. That is the same
+		-- distinction the materialized count draws on the job row itself.
+		LEFT JOIN LATERAL (
+			SELECT COALESCE(dj.completed_at, dj.updated_at) AS at,
+			       (dj.results #>> '{processing,host_inventory,installs_active}')::int AS packages,
+			       (dj.results #>> '{processing,host_inventory,endpoints}')::int   AS listeners
+			FROM device_jobs dj
+			WHERE dj.agent_id = a.id AND dj.deleted_at IS NULL
+			  AND dj.job_type = 'host_inventory'
+			  AND dj.results #> '{processing,host_inventory}' IS NOT NULL
+			ORDER BY COALESCE(dj.completed_at, dj.updated_at) DESC
+			LIMIT 1
+		) hi ON TRUE
 		LEFT JOIN LATERAL (
 			SELECT json_agg(
 				json_build_object(
@@ -305,6 +325,7 @@ func (s *AgentService) ListAgents(ctx context.Context, tenantID uuid.UUID) ([]*m
 				&agent.Profile, &agent.Version, &agent.Status, &agent.IPAddress,
 				&agent.LastHeartbeat, &agent.CreatedAt, &agent.UpdatedAt,
 				&agent.JobCount, &agent.LastJobAt, &addressesJSON,
+				&agent.LastHostInventoryAt, &agent.HostInventoryPackages, &agent.HostInventoryListeners,
 			); scanErr != nil {
 				return fmt.Errorf("failed to scan agent: %w", scanErr)
 			}
@@ -400,7 +421,7 @@ func (s *AgentService) DeleteAgent(ctx context.Context, tenantID, agentID uuid.U
 			return ErrAgentNotFound
 		}
 
-		// Release pending jobs that CAN be re-dispatched. The `device_id IS NOT
+		// Release pending jobs that CAN be re-dispatched. The `asset_id IS NOT
 		// NULL` filter is not defensive padding — it is the device_jobs
 		// `valid_job_assignment` CHECK, which permits an unassigned
 		// device_interrogation job only when it names a device. That constraint is
@@ -412,7 +433,7 @@ func (s *AgentService) DeleteAgent(ctx context.Context, tenantID, agentID uuid.U
 			UPDATE device_jobs
 			SET agent_id = NULL
 			WHERE agent_id = $1 AND tenant_id = $2
-			  AND status = 'pending' AND device_id IS NOT NULL AND deleted_at IS NULL`,
+			  AND status = 'pending' AND asset_id IS NOT NULL AND deleted_at IS NULL`,
 			agentID, tenantID); err != nil {
 			return fmt.Errorf("failed to release pending jobs: %w", err)
 		}
@@ -420,7 +441,7 @@ func (s *AgentService) DeleteAgent(ctx context.Context, tenantID, agentID uuid.U
 		// Everything still pinned to the agent is now unrunnable and must be
 		// failed rather than left to sit:
 		//   - in_progress — the deleted agent will never report a result.
-		//   - pending with no device_id — nothing else can resolve its target
+		//   - pending with no asset_id — nothing else can resolve its target
 		//     (and the CHECK above forbids un-assigning it).
 		// The two get different messages because they are different situations,
 		// and a tenant reading the job list should not have to guess which.
@@ -527,7 +548,7 @@ func (s *AgentService) GetNextJob(ctx context.Context, agentID uuid.UUID) (*mode
 	job := deviceJob.ToJob()
 
 	// Fill in the device's address from the device row before the job leaves
-	// the platform. The in-cluster worker re-reads the device by device_id, so
+	// the platform. The in-cluster worker re-reads the device by asset_id, so
 	// creation paths were free to omit the address and one (the scheduler,
 	// which forwards an operator-stored parameter map verbatim) still can. An
 	// agent has no database and only gets this payload, so the address has to
@@ -619,7 +640,7 @@ func (s *AgentService) enrichJobTarget(ctx context.Context, tenantID uuid.UUID, 
 	if job.Parameters == nil {
 		job.Parameters = map[string]interface{}{}
 	}
-	if job.DeviceID == nil {
+	if job.AssetID == nil {
 		// Nothing to look up — the payload is all there is.
 		if hasAnyTarget(job.Parameters) {
 			return nil
@@ -629,13 +650,15 @@ func (s *AgentService) enrichJobTarget(ctx context.Context, tenantID uuid.UUID, 
 
 	var hostname, ipAddress, managementURL, deviceType sql.NullString
 	err := s.bypassDB.QueryRowContext(ctx,
-		`SELECT hostname, ip_address, management_url, device_type
-		   FROM devices
-		  WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
-		*job.DeviceID, tenantID,
+		`SELECT a.hostname, host(a.primary_address), m.management_url,
+		        a.metadata->>'device_type'
+		   FROM public.assets a
+		   JOIN public.asset_management m ON m.tenant_id = a.tenant_id AND m.asset_id = a.id
+		  WHERE a.id = $1 AND a.tenant_id = $2 AND a.deleted_at IS NULL`,
+		*job.AssetID, tenantID,
 	).Scan(&hostname, &ipAddress, &managementURL, &deviceType)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("device %s not found", *job.DeviceID)
+		return fmt.Errorf("device %s not found", *job.AssetID)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to resolve device address: %w", err)
@@ -751,8 +774,22 @@ func (s *AgentService) SubmitJobResult(ctx context.Context, agentID uuid.UUID, r
 		return fmt.Errorf("failed to update job status: %w", err)
 	}
 
-	// Process results and create discovery findings
-	if result.Success && len(result.Assets) > 0 {
+	// Process results: discovery findings from the crypto assets, and the ops
+	// facts and relationships through the observation sink.
+	//
+	// The gate counts all three. It used to be `len(result.Assets) > 0`, which
+	// was right while an agent result carried nothing else — but a result now
+	// also carries the registered facts and canonical edges the collectors emit
+	// (ADR-0004 D1, ADR-0003), and those arrive whether or not the device
+	// happened to present any cryptography. A switch reporting a full port table
+	// and six LLDP neighbours but no certificate is an ordinary outcome, and
+	// dropping it here would silently make the agent path and the in-cluster
+	// path — which share ObservationSink precisely so they cannot diverge —
+	// persist different things from the same interrogation.
+	//
+	// A result with none of the three is still skipped: there is nothing to
+	// process, and creating a discovery job for it would be noise.
+	if result.Success && (len(result.Assets) > 0 || len(result.Facts) > 0 || len(result.Relationships) > 0) {
 		err = s.resultProcessor.ProcessJobResults(ctx, result.JobID, result)
 		if err != nil {
 			// Log error but don't fail the submission

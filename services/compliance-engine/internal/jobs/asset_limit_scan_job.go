@@ -49,6 +49,22 @@ func assetSeverity(pct float64, warnPercent, highPercent int) string {
 // alert as usage approaches the limit (80% info → 95% high). It auto-resolves
 // when usage falls back below the warn rung or the plan becomes unlimited.
 // One alert per tenant (subject_type=tenant, subject_id=tenant_id).
+//
+// # What counts as one asset
+//
+// One row of `assets`, which since phase 1 is one THING — a host with five
+// listening services is one asset with five asset_endpoints rows, where the
+// retired network_assets table made it five assets and therefore five units of
+// the tenant's cap. The count must never reach through asset_endpoints: joining
+// it would restore the old inflation, and this number is measured against the
+// plan limit that rejects new assets, so inflating it bills a customer for
+// ports. `TestIntegration_AssetLimitScan_CountsHostsNotEndpoints` pins that.
+//
+// It deliberately shares its counting rule with the ENFORCER
+// (shared/services.LimitEnforcementService.countAssets): all live rows,
+// whatever their asset_status. An alert measured against a different number
+// than the gate that rejects an asset is the defect the assetLimit comment
+// below records, pointed at a different column.
 type AssetLimitScanJob struct {
 	db           *sqlx.DB
 	bypassDB     *sqlx.DB
@@ -112,7 +128,7 @@ func (j *AssetLimitScanJob) ScanAll() {
 // open alert still needs a chance to auto-resolve). Cross-tenant — bypass role.
 func (j *AssetLimitScanJob) tenants() ([]uuid.UUID, error) {
 	rows, err := j.bypassDB.Query(`
-		SELECT DISTINCT tenant_id FROM network_assets WHERE deleted_at IS NULL
+		SELECT DISTINCT tenant_id FROM assets WHERE deleted_at IS NULL
 		UNION
 		SELECT DISTINCT tenant_id FROM alerts WHERE alert_type = $1 AND status <> 'resolved'
 	`, assetLimitAlertType)
@@ -164,7 +180,7 @@ func (j *AssetLimitScanJob) scanTenant(ctx context.Context, tenantID uuid.UUID) 
 
 	var used int64
 	if err := j.bypassDB.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND deleted_at IS NULL
+		SELECT COUNT(*) FROM assets WHERE tenant_id = $1 AND deleted_at IS NULL
 	`, tenantID).Scan(&used); err != nil {
 		return fmt.Errorf("count assets: %w", err)
 	}

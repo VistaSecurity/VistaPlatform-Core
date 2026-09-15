@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -39,7 +40,7 @@ const FeatureCBOMSigning = "cbom_signing"
 // in-memory stub, no database required. Keep this in sync with the methods
 // the handlers below actually call.
 type artifactStore interface {
-	List(ctx context.Context, tenantID uuid.UUID, scopeID *uuid.UUID, limit int) ([]Artifact, error)
+	List(ctx context.Context, tenantID uuid.UUID, scopeID *uuid.UUID, kind ArtifactKind, limit int) ([]Artifact, error)
 	Get(ctx context.Context, tenantID, artifactID uuid.UUID) (*Artifact, error)
 	GetInlineContent(ctx context.Context, tenantID, artifactID uuid.UUID) ([]byte, error)
 	SoftDelete(ctx context.Context, tenantID, artifactID uuid.UUID) error
@@ -54,8 +55,21 @@ type scopeGetter interface {
 // cbomBuilder is the build-from-inventory step. *Builder is the production
 // implementation.
 type cbomBuilder interface {
-	Build(ctx context.Context, scope *scopes.Scope, authToken string) (*BuildOutput, error)
+	Build(ctx context.Context, kind ArtifactKind, scope *scopes.Scope, authToken string) (*BuildOutput, error)
 }
+
+// ocsfRenderer projects an inventory artifact's canonical bytes into the OCSF
+// event stream. *xbom.RenderOCSF is the production implementation; it is a
+// function value rather than an interface because there is exactly one method
+// and no state.
+//
+// Unlike the Enterprise ArtifactFormatter this is CORE — a SIEM is where an ops
+// team already looks, and putting the one export that reaches them behind a
+// paywall would make the free edition unusable in the place it has to work. It
+// is injected rather than imported directly only to keep the import graph
+// one-way: xbom already depends on this package for ArtifactKind and
+// BuildOutput.
+type ocsfRenderer func(canonicalBytes []byte) (body []byte, contentType string, err error)
 
 // cbomPersister is the persist-build-to-row step. *Persister is the production
 // implementation.
@@ -77,6 +91,7 @@ type Handler struct {
 	storage        sharedstorage.ArtifactStorageService // optional; used for presigned download URLs
 	signer         Signer                               // Phase 4: nil-tolerant; used by /verify
 	formatter      ArtifactFormatter                    // Enterprise: SPDX/PDF rendering; nil in Core
+	ocsf           ocsfRenderer                         // Core: OCSF event-stream projection; nil disables ?format=ocsf
 	featureChecker featureChecker                       // tenant runtime entitlement gate
 }
 
@@ -119,6 +134,12 @@ func (h *Handler) SetSigner(s Signer) { h.signer = s }
 // which is why the Enterprise implementation is a value type.
 func (h *Handler) SetArtifactFormatter(f ArtifactFormatter) { h.formatter = f }
 
+// SetOCSFRenderer wires the Core OCSF projection used by
+// /download?format=ocsf. Unwired, that format answers 501 — "this deployment
+// cannot render it", which is a wiring fault, not a missing subscription and
+// not a malformed request.
+func (h *Handler) SetOCSFRenderer(r ocsfRenderer) { h.ocsf = r }
+
 // SetFeatureChecker wires the tenant runtime entitlement gate. Leaving it nil
 // fails closed for paid CBOM evidence features; Core artifact generation and
 // CycloneDX download remain available.
@@ -141,6 +162,20 @@ func (h *Handler) generate(c *gin.Context) {
 	var req GenerateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		sharedapi.BadRequest(c, "invalid request body")
+		return
+	}
+
+	// An omitted kind is `cbom` — what this endpoint produced before kinds
+	// existed, so no client changes meaning by not changing. An unknown one is
+	// 400 and names the vocabulary rather than silently defaulting: a typo'd
+	// "sboM" that quietly produced a CBOM would be discovered by an auditor,
+	// not by the person who typed it.
+	kind := req.Kind
+	if kind == "" {
+		kind = KindCBOM
+	}
+	if !kind.IsValid() {
+		sharedapi.BadRequest(c, fmt.Sprintf("kind must be one of: %s", kindVocabulary()))
 		return
 	}
 
@@ -176,17 +211,44 @@ func (h *Handler) generate(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Minute)
 	defer cancel()
 
-	build, err := h.builder.Build(ctx, scope, authToken)
-	var unsupported *UnsupportedPredicateError
-	if errors.As(err, &unsupported) {
-		// 422, not 500: the request and the scope are both well-formed, but the
-		// artifact this deployment would produce is not the one the scope
-		// describes. Producing a wider CBOM and saying nothing is the bug being
-		// fixed, so refusing is the correct answer.
-		c.JSON(http.StatusUnprocessableEntity, gin.H{
-			"error":              unsupported.Error(),
-			"unsupported_fields": unsupported.Fields,
+	build, err := h.builder.Build(ctx, kind, scope, authToken)
+	if errors.Is(err, ErrKindUnavailable) {
+		// 501, not 400 and not 500: the kind is one this build recognises, the
+		// request is well-formed, and the deployment simply has no assembler
+		// wired for it. Reporting it as a client error would send someone to
+		// fix a request that was correct.
+		c.JSON(http.StatusNotImplemented, gin.H{
+			"error": fmt.Sprintf("this deployment cannot generate a %s artifact", kind),
 		})
+		return
+	}
+	var invalidScope *InvalidScopeQueryError
+	if errors.As(err, &invalidScope) {
+		// 422, not 500: the request is well-formed, but the scope's stored
+		// query no longer validates, so the artifact this would produce is not
+		// the one the scope describes. Producing a wider CBOM and saying
+		// nothing is the bug being avoided, so refusing is the correct answer.
+		//
+		// The body carries QUERY_LANGUAGE §10's diagnostics, not a sentence:
+		// the fix is to go and edit the scope, and the person doing that needs
+		// to know WHICH term stopped validating.
+		body := gin.H{"error": invalidScope.Error(), "query": invalidScope.Query}
+		if qe, ok := scopes.AsInvalidQuery(invalidScope); ok {
+			diagnostics := make([]gin.H, 0, len(qe.Errors))
+			for _, e := range qe.Errors {
+				item := gin.H{
+					"code":    string(e.Code),
+					"message": e.Message,
+					"span":    gin.H{"start": e.Span.Start, "end": e.Span.End},
+				}
+				if e.Suggestion != "" {
+					item["suggestion"] = e.Suggestion
+				}
+				diagnostics = append(diagnostics, item)
+			}
+			body["errors"] = diagnostics
+		}
+		c.JSON(http.StatusUnprocessableEntity, body)
 		return
 	}
 	if err != nil {
@@ -247,6 +309,16 @@ func (h *Handler) list(c *gin.Context) {
 		scopeFilter = &parsed
 	}
 
+	// ?kind=. Absent means every kind, not `cbom` — this is one list of the
+	// tenant's artifacts, and defaulting the filter would hide the SBOM someone
+	// just generated behind a filter they never set. An unknown value is 400
+	// rather than "matches nothing", which would read as an empty inventory.
+	kindFilter := ArtifactKind(c.Query("kind"))
+	if kindFilter != "" && !kindFilter.IsValid() {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("kind must be one of: %s", kindVocabulary())})
+		return
+	}
+
 	// ?limit=N, documented in the OpenAPI spec and previously ignored — the
 	// value was hardcoded at 50 with a comment claiming otherwise. Out-of-range
 	// and unparseable values fall back to the default rather than erroring; the
@@ -264,7 +336,7 @@ func (h *Handler) list(c *gin.Context) {
 		limit = parsed
 	}
 
-	artifacts, err := h.repo.List(c.Request.Context(), tenantID, scopeFilter, limit)
+	artifacts, err := h.repo.List(c.Request.Context(), tenantID, scopeFilter, kindFilter, limit)
 	if err != nil {
 		log.Printf("list artifacts: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
@@ -323,7 +395,7 @@ func (h *Handler) download(c *gin.Context) {
 	}
 	format := DownloadFormat(c.DefaultQuery("format", string(FormatCycloneDX)))
 	if !format.IsValid() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "format must be one of: cyclonedx, spdx, pdf"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "format must be one of: cyclonedx, spdx, pdf, ocsf"})
 		return
 	}
 
@@ -362,9 +434,28 @@ func (h *Handler) download(c *gin.Context) {
 		return
 	}
 
+	// Kind compatibility, checked AFTER the edition gate so the two answers
+	// stay distinguishable: 402 is "your deployment/subscription cannot render
+	// this format at all", 400 is "this format is not defined for this kind of
+	// artifact". A Core install asking for SPDX gets the first whatever the
+	// kind is, which is what it got before kinds existed.
+	if msg, ok := formatKindMismatch(format, a.ArtifactKind); !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": msg})
+		return
+	}
+
+	// OCSF is Core but it is a PROJECTION, not the stored bytes — so it falls
+	// through to the byte-loading path below rather than the verbatim/redirect
+	// one. Handled here as its own case because the renderer is Core-wired and
+	// its absence is a 501, not the 402 the Enterprise formats answer with.
+	if format == FormatOCSF && h.ocsf == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "this deployment cannot render the OCSF event stream"})
+		return
+	}
+
 	// CycloneDX serves verbatim. Inline returns bytes directly; storage
 	// returns a presigned redirect (URL strategy is configured server-side).
-	if format.IsCore() {
+	if format.ServesCanonicalBytes() {
 		if a.HasInlineContent {
 			bytes, err := h.repo.GetInlineContent(c.Request.Context(), tenantID, artifactID)
 			if err != nil {
@@ -390,8 +481,9 @@ func (h *Handler) download(c *gin.Context) {
 		return
 	}
 
-	// SPDX + PDF need the bytes server-side to re-render. Read them from inline
-	// content or, for object-stored artifacts, by streaming from storage.
+	// SPDX, PDF and OCSF need the bytes server-side to re-render. Read them
+	// from inline content or, for object-stored artifacts, by streaming from
+	// storage.
 	var bytes []byte
 	if a.HasInlineContent {
 		bytes, err = h.repo.GetInlineContent(c.Request.Context(), tenantID, artifactID)
@@ -413,10 +505,18 @@ func (h *Handler) download(c *gin.Context) {
 			return
 		}
 	}
-	// The renderer owns unmarshalling the canonical document as well as the
-	// projection, so Core carries no knowledge of the alternate formats'
-	// shapes — only their names.
-	body, contentType, err := h.formatter.Render(bytes, string(format))
+	var (
+		body        []byte
+		contentType string
+	)
+	if format == FormatOCSF {
+		body, contentType, err = h.ocsf(bytes)
+	} else {
+		// The renderer owns unmarshalling the canonical document as well as the
+		// projection, so Core carries no knowledge of the alternate formats'
+		// shapes — only their names.
+		body, contentType, err = h.formatter.Render(bytes, string(format))
+	}
 	if err != nil {
 		log.Printf("%s render: %v", format, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
@@ -576,4 +676,53 @@ func (h *Handler) respondCBOMSigningRequired(c *gin.Context) {
 
 func boolPtrTrue(v *bool) bool {
 	return v != nil && *v
+}
+
+// kindVocabulary renders the closed kind set for an error message. Generated
+// from AllArtifactKinds rather than typed out, so a kind added to the constant
+// list cannot be missing from the message that tells a caller what is allowed.
+func kindVocabulary() string {
+	names := make([]string, 0, len(AllArtifactKinds))
+	for _, k := range AllArtifactKinds {
+		names = append(names, string(k))
+	}
+	return strings.Join(names, ", ")
+}
+
+// formatKindMismatch reports whether a download format is defined for an
+// artifact kind, and if not, why.
+//
+// Two rules, in both directions:
+//
+//   - OCSF is defined ONLY for `inventory`. It is a device-and-vulnerability
+//     event stream, and a CBOM, an SBOM and an HBOM have no devices to project.
+//     Serving an empty stream instead would tell a SIEM the tenant has no
+//     assets, which is a far worse answer than a refusal.
+//   - SPDX and PDF are defined ONLY for `cbom`. Both renderers project the
+//     crypto component model — the PDF's sections are certificates, algorithms,
+//     protocols and keys — so pointing them at an inventory snapshot produces a
+//     document that is empty where it matters and says so nowhere.
+//
+// Returning a message rather than an error type: the caller's only job is to
+// put it in a 400 body, and the reason has to reach the person who asked.
+func formatKindMismatch(format DownloadFormat, kind ArtifactKind) (string, bool) {
+	// A row written before the column existed reads back as 'cbom' via the
+	// COALESCE in the repository, so an empty kind here means a caller built an
+	// Artifact by hand. Treat it as cbom rather than refusing every format.
+	if kind == "" {
+		kind = KindCBOM
+	}
+	switch format {
+	case FormatOCSF:
+		if kind != KindInventory {
+			return fmt.Sprintf(
+				"the OCSF event stream is defined for inventory artifacts; this artifact is a %s", kind), false
+		}
+	case FormatSPDX, FormatPDF:
+		if kind != KindCBOM {
+			return fmt.Sprintf(
+				"%s export is defined for cbom artifacts; this artifact is a %s", format, kind), false
+		}
+	}
+	return "", true
 }

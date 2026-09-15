@@ -63,7 +63,19 @@ type ProcessingLog struct {
 	// step failed, and without it the summary would be all-zero and
 	// indistinguishable from "there was nothing to do".
 	Fatal string
-	steps []ProcessingStep
+	// HostInventory is the count block for a host_inventory run (asset-
+	// inventory workstream 2.11b). A host inventory does not produce discovery
+	// findings — it produces one asset, its facts, its endpoints and its
+	// software installs — so the per-stage tallies above are all zero for it
+	// and would report a clean nothing. This block is what the run actually
+	// did, and it OVERRIDES `materialized` and `fully_materialized` so the
+	// headline counts assets rather than findings.
+	//
+	// Nil for every other job type. Nil and a zeroed block are different
+	// answers: nil means this was not a host inventory, a zeroed block means
+	// one ran and landed nothing.
+	HostInventory *HostInventoryCounts
+	steps         []ProcessingStep
 }
 
 func (p *ProcessingLog) record(target, stage, status, detail string) {
@@ -163,6 +175,17 @@ func (p *ProcessingLog) Summary() map[string]interface{} {
 	}
 	if p.Fatal != "" {
 		summary["fatal"] = p.Fatal
+	}
+	if p.HostInventory != nil {
+		summary["host_inventory"] = p.HostInventory
+		// A host inventory materialises ASSETS, not findings. Leaving the
+		// finding-derived headline in place would report `materialized: 0` for
+		// a run that created a host, 412 software installs and 18 endpoints —
+		// which is what the 2.11a hold reported, honestly, because nothing had
+		// been materialised. Saying it again now would be the opposite of
+		// honest.
+		summary["materialized"] = p.HostInventory.Materialized()
+		summary["fully_materialized"] = p.Fatal == "" && p.HostInventory.FullyMaterialized()
 	}
 	return summary
 }

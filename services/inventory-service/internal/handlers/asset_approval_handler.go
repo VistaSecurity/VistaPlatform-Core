@@ -12,7 +12,7 @@ import (
 // *services.AssetService satisfies it in production; the contract test passes an
 // in-memory stub (mirrors cbom-service/scopes' scopeStore pattern).
 type assetApprovalStore interface {
-	ApproveAssets(tenantID uuid.UUID, assetIDs []uuid.UUID) error
+	ApproveAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, actorUserID uuid.UUID) error
 	DenyAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, userID uuid.UUID) error
 }
 
@@ -58,7 +58,7 @@ func (h *AssetApprovalHandler) ApproveAssets(c *gin.Context) {
 		return
 	}
 
-	if err := h.assetService.ApproveAssets(tenantID, ids); err != nil {
+	if err := h.assetService.ApproveAssets(tenantID, ids, approvalActor(c)); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to approve assets"})
 		return
 	}
@@ -135,4 +135,19 @@ func (h *AssetApprovalHandler) DenyAssets(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "assets denied", "count": len(ids)})
+}
+
+// approvalActor is the person deciding, or uuid.Nil when the session carries no
+// user. Nil writes NULL to `asset_history.actor_user_id`, which is the honest
+// value: empty is "no person was involved", not "the system".
+func approvalActor(c *gin.Context) uuid.UUID {
+	v, ok := c.Get("userID")
+	if !ok {
+		return uuid.Nil
+	}
+	id, ok := v.(uuid.UUID)
+	if !ok {
+		return uuid.Nil
+	}
+	return id
 }

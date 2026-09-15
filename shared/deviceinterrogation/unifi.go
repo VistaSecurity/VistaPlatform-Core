@@ -142,30 +142,21 @@ func (c *unifiClient) interrogate(ctx context.Context) (*InterrogateResult, erro
 		site = "default"
 	}
 
-	if devices, err := c.getDevices(ctx, site); err != nil {
-		fmt.Printf("Warning: failed to get devices: %v\n", err)
-	} else {
-		for _, device := range devices {
-			asset := c.convertDeviceToAsset(device, site)
-			if asset.Hostname != "" || asset.IPAddress != "" {
-				result.Assets = append(result.Assets, asset)
-			}
-		}
-	}
-
-	// Synthetic management-interface TLS asset for the controller itself.
-	result.Assets = append(result.Assets, c.getManagementInterfaceAsset())
-
-	// VPN networks (site-to-site IPsec / OpenVPN, WireGuard / OpenVPN / L2TP
-	// remote-user servers) become vpn_gateway assets carrying the API-reported
-	// crypto config.
+	// The site's networks are fetched BEFORE the devices now: they carry the
+	// VLAN tag each network id stands for, which is what turns a port's opaque
+	// `native_networkconf_id` into an interface VLAN (ADR-0004 D1 item 1).
+	var networkConfs []map[string]interface{}
 	if confs, err := c.getNetworkConfs(ctx, site); err != nil {
 		fmt.Printf("Warning: failed to get network configs: %v\n", err)
 	} else {
-		controllerHost, _ := unifiHostPort(c.baseURL)
-		result.Assets = append(result.Assets, unifiVPNAssets(confs, controllerHost)...)
+		networkConfs = confs
 	}
+	vlanByNetworkID := unifiVLANByNetworkID(networkConfs)
 
+	controllerHost, _ := unifiHostPort(c.baseURL)
+
+	// Fetched before the device loop because the controller's display name is
+	// part of how a managed device's member_of edge names its far end.
 	if identity, err := c.getControllerIdentity(ctx, site); err != nil {
 		fmt.Printf("Warning: failed to get controller identity: %v\n", err)
 	} else {
@@ -174,7 +165,52 @@ func (c *unifiClient) interrogate(ctx context.Context) (*InterrogateResult, erro
 		}
 	}
 
+	if devices, err := c.getDevices(ctx, site); err != nil {
+		fmt.Printf("Warning: failed to get devices: %v\n", err)
+	} else {
+		controllerPeer := unifiControllerPeer(controllerHost, result.DeviceInfo)
+		for _, device := range devices {
+			asset := c.convertDeviceToAsset(device, site)
+			if asset.Hostname != "" || asset.IPAddress != "" {
+				result.Assets = append(result.Assets, asset)
+			}
+			// Ops facts and topology for the managed device itself. These are
+			// about the DEVICE, not the controller, which is why they carry a
+			// subject: a switch's port table is not the controller's.
+			unifiEmitDeviceObservations(result, device, controllerPeer, vlanByNetworkID)
+		}
+	}
+
+	// Synthetic management-interface TLS asset for the controller itself.
+	result.Assets = append(result.Assets, c.getManagementInterfaceAsset())
+
+	// VPN networks (site-to-site IPsec / OpenVPN, WireGuard / OpenVPN / L2TP
+	// remote-user servers) become vpn_gateway assets carrying the API-reported
+	// crypto config. Ordinary LAN and VLAN networks — the other ~90% of
+	// this response, filtered away until now — become the controller's
+	// net.vlans fact and, at ingest, the site's segments.
+	result.Assets = append(result.Assets, unifiVPNAssets(networkConfs, controllerHost)...)
+	unifiEmitNetworkFacts(result, networkConfs)
+
+	// The controller's own management plane. Read off the URL we just
+	// authenticated against rather than assumed: a legacy software controller
+	// reached over plain HTTP is exactly the case the plaintext_management
+	// finding exists for, and hardcoding "https" here would hide it.
+	protocol, plaintext := unifiManagementProtocol(c.baseURL)
+	result.addFact(factHWVendor, unifiVendor, ConfidenceDerived)
+	result.addFact(factMgmtProtocol, protocol, ConfidenceReported)
+	result.addFact(factMgmtPlaintext, plaintext, ConfidenceReported)
+
 	return result, nil
+}
+
+// unifiManagementProtocol reports the management protocol and whether it
+// carries credentials in the clear, from the controller base URL.
+func unifiManagementProtocol(baseURL string) (string, bool) {
+	if strings.HasPrefix(strings.ToLower(baseURL), "http://") {
+		return "http", true
+	}
+	return "https", false
 }
 
 // authenticate authenticates with the UniFi controller. It tries the UDM/UDR
@@ -394,6 +430,14 @@ func (c *unifiClient) getSettings(ctx context.Context, site string) ([]map[strin
 // scrub them afterwards. Sanitize (redact.go) remains as a backstop.
 //
 // Add a field here only if something actually reads it.
+//
+// Widened for the ops set (ADR-0004 D1 item 1) with the SCALAR fields below the
+// first group. The nested tables that widening also needs — uplink, port_table,
+// ethernet_table, lldp_table — are deliberately NOT here: they are read through
+// unifiDeviceStructuredFields (unifi_ops.go), which projects each entry onto its
+// own allowlist and emits facts and edges. Adding one here instead would copy a
+// 40-field vendor object per port into asset metadata, which is the original
+// leak one level down.
 var unifiDeviceInventoryFields = []string{
 	"name",         // display name
 	"ip",           // management address
@@ -409,6 +453,9 @@ var unifiDeviceInventoryFields = []string{
 	"model_in_lts",
 	"architecture",
 	"kernel_version",
+
+	// --- ops set (ADR-0004 D1) ---
+	"uptime", // seconds since boot → net.uptime_seconds; a patching signal
 }
 
 // convertDeviceToAsset converts a UniFi managed device to a CryptoAsset,
@@ -538,8 +585,12 @@ func unifiHostPort(baseURL string) (string, int) {
 }
 
 // unifiIdentity derives structured device identity from controller system info.
+//
+// The subject is the CONTROLLER, so the class hint is wireless_controller —
+// what a UDM, a Cloud Key or a software controller is in the taxonomy. The
+// devices it manages get their own hints from their `type` (classhint.go).
 func unifiIdentity(sysInfo map[string]interface{}) *DeviceIdentity {
-	identity := &DeviceIdentity{Vendor: "Ubiquiti"}
+	identity := &DeviceIdentity{Vendor: unifiVendor, ClassHint: unifiControllerClassHint()}
 	if sysInfo == nil {
 		return identity
 	}

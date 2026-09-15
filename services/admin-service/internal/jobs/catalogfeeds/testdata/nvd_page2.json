@@ -1,0 +1,43 @@
+{
+  "resultsPerPage": 1,
+  "startIndex": 2,
+  "totalResults": 3,
+  "vulnerabilities": [
+    {
+      "cve": {
+        "id": "CVE-2022-9999",
+        "published": "2022-11-01T00:00:00.000",
+        "lastModified": "2022-11-02T00:00:00.000",
+        "vulnStatus": "Rejected",
+        "descriptions": [
+          { "lang": "en", "value": "A low-impact issue." }
+        ],
+        "metrics": {
+          "cvssMetricV40": [
+            {
+              "type": "Primary",
+              "cvssData": {
+                "version": "4.0",
+                "vectorString": "CVSS:4.0/AV:L/AC:H/AT:P/PR:H/UI:P/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+                "baseScore": 2.1,
+                "baseSeverity": "LOW"
+              }
+            }
+          ]
+        },
+        "configurations": [
+          {
+            "nodes": [
+              {
+                "cpeMatch": [
+                  { "vulnerable": true, "criteria": "cpe:2.3:a:example:widget:1.0:*:*:*:*:*:*:*" },
+                  { "vulnerable": true, "criteria": "cpe:2.3:a:example:widget:1.0:*:*:*:*:*:*:*" }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

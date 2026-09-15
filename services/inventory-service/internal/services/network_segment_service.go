@@ -5,14 +5,15 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
-	"sort"
 	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/approval"
 	"github.com/vistasecurity/vistaplatform/shared/network"
 )
 
@@ -25,8 +26,15 @@ func NewNetworkSegmentService(db *database.DB, locationService *LocationService)
 	return &NetworkSegmentService{db: db, locationService: locationService}
 }
 
-// GetSegmentForIP returns the first matching active network segment for the given IP/hostname, or nil.
-// CIDR segments are matched first (most specific prefix first), then IP range, then domain.
+// GetSegmentForIP returns the matching active network segment for the given
+// IP/hostname, or nil.
+//
+// The ordering and matching rule lives in shared/network.MatchSegment rather
+// than here: device-interrogation-service asks the same question of the same
+// table when it resolves the scope a managed device's hostname and address
+// identify within (ADR-0002 D3), and two implementations of "which segment is
+// this in" would put one host in two segments and therefore under two
+// identities — the duplication the identification engine exists to end.
 func (s *NetworkSegmentService) GetSegmentForIP(tenantID uuid.UUID, ipAddress *string, hostname *string) (*models.NetworkSegment, error) {
 	var segments []models.NetworkSegment
 	// LEFT JOIN: a segment's location is optional, so an INNER JOIN would silently
@@ -49,53 +57,23 @@ func (s *NetworkSegmentService) GetSegmentForIP(tenantID uuid.UUID, ipAddress *s
 		segments[i].HydrateAutoApproveSources()
 	}
 
-	// Sort so CIDR (by prefix length desc), then ip_range, then domain. Same type keep order.
-	sort.Slice(segments, func(i, j int) bool {
-		if segments[i].SegmentType != segments[j].SegmentType {
-			order := map[string]int{"cidr": 0, "ip_range": 1, "domain": 2, "cloud_vpc": 3}
-			return order[segments[i].SegmentType] < order[segments[j].SegmentType]
-		}
-		if segments[i].SegmentType == "cidr" {
-			_, n1, e1 := net.ParseCIDR(segments[i].Value)
-			_, n2, e2 := net.ParseCIDR(segments[j].Value)
-			if e1 != nil || e2 != nil {
-				return false
-			}
-			m1, _ := n1.Mask.Size()
-			m2, _ := n2.Mask.Size()
-			return m1 > m2 // larger mask = more specific first
-		}
-		return false
-	})
-
-	// Match IP first
-	if ipAddress != nil && *ipAddress != "" {
-		for i := range segments {
-			seg := &segments[i]
-			switch seg.SegmentType {
-			case "cidr":
-				if network.IsIPInCIDR(*ipAddress, seg.Value) {
-					return seg, nil
-				}
-			case "ip_range":
-				start, end, err := network.ParseIPRange(seg.Value)
-				if err == nil && network.IsIPInRange(*ipAddress, start, end) {
-					return seg, nil
-				}
-			}
-		}
+	byID := make(map[string]*models.NetworkSegment, len(segments))
+	candidates := make([]network.Segment, 0, len(segments))
+	for i := range segments {
+		id := segments[i].ID.String()
+		byID[id] = &segments[i]
+		candidates = append(candidates, network.Segment{
+			ID:    id,
+			Type:  segments[i].SegmentType,
+			Value: segments[i].Value,
+		})
 	}
 
-	// Match hostname/domain
-	if hostname != nil && *hostname != "" {
-		for i := range segments {
-			if segments[i].SegmentType == "domain" && network.MatchesDomainPattern(*hostname, segments[i].Value) {
-				return &segments[i], nil
-			}
-		}
+	match, ok := network.MatchSegment(candidates, derefString(ipAddress), derefString(hostname))
+	if !ok {
+		return nil, nil
 	}
-
-	return nil, nil
+	return byID[match.ID], nil
 }
 
 // EnrichAssetFromSegment applies segment context to an asset (environment, location_id, etc.).
@@ -147,14 +125,14 @@ func (s *NetworkSegmentService) EnrichAssetByID(tenantID, assetID uuid.UUID, ipA
 		locName = seg.LocationName
 	}
 	bu := seg.BusinessUnit
-	// RLS-scoped read of current tags + write over network_assets, in one tenant tx.
+	// RLS-scoped read of current tags + write over assets, in one tenant tx.
 	return database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		var currentTags models.JSONB
-		_ = tx.QueryRow(`SELECT tags FROM network_assets WHERE id = $1 AND tenant_id = $2`, assetID, tenantID).Scan(&currentTags)
+		_ = tx.QueryRow(`SELECT tags FROM assets WHERE id = $1 AND tenant_id = $2`, assetID, tenantID).Scan(&currentTags)
 		merged := mergeSegmentTags(currentTags, seg.Tags)
 		tagsVal := toJSONB(merged)
 		_, e := tx.Exec(`
-		UPDATE network_assets SET
+		UPDATE assets SET
 			environment = $1, location_id = COALESCE($2, location_id), network_segment_id = $3,
 			business_unit = COALESCE($4, business_unit), site = COALESCE($5, site), tags = $6, updated_at = NOW()
 		WHERE id = $7 AND tenant_id = $8`,
@@ -480,11 +458,14 @@ func (s *NetworkSegmentService) ReclassifyAllAssets(tenantID uuid.UUID) (int, er
 		IP       sql.NullString
 		Hostname sql.NullString
 	}
-	// RLS-scoped read over network_assets. Materialized up front so the per-asset
+	// RLS-scoped read over assets. Materialized up front so the per-asset
 	// loop below — which opens its own tenant txs via GetSegmentForIP / GetByID — does
 	// not run inside an open cursor on the pool.
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		return tx.Select(&assets, `SELECT id, ip_address as ip, hostname FROM network_assets WHERE tenant_id = $1 AND deleted_at IS NULL`, tenantID)
+		// host(primary_address): the address lives on the endpoints, and
+		// primary_address is the asset-level copy the list queries read.
+		// `ip_address` has not been a column on this table since phase 1.
+		return tx.Select(&assets, `SELECT id, host(primary_address) as ip, hostname FROM assets WHERE tenant_id = $1 AND deleted_at IS NULL`, tenantID)
 	})
 	if err != nil {
 		return 0, err
@@ -512,16 +493,16 @@ func (s *NetworkSegmentService) ReclassifyAllAssets(tenantID uuid.UUID) (int, er
 					locName = &loc.Name
 				}
 			}
-			// RLS-scoped write over network_assets.
+			// RLS-scoped write over assets.
 			err = database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-				_, e := tx.Exec(`UPDATE network_assets SET environment = $1, location_id = COALESCE($2, location_id), network_segment_id = $3, business_unit = COALESCE($4, business_unit), site = COALESCE($5, site), updated_at = NOW() WHERE id = $6 AND tenant_id = $7`,
+				_, e := tx.Exec(`UPDATE assets SET environment = $1, location_id = COALESCE($2, location_id), network_segment_id = $3, business_unit = COALESCE($4, business_unit), site = COALESCE($5, site), updated_at = NOW() WHERE id = $6 AND tenant_id = $7`,
 					seg.Environment, seg.LocationID, seg.ID, seg.BusinessUnit, locName, a.ID, tenantID)
 				return e
 			})
 		} else {
-			// RLS-scoped write over network_assets.
+			// RLS-scoped write over assets.
 			err = database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-				_, e := tx.Exec(`UPDATE network_assets SET environment = NULL, location_id = NULL, network_segment_id = NULL, site = NULL, updated_at = NOW() WHERE id = $1 AND tenant_id = $2`, a.ID, tenantID)
+				_, e := tx.Exec(`UPDATE assets SET environment = NULL, location_id = NULL, network_segment_id = NULL, site = NULL, updated_at = NOW() WHERE id = $1 AND tenant_id = $2`, a.ID, tenantID)
 				return e
 			})
 		}
@@ -571,6 +552,43 @@ func approvalRuleSourceCondition(sources []string) string {
 	}
 }
 
+// segmentApprovalQuery renders a segment's auto-approve settings as a
+// query-language predicate over the `observation` target (QUERY_LANGUAGE §8).
+//
+// It is the whole of what a segment rule says, written out where a person can
+// read it — which is the point of the change. The jsonb object it replaced had
+// the same five conditions, but only this package and the evaluator knew what
+// the keys meant, and nothing told a tenant what their rule actually did.
+//
+// Two mappings worth stating:
+//
+//   - `source: all` becomes NO source term. "Matches any source" is the absence
+//     of a constraint, not a constraint whose value is "all" — and writing it
+//     as a term would need an `all` value in a closed enum that has no such
+//     member.
+//   - `require_network_segment_match: true` collapses into the segment id term:
+//     `network.segment_id=<uuid>` already cannot match an observation with no
+//     segment (§5.2 — an absent value is Unknown). The old object carried both,
+//     and the boolean was redundant the moment the id was present.
+//
+// `require_network_space_match` is dropped outright (§8): network space is a
+// retired concept and the field was vestigial.
+func segmentApprovalQuery(sources []string, networkType, segmentID string) string {
+	terms := make([]string, 0, 3)
+	switch approvalRuleSourceCondition(sources) {
+	case "sensor_discoveries":
+		terms = append(terms, "source:sensor")
+	case "cloud_discovery":
+		terms = append(terms, "source:cloud")
+	}
+	terms = append(terms, "network.ownership:internal")
+	if t := strings.TrimSpace(networkType); t != "" {
+		terms = append(terms, "network.type:"+t)
+	}
+	terms = append(terms, "network.segment_id="+segmentID)
+	return strings.Join(terms, " and ")
+}
+
 // nullableUserID maps uuid.Nil to SQL NULL for created_by-style columns. The zero UUID
 // is what HMAC service-auth requests carry (no real user row exists for it, so inserting
 // it verbatim would fail the users FK).
@@ -590,10 +608,12 @@ func (s *NetworkSegmentService) ManageAutoApprovalRules(tenantID, userID uuid.UU
 	// RLS-scoped reads + writes over discovery_auto_approval_rules and network_segments —
 	// the existing-rules scan, segment list, and per-segment upsert/disable form one unit.
 	return database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		// Get existing rules linked to network segments
-		query := `SELECT id, conditions FROM discovery_auto_approval_rules
-			WHERE tenant_id = $1 AND conditions->>'network_segment_id' IS NOT NULL`
-		rows, err := tx.Query(query, tenantID)
+		// Which rule belongs to which segment is read out of the rule's QUERY,
+		// not out of a jsonb key and not out of a LIKE over the text:
+		// `network.segment_id=X`, `network.segment_id = X` and
+		// `network.segment_id="X"` are one predicate, and a text match would
+		// find one of the three and orphan the rules written the other two ways.
+		rows, err := tx.Query(`SELECT id, query FROM discovery_auto_approval_rules WHERE tenant_id = $1`, tenantID)
 		if err != nil {
 			return fmt.Errorf("failed to query existing rules: %w", err)
 		}
@@ -602,16 +622,12 @@ func (s *NetworkSegmentService) ManageAutoApprovalRules(tenantID, userID uuid.UU
 		existingRules := make(map[string]uuid.UUID) // segment_id -> rule_id
 		for rows.Next() {
 			var ruleID uuid.UUID
-			var conditionsJSON []byte
-			if err := rows.Scan(&ruleID, &conditionsJSON); err != nil {
+			var ruleQuery string
+			if err := rows.Scan(&ruleID, &ruleQuery); err != nil {
 				continue
 			}
-			var conditions map[string]interface{}
-			if err := json.Unmarshal(conditionsJSON, &conditions); err != nil {
-				continue
-			}
-			if segID, ok := conditions["network_segment_id"].(string); ok {
-				existingRules[segID] = ruleID
+			if segID, ok := approval.SegmentIDFromQuery(ruleQuery); ok {
+				existingRules[segID.String()] = ruleID
 			}
 		}
 		if err := rows.Close(); err != nil {
@@ -631,15 +647,15 @@ func (s *NetworkSegmentService) ManageAutoApprovalRules(tenantID, userID uuid.UU
 
 			if seg.AutoApproveDiscoveries {
 				sources := models.AutoApproveSourcesFromMetadata(seg.Metadata)
-				conditions := map[string]interface{}{
-					"source":                        approvalRuleSourceCondition(sources),
-					"network_ownership":             "internal",
-					"network_type":                  seg.NetworkType,
-					"require_network_segment_match": true,
-					"network_segment_id":            segIDStr,
-				}
-				conditionsJSON, err := json.Marshal(conditions)
+				ruleQuery, err := approval.ValidateRuleQuery(
+					segmentApprovalQuery(sources, seg.NetworkType, segIDStr))
 				if err != nil {
+					// The generator produced something the language refuses.
+					// That is OUR bug, not the tenant's, and writing the rule
+					// anyway would store one that can never be evaluated — so
+					// it is logged loudly and the segment is skipped rather
+					// than left with a rule nothing can read.
+					log.Printf("[NetworkSegmentService] BUG: generated auto-approval query for segment %s does not validate: %v", seg.ID, err)
 					continue
 				}
 				sourceLabel := strings.Join(sources, "+")
@@ -648,16 +664,16 @@ func (s *NetworkSegmentService) ManageAutoApprovalRules(tenantID, userID uuid.UU
 
 				if exists {
 					_, err = tx.Exec(`UPDATE discovery_auto_approval_rules
-						SET name = $1, description = $2, conditions = $3, is_active = $4, updated_at = NOW()
-						WHERE id = $5`, ruleName, ruleDescription, conditionsJSON, seg.IsActive, ruleID)
+						SET name = $1, description = $2, query = $3, is_active = $4, updated_at = NOW()
+						WHERE id = $5`, ruleName, ruleDescription, ruleQuery, seg.IsActive, ruleID)
 					if err != nil {
 						fmt.Printf("Warning: failed to update auto-approval rule for segment %s: %v\n", seg.ID, err)
 					}
 				} else {
 					_, err = tx.Exec(`INSERT INTO discovery_auto_approval_rules
-						(tenant_id, name, description, conditions, is_active, created_by, created_at, updated_at)
+						(tenant_id, name, description, query, is_active, created_by, created_at, updated_at)
 						VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
-						tenantID, ruleName, ruleDescription, conditionsJSON, seg.IsActive, nullableUserID(userID))
+						tenantID, ruleName, ruleDescription, ruleQuery, seg.IsActive, nullableUserID(userID))
 					if err != nil {
 						fmt.Printf("Warning: failed to create auto-approval rule for segment %s: %v\n", seg.ID, err)
 					}
@@ -750,7 +766,15 @@ func (s *NetworkSegmentService) MigrateAutoApprovalRulesToSegments(tenantID uuid
 				continue
 			}
 			var seg models.NetworkSegment
-			if err := tx.Get(&seg, `SELECT id FROM network_segments WHERE tenant_id = $1 AND value = $2`, tenantID, value); err != nil || seg.ID == uuid.Nil {
+			// A CIDR no longer names at most one segment: a cloud subnet's is
+			// scoped to its VPC, so two VPCs sharing a CIDR are two rows and a
+			// bare Get would error with "multiple rows". This migration maps a
+			// legacy network SPACE, which is a LAN concept, so the unscoped row
+			// is the one it means.
+			if err := tx.Get(&seg, `
+				SELECT id FROM network_segments
+				WHERE tenant_id = $1 AND value = $2 AND cloud_network_ref IS NULL
+				ORDER BY created_at LIMIT 1`, tenantID, value); err != nil || seg.ID == uuid.Nil {
 				continue
 			}
 			delete(conditions, "network_space_id")
@@ -863,7 +887,15 @@ func (s *NetworkSegmentService) MigrateFromNetworkSpaces(tenantID uuid.UUID) (in
 			result, e := tx.Exec(`
 			INSERT INTO network_segments (tenant_id, name, segment_type, value, network_type, environment, location_id, description, is_active, auto_approve_discoveries, tags, metadata, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, 'production', $6, $7, $8, $9, $10, $11, NOW(), NOW())
-			ON CONFLICT (tenant_id, value) DO NOTHING`,
+			-- The conflict target is the EXPRESSION the unique index is built
+			-- on. Uniqueness became
+			-- (tenant_id, value, coalesce(cloud_network_ref, '')) when a
+			-- segment gained the cloud network it belongs to (two VPCs may use
+			-- one CIDR), and Postgres cannot infer an index from the bare
+			-- columns any more — it raises "no unique or exclusion constraint
+			-- matching the ON CONFLICT specification", which surfaced here as a
+			-- 500 on classify-asset.
+			ON CONFLICT (tenant_id, value, coalesce(cloud_network_ref, ''::text)) DO NOTHING`,
 				tenantID, sp.Value, segmentType, sp.Value, networkType, locationID, ptrString(sp.Description), sp.IsActive, autoApprove, tags, meta)
 			if e != nil {
 				continue

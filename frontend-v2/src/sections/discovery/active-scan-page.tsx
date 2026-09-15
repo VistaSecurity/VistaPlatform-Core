@@ -5,6 +5,7 @@ import { clients } from '../../lib/clients';
 import { Icon } from '../../components/ui';
 import { DTable, CellMono, CellTxt, PageWrap, queryNote, relTime } from './kit';
 import { useUnscannedAssets } from './queries';
+import { assetIdentity, classLabel, primaryAddressPort } from '../inventory/asset-shape';
 
 // Discovery → Active Scan () — coverage surface for the active inventory:
 // monitoring assets that have never been actively scanned. Run a TLS probe per asset (or
@@ -14,8 +15,8 @@ import { useUnscannedAssets } from './queries';
 
 const COLS = [
   { label: 'Asset', w: '1.4fr' },
-  { label: 'IP', w: '1fr' },
-  { label: 'Type', w: '1fr' },
+  { label: 'Address', w: '1fr' },
+  { label: 'Class', w: '1fr' },
   { label: 'Segment', w: '1fr' },
   { label: 'Status', w: '120px' },
   { label: 'Last seen', w: '100px' },
@@ -70,9 +71,12 @@ export function ActiveScanPage() {
           rowKey={(a) => a.id}
           render={(a) => (
             <>
-              <CellMono v={a.hostname} />
-              <CellMono v={a.ip_address} c="var(--app-t3)" />
-              <CellTxt v={a.asset_type} />
+              <CellMono v={assetIdentity(a).primary} />
+              {/* The PRIMARY ENDPOINT's address and port, or blank. An asset
+                  with no network face has nothing to scan an address on, and
+                  showing a made-up one is what the old `port` column did. */}
+              <CellMono v={primaryAddressPort(a)} c="var(--app-t3)" />
+              <CellTxt v={classLabel(a.class_key)} />
               <CellTxt v={a.network_segment_name || a.business_unit} />
               <CellTxt v={a.asset_status} />
               <CellTxt v={relTime(a.last_seen_at)} c="var(--app-t3)" />

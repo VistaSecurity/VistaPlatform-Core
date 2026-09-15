@@ -13,12 +13,23 @@ import (
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 )
 
+// resultSubmitter is the slice of the API client the executor uses: it posts a
+// finished job result and nothing else.
+//
+// Named as an interface so the executor's dispatch can be driven in a test
+// without a platform to POST to. The alternative — testing each execute*
+// function directly — would leave the `switch job.Type` itself unexercised, and
+// the switch is the wiring that decides whether a job type is handled at all.
+type resultSubmitter interface {
+	SubmitResult(result *models.JobResult) error
+}
+
 // JobExecutor executes device interrogation jobs. The vendor/protocol logic
 // lives in the shared deviceinterrogation core; this executor is a thin agent
 // wrapper that decrypts credentials locally, runs the shared interrogator, and
 // POSTs the results home. The in-cluster platform agent wraps the same core.
 type JobExecutor struct {
-	apiClient   *api.OutboundClient
+	submitter   resultSubmitter
 	config      *config.Config
 	registry    *di.Registry
 	auditLogger *audit.AuditLogger
@@ -27,7 +38,7 @@ type JobExecutor struct {
 // NewJobExecutor creates a new job executor.
 func NewJobExecutor(apiClient *api.OutboundClient, cfg *config.Config) *JobExecutor {
 	return &JobExecutor{
-		apiClient: apiClient,
+		submitter: apiClient,
 		config:    cfg,
 		registry:  di.NewRegistry(),
 	}
@@ -36,7 +47,7 @@ func NewJobExecutor(apiClient *api.OutboundClient, cfg *config.Config) *JobExecu
 // NewJobExecutorWithAudit creates a new job executor with audit logging enabled.
 func NewJobExecutorWithAudit(apiClient *api.OutboundClient, cfg *config.Config, auditLogger *audit.AuditLogger) *JobExecutor {
 	return &JobExecutor{
-		apiClient:   apiClient,
+		submitter:   apiClient,
 		config:      cfg,
 		registry:    di.NewRegistry(),
 		auditLogger: auditLogger,
@@ -50,6 +61,8 @@ func (e *JobExecutor) Execute(job *models.Job) error {
 		return e.executeDeviceInterrogation(job)
 	case "cloud_discovery":
 		return e.executeCloudDiscovery(job)
+	case JobTypeHostInventory:
+		return e.executeHostInventory(job)
 	default:
 		return fmt.Errorf("unknown job type: %s", job.Type)
 	}
@@ -101,15 +114,22 @@ func (e *JobExecutor) executeDeviceInterrogation(job *models.Job) error {
 	assets := convertInterrogateResult(result)
 
 	jobResult := &models.JobResult{
-		JobID:       job.ID,
-		Success:     true,
-		Assets:      assets,
-		Metadata:    result.DeviceInfo,
-		CompletedAt: time.Now(),
+		JobID:   job.ID,
+		Success: true,
+		Assets:  assets,
+		// The ops observations the collectors produced alongside the crypto
+		// assets. They are forwarded verbatim rather than folded into Metadata:
+		// the platform validates each fact key against the registry and each
+		// edge type against the canonical ten, and a blob it has to go fishing
+		// in cannot be validated at all.
+		Facts:         result.Facts,
+		Relationships: result.Relationships,
+		Metadata:      result.DeviceInfo,
+		CompletedAt:   time.Now(),
 	}
 
 	security.ClearCredentials(decryptedCreds)
-	return e.apiClient.SubmitResult(jobResult)
+	return e.submitter.SubmitResult(jobResult)
 }
 
 // executeCloudDiscovery executes a cloud discovery job.
@@ -119,7 +139,7 @@ func (e *JobExecutor) executeCloudDiscovery(job *models.Job) error {
 
 // submitFailure builds and submits a failed JobResult.
 func (e *JobExecutor) submitFailure(job *models.Job, errMsg string) error {
-	return e.apiClient.SubmitResult(&models.JobResult{
+	return e.submitter.SubmitResult(&models.JobResult{
 		JobID:       job.ID,
 		Success:     false,
 		Error:       errMsg,

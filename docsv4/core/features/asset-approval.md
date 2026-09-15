@@ -127,26 +127,234 @@ so rather than presenting one number as if it answered both.
 Review assets awaiting approval:
 
 **UI:** Discovery → Approvals (also reachable from the Inventory page's
-pending-approval banner)
+pending-approval banner, and from **Inventory → Lifecycle → Pending**, which is
+a link to this page rather than a second queue)
 
 **API:** `GET /api/v1/inventory-service/assets?status=pending_approval`
 
-**Information Displayed:**
-- Hostname and IP address
-- Port and protocol
-- **Discovery source** (Sensor, Cloud, or Job) - with filter option
-- **Network ownership** (Internal, 3rd Party, Unknown)
-- **Approval source** (Auto or Manual) - indicates if auto-approved
-- Discovery timestamp
-- Cryptographic details (TLS version, cipher suites, etc.)
-- Risk level
+Approvals is the **single proposal queue**. Everything that wants your decision
+lands here, whatever produced it, and there is no second inbox anywhere in the
+product.
 
-**Filtering Options:**
-- Filter by discovery source: "All Sources", "Discovery Jobs", "Sensor Discoveries", or "Cloud Discoveries"
-- Filter by status: `pending_approval`, `monitoring`, `denied`
-- Filter by network ownership: `internal`, `third_party`, `unknown`
+**Each row shows:**
+- The asset's name, and its primary endpoint's address and port. An asset with
+  no network endpoint — an object store, a declared service — shows a blank
+  address, which is the truth rather than a missing value.
+- Its **class** (Server, Switch, Object storage …), from the class taxonomy
+- Its network segment or business unit
+- Its **source** — see below
+- The platform's confidence, when it recorded one
+- When it was found
 
-**Note:** Cloud-discovered assets (from AWS, Azure, GCP) now appear in the Discovery Approvals modal alongside sensor-discovered assets, providing a unified approval workflow for all automatically processed discoveries.
+Each row also has an **open-page** button, so you can look at the whole asset
+before deciding.
+
+#### The source filter
+
+The chips above the queue filter by where a row came from:
+
+| Source | What it means |
+|---|---|
+| **Discovered** | A sensor or scan observed this on the network. |
+| **Imported** | It came in through the spreadsheet import. |
+| **Pulled from CMDB** | It came from a connected CMDB. |
+| **Proposed by matcher** | The identification engine thinks two records are one thing — a merge proposal (below). |
+| **Proposed by classifier** | A class was proposed and nothing measured it — either by the classification rules or, where those could not decide, by the learned classifier. The row itself says which. See *Class proposals* below. |
+| **Proposed by assistant** | The AI assistant proposed this. Nothing is applied without a person accepting it. |
+
+Every source is always listed, with its count — including the ones at zero, so
+you can see what the queue is capable of holding and the row does not jump
+around as proposals arrive. Selecting none means *all*.
+
+### 3a. Merge proposals
+
+When a discovery carries identifiers that match an asset you already have, but
+the evidence is not conclusive, the platform does **not** guess. It raises a
+**merge proposal**: a row that asks whether two records are the same physical
+thing.
+
+A proposal shows both candidates side by side, with **the identifiers that
+matched highlighted on each card** — that highlighting is the evidence, and it
+is what lets you answer the question rather than trust a number. Alongside it:
+the platform's confidence, and which producer raised the proposal.
+
+#### How proposals are scored
+
+Each candidate carries a **score** — a percentage bar on its card — and,
+underneath it, **the three signals that moved that score most**, with an arrow
+saying whether each counted for the merge or against it.
+
+The score is a probability, and **50% means "as likely as not"**. It is produced
+by a small model that ships inside the platform: it runs locally, sends nothing
+anywhere, and looks at nothing but comparisons between the two records. The
+signals it weighs are things like:
+
+| Signal | Reads as |
+|---|---|
+| A one-per-asset identifier matches | serial number, cloud resource id, agent id or CMDB sys_id agreeing — the strongest evidence there is |
+| A tenant-unique identifier matches | SSH host key, MAC address or FQDN agreeing |
+| A scope-local identifier matches | hostname or address agreeing — real evidence, but only alongside agreement about *where* |
+| How many kinds agree | one serial is strong and narrow; a MAC, an FQDN and a hostname agreeing is corroboration from several angles |
+| The names are alike | and, separately, whether they differ **only in a trailing number** — `web01` and `web02` are the commonest thing that looks identical and is not |
+| Same or different network segment | every segment has a `db01` |
+| Same or different vendor and model | a disagreement is real evidence of two things |
+| How close in time the sightings are | |
+| Whether two *different kinds* of source agree | a sensor and your CMDB both saying so is not the same as one collector saying it twice |
+
+Three things the score deliberately does **not** do:
+
+- It never decides. The order of the cards and the reasons are what it produces;
+  the decision is yours, unless you set a threshold (below).
+- It never sees key material, raw captures or configuration text — only the
+  comparisons above.
+- A score of **0%** means *nothing scored this pairing*, not "certainly wrong".
+  An unscored candidate simply shows no bar.
+
+#### Letting a high score settle it
+
+Under **Settings → Policies → Identification rules** you can set an
+**auto-accept threshold**: a score at or above it is accepted without asking you.
+
+The default is **Never**, and that is not a low bar — it is off. No score
+bypasses it.
+
+**The threshold applies to every sighting**, whichever way it reached us —
+discovery, imports, SBOM uploads, passively observed hosts, device
+interrogation, cloud collectors, and the neighbours an interrogated device
+reports. One host seen two ways is one question, so which collector happened to
+see it does not change the answer.
+
+> ⚠️ **An auto-accepted merge cannot be undone from the UI today.** The sighting
+> is written into the asset the matcher chose, and putting it back is manual
+> work. Turn this on only once you have watched the proposals the matcher raises
+> and agree with how it ranks them.
+
+Two things are **never** auto-accepted, whatever the score:
+
+- a sighting whose **serial number, cloud resource id, agent id or CMDB sys_id
+  disagrees** with the candidate's. Two different serials are two different
+  machines, and no amount of other agreement changes that;
+- anything involving an asset **still waiting for approval**. Admitting an asset
+  to your inventory and merging two assets are two decisions, and the threshold
+  licenses only the second.
+
+Everything the threshold does is listed on **Discovery → Approvals** under
+**"Auto-merged by the matcher (last 30 days)"**, with the score, the reasons and
+a link to the asset — so you can check its work. That section is absent while
+the threshold is Never, because nothing can have happened.
+
+Two actions:
+
+- **Merge** — the records become one asset. The surviving asset's **History**
+  tab records what was merged into it, so the decision is auditable and the old
+  identity is not lost.
+- **Keep separate** — they stay two assets, and the matcher will not propose
+  this pair again.
+
+Merging needs the same permission as approving an asset.
+
+**Why this exists:** the same machine seen by a sensor, exported from your CMDB
+and typed in by hand should be one row, not three. The platform matches them on
+their identifiers automatically where it can (see
+**Settings → Policies → Identification rules**), and asks you only where it
+genuinely cannot tell.
+
+**Auto-accepted proposals.** If you have set an auto-accept threshold, a
+proposal the matcher settled still appears — marked **Auto-accepted into one**,
+and listed separately under "Auto-merged by the matcher". Its *remaining*
+candidates are still yours to decide: the threshold settled where the sighting
+went, not whether every other candidate is the same thing.
+
+### 3b. Class proposals
+
+Vista Platform works out what a thing **is** from evidence it already collected:
+the manufacturer registered to a device's MAC prefix, the model it stated over
+SNMP or CDP, the services it advertises on the LAN (`_ipp._tcp` means it accepts
+print jobs), the capabilities it advertises over CDP or LLDP, and the management
+API it answered. Those mappings are a curated table your platform administrator
+maintains — not code — so the catalogue grows without waiting for a release.
+
+**For a newly discovered asset, there is nothing extra to do.** The class is
+already on the row when it reaches this queue, and approving the asset approves
+the class with it. The Class column shows what the rules decided.
+
+**A class proposal appears when the rules disagree with an asset you already
+have.** That is a separate question — "this thing you admitted as an unknown
+host looks like a printer" — and the platform will not answer it for you. The
+row shows:
+
+- what the asset is classed as **now**, and what the rules say it is;
+- **which rules matched**, with the pattern each one keyed on and a link to the
+  source the mapping comes from. That link is the point: a rule you cannot check
+  is one you can only rubber-stamp.
+
+Two actions, both needing the same permission as approving an asset:
+
+- **Accept** — the class changes, and the asset's **History** records which rule
+  decided it, so six months later the decision can be traced back to a specific
+  row rather than to "the system".
+- **Reject** — nothing changes, and the same class is **not proposed again** for
+  that asset. Without that, a printer advertising its print service every few
+  minutes would put the same question back in your queue all day.
+
+Three things the platform will not do here:
+
+- **It never changes a class you set yourself.** A class a person chose is never
+  proposed against, at any confidence.
+- **When two rules disagree, it proposes nothing** and shows you both candidates
+  instead. You pick one, or reject both — in which case the *rules* want fixing,
+  and your platform administrator is who does that.
+- **It never guesses.** A device nothing recognises stays `unknown host`, which
+  reads as "we have not worked this out" and invites a look. A confident wrong
+  answer is the one that gets bulk-approved.
+
+#### "Proposed by model"
+
+Some rows are marked **Model** rather than **Rule**, with a probability beside
+them — *proposed by model (P=0.87)*.
+
+That is the **learned classifier**. It only ever speaks where the curated rules
+could not: either no rule recognised the device at all, or two rules disagreed
+and the rules themselves refused to choose. Where a rule has an answer, the rule
+wins and the model is not consulted.
+
+It runs entirely inside your own installation. There is no external service, no
+network call and nothing sent anywhere: the model is a small set of numbers
+shipped inside the software, and it reads only the evidence already on the row —
+the manufacturer a MAC prefix is registered to, which ports are open, what a
+service banner said about itself, which services the device advertises. It never
+sees a hostname, an address or a credential, because none of those is an input
+to the question "what is this".
+
+Because it cannot link you to a source the way a rule can, the row carries its
+**three strongest reasons** instead — "port 9100 is open", "the MAC prefix is
+registered to Hewlett Packard", "it advertises `_scanner._tcp`". Those are not a
+summary of the model's reasoning; they are the arithmetic it actually did.
+
+Four things to know about these rows:
+
+- **They are always proposals.** A model-proposed class is *never* put on an
+  asset, not even a brand-new one. A rule's class arrives already on a newly
+  discovered asset and approving the asset approves it; a model's class waits
+  here for a person, every time.
+- **A low score never reaches you.** The model proposes only at **0.80 or
+  above**. Below that it says nothing and the asset stays `unknown host` — a
+  thin guess in your queue is worse than an honest blank.
+- **It cannot invent a class.** It can only propose a class your classification
+  rules already know about, and on a rules disagreement it can only pick one of
+  the two the rules named.
+- **Accepting records that a model proposed it.** The asset's **History** shows
+  the class came from the model and names the exact version, so a class that
+  later turns out wrong can be traced — the same way a rule-derived one names
+  its rule.
+
+Rejecting works exactly as it does for a rule proposal: nothing changes, and the
+same class is not proposed for that asset again.
+
+Your platform administrator can turn the model off without affecting the
+classification rules at all — the `CLASSIFIER_MODEL_ENABLED` setting. The rules
+go on proposing exactly as before, and nothing is proposed where they cannot
+decide.
 
 ### 4. Approve Assets
 
@@ -236,9 +444,47 @@ Discovery Jobs:
 - `pending_approval` - Awaiting review and approval
 - `monitoring` - Active and being monitored
 - `denied` - Denied and suppressed from rediscovery
-- `archived` - Archived (soft deleted via `deleted_at`)
+- `archived` - Archived (soft deleted via `deleted_at`, or merged into another asset)
 
 **Note:** Assets can also have a `stale_status` of `warning` or `archived` when they haven't been seen recently. See [Asset Lifecycle Management](./asset-lifecycle-management.md) for details.
+
+## Merge proposals
+
+Sometimes the same physical thing is discovered twice — a server seen by a
+sensor on one address and pulled from your cloud account under another, say —
+and the two observations resolve to different assets. When the platform is
+confident they might be one thing but not confident enough to act, it opens a
+**merge proposal** instead of guessing.
+
+Merge proposals appear in **Discovery → Approvals** alongside pending assets.
+Each one shows both candidates side by side with the evidence — the identifiers
+that matched — so you can see *why* it was proposed rather than being asked to
+rubber-stamp it. You have two answers:
+
+- **Merge** — you pick which asset survives; the platform never chooses for you,
+  because merging is not easily undone. Everything the other asset carried moves
+  across: its endpoints, identifiers, crypto configurations, facts, software
+  installs, relationships and its history, so the surviving asset's timeline
+  includes what happened before the merge rather than starting at it. Where both
+  assets had the same endpoint or identifier, they become one, and the earliest
+  first-seen and latest last-seen are kept.
+- **Keep separate** — these are genuinely two things. The proposal is resolved
+  and the newly-discovered asset stays in the pending queue for the ordinary
+  approve/deny decision, because "this is not that" is not the same answer as
+  "this belongs in inventory".
+
+### What happens to the merged-away asset
+
+It is **archived, not deleted**, and its ID keeps working. If a ticket, a
+bookmark, a dashboard or an integration still holds the old ID, looking it up
+returns the asset with `asset_status: archived` and a `merged_into` field naming
+the survivor — a signpost rather than a dead end. Integrations that store asset
+IDs should follow `merged_into` and replace the ID they held; the
+`inventory.lifecycle.asset.merged` event carries the same pair for systems that
+would rather be told than find out on their next read.
+
+Archived assets are outside the default inventory view. To see one, filter for
+it explicitly — `status:archived` in the Inventory search box.
 
 ## Bulk Operations
 
@@ -267,8 +513,11 @@ Deny multiple assets at once:
 
 ## Pending-Approval Banner
 
-The Inventory page shows a banner whenever the tenant has assets awaiting
-approval:
+The Inventory page shows a banner whenever the tenant has anything awaiting
+review — discovered assets, merge proposals, relationship proposals and class
+proposals all count towards it, because Approvals is one queue and a banner that
+counted only part of it would send you to a page with more work on it than the
+number admitted:
 
 **UI:** Inventory (any lens) → "N discovered assets awaiting approval" banner
 with a **Review** button that opens Discovery → Approvals. The infrastructure

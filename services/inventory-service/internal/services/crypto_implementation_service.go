@@ -40,7 +40,7 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 		filters.SortOrder = "desc"
 	}
 
-	// Base query with JOIN to network_assets for asset information
+	// Base query with JOIN to assets for asset information
 	// Also LEFT JOIN to certificates for additional context
 	//
 	// asset_status = 'monitoring' (M-1): matches the default scope every other
@@ -58,11 +58,12 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 			ci.compliance_status, ci.first_discovered_at, ci.last_verified_at,
 			ci.created_at, ci.updated_at, ci.deleted_at,
 			-- Asset information
-			a.hostname as asset_hostname, a.ip_address as asset_ip_address, a.asset_type, a.environment as asset_environment, a.business_unit as asset_business_unit,
+			a.hostname as asset_hostname, COALESCE(host(e.address), host(a.primary_address)) as asset_ip_address, a.class_key, a.environment as asset_environment, a.business_unit as asset_business_unit,
 			-- Certificate information (if present)
 			c.common_name as cert_common_name, c.issuer_dn as cert_issuer_dn
 		FROM crypto_implementations ci
-		INNER JOIN network_assets a ON ci.asset_id = a.id
+		INNER JOIN assets a ON a.tenant_id = ci.tenant_id AND a.id = ci.asset_id
+		LEFT JOIN asset_endpoints e ON e.tenant_id = ci.tenant_id AND e.id = ci.endpoint_id
 		LEFT JOIN certificates c ON ci.certificate_id = c.id
 		WHERE ci.tenant_id = $1 AND ci.deleted_at IS NULL AND a.deleted_at IS NULL AND a.asset_status = 'monitoring'
 	`
@@ -128,20 +129,20 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 
 	if filters.Search != "" {
 		argCount++
-		// ci.protocol is the protocol_type ENUM and a.ip_address is INET. Neither
+		// ci.protocol is the protocol_type ENUM and a.primary_address is INET. Neither
 		// type has an ILIKE (~~*) operator, so a bare `col ILIKE $n` aborts the
 		// whole statement at plan time ("operator does not exist:
 		// protocol_type ~~* unknown" / "inet ~~* unknown") — which 500'd both the
 		// count and the page query for ANY non-empty search on the Configuration
 		// lens. Cast both to text, matching the asset-list search
-		// (asset_query_builder.go, `a.ip_address::text ILIKE`) so the two search
+		// (asset_query_builder.go, `host(a.primary_address) ILIKE`) so the two search
 		// boxes behave identically.
 		whereConditions = append(whereConditions, fmt.Sprintf(`(
 			ci.protocol::text ILIKE $%d
 			OR ci.protocol_version ILIKE $%d
 			OR ci.cipher_suite ILIKE $%d
 			OR a.hostname ILIKE $%d
-			OR a.ip_address::text ILIKE $%d
+			OR host(a.primary_address) ILIKE $%d
 		)`, argCount, argCount, argCount, argCount, argCount))
 		searchPattern := "%" + filters.Search + "%"
 		args = append(args, searchPattern)
@@ -187,7 +188,8 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 	countQuery := `
 		SELECT COUNT(*)
 		FROM crypto_implementations ci
-		INNER JOIN network_assets a ON ci.asset_id = a.id
+		INNER JOIN assets a ON a.tenant_id = ci.tenant_id AND a.id = ci.asset_id
+		LEFT JOIN asset_endpoints e ON e.tenant_id = ci.tenant_id AND e.id = ci.endpoint_id
 		LEFT JOIN certificates c ON ci.certificate_id = c.id
 		WHERE ci.tenant_id = $1 AND ci.deleted_at IS NULL AND a.deleted_at IS NULL AND a.asset_status = 'monitoring'
 	` + whereClause
@@ -224,7 +226,7 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 	offset := (filters.Page - 1) * filters.PageSize
 	query += fmt.Sprintf(" LIMIT %d OFFSET %d", filters.PageSize, offset)
 
-	// RLS-scoped reads over crypto_implementations (JOIN network_assets / certificates)
+	// RLS-scoped reads over crypto_implementations (JOIN assets / certificates)
 	// — count + page run in one tenant tx so app.tenant_id is set for both.
 	var implementations []models.CryptoImplementation
 	txErr := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
@@ -318,7 +320,7 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 				impl.AssetIPAddress = &assetIPAddress.String
 			}
 			if assetType.Valid {
-				impl.AssetType = &assetType.String
+				impl.AssetClassKey = &assetType.String
 			}
 			if assetEnvironment.Valid {
 				impl.AssetEnvironment = &assetEnvironment.String
@@ -383,9 +385,10 @@ func (s *CryptoImplementationService) GetCryptoImplementationByID(tenantID, id u
 			ci.compliance_status, ci.first_discovered_at, ci.last_verified_at,
 			ci.created_at, ci.updated_at, ci.deleted_at,
 			-- Asset information
-			a.hostname as asset_hostname, a.ip_address as asset_ip_address, a.asset_type, a.environment as asset_environment, a.business_unit as asset_business_unit
+			a.hostname as asset_hostname, COALESCE(host(e.address), host(a.primary_address)) as asset_ip_address, a.class_key, a.environment as asset_environment, a.business_unit as asset_business_unit
 		FROM crypto_implementations ci
-		INNER JOIN network_assets a ON ci.asset_id = a.id
+		INNER JOIN assets a ON a.tenant_id = ci.tenant_id AND a.id = ci.asset_id
+		LEFT JOIN asset_endpoints e ON e.tenant_id = ci.tenant_id AND e.id = ci.endpoint_id
 		WHERE ci.id = $1 AND ci.tenant_id = $2 AND ci.deleted_at IS NULL AND a.deleted_at IS NULL
 	`
 
@@ -400,7 +403,7 @@ func (s *CryptoImplementationService) GetCryptoImplementationByID(tenantID, id u
 	// Asset fields
 	var assetHostname, assetIPAddress, assetType, assetEnvironment, assetBusinessUnit sql.NullString
 
-	// RLS-scoped read over crypto_implementations (JOIN network_assets).
+	// RLS-scoped read over crypto_implementations (JOIN assets).
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		return tx.QueryRow(query, id, tenantID).Scan(
 			&impl.ID, &impl.TenantID, &impl.AssetID, &impl.Protocol, &protocolVersion, &cipherSuite,
@@ -470,7 +473,7 @@ func (s *CryptoImplementationService) GetCryptoImplementationByID(tenantID, id u
 		impl.AssetIPAddress = &assetIPAddress.String
 	}
 	if assetType.Valid {
-		impl.AssetType = &assetType.String
+		impl.AssetClassKey = &assetType.String
 	}
 	if assetEnvironment.Valid {
 		impl.AssetEnvironment = &assetEnvironment.String

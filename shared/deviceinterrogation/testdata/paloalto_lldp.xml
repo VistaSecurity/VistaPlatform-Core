@@ -1,0 +1,42 @@
+<!--
+  PAN-OS `show lldp neighbors all`. The neighbours are grouped by the local
+  interface they were seen on.
+
+  <system-description> carries the neighbour's own banner — unbounded vendor
+  text with no reader — and is not bound by the projection. The fixture plants a
+  secret in it so the test can assert it does not survive.
+-->
+<response status="success">
+  <result>
+    <entry>
+      <local-interface>ethernet1/1</local-interface>
+      <lldp-neighbors>
+        <entry>
+          <more-neighbors>no</more-neighbors>
+          <chassis-id>00:1b:17:00:00:01</chassis-id>
+          <chassis-id-type>mac-address</chassis-id-type>
+          <port-id>Gi1/0/24</port-id>
+          <port-id-type>ifname</port-id-type>
+          <port-description>uplink to fw-edge-01</port-description>
+          <system-name>core-sw-1.example.net</system-name>
+          <system-description>Cisco IOS Software, snmp community MUST-NOT-BE-COLLECTED</system-description>
+          <system-capabilities>B,R</system-capabilities>
+          <enabled-capabilities>B,R</enabled-capabilities>
+          <management-address>198.51.100.1</management-address>
+        </entry>
+      </lldp-neighbors>
+    </entry>
+    <entry>
+      <local-interface>ethernet1/2</local-interface>
+      <lldp-neighbors>
+        <entry>
+          <more-neighbors>no</more-neighbors>
+          <chassis-id>00:00:00:00:00:00</chassis-id>
+          <chassis-id-type>mac-address</chassis-id-type>
+          <port-id/>
+          <system-name/>
+        </entry>
+      </lldp-neighbors>
+    </entry>
+  </result>
+</response>

@@ -99,7 +99,7 @@ func (s *HealthMetricsService) GetDeviceHealthMetrics(ctx context.Context, tenan
 			MAX(CASE WHEN status = 'completed' THEN completed_at END) as last_success,
 			MAX(CASE WHEN status = 'failed' THEN completed_at END) as last_failure
 		FROM device_jobs
-		WHERE device_id = $1 
+		WHERE asset_id = $1 
 			AND created_at >= NOW() - INTERVAL '%d hours'
 			AND job_type = 'device_interrogation'
 	`
@@ -107,7 +107,7 @@ func (s *HealthMetricsService) GetDeviceHealthMetrics(ctx context.Context, tenan
 	errorQuery := `
 		SELECT error_message
 		FROM device_jobs
-		WHERE device_id = $1 AND status = 'failed'
+		WHERE asset_id = $1 AND status = 'failed'
 		ORDER BY completed_at DESC
 		LIMIT 1
 	`
@@ -218,14 +218,19 @@ func (s *HealthMetricsService) GetPlatformHealthSummary(ctx context.Context) (*P
 		IntegrationsByProvider: make(map[string]int),
 	}
 
-	// Query device counts
+	// Query device counts.
+	//
+	// "A device" is an asset with management configured (ADR-0002 D5), so the
+	// count is the join, not a table. The deleted_at filter stays on `assets`:
+	// asset_management has no soft delete — unmanaging an asset removes the row.
 	deviceQuery := `
-		SELECT 
+		SELECT
 			COUNT(*) as total,
-			COUNT(CASE WHEN connection_status = 'connected' THEN 1 END) as connected,
-			COUNT(CASE WHEN connection_status IN ('error', 'disconnected') THEN 1 END) as disconnected
-		FROM devices
-		WHERE deleted_at IS NULL
+			COUNT(CASE WHEN m.connection_status = 'connected' THEN 1 END) as connected,
+			COUNT(CASE WHEN m.connection_status IN ('error', 'disconnected') THEN 1 END) as disconnected
+		FROM public.asset_management m
+		JOIN public.assets a ON a.tenant_id = m.tenant_id AND a.id = m.asset_id
+		WHERE a.deleted_at IS NULL
 	`
 	err := s.bypassDB.QueryRowContext(ctx, deviceQuery).Scan(
 		&summary.TotalDevices,
@@ -236,12 +241,16 @@ func (s *HealthMetricsService) GetPlatformHealthSummary(ctx context.Context) (*P
 		return nil, fmt.Errorf("failed to query device counts: %w", err)
 	}
 
-	// Query devices by type
+	// Query devices by type. The interrogation driver lives in the asset's
+	// metadata; an asset managed without one counts as 'unknown' rather than
+	// under an empty key.
 	deviceTypeQuery := `
-		SELECT device_type, COUNT(*) as count
-		FROM devices
-		WHERE deleted_at IS NULL
-		GROUP BY device_type
+		SELECT coalesce(NULLIF(a.metadata->>'device_type', ''), 'unknown') AS device_type,
+		       COUNT(*) as count
+		FROM public.asset_management m
+		JOIN public.assets a ON a.tenant_id = m.tenant_id AND a.id = m.asset_id
+		WHERE a.deleted_at IS NULL
+		GROUP BY 1
 	`
 	rows, err := s.bypassDB.QueryContext(ctx, deviceTypeQuery)
 	if err == nil {
@@ -344,7 +353,7 @@ func (s *HealthMetricsService) GetDeviceHealthTimeline(ctx context.Context, tena
 			COUNT(CASE WHEN status = 'failed' THEN 1 END) as failure_count,
 			COALESCE(AVG(EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000)::int, 0) as avg_duration_ms
 		FROM device_jobs
-		WHERE device_id = $1 
+		WHERE asset_id = $1 
 			AND created_at >= NOW() - INTERVAL '%d hours'
 		GROUP BY bucket
 		ORDER BY bucket
@@ -379,36 +388,27 @@ func (s *HealthMetricsService) GetDeviceHealthTimeline(ctx context.Context, tena
 	return timeline, nil
 }
 
-// RecordConnectionTest records a connection test result, scoped to tenantID
-// (devices is RLS-scoped).
-func (s *HealthMetricsService) RecordConnectionTest(ctx context.Context, tenantID, deviceID uuid.UUID, success bool, latencyMs int, errorMsg string) error {
-	// Update device connection status
+// RecordConnectionTest records a connection test result on the asset's
+// management row, scoped to tenantID.
+func (s *HealthMetricsService) RecordConnectionTest(ctx context.Context, tenantID, assetID uuid.UUID, success bool, latencyMs int, errorMsg string) error {
 	status := "connected"
 	if !success {
 		status = "error"
 	}
-
-	query := `
-		UPDATE devices
-		SET connection_status = $1,
-			last_interrogated_at = NOW(),
-			interrogation_error = $2,
-			updated_at = NOW()
-		WHERE id = $3 AND tenant_id = $4
-	`
-
-	var errPtr *string
-	if errorMsg != "" {
-		errPtr = &errorMsg
+	now := time.Now().UTC()
+	in := managementUpsert{
+		ConnectionStatus:   &status,
+		LastInterrogatedAt: &now,
 	}
-
-	err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		_, e := tx.ExecContext(ctx, query, status, errPtr, deviceID, tenantID)
-		return e
-	})
-	if err != nil {
+	if errorMsg != "" {
+		in.InterrogationError = &errorMsg
+	} else {
+		// A successful test clears the previous failure. Leaving it would show
+		// a connected device with a stale error beside it.
+		in.ClearInterrogationError = true
+	}
+	if err := upsertManagementOwnTx(ctx, s.db, tenantID, assetID, in); err != nil {
 		return fmt.Errorf("failed to record connection test: %w", err)
 	}
-
 	return nil
 }

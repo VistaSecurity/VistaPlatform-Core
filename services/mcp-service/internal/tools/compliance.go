@@ -63,7 +63,17 @@ func registerComplianceTools(s *mcp.Server, d *Deps) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "vistaplatform_get_control_findings",
 		Description: "Drill into one compliance control: its description, rationale, evidence summary by severity, the paginated findings " +
-			"(each tied to a concrete asset) and any active overrides.",
+			"(each tied to a concrete subject) and any active overrides. " +
+			"On an embedded asset, `asset_type` is the asset's CLASS KEY from the class tree (e.g. `server`, " +
+			"`network_device.switch`) — resolve it with vistaplatform_list_asset_classes, and use " +
+			"vistaplatform_get_asset for its identifiers and endpoints. " +
+			"The finding's own `subject_type` is a different field: it says which KIND of object the measurement " +
+			"was taken on (asset or certificate), and `subject_id` is that object's id. A cryptographic-configuration " +
+			"measurement is taken per ASSET; the configurations it was read from are listed in " +
+			"`evidence.crypto_implementation_ids`, so follow those to reach them rather than reading `subject_id` as one. " +
+			"`producer` says which producer judged it; compliance findings also carry `control_id`. " +
+			"A control with no findings is not automatically a pass — check its status, because a control nothing " +
+			"was measured for is NOT ASSESSED.",
 		Annotations: readOnly("Get control findings"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in controlFindingsInput) (*mcp.CallToolResult, any, error) {
 		return d.run(ctx, req, "compliance.read", in, func() (any, error) {

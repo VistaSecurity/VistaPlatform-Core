@@ -238,8 +238,12 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List the tenant's compliance findings
-         * @description Returns a paginated page of the tenant's ACTIVE compliance findings, newest-seen first, with the owning asset joined onto each finding for display (no per-asset N+1). Unlike the per-asset list, suppressed findings are included so a triage surface can show and un-suppress them — narrow with `workflow_status` when they aren't wanted. Added for the frontend-v2 Findings workflow surface ().
+         * List the tenant's findings, from every producer
+         * @description Returns a paginated page of the tenant's ACTIVE findings, newest-seen first, with the subject's display object joined onto each finding (no per-asset N+1). Unlike the per-asset list, suppressed findings are included so a triage surface can show and un-suppress them — narrow with `workflow_status` when they aren't wanted. Added for the frontend-v2 Findings workflow surface ().
+         *
+         *     EVERY producer, not only `compliance`. Narrow with `producer`; read the per-producer tally from `producer_counts`, which is computed under the same filters MINUS the producer one, so a facet's number and the list it leads to describe the same set.
+         *
+         *     `control_id` and `framework_id` are compliance-shaped and narrow to compliance rows by construction — every other producer leaves `control_id` NULL. The framework activation gate likewise applies to compliance rows only: a finding with no control has no framework whose licence could gate it.
          */
         get: operations["listFindings"];
         put?: never;
@@ -279,7 +283,7 @@ export interface paths {
         };
         /**
          * Active findings grouped by framework control (top exposures)
-         * @description Returns active findings aggregated per framework control — worst severity, finding count, affected-asset count, and a per-severity breakdown — ranked worst-severity → count → affected-assets. Backs the Posture "highest-priority exposures" list. Read off the materialized compliance_findings table, so it agrees with the Findings page.
+         * @description Returns active findings aggregated per framework control — worst severity, finding count, affected-asset count, and a per-severity breakdown — ranked worst-severity → count → affected-assets. Backs the Posture "highest-priority exposures" list. Read off the materialized findings, so it agrees with the Findings page.
          */
         get: operations["getFindingsByControl"];
         put?: never;
@@ -351,6 +355,60 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/findings/{id}/remediation/draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Finding UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Draft a remediation plan for a finding (Enterprise)
+         * @description Asks the ADR-0008 Remediator seam to turn the finding's generic remediation guidance into a numbered plan of steps for the thing the finding is actually about. **Nothing is persisted by this call** — accepting a draft is a separate, explicit action (`POST /findings/{id}/remediation/accept`).
+         *
+         *     The response ALWAYS carries a plan. `plan.source` says which kind: `model` is a drafted plan whose every step cites the evidence it relies on, and `guidance` is the finding kind's standard remediation guidance returned verbatim, with `plan.reason` saying why the model did not answer. A guidance plan is a 200, not an error — the page shows that text with or without a model, and "the model could not show its working" is a complete answer rather than a failure of the product.
+         *
+         *     Edition and availability: 402 in Vista Platform Core, which has no remediator at all; 503 in an Enterprise build with no reachable AI_PROVIDER; 403 when the tenant has turned the AI assistant off in Settings → AI assistant. A client asks `GET /api/v1/auth-service/tenant/ai` before offering the button rather than inferring availability from these.
+         */
+        post: operations["draftRemediationPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/findings/{id}/remediation/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Finding UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Accept a drafted remediation plan as a plan item (Enterprise)
+         * @description Persists a plan a PERSON accepted (ADR-0008 D5: a seam proposes, a rule or a human approves). It writes one `remediation_plan_items` row linking the finding to a plan, with the steps rendered into the item's notes and the provenance on the row — `source_kind: inferred`, `source_ref: remediator:<model id>` — beside the accepting user in `added_by`.
+         *
+         *     Give `plan_id` to add to an existing plan, or `title` to create one. The steps are sent back in the body rather than referenced, because the draft was never stored — there is no id to point at — so what is persisted is whatever the client sends.
+         *
+         *     Afterwards it is an ordinary plan item on the Plans page, shown and managed like every other one.
+         */
+        post: operations["acceptRemediationPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/findings/{id}/history": {
         parameters: {
             query?: never;
@@ -381,7 +439,14 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** List the compliance findings for an asset */
+        /**
+         * List the open findings on an asset, from every producer
+         * @description The OPEN findings whose subject is this asset or one of its descendants — its endpoints, the crypto configurations and certificates at those endpoints, its software installs. Most findings are about a certificate or a configuration rather than the host, so an asset-only reading returns almost nothing.
+         *
+         *     "Open" means `detection_state = ACTIVE` AND `workflow_status NOT IN (RESOLVED, SUPPRESSED)`: still detected, and nobody has closed it.
+         *
+         *     Every producer, not only `compliance` — read `producer` on each row to tell them apart. Compliance rows are additionally gated on the tenant having activated the framework their control belongs to; a producer with no control has no such gate.
+         */
         get: operations["getFindingsByAsset"];
         put?: never;
         post?: never;
@@ -767,6 +832,97 @@ export interface paths {
          * @description Marks the tenant's subscription to the given framework as `cancelled`. The license row is preserved (not deleted) so historical references remain valid.
          */
         delete: operations["cancelSubscription"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/custom-policies/draft-controls/availability": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Can this deployment draft controls from a standard?
+         * @description Whether the "Draft from a standard…" action is offered on the Custom Policies page. Deliberately NOT gated on the `custom_policies` entitlement: what it discloses is a property of the deployment (has an operator configured a model provider), not of the tenant or its data, and gating it would put a 402 in the console of every non-Enterprise tenant that opens the page.
+         */
+        get: operations["getCustomPolicyDraftingAvailability"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/custom-policies/{id}/draft-controls": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Platform framework UUID. */
+                id: components["parameters"]["FrameworkId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Draft controls for a custom policy from a pasted standard
+         * @description Sends the pasted text to the configured model behind the provider boundary (redacted, audited) and returns UNPUBLISHED control drafts, each citing the byte span of the pasted text it came from, with measurement rules restricted to this deployment's `measurement_types` catalogue.
+         *
+         *     Nothing is persisted. To accept a draft the client calls `POST /frameworks/tenant/{id}/controls` once per accepted draft with `source_kind: inferred` and `source_ref: author:<model_id>`, then `POST /frameworks/tenant/controls/{id}/measurements` for each of its rules.
+         *
+         *     Gated by the `custom_policies` entitlement (402) and the `compliance.update` permission (403). Additionally refused with **403** when the tenant has turned the AI assistant off in Settings → AI assistant (`GET /api/v1/auth-service/tenant/ai`) — a deliberate refusal, not an outage, and distinct from the 503 a deployment with no provider answers.
+         */
+        post: operations["draftControlsForCustomPolicy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/frameworks/draft-controls/availability": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Can this deployment draft controls from a standard? (platform)
+         * @description The platform-admin plane's copy of the availability question.
+         */
+        get: operations["getAdminDraftingAvailability"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/frameworks/{id}/draft-controls": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Draft controls for a platform framework from a pasted standard
+         * @description As the tenant endpoint, for the shared platform catalogue. Platform-admin only.
+         *
+         *     The framework must be in `draft` status: drafting into a published one would put unreviewed controls where the reconcile worker walks, and every tenant would be scored against them the moment the accept call returned. Publishing IS the approval step (ADR-0008 D3), so it has to still be ahead of the draft. A published framework answers 409.
+         */
+        post: operations["draftControlsForPlatformFramework"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1404,6 +1560,102 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description ADR-0008 D4.1 provenance, carried by every seam output. All four as FIELDS rather than as something a reader infers: a value that crosses a service boundary or lands in a jsonb column must say what produced it, or it arrives indistinguishable from a measured fact. */
+        SeamProvenance: {
+            /**
+             * @description `inferred` for a drafted plan. `declared` for the standard guidance, which is text we wrote by hand into the findings registry — calling that inferred would overstate it exactly as badly as the reverse understates.
+             * @enum {string}
+             */
+            source_kind: "measured" | "imported" | "declared" | "inferred";
+            /** @description The producer: `remediator:model` or `remediator:guidance`. */
+            source_ref: string;
+            /**
+             * Format: double
+             * @description 0 for both kinds. A model is never asked to score itself, and a number we invented would read as a measurement.
+             */
+            confidence: number;
+            /** @description What answered, from the provider's own response. Empty on a guidance plan: no model was involved, and "" is not a model called unknown. */
+            model_id: string;
+        };
+        /** @description What a step rests on. Derived from the step's own text, so the text and the list cannot disagree. */
+        RemediationPlanCitation: {
+            /** @enum {string} */
+            kind: "evidence" | "guidance";
+            /** @description The evidence key, for `kind: evidence`. Absent for `guidance`, which names the finding kind's registry text and needs no reference. */
+            ref?: string;
+        };
+        /** @description One action. Every step carries at least one citation — a step that cited nothing, or that cited an evidence key the finding does not have, was dropped before this response was written (ADR-0008 D4.4, cite or refuse). */
+        RemediationPlanStep: {
+            /** @description 1-based, renumbered over the steps that survived. */
+            order: number;
+            /** @description What to do, with the citation markers inline — `[ev:<key>]` for an evidence key, `[guide]` for the standard guidance. */
+            action: string;
+            rationale?: string;
+            citations?: components["schemas"]["RemediationPlanCitation"][];
+            /** @description True for a step that runs a command, edits a configuration or otherwise changes a system. The platform never performs a step — the seam proposes and never executes (ADR-0008 D1) — so this marks which steps a person carries out rather than checks. */
+            manual: boolean;
+        };
+        /** @description A proposed remediation plan. Nothing here is acted on automatically. */
+        RemediationPlanDraft: {
+            /** @enum {string} */
+            source_kind: "measured" | "imported" | "declared" | "inferred";
+            source_ref: string;
+            /** Format: double */
+            confidence: number;
+            model_id: string;
+            /**
+             * @description `model` is a drafted plan with cited steps. `guidance` is the finding kind's standard remediation guidance, verbatim, with no steps — what a deployment with no model returns and what every failure degrades to.
+             * @enum {string}
+             */
+            source: "model" | "guidance";
+            /** @description One or two sentences for a model plan; the guidance text verbatim for a guidance plan. */
+            summary: string;
+            /** @description Absent or empty on a guidance plan. */
+            steps?: components["schemas"]["RemediationPlanStep"][];
+            /**
+             * @description Why this is a guidance plan. Absent on a model plan. A closed set, because "how often does this degrade, and to what" cannot be counted from free text — and because "no model here" and "the model could not show its working" send a reader to two different places.
+             * @enum {string}
+             */
+            reason?: "no_provider" | "provider_error" | "refused" | "unreadable" | "no_cited_steps";
+            /** @description How many drafted steps were discarded for citing nothing, or for citing evidence the finding does not have. */
+            dropped?: number;
+            /** @description The model hit its output limit, so the plan stops early. A cut-off plan reads exactly like a short one. */
+            truncated?: boolean;
+        };
+        RemediationDraftResponse: {
+            plan: components["schemas"]["RemediationPlanDraft"];
+            provenance: components["schemas"]["SeamProvenance"];
+        };
+        AcceptRemediationPlanStep: {
+            action: string;
+            rationale?: string;
+            manual?: boolean;
+        };
+        /** @description The plan as the user is accepting it. The draft was never persisted, so these steps are whatever the client sends rather than a reference to something the server holds, and the server does not claim otherwise: what the provenance columns record is that a plan was accepted through this path, by this user, against the model this deployment is configured with. The PROVENANCE is the server's — `source_kind` and `source_ref` are not taken from the body. */
+        AcceptRemediationPlanRequest: {
+            /**
+             * Format: uuid
+             * @description An existing plan to add the finding to. Omit to create one from `title`.
+             */
+            plan_id?: string;
+            /** @description Title for a new plan. Required when `plan_id` is absent. */
+            title?: string;
+            /** @description Ignored. Kept so an older client's body still decodes. The row's `source_ref` names the model this deployment is configured with, or `remediator:model` when it pins none — a caller cannot choose it. */
+            model_id?: string;
+            summary?: string;
+            /** @description At least one, and at most as many as this platform's own drafter may propose. A guidance plan has no steps and cannot be accepted here — "Add to plan" is the button for adding a finding without a drafted plan, and accepting one would record our own guidance text as something a model wrote. */
+            steps: components["schemas"]["AcceptRemediationPlanStep"][];
+            /**
+             * @description Echoed from the draft. Only a model plan is acceptable here.
+             * @enum {string}
+             */
+            source?: "model";
+        };
+        AcceptRemediationPlanResponse: {
+            item: components["schemas"]["RemediationPlanItem"];
+            /** Format: uuid */
+            plan_id: string;
+        };
         /** @description A remediation plan (models.RemediationPlan). The listed required fields are always present (including the computed item_count / resolved_count / progress rollups); the rest are `omitempty` and appear only when set. */
         RemediationPlan: {
             /** Format: uuid */
@@ -1474,12 +1726,20 @@ export interface components {
             added_at: string;
             /** Format: uuid */
             added_by: string;
+            /**
+             * @description Where this item's notes came from (ADR-0008 D4.1). Absent for an item added the ordinary way, and for every item created before the column existed — which is NOT backfilled, because saying `declared` would assert that somebody typed it. `inferred` means a person accepted a plan the Remediator seam drafted; `added_by` beside it names that person, which is the other half of D5.
+             * @enum {string}
+             */
+            source_kind?: "measured" | "imported" | "declared" | "inferred";
+            /** @description The producer, when `source_kind` is set: `remediator:<model id>`. */
+            source_ref?: string;
             finding_severity?: string;
             finding_summary?: string;
             finding_workflow_status?: string;
-            finding_asset_type?: string;
+            /** @enum {string} */
+            finding_subject_type?: "asset" | "certificate";
             /** Format: uuid */
-            finding_asset_id?: string;
+            finding_subject_id?: string;
             ticket_status?: string;
             ticket_title?: string;
         };
@@ -1553,18 +1813,46 @@ export interface components {
         OverrideListResponse: {
             overrides: components["schemas"]["Override"][] | null;
         };
-        /** @description A compliance finding (models.ComplianceFinding). The listed required fields are always present; `evidence` is required but nullable (the backing map serializes as null when empty). Every other field is `omitempty` and appears only when set. `control` and `asset` are optional joined objects, left unpinned in this slice. */
+        /**
+         * @description A finding (models.ComplianceFinding), from the one `findings` table every producer writes (ADR-0005 D3).
+         *
+         *     `producer` and `kind` come from standards/findings-registry.yaml and say who judged what — `compliance/control_noncompliant`, `eol/os_end_of_life`, `vulnerability/known_vulnerability`, and so on. Both the org-wide list and the per-asset list return every producer's rows; read `producer` rather than assuming. `subject_type` and `subject_id` name the OBJECT the measurement was taken on — an asset, a certificate, a software install — and replaced the `asset_id`/`asset_type` pair, whose `asset_type` named the measurement KIND rather than the type of the id beside it. A cryptographic-configuration measurement is taken per ASSET; the configurations it was read from are listed in `evidence.crypto_implementation_ids`, which is what a client should link through to reach them.
+         *
+         *     `control_id` is the NULL uuid for every producer but `compliance`: findings_control_id_compliance_only_check confines the column to that producer, and the field is non-optional on the wire. Treat `00000000-0000-0000-0000-000000000000` as "no control", and check `producer` rather than the id. `score` is the finding's contribution to the per-asset risk rollup; it is always 0 for a compliance finding (compliance is scored by the framework score, and counting one control across every asset it touches would swamp the rollup) and is the kind's real contribution for a producer whose `feeds_risk` is true.
+         *
+         *     `severity` is the registry's lowercase ladder — info, low, medium, high, critical — not the old Low/Med/High/Critical.
+         *
+         *     The listed required fields are always present; `evidence` is required but nullable (the backing map serializes as null when empty). Every other field is `omitempty` and appears only when set. `control` is an optional joined object, left unpinned in this slice; `asset` is pinned (FindingAsset) and is the SUBJECT's display object.
+         */
         ComplianceFinding: {
             /** Format: uuid */
             id: string;
             /** Format: uuid */
             tenant_id: string;
+            /** @description Registry producer key — `compliance`, `crypto`, `eol`, `vulnerability`, `configuration`, `hygiene`, `drift`. Not an enum: the registry is the enforcement point (there is no CHECK on the column either), and pinning the list here would make shipping a producer a contract change. */
+            producer: string;
+            /** @description Registry kind key, unique within its producer — `control_noncompliant`, `os_end_of_life`, `known_vulnerability`, … */
+            kind: string;
             /** Format: uuid */
             control_id: string;
-            /** Format: uuid */
-            asset_id: string;
-            asset_type: string;
-            severity: string;
+            /**
+             * Format: uuid
+             * @description The id of the object the measurement was taken on — an `assets.id`, a `certificates.id`, a `software_installs.id`, per `subject_type`.
+             */
+            subject_id: string;
+            /**
+             * @description Which table `subject_id` points at — the subject vocabulary from standards/findings-registry.yaml, whole, because a finding of ANY producer can reach a client here. The `compliance` producer emits `asset` and `certificate`; `eol` emits `asset` (OS and hardware) and `software_install`; `vulnerability` emits `software_install`. `crypto_configuration` is reserved for the configuration producer, which measures a single configuration and carries its id.
+             *
+             *     The enum lists the whole vocabulary rather than the types that have a writer today, so a producer shipping is not a contract change that regenerates both UIs' types.
+             * @enum {string}
+             */
+            subject_type: "asset" | "endpoint" | "certificate" | "key" | "crypto_configuration" | "software_install" | "relationship" | "control" | "framework";
+            /** @description Display name captured at write time. A read still joins for the live name; this is the fallback for a subject whose row has gone. */
+            subject_label?: string;
+            /** @enum {string} */
+            severity: "info" | "low" | "medium" | "high" | "critical";
+            /** @description Contribution to the per-asset risk rollup. Always 0 for a compliance finding (ADR-0005 D4 — the kind's feeds_risk is false). */
+            score: number;
             summary: string;
             evidence: {
                 [key: string]: unknown;
@@ -1600,9 +1888,7 @@ export interface components {
             control?: {
                 [key: string]: unknown;
             };
-            asset?: {
-                [key: string]: unknown;
-            };
+            asset?: components["schemas"]["FindingAsset"];
         };
         /** @description A single change-history entry for a finding (models.ComplianceFindingHistory). */
         ComplianceFindingHistory: {
@@ -1619,12 +1905,47 @@ export interface components {
             new_value?: string;
             change_reason?: string;
         };
-        /** @description Per-severity finding tally within a control group (services.SeverityCounts). */
+        /** @description Per-severity finding tally within a control group (services.SeverityCounts). Keys are the findings registry's lowercase ladder; `med` was renamed `medium` with the table (workstream 3.1), because no other surface in the product ever spelled it `med`. */
         SeverityCounts: {
             critical: number;
             high: number;
-            med: number;
+            medium: number;
             low: number;
+        };
+        /**
+         * @description The object a finding is about, joined onto the finding for display (models.Asset). Which object that is depends on the finding's own `subject_type` (asset / certificate); a certificate resolves to its own identity in `display_name` rather than to a host.
+         *
+         *     Two fields changed meaning when an asset stopped being a listening port (ADR-0002 D1) and the shape is pinned here so the change is visible to clients rather than inferred:
+         *
+         *     `asset_type` is the asset's CLASS KEY (`server`, `network_device`, `managed_database`, …) — a value of the class registry, not of the retired `asset_type` enum. Do not confuse it with the finding's own top-level `subject_type`, which names the KIND of object the finding is about.
+         *
+         *     `port` belongs to an endpoint, and an asset has many. It is populated only where there is a single true answer: for a finding on a crypto configuration, the endpoint that configuration was measured on; for a finding on an asset, the asset's one endpoint if it has exactly one. Otherwise it is null — which says "this asset has several faces", not "no port".
+         *
+         *     `ip_address` follows the same rule and is null rather than substituted when the relevant endpoint is identified by FQDN alone. Every field except `display_name` is always present; most are nullable.
+         */
+        FindingAsset: {
+            /**
+             * Format: uuid
+             * @description The finding's subject id — an asset id or a certificate id.
+             */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            /** @description The ASSET's hostname (assets.hostname), not the endpoint's FQDN. */
+            hostname: string | null;
+            /** @description Bare address, no prefix length. Null when the measured endpoint has no address. */
+            ip_address: string | null;
+            /** @description Null when no single endpoint answers for the finding. Never a sentinel. */
+            port: number | null;
+            /** @description The asset's class key (assets.class_key). */
+            asset_type: string;
+            environment: string | null;
+            /** @description Not populated by the finding readers; serialized as null. */
+            tags: {
+                [key: string]: unknown;
+            } | null;
+            /** @description Set when the finding's subject is not an asset — a certificate's common name (falling back to its subject DN), or a crypto configuration's protocol/version label so two configurations on one host stay distinguishable. */
+            display_name?: string;
         };
         /** @description Active findings aggregated for one framework control (services.FindingsByControlGroup). */
         FindingsByControlGroup: {
@@ -1635,15 +1956,15 @@ export interface components {
             framework_id: string;
             framework_name: string;
             /**
-             * @description Worst severity present in the group.
+             * @description Worst severity present in the group, on the registry ladder.
              * @enum {string}
              */
-            worst_severity: "Critical" | "High" | "Med" | "Low";
+            worst_severity: "info" | "low" | "medium" | "high" | "critical";
             finding_count: number;
-            /** @description COUNT(DISTINCT asset_id) in the group. */
+            /** @description COUNT(DISTINCT subject_id) in the group. */
             affected_assets: number;
             /**
-             * @description What affected_assets is actually counting. "asset" when every finding in the group targets a network asset, "certificate" / "configuration" when every finding targets that other kind (compliance_findings.asset_type), "mixed" otherwise — lets the UI say "N certificates" instead of always "N assets".
+             * @description What affected_assets is actually counting. "asset" when every finding in the group is about an asset, "certificate" / "configuration" when every finding is about that other kind (findings.subject_type), "mixed" otherwise — lets the UI say "N certificates" instead of always "N assets".
              * @enum {string}
              */
             target_kind: "asset" | "certificate" | "configuration" | "mixed";
@@ -1664,15 +1985,19 @@ export interface components {
             resolved_findings: number;
             suppressed_findings: number;
             resurfaced_findings: number;
-            /** @description ACTIVE findings by severity, tenant-wide (no control-join, no limit) — read off the same materialized compliance_findings table as the Findings page, so a dashboard tile built from severity_counts.critical agrees with the Findings page. */
+            /** @description ACTIVE findings by severity, tenant-wide (no control-join, no limit) — read off the same materialized findings as the Findings page, so a dashboard tile built from severity_counts.critical agrees with the Findings page. */
             severity_counts: components["schemas"]["SeverityCounts"];
         };
-        /** @description CURRENT list envelope for GET /findings — `{ "findings": [...], "total": N, "page": P, "page_size": S }`. `total` is the unpaginated count. On an empty/nil result `findings` can serialize as JSON null, so it is typed as a nullable array. Each finding carries the joined `asset` object when the owning asset exists and is not deleted. */
+        /** @description CURRENT list envelope for GET /findings — `{ "findings": [...], "total": N, "page": P, "page_size": S, "producer_counts": {...} }`. `total` is the unpaginated count. On an empty/nil result `findings` can serialize as JSON null, so it is typed as a nullable array. Each finding carries the joined `asset` object when the owning asset exists and is not deleted. */
         FindingListResponse: {
             findings: components["schemas"]["ComplianceFinding"][] | null;
             total: number;
             page: number;
             page_size: number;
+            /** @description Registry producer key -> count of matching ACTIVE findings, under every filter on this request EXCEPT `producer`. A producer with no matching findings is ABSENT rather than zero; a client renders one facet per registered producer and reads a missing key as 0, so a producer that has never written a row still appears. Empty when the tally could not be computed — the findings are the answer and the counts are navigation, so a failed COUNT does not fail the page. */
+            producer_counts: {
+                [key: string]: number;
+            };
         };
         /** @description CURRENT envelope for GET /assets/{assetId}/findings — `{ "findings": [...] }`. On an empty/nil result `findings` can serialize as JSON null, so it is typed as a nullable array. */
         FindingsByAssetResponse: {
@@ -1723,6 +2048,13 @@ export interface components {
             /** @enum {string} */
             baseline_severity: "Low" | "Med" | "High" | "Critical";
             crypto_relevant: boolean;
+            /**
+             * @description ADR-0008 D4.1 provenance: where this control came from. ABSENT means the row predates the column — deliberately distinct from `declared`, because we do not know who wrote a historical control and guessing would invent the fact this field exists to record.
+             * @enum {string}
+             */
+            source_kind?: "measured" | "imported" | "declared" | "inferred";
+            /** @description What produced it, when `source_kind` says something produced it — `author:<model_id>` for a control accepted from the Author seam. Absent for a declared control, which has no reference to give. */
+            source_ref?: string;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
@@ -1794,6 +2126,13 @@ export interface components {
             /** @enum {string} */
             baseline_severity: "Low" | "Med" | "High" | "Critical";
             crypto_relevant: boolean;
+            /**
+             * @description ADR-0008 D4.1 provenance: where this control came from. ABSENT means the row predates the column — deliberately distinct from `declared`, because we do not know who wrote a historical control and guessing would invent the fact this field exists to record.
+             * @enum {string}
+             */
+            source_kind?: "measured" | "imported" | "declared" | "inferred";
+            /** @description What produced it, when `source_kind` says something produced it — `author:<model_id>` for a control accepted from the Author seam. Absent for a declared control, which has no reference to give. */
+            source_ref?: string;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
@@ -1848,6 +2187,13 @@ export interface components {
             /** @enum {string} */
             baseline_severity: "Low" | "Med" | "High" | "Critical";
             crypto_relevant?: boolean;
+            /**
+             * @description Where this control came from. READ ON CREATE ONLY — provenance records origin, and editing a drafted control does not make it a hand-written one. Omitted, it defaults to `declared`. A client accepting an Author-seam draft sends `inferred`.
+             * @enum {string}
+             */
+            source_kind?: "declared" | "inferred";
+            /** @description What produced it, e.g. `author:claude-opus-4`. Create only. */
+            source_ref?: string;
         };
         /** @description Request body for create/update of a control-measurement mapping. */
         ControlMeasurementInput: {
@@ -2002,11 +2348,19 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /**
+         * @description A summarized finding in a batch-evaluate response.
+         *
+         *     `subject_id`/`subject_type` name the object the control failed on — an asset, a certificate or a crypto configuration. They replaced `asset_id`, which called all three an asset; the posture grid groups by this id, and on live data three findings in four are not about an asset.
+         */
         BatchFindingSummary: {
             id: string;
             control_id: string;
-            asset_id: string;
-            severity: string;
+            subject_id: string;
+            /** @enum {string} */
+            subject_type: "asset" | "certificate";
+            /** @enum {string} */
+            severity: "info" | "low" | "medium" | "high" | "critical";
             summary: string;
         };
         BatchControlStatus: {
@@ -2112,11 +2466,103 @@ export interface components {
             /** @enum {string} */
             baseline_severity: "Low" | "Med" | "High" | "Critical";
             crypto_relevant?: boolean;
+            /**
+             * @description Where this control came from. READ ON CREATE ONLY — provenance records origin, and editing a drafted control does not make it a hand-written one. Omitted, it defaults to `declared`. A client accepting an Author-seam draft sends `inferred`.
+             * @enum {string}
+             */
+            source_kind?: "declared" | "inferred";
+            /** @description What produced it, e.g. `author:claude-opus-4`. Create only. */
+            source_ref?: string;
         };
         /** @description Single-control mutation envelope for the admin control endpoints. */
         AdminControlResponse: {
             message?: string;
             control: components["schemas"]["PublishedFrameworkControl"];
+        };
+        /** @description Whether drafting controls from a standard can answer in this process. Three fields rather than a bool because the two "no" answers have different fixes, and an operator who configured a provider and still sees no button needs to know which one they are looking at. */
+        AuthorAvailability: {
+            available: boolean;
+            /**
+             * @description `edition` — this build has no generative author; the seam and its null default are Core, the model clients are Enterprise. `no_provider` — the build has the seam, but `AI_PROVIDER` names nothing reachable. Absent when available.
+             * @enum {string}
+             */
+            reason?: "edition" | "no_provider";
+            /** @description The configured provider name ("none", "anthropic", "openai-compatible"). */
+            provider?: string;
+        };
+        /** @description The pasted text of a standard, or one section of it. */
+        DraftControlsRequest: {
+            /** @description Bounded at 64 KiB. Past that the request is REFUSED rather than truncated: a citation is a byte offset into the text we were given, and silently dropping the second half of a document would leave a reviewer believing a standard was read that was not. */
+            text: string;
+        };
+        /** @description A byte span of the pasted text a draft came from. */
+        DraftCitation: {
+            /** @enum {string} */
+            kind: "standard_span";
+            /** @description `<start>-<end>`, byte offsets into the redacted pasted text. */
+            ref: string;
+            /** @description The passage at those offsets, read out of the server's own copy — never echoed back from the model, which could otherwise quote text that is not in the document. It is what the review UI highlights. */
+            text?: string;
+        };
+        /** @description A drafted measurement rule. The measurement is named by CODE, not by id: a code is stable vocabulary a model can be given and an answer checked against, while a uuid is a per-deployment row id it could only guess at. The client resolves the code against `GET /measurement-types`. */
+        MeasurementDraft: {
+            measurement_type_code: string;
+            /** @enum {string} */
+            rule_type: "threshold" | "presence" | "pattern" | "range";
+            predicate: {
+                [key: string]: unknown;
+            };
+        };
+        /** @description One proposed control. `published` is always false and nothing here has been written: ADR-0008 D5 keeps compliance evaluation free of models — the seam drafts predicates, the engine evaluates them, a human publishes them. */
+        ControlDraft: {
+            /** @enum {string} */
+            source_kind: "inferred";
+            source_ref: string;
+            /** @description Always 0, meaning NO ESTIMATE WAS MADE. A model is never asked to score itself and has no calibrated way to answer if it were; a number here would read beside a drafted control as a measurement of how right it is. The citation is the evidence. */
+            confidence: number;
+            model_id: string;
+            /** @description The identifier the standard uses, suggested rather than assigned. */
+            control_id?: string;
+            title: string;
+            description?: string;
+            /** @enum {string} */
+            severity?: "Low" | "Med" | "High" | "Critical";
+            citations?: components["schemas"]["DraftCitation"][];
+            measurements?: components["schemas"]["MeasurementDraft"][];
+            /** @description Plain-language remarks for the reviewer — a rule that was dropped, a severity the passage did not state, or that this control has no rule and will therefore evaluate to "not assessed" rather than to a pass. Addressed to a human; nothing parses them. */
+            notes?: string[];
+            published: boolean;
+        };
+        /** @description One thing the model produced that was discarded before anyone saw it. */
+        DraftDrop: {
+            /** @enum {string} */
+            reason: "no_citation" | "unresolvable_citation" | "missing_title" | "unknown_measurement_type" | "invalid_predicate" | "over_limit";
+            /**
+             * @description Whether a whole draft was discarded or only one of its rules.
+             * @enum {string}
+             */
+            scope: "control" | "measurement";
+            /** @description The control's title or the measurement code. Model-written text. */
+            subject?: string;
+            detail?: string;
+        };
+        DraftDroppedSummary: {
+            count: number;
+            reasons: components["schemas"]["DraftDrop"][];
+        };
+        DraftControlsResponse: {
+            /**
+             * @description Always `model` — a draft always came from one, because that is the only thing that drafts. On the wire so a UI can label the review panel from the response rather than from having remembered which button it pressed.
+             * @enum {string}
+             */
+            source: "model";
+            model_id: string;
+            drafts: components["schemas"]["ControlDraft"][];
+            dropped: components["schemas"]["DraftDroppedSummary"];
+            /** @description Remarks about the run as a whole. Per-draft notes live on the draft. */
+            notes?: string[];
+            /** @description The model hit its output limit, so this is a partial reading of the text. A client that omitted this would render a short list of drafts that looks exactly like a short standard. */
+            truncated?: boolean;
         };
         /** @description A measurement a control rule can target (the rule-builder catalog). */
         MeasurementType: {
@@ -2127,7 +2573,6 @@ export interface components {
             description?: string;
             /** @enum {string} */
             data_type: "integer" | "string" | "enum" | "date" | "boolean";
-            extraction_query?: string;
             units?: string;
             valid_range?: {
                 [key: string]: unknown;
@@ -2473,6 +2918,13 @@ export interface components {
             /** @description Where the rung came from: `baseline` (product default), `preference` (the tenant's replacement of the baseline), or `policy:<framework name>` (projected from an activated compliance policy's threshold measurement). */
             source: string;
         };
+        /** @description One step of a FIXED ladder (alertcatalog.LadderRung) — a ladder whose boundaries come from a published standard (the CVSS qualitative bands) or from the finding ladder the alert is driven by, rather than from a tenant preference. There is nothing to tune, so the registry declares the whole ladder and the entry carries it verbatim. */
+        AlertCatalogFixedRung: {
+            /** @description The boundary in the detector's own units, as a label a person reads ("CVSS 7.0 or higher"). Free text, deliberately not parseable. */
+            threshold: string;
+            /** @description critical / high / medium / low / info. */
+            severity: string;
+        };
         /** @description The tenant's replacement for a ladder type's baseline rung (alertcatalog map[string]int on the wire — only the `days` key is read; unrecognized keys are ignored, not rejected). */
         AlertCatalogPreferenceRung: {
             /** @description A PUT with days outside 1..3650 is rejected with 400. */
@@ -2511,6 +2963,8 @@ export interface components {
             preference_rung?: components["schemas"]["AlertCatalogPreferenceRung"];
             /** @description Only present for ladder-severity-model entries with a positive baseline_days; the effective ladder after applying the tenant's preference rung and any policy rungs. */
             ladder?: components["schemas"]["AlertCatalogRung"][];
+            /** @description The FIXED ladder, worst-last. Present instead of `ladder` for ladder-severity-model entries whose boundaries are not tenant-tunable (known_vulnerability, end_of_life). An entry never carries both. */
+            rungs?: components["schemas"]["AlertCatalogFixedRung"][];
         };
         /** @description Envelope for GET /alert-catalog — `{ "catalog": [...] }`. `catalog` is always an array, never null. */
         AlertCatalogListResponse: {
@@ -2721,6 +3175,11 @@ export interface components {
         LegacyError: {
             error: string;
         };
+        /** @description Variant returned by `POST /findings/{id}/remediation/draft` when this deployment has the remediator but no reachable model provider. It repeats the finding kind's standard remediation `guidance` beside the error, because that text is the answer without a model and a client that has only this response should still be able to show it. */
+        LegacyErrorWithGuidance: {
+            error: string;
+            guidance?: string;
+        };
         /** @description Variant returned by `GET /frameworks/default` when the tenant row is missing. Carries an extra free-form `details` string alongside the canonical `error` key. Documented separately to keep additionalProperties:false honest. */
         LegacyErrorWithDetails: {
             error: string;
@@ -2813,6 +3272,42 @@ export interface components {
             };
             content: {
                 "application/json": components["schemas"]["LegacyError"];
+            };
+        };
+        /** @description The tenant's subscription does not include this capability. 402 rather than 403 on purpose: the caller is authenticated and authorized, and what is missing is an entitlement — 403 would send an operator to fix RBAC and waste their afternoon. */
+        LegacyPaymentRequired: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["LegacyError"];
+            };
+        };
+        /** @description The model provider is throttling this deployment. */
+        LegacyRateLimited: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["LegacyError"];
+            };
+        };
+        /** @description No drafts, and not because the text contained none: this deployment has no model provider configured, the provider could not be reached or rejected the credential, or its answer could not be read as drafted controls. The `error` string says which, because each has a different fix. Deliberately not a 200 with an empty list, which would read as "the standard states no requirements". */
+        LegacyAuthorUnavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["LegacyError"];
+            };
+        };
+        /** @description No drafted plan, and not because the finding needs nothing done: this deployment has the remediator but no model provider is reachable. Deliberately 503 and not 402 — an operator can fix this one, and the two must not read the same. The body repeats the finding kind's standard `guidance`, so a client that only knows how to render this response still shows the reader something true. */
+        LegacyRemediatorUnavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["LegacyErrorWithGuidance"];
             };
         };
         /** @description Unexpected server error. */
@@ -3413,6 +3908,8 @@ export interface operations {
     listFindings: {
         parameters: {
             query?: {
+                /** @description Registry producer key — `compliance`, `eol`, `vulnerability`, … from standards/findings-registry.yaml. Omit for every producer. An unregistered key is a 400 rather than an empty page, because a filter that reads as applied and is not is worse than an error. */
+                producer?: string;
                 /** @description 1-based page number (default 1). */
                 page?: number;
                 /** @description Page size (default 50, max 200). */
@@ -3429,6 +3926,20 @@ export interface operations {
                 control_id?: string;
                 /** @description Findings on any control of this platform or tenant framework. */
                 framework_id?: string;
+                /**
+                 * @description Narrow to findings about ONE subject, with `subject_id`. The vocabulary is the registry's subject types (`asset`, `endpoint`, `certificate`, `key`, `crypto_configuration`, `software_install`, `relationship`, `control`, `framework`). An unregistered value is a 400.
+                 *
+                 *     `subject_type` and `subject_id` must be supplied TOGETHER. Either one alone is a 400: a lone id could match across subject vocabularies, and a lone type is the producer filter under a worse name. Half-applying it would be a filter that reads as applied and is not.
+                 */
+                subject_type?: "asset" | "endpoint" | "certificate" | "key" | "crypto_configuration" | "software_install" | "relationship" | "control" | "framework";
+                /** @description The subject's id. Requires `subject_type`. */
+                subject_id?: string;
+                /**
+                 * @description Free-text search, applied server-side across the finding's summary, its subject label, its kind with underscores opened out (so `end of life` matches `software_end_of_life`), and the hostname of the asset the finding is on — which for a `software_install` subject is the host the package is installed on, the row's context line. Case-insensitive, substring; `%` and `_` are literal characters, not wildcards.
+                 *
+                 *     It narrows the page AND `total` AND `producer_counts`, because all three are built from one predicate. A client that filtered the rows it had already fetched instead would be searching a page-capped prefix of the stream — a term matching only the 1,200th finding would answer "nothing matches".
+                 */
+                q?: string;
             };
             header?: never;
             path?: never;
@@ -3608,6 +4119,69 @@ export interface operations {
             500: components["responses"]["LegacyServerError"];
         };
     };
+    draftRemediationPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Finding UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The drafted plan, or the standard guidance with a reason. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RemediationDraftResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            402: components["responses"]["LegacyPaymentRequired"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+            503: components["responses"]["LegacyRemediatorUnavailable"];
+        };
+    };
+    acceptRemediationPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Finding UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AcceptRemediationPlanRequest"];
+            };
+        };
+        responses: {
+            /** @description The created plan item and the plan it went into. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AcceptRemediationPlanResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            402: components["responses"]["LegacyPaymentRequired"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
     getFindingHistory: {
         parameters: {
             query?: never;
@@ -3646,7 +4220,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The asset's findings. */
+            /** @description The asset's open findings, worst severity first. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4288,6 +4862,116 @@ export interface operations {
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
             500: components["responses"]["LegacyServerError"];
+        };
+    };
+    getCustomPolicyDraftingAvailability: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The seam's state in this process. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthorAvailability"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+        };
+    };
+    draftControlsForCustomPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Platform framework UUID. */
+                id: components["parameters"]["FrameworkId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DraftControlsRequest"];
+            };
+        };
+        responses: {
+            /** @description The model answered. `drafts` may legitimately be empty — a standard section that states no requirement yields none — and `dropped` says what was discarded and why. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DraftControlsResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            402: components["responses"]["LegacyPaymentRequired"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            429: components["responses"]["LegacyRateLimited"];
+            500: components["responses"]["LegacyServerError"];
+            503: components["responses"]["LegacyAuthorUnavailable"];
+        };
+    };
+    getAdminDraftingAvailability: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The seam's state in this process. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthorAvailability"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+        };
+    };
+    draftControlsForPlatformFramework: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DraftControlsRequest"];
+            };
+        };
+        responses: {
+            /** @description The model answered. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DraftControlsResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
+            429: components["responses"]["LegacyRateLimited"];
+            500: components["responses"]["LegacyServerError"];
+            503: components["responses"]["LegacyAuthorUnavailable"];
         };
     };
     listTenantFrameworks: {

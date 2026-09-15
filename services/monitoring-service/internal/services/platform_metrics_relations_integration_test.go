@@ -1,9 +1,11 @@
 package services
 
 // Guard for B-41: GetTenantStatuses, GetPlatformMetrics and GetTenantMetrics
-// all joined a relation named `assets`. No such relation has ever existed in
-// any commit — the asset spine is `network_assets`, a view over
-// `network_assets_partitioned`.
+// all joined a relation that did not exist in any commit. (The name they used
+// was `assets` at a time when the asset spine was `network_assets`; since
+// phase 1 the spine IS `assets`, so the three queries now name a real table —
+// but the reason they must be exercised against a real database has not
+// changed.)
 //
 // The failure modes differed and both were bad. GetTenantStatuses propagated
 // the error, so GET /admin-service/status/tenants and /tenants/:id answered 500
@@ -16,6 +18,14 @@ package services
 // These tests assert the queries EXECUTE and return the real counts. A test
 // that only asserted "no error" would have passed on a query returning zeros,
 // so the counts are checked too.
+//
+// Since phase 1 they carry a second property. Each seeded host is given
+// several `asset_endpoints` rows, so the exact asset counts below also pin
+// that these are counts of ASSETS — an asset is a host, and its listening
+// services are endpoints of it. A query that lost its COUNT(DISTINCT) (the
+// users join fans every asset out per user) or that reached through
+// asset_endpoints would return a multiple of the right answer, which is the
+// inflation the retired port-as-asset model had.
 //
 // Skips without TEST_DATABASE_URL (nightly test-backend / make
 // test-integration-db).
@@ -30,9 +40,15 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
+// endpointsPerSeededHost is how many faces each seeded host exposes. It is
+// greater than one on purpose: with one endpoint per host, an asset count and
+// an endpoint count are the same number and the counts below prove nothing
+// about which one the query computed.
+const endpointsPerSeededHost = 3
+
 // seedTenantWithAssets creates one tenant, one user and n non-deleted assets
-// (plus one soft-deleted asset, which must NOT be counted), and returns the
-// tenant id.
+// (plus one soft-deleted asset, which must NOT be counted), each with
+// endpointsPerSeededHost endpoints, and returns the tenant id.
 func seedTenantWithAssets(t *testing.T, db *sqlx.DB, liveAssets int) uuid.UUID {
 	t.Helper()
 	tenant := uuid.New()
@@ -50,23 +66,32 @@ func seedTenantWithAssets(t *testing.T, db *sqlx.DB, liveAssets int) uuid.UUID {
 		t.Fatalf("insert user: %v", err)
 	}
 	for i := 0; i < liveAssets; i++ {
+		assetID := uuid.New()
 		if _, err := db.Exec(`
-			INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status,
-			                            last_seen_at, first_discovered_at, created_at, updated_at)
-			VALUES ($1,$2,$3,'server','monitoring',NOW(),NOW(),NOW(),NOW())`,
-			uuid.New(), tenant, slug+"-live.example.test"); err != nil {
+			INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`,
+			assetID, tenant, slug+"-live.example.test"); err != nil {
 			t.Fatalf("insert asset: %v", err)
+		}
+		// Addresses are RFC 5737 TEST-NET-1, reserved for documentation.
+		for f := 0; f < endpointsPerSeededHost; f++ {
+			if _, err := db.Exec(`
+				INSERT INTO asset_endpoints (tenant_id, asset_id, address, port, transport, status)
+				VALUES ($1, $2, '192.0.2.1'::inet, $3, 'tcp', 'active')`,
+				tenant, assetID, 8000+f); err != nil {
+				t.Fatalf("insert endpoint: %v", err)
+			}
 		}
 	}
 	if _, err := db.Exec(`
-		INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status,
-		                            last_seen_at, first_discovered_at, created_at, updated_at, deleted_at)
-		VALUES ($1,$2,$3,'server','monitoring',NOW(),NOW(),NOW(),NOW(),NOW())`,
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at, deleted_at)
+			VALUES ($1, $2, $3, 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW(), NOW())`,
 		uuid.New(), tenant, slug+"-gone.example.test"); err != nil {
 		t.Fatalf("insert deleted asset: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = db.Exec(`DELETE FROM network_assets WHERE tenant_id = $1`, tenant)
+		_, _ = db.Exec(`DELETE FROM asset_endpoints WHERE tenant_id = $1`, tenant)
+		_, _ = db.Exec(`DELETE FROM assets WHERE tenant_id = $1`, tenant)
 		_, _ = db.Exec(`DELETE FROM users WHERE tenant_id = $1`, tenant)
 		_, _ = db.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
 	})
@@ -104,7 +129,9 @@ func TestIntegration_PlatformMetrics_QueriesARealRelation(t *testing.T) {
 	}
 	if tenantMetrics.TotalAssets != 3 {
 		t.Errorf("GetTenantMetrics.TotalAssets = %d, want 3 — the soft-deleted asset "+
-			"must be excluded", tenantMetrics.TotalAssets)
+			"must be excluded, and %d (3 hosts x %d endpoints) would mean the count "+
+			"is measuring endpoints rather than assets",
+			tenantMetrics.TotalAssets, 3*endpointsPerSeededHost, endpointsPerSeededHost)
 	}
 	if tenantMetrics.TotalUsers != 1 {
 		t.Errorf("GetTenantMetrics.TotalUsers = %d, want 1", tenantMetrics.TotalUsers)
@@ -128,7 +155,10 @@ func TestIntegration_TenantStatuses_QueriesARealRelation(t *testing.T) {
 		if s.TenantID == tenant.String() {
 			found = true
 			if s.AssetCount != 2 {
-				t.Errorf("AssetCount = %d, want 2 — the soft-deleted asset must be excluded", s.AssetCount)
+				t.Errorf("AssetCount = %d, want 2 — the soft-deleted asset must be "+
+					"excluded, and %d (2 hosts x %d endpoints) would mean the count "+
+					"is measuring endpoints rather than assets",
+					s.AssetCount, 2*endpointsPerSeededHost, endpointsPerSeededHost)
 			}
 			if s.UserCount != 1 {
 				t.Errorf("UserCount = %d, want 1", s.UserCount)

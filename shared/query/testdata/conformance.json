@@ -1,0 +1,2347 @@
+[
+  {
+    "name": "cheatsheet-equal-loose",
+    "query": "environment:production",
+    "note": "§3: equal, loose (case-insensitive)",
+    "canonical": "environment:production",
+    "ast": {"cmp":{"f":"environment","op":":","v":"production"}},
+    "sql": {"where":"(lower((a.environment)::text) = $1)","arg_count":1,"args":["production"]}
+  },
+  {
+    "name": "cheatsheet-equal-exact",
+    "query": "hostname=\"Web01\"",
+    "note": "§3: equal, exact (case-sensitive)",
+    "canonical": "hostname=Web01",
+    "ast": {"cmp":{"f":"hostname","op":"=","v":"Web01"}},
+    "sql": {"where":"(a.hostname = $1)","arg_count":1,"args":["Web01"]}
+  },
+  {
+    "name": "cheatsheet-equal-exact-alias",
+    "query": "hostname:=\"Web01\"",
+    "note": "§3: ':=' is an accepted alias for '='; canonical form writes '='",
+    "canonical": "hostname=Web01",
+    "ast": {"cmp":{"f":"hostname","op":"=","v":"Web01"}},
+    "sql": {"where":"(a.hostname = $1)","arg_count":1,"args":["Web01"]}
+  },
+  {
+    "name": "cheatsheet-not-equal",
+    "query": "environment != production",
+    "note": "§3: not equal",
+    "canonical": "environment != production",
+    "ast": {"cmp":{"f":"environment","op":"!=","v":"production"}},
+    "sql": {"where":"((a.environment)::text \u003c\u003e $1)","arg_count":1,"args":["production"]}
+  },
+  {
+    "name": "identifier-not-equal-is-not-exists",
+    "query": "id.mac != aa:bb:cc:dd:ee:ff",
+    "note": "S3: an identifier field reads ROWS, so `!=` must negate the whole EXISTS. Pushing it inside gave \"has SOME identifier that is not X\", which every asset with two identifiers satisfies",
+    "canonical": "id.mac != aa:bb:cc:dd:ee:ff",
+    "ast": {"cmp":{"f":"id.mac","op":"!=","v":"aa:bb:cc:dd:ee:ff"}},
+    "sql": {"where":"NOT EXISTS (SELECT 1 FROM asset_identifiers ai1 WHERE ai1.asset_id = a.id AND ai1.kind = $1 AND (ai1.value = $2))","arg_count":2,"args":["mac_address","aa:bb:cc:dd:ee:ff"]}
+  },
+  {
+    "name": "identifier-equal-stays-a-plain-exists",
+    "query": "id.mac:aa:bb:cc:dd:ee:ff",
+    "note": "S3, other polarity: the positive term stays a plain EXISTS",
+    "canonical": "id.mac:aa:bb:cc:dd:ee:ff",
+    "ast": {"cmp":{"f":"id.mac","op":":","v":"aa:bb:cc:dd:ee:ff"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM asset_identifiers ai1 WHERE ai1.asset_id = a.id AND ai1.kind = $1 AND (lower(ai1.value) = $2))","arg_count":2,"args":["mac_address","aa:bb:cc:dd:ee:ff"]}
+  },
+  {
+    "name": "tag-not-equal-is-not-exists",
+    "query": "tag != prod",
+    "note": "S3: the bare tag field matches a key OR a value, so pushing `!=` inside matched any asset with a tag differing in either — that is, almost all of them",
+    "canonical": "tag != prod",
+    "ast": {"cmp":{"f":"tag","op":"!=","v":"prod"}},
+    "sql": {"where":"NOT EXISTS (SELECT 1 FROM jsonb_each_text(a.tags) AS tg1(key, value) WHERE (tg1.key = $1) OR (tg1.value = $2))","arg_count":2,"args":["prod","prod"]}
+  },
+  {
+    "name": "fact-not-equal-stays-scalar",
+    "query": "fact.os.name != linux",
+    "note": "S3, exclusion: a fact is a scalar subquery since §13 A4, so `\u003c\u003e` against it is already right AND stays three-valued, which NOT EXISTS would not be",
+    "canonical": "fact.os.name != linux",
+    "ast": {"cmp":{"f":"fact.os.name","op":"!=","v":"linux"}},
+    "sql": {"where":"((SELECT (af1.value #\u003e\u003e $1::text[]) FROM asset_facts af1 WHERE af1.asset_id = a.id AND af1.key = $6 ORDER BY array_position(ARRAY[$2, $3, $4, $5], af1.source_kind), af1.observed_at DESC LIMIT 1) \u003c\u003e $7)","arg_count":7,"args":["{}","measured","declared","imported","inferred","os.name","linux"]}
+  },
+  {
+    "name": "cheatsheet-compare-number",
+    "query": "risk_score \u003e= 70",
+    "note": "§3: compare",
+    "canonical": "risk_score \u003e= 70",
+    "ast": {"cmp":{"f":"risk_score","op":"\u003e=","v":"70"}},
+    "sql": {"where":"(a.risk_score \u003e= $1)","arg_count":1,"args":[70]}
+  },
+  {
+    "name": "cheatsheet-compare-date",
+    "query": "last_seen \u003c now-14d",
+    "note": "§3: compare; §10 canonicalises the duration to its largest exact unit",
+    "canonical": "last_seen \u003c now-2w",
+    "ast": {"cmp":{"f":"last_seen","op":"\u003c","v":"now-2w"}},
+    "sql": {"where":"(a.last_seen_at \u003c $1)","arg_count":1,"args":["2026-08-28T12:00:00Z"]}
+  },
+  {
+    "name": "cheatsheet-any-of-in",
+    "query": "environment in (production, staging)",
+    "note": "§3: any of",
+    "canonical": "environment in (production, staging)",
+    "ast": {"in":{"f":"environment","v":["production","staging"]}},
+    "sql": {"where":"((lower((a.environment)::text) = $1) OR (lower((a.environment)::text) = $2))","arg_count":2,"args":["production","staging"]}
+  },
+  {
+    "name": "cheatsheet-any-of-group",
+    "query": "environment:(production or staging)",
+    "note": "§3: any of, group form; §7.1 has no group node so it desugars",
+    "canonical": "environment:production or environment:staging",
+    "ast": {"or":[{"cmp":{"f":"environment","op":":","v":"production"}},{"cmp":{"f":"environment","op":":","v":"staging"}}]},
+    "sql": {"where":"((lower((a.environment)::text) = $1) OR (lower((a.environment)::text) = $2))","arg_count":2,"args":["production","staging"]}
+  },
+  {
+    "name": "cheatsheet-none-of-group",
+    "query": "environment:(not production and not staging)",
+    "note": "§13 amendment 3: a value group's \"not\" binds to one value, like the outer grammar's unary, so this is And{Not, Not} and desugars to two negated terms",
+    "canonical": "not environment:production and not environment:staging",
+    "ast": {"and":[{"not":{"cmp":{"f":"environment","op":":","v":"production"}}},{"not":{"cmp":{"f":"environment","op":":","v":"staging"}}}]},
+    "sql": {"where":"(NOT ((lower((a.environment)::text) = $1)) AND NOT ((lower((a.environment)::text) = $2)))","arg_count":2,"args":["production","staging"]}
+  },
+  {
+    "name": "cheatsheet-none-of",
+    "query": "environment not in (production, staging)",
+    "note": "§3: none of",
+    "canonical": "environment not in (production, staging)",
+    "ast": {"in":{"f":"environment","neg":true,"v":["production","staging"]}},
+    "sql": {"where":"NOT ((lower((a.environment)::text) = $1) OR (lower((a.environment)::text) = $2))","arg_count":2,"args":["production","staging"]}
+  },
+  {
+    "name": "cheatsheet-negate-not",
+    "query": "not class:hardware",
+    "note": "§3: negate",
+    "canonical": "not class:hardware",
+    "ast": {"not":{"cmp":{"f":"class","op":":","v":"hardware"}}},
+    "sql": {"where":"NOT ((a.class_path = $1 OR a.class_path LIKE $2))","arg_count":2,"args":["hardware","hardware.%"]}
+  },
+  {
+    "name": "cheatsheet-negate-dash",
+    "query": "-class:hardware",
+    "note": "§3: '-' negation; §10 writes it as 'not'",
+    "canonical": "not class:hardware",
+    "ast": {"not":{"cmp":{"f":"class","op":":","v":"hardware"}}},
+    "sql": {"where":"NOT ((a.class_path = $1 OR a.class_path LIKE $2))","arg_count":2,"args":["hardware","hardware.%"]}
+  },
+  {
+    "name": "cheatsheet-group",
+    "query": "(environment:production or environment:staging) and class:server",
+    "note": "§3: group",
+    "canonical": "(environment:production or environment:staging) and class:server",
+    "ast": {"and":[{"or":[{"cmp":{"f":"environment","op":":","v":"production"}},{"cmp":{"f":"environment","op":":","v":"staging"}}]},{"cmp":{"f":"class","op":":","v":"server"}}]},
+    "sql": {"where":"(((lower((a.environment)::text) = $1) OR (lower((a.environment)::text) = $2)) AND (a.class_path = $3 OR a.class_path LIKE $4))","arg_count":4,"args":["production","staging","hardware.computer.server","hardware.computer.server.%"]}
+  },
+  {
+    "name": "cheatsheet-range",
+    "query": "risk_score:[40 to 69]",
+    "note": "§3: inclusive range",
+    "canonical": "risk_score:[40 to 69]",
+    "ast": {"range":{"f":"risk_score","hi":"69","lo":"40"}},
+    "sql": {"where":"((a.risk_score \u003e= $1) AND (a.risk_score \u003c= $2))","arg_count":2,"args":[40,69]}
+  },
+  {
+    "name": "cheatsheet-wildcard-hostname",
+    "query": "hostname:web-*",
+    "note": "§3: wildcard",
+    "canonical": "hostname:web-*",
+    "ast": {"cmp":{"f":"hostname","op":":","v":"web-*"}},
+    "sql": {"where":"(a.hostname ILIKE $1)","arg_count":1,"args":["web-%"]}
+  },
+  {
+    "name": "cheatsheet-wildcard-identifier",
+    "query": "id.mac:aa:bb:*",
+    "note": "§2: ':' is legal inside a value once the field is consumed",
+    "canonical": "id.mac:aa:bb:*",
+    "ast": {"cmp":{"f":"id.mac","op":":","v":"aa:bb:*"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM asset_identifiers ai1 WHERE ai1.asset_id = a.id AND ai1.kind = $1 AND (ai1.value ILIKE $2))","arg_count":2,"args":["mac_address","aa:bb:%"]}
+  },
+  {
+    "name": "cheatsheet-regex",
+    "query": "hostname ~ \"^web[0-9]{2}\\\\.\"",
+    "note": "§3: RE2 regex",
+    "canonical": "hostname ~ \"^web[0-9]{2}\\\\.\"",
+    "ast": {"match":{"f":"hostname","re":"^web[0-9]{2}\\."}},
+    "sql": {"where":"(a.hostname ~ $1)","arg_count":1,"args":["^web[0-9]{2}\\."]}
+  },
+  {
+    "name": "cheatsheet-exists",
+    "query": "exists(owner_email)",
+    "note": "§3: present at all",
+    "canonical": "exists(owner_email)",
+    "ast": {"exists":{"f":"owner_email"}},
+    "sql": {"where":"(a.owner_email IS NOT NULL)","arg_count":0}
+  },
+  {
+    "name": "cheatsheet-exists-star",
+    "query": "owner_email:*",
+    "note": "§3: the ':*' spelling of present-at-all",
+    "canonical": "owner_email:*",
+    "ast": {"cmp":{"f":"owner_email","op":":","v":"*"}},
+    "sql": {"where":"(a.owner_email IS NOT NULL)","arg_count":0}
+  },
+  {
+    "name": "cheatsheet-free-text",
+    "query": "payroll",
+    "note": "§5.4: name, hostname, identifier values, tag keys and values",
+    "canonical": "payroll",
+    "ast": {"text":"payroll"},
+    "sql": {"where":"(a.display_name ILIKE $1 OR a.hostname ILIKE $1 OR EXISTS (SELECT 1 FROM asset_identifiers ai1 WHERE ai1.asset_id = a.id AND ai1.value ILIKE $1) OR EXISTS (SELECT 1 FROM jsonb_each_text(a.tags) AS tg2(key, value) WHERE tg2.key ILIKE $1 OR tg2.value ILIKE $1))","arg_count":1,"args":["%payroll%"]}
+  },
+  {
+    "name": "cheatsheet-tag-key-value",
+    "query": "tag.env:prod",
+    "note": "§3: tag key and value",
+    "canonical": "tag.env:prod",
+    "ast": {"cmp":{"f":"tag.env","op":":","v":"prod"}},
+    "sql": {"where":"(lower((a.tags -\u003e\u003e $1)) = $2)","arg_count":2,"args":["env","prod"]}
+  },
+  {
+    "name": "cheatsheet-tag-any",
+    "query": "tag:env",
+    "note": "§3/§8: bare tag matches a key or a value",
+    "canonical": "tag:env",
+    "ast": {"cmp":{"f":"tag","op":":","v":"env"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM jsonb_each_text(a.tags) AS tg1(key, value) WHERE (tg1.key ILIKE $1) OR (tg1.value ILIKE $2))","arg_count":2,"args":["%env%","%env%"]}
+  },
+  {
+    "name": "cheatsheet-identifier-kind",
+    "query": "id.serial_number:\"J7K2QX1\"",
+    "note": "§3: identifier of one kind",
+    "canonical": "id.serial_number:J7K2QX1",
+    "ast": {"cmp":{"f":"id.serial_number","op":":","v":"J7K2QX1"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM asset_identifiers ai1 WHERE ai1.asset_id = a.id AND ai1.kind = $1 AND (lower(ai1.value) = $2))","arg_count":2,"args":["serial_number","j7k2qx1"]}
+  },
+  {
+    "name": "cheatsheet-identifier-any",
+    "query": "id.any:\"aa:bb:cc:dd:ee:ff\"",
+    "note": "§3 cheat sheet, §13 A1: an identifier of ANY kind is id.any; a bare id is the row's own uuid",
+    "canonical": "id.any:aa:bb:cc:dd:ee:ff",
+    "ast": {"cmp":{"f":"id.any","op":":","v":"aa:bb:cc:dd:ee:ff"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM asset_identifiers ai1 WHERE ai1.asset_id = a.id AND (lower(ai1.value) = $1))","arg_count":1,"args":["aa:bb:cc:dd:ee:ff"]}
+  },
+  {
+    "name": "cheatsheet-identifier-row-uuid",
+    "query": "id=550e8400-e29b-41d4-a716-446655440000",
+    "note": "§4.3, §13 A1: a bare id is the row's own uuid on every target, type-checked as one",
+    "canonical": "id=550e8400-e29b-41d4-a716-446655440000",
+    "ast": {"cmp":{"f":"id","op":"=","v":"550e8400-e29b-41d4-a716-446655440000"}},
+    "sql": {"where":"(a.id = $1::uuid)","arg_count":1,"args":["550e8400-e29b-41d4-a716-446655440000"]}
+  },
+  {
+    "name": "error-identifier-any-spelling-bad",
+    "query": "id:\"aa:bb:cc:dd:ee:ff\"",
+    "note": "§13 A1: the cheat sheet's old any-kind spelling now names the uuid column, so it type-checks as a uuid and the error points at id.any",
+    "canonical": "id:aa:bb:cc:dd:ee:ff",
+    "ast": {"cmp":{"f":"id","op":":","v":"aa:bb:cc:dd:ee:ff"}},
+    "errors": [{"code":"type_mismatch"}]
+  },
+  {
+    "name": "error-identifier-any-spelling-ok",
+    "query": "id.any:\"aa:bb:cc:dd:ee:ff\"",
+    "note": "§13 A1: the nearest legal query",
+    "canonical": "id.any:aa:bb:cc:dd:ee:ff",
+    "ast": {"cmp":{"f":"id.any","op":":","v":"aa:bb:cc:dd:ee:ff"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM asset_identifiers ai1 WHERE ai1.asset_id = a.id AND (lower(ai1.value) = $1))","arg_count":1,"args":["aa:bb:cc:dd:ee:ff"]}
+  },
+  {
+    "name": "cheatsheet-class-subtree",
+    "query": "class:hardware",
+    "note": "§5.3: ':' is the subtree",
+    "canonical": "class:hardware",
+    "ast": {"cmp":{"f":"class","op":":","v":"hardware"}},
+    "sql": {"where":"(a.class_path = $1 OR a.class_path LIKE $2)","arg_count":2,"args":["hardware","hardware.%"]}
+  },
+  {
+    "name": "cheatsheet-class-exact",
+    "query": "class=server",
+    "note": "§5.3: '=' is the class exactly",
+    "canonical": "class=server",
+    "ast": {"cmp":{"f":"class","op":"=","v":"server"}},
+    "sql": {"where":"(a.class_key = $1)","arg_count":1,"args":["server"]}
+  },
+  {
+    "name": "cheatsheet-risk-band",
+    "query": "risk \u003e= high",
+    "note": "§5.5: through the ladder, never a hand-written threshold",
+    "canonical": "risk \u003e= high",
+    "ast": {"cmp":{"f":"risk","op":"\u003e=","v":"high"}},
+    "sql": {"where":"(CASE WHEN coalesce(array_length(a.risk_assessed_by, 1), 0) \u003e 0 THEN (a.risk_score \u003e= $1) END)","arg_count":1,"args":[70]}
+  },
+  {
+    "name": "cheatsheet-risk-not-assessed",
+    "query": "risk:not_assessed",
+    "note": "§5.2: nobody scored it — a different set from informational",
+    "canonical": "risk:not_assessed",
+    "ast": {"cmp":{"f":"risk","op":":","v":"not_assessed"}},
+    "sql": {"where":"(coalesce(array_length(a.risk_assessed_by, 1), 0) = 0)","arg_count":0}
+  },
+  {
+    "name": "cheatsheet-child-collection",
+    "query": "endpoint:(port:443 and protocol:tls)",
+    "note": "§5.1: EXISTS over a child collection",
+    "canonical": "endpoint:(port:443 and protocol:tls)",
+    "ast": {"sub":{"c":"endpoint","p":{"and":[{"cmp":{"f":"port","op":":","v":"443"}},{"cmp":{"f":"protocol","op":":","v":"tls"}}]}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM asset_endpoints e1 WHERE e1.asset_id = a.id AND ((e1.port = $1) AND (lower((e1.protocol)::text) = $2)))","arg_count":2,"args":[443,"tls"]}
+  },
+  {
+    "name": "cheatsheet-traverse-one-hop",
+    "query": "depends_on:(class=database_instance)",
+    "note": "§5.6: a traversal with no argument is one hop",
+    "canonical": "depends_on:(class=database_instance)",
+    "ast": {"traverse":{"depth":1,"dir":"out","form":"named","p":{"cmp":{"f":"class","op":"=","v":"database_instance"}},"rel":"depends_on","t":"depends_on"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT r2.to_asset_id AS id, 1 AS depth FROM asset_relationships r2 WHERE r2.from_asset_id = a.id AND r2.status = $1 AND r2.type = $3 AND r2.to_asset_id \u003c\u003e a.id UNION SELECT r3.to_asset_id, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON r3.from_asset_id = w1.id WHERE w1.depth \u003c $2 AND r3.status = $1 AND r3.type = $3 AND r3.to_asset_id \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE (a4.class_key = $4))","arg_count":4,"args":["active",1,"depends_on","database_instance"]}
+  },
+  {
+    "name": "cheatsheet-traverse-three-hops",
+    "query": "depends_on(3):(display_name:\"Payroll\")",
+    "note": "§5.6: up to three hops",
+    "canonical": "depends_on(3):(display_name:Payroll)",
+    "ast": {"traverse":{"depth":3,"dir":"out","form":"named","p":{"cmp":{"f":"display_name","op":":","v":"Payroll"}},"rel":"depends_on","t":"depends_on"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT r2.to_asset_id AS id, 1 AS depth FROM asset_relationships r2 WHERE r2.from_asset_id = a.id AND r2.status = $1 AND r2.type = $3 AND r2.to_asset_id \u003c\u003e a.id UNION SELECT r3.to_asset_id, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON r3.from_asset_id = w1.id WHERE w1.depth \u003c $2 AND r3.status = $1 AND r3.type = $3 AND r3.to_asset_id \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE (a4.display_name ILIKE $4))","arg_count":4,"args":["active",3,"depends_on","%Payroll%"]}
+  },
+  {
+    "name": "cheatsheet-reverse-used-by",
+    "query": "used_by:(class:application)",
+    "note": "§5.6: a reverse label walks the same edge backwards",
+    "canonical": "used_by:(class:application)",
+    "ast": {"traverse":{"depth":1,"dir":"in","form":"named","p":{"cmp":{"f":"class","op":":","v":"application"}},"rel":"used_by","t":"depends_on"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT r2.from_asset_id AS id, 1 AS depth FROM asset_relationships r2 WHERE r2.to_asset_id = a.id AND r2.status = $1 AND r2.type = $3 AND r2.from_asset_id \u003c\u003e a.id UNION SELECT r3.from_asset_id, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON r3.to_asset_id = w1.id WHERE w1.depth \u003c $2 AND r3.status = $1 AND r3.type = $3 AND r3.from_asset_id \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE (a4.class_path = $4 OR a4.class_path LIKE $5))","arg_count":5,"args":["active",1,"depends_on","application","application.%"]}
+  },
+  {
+    "name": "cheatsheet-reverse-hosts",
+    "query": "hosts:(class=virtual_machine)",
+    "note": "ADR-0003 D2 reverse label",
+    "canonical": "hosts:(class=virtual_machine)",
+    "ast": {"traverse":{"depth":1,"dir":"in","form":"named","p":{"cmp":{"f":"class","op":"=","v":"virtual_machine"}},"rel":"hosts","t":"hosted_on"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT r2.from_asset_id AS id, 1 AS depth FROM asset_relationships r2 WHERE r2.to_asset_id = a.id AND r2.status = $1 AND r2.type = $3 AND r2.from_asset_id \u003c\u003e a.id UNION SELECT r3.from_asset_id, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON r3.to_asset_id = w1.id WHERE w1.depth \u003c $2 AND r3.status = $1 AND r3.type = $3 AND r3.from_asset_id \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE (a4.class_key = $4))","arg_count":4,"args":["active",1,"hosted_on","virtual_machine"]}
+  },
+  {
+    "name": "cheatsheet-reverse-runs",
+    "query": "runs:(class:application)",
+    "note": "ADR-0003 D2 reverse label",
+    "canonical": "runs:(class:application)",
+    "ast": {"traverse":{"depth":1,"dir":"in","form":"named","p":{"cmp":{"f":"class","op":":","v":"application"}},"rel":"runs","t":"runs_on"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT r2.from_asset_id AS id, 1 AS depth FROM asset_relationships r2 WHERE r2.to_asset_id = a.id AND r2.status = $1 AND r2.type = $3 AND r2.from_asset_id \u003c\u003e a.id UNION SELECT r3.from_asset_id, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON r3.to_asset_id = w1.id WHERE w1.depth \u003c $2 AND r3.status = $1 AND r3.type = $3 AND r3.from_asset_id \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE (a4.class_path = $4 OR a4.class_path LIKE $5))","arg_count":5,"args":["active",1,"runs_on","application","application.%"]}
+  },
+  {
+    "name": "cheatsheet-generic-rel",
+    "query": "rel(connects_to, in, 2):(display_name:\"core-sw-1\")",
+    "note": "§3: the explicit traversal form",
+    "canonical": "rel(connects_to, in, 2):(display_name:core-sw-1)",
+    "ast": {"traverse":{"depth":2,"dir":"in","form":"rel","p":{"cmp":{"f":"display_name","op":":","v":"core-sw-1"}},"rel":"connects_to","t":"connects_to"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT r2.from_asset_id AS id, 1 AS depth FROM asset_relationships r2 WHERE r2.to_asset_id = a.id AND r2.status = $1 AND r2.type = $3 AND r2.from_asset_id \u003c\u003e a.id UNION SELECT r3.from_asset_id, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON r3.to_asset_id = w1.id WHERE w1.depth \u003c $2 AND r3.status = $1 AND r3.type = $3 AND r3.from_asset_id \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE (a4.display_name ILIKE $4))","arg_count":4,"args":["active",2,"connects_to","%core-sw-1%"]}
+  },
+  {
+    "name": "cheatsheet-any-rel",
+    "query": "any_rel:(class:hardware)",
+    "note": "§3: traverse every type",
+    "canonical": "any_rel:(class:hardware)",
+    "ast": {"traverse":{"depth":1,"dir":"any","form":"any","p":{"cmp":{"f":"class","op":":","v":"hardware"}},"rel":"any_rel"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT CASE WHEN r2.from_asset_id = a.id THEN r2.to_asset_id ELSE r2.from_asset_id END AS id, 1 AS depth FROM asset_relationships r2 WHERE (r2.from_asset_id = a.id OR r2.to_asset_id = a.id) AND r2.status = $1 AND CASE WHEN r2.from_asset_id = a.id THEN r2.to_asset_id ELSE r2.from_asset_id END \u003c\u003e a.id UNION SELECT CASE WHEN r3.from_asset_id = w1.id THEN r3.to_asset_id ELSE r3.from_asset_id END, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON (r3.from_asset_id = w1.id OR r3.to_asset_id = w1.id) WHERE w1.depth \u003c $2 AND r3.status = $1 AND CASE WHEN r3.from_asset_id = w1.id THEN r3.to_asset_id ELSE r3.from_asset_id END \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE (a4.class_path = $3 OR a4.class_path LIKE $4))","arg_count":4,"args":["active",1,"hardware","hardware.%"]}
+  },
+  {
+    "name": "cheatsheet-implicit-and",
+    "query": "environment:production class:server",
+    "note": "§2: juxtaposition is an implicit and; §10 writes it out",
+    "canonical": "environment:production and class:server",
+    "ast": {"and":[{"cmp":{"f":"environment","op":":","v":"production"}},{"cmp":{"f":"class","op":":","v":"server"}}]},
+    "sql": {"where":"((lower((a.environment)::text) = $1) AND (a.class_path = $2 OR a.class_path LIKE $3))","arg_count":3,"args":["production","hardware.computer.server","hardware.computer.server.%"]}
+  },
+  {
+    "name": "example-01-adjacent-to-a-switch",
+    "query": "any_rel:(id.any:\"aa:bb:cc:00:11:22\")",
+    "note": "§9.1",
+    "canonical": "any_rel:(id.any:aa:bb:cc:00:11:22)",
+    "ast": {"traverse":{"depth":1,"dir":"any","form":"any","p":{"cmp":{"f":"id.any","op":":","v":"aa:bb:cc:00:11:22"}},"rel":"any_rel"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT CASE WHEN r2.from_asset_id = a.id THEN r2.to_asset_id ELSE r2.from_asset_id END AS id, 1 AS depth FROM asset_relationships r2 WHERE (r2.from_asset_id = a.id OR r2.to_asset_id = a.id) AND r2.status = $1 AND CASE WHEN r2.from_asset_id = a.id THEN r2.to_asset_id ELSE r2.from_asset_id END \u003c\u003e a.id UNION SELECT CASE WHEN r3.from_asset_id = w1.id THEN r3.to_asset_id ELSE r3.from_asset_id END, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON (r3.from_asset_id = w1.id OR r3.to_asset_id = w1.id) WHERE w1.depth \u003c $2 AND r3.status = $1 AND CASE WHEN r3.from_asset_id = w1.id THEN r3.to_asset_id ELSE r3.from_asset_id END \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE EXISTS (SELECT 1 FROM asset_identifiers ai5 WHERE ai5.asset_id = a4.id AND (lower(ai5.value) = $3)))","arg_count":3,"args":["active",1,"aa:bb:cc:00:11:22"]}
+  },
+  {
+    "name": "example-02-two-hops-behind",
+    "query": "rel(connects_to, in, 2):(display_name:\"core-sw-1\")",
+    "note": "§9.2",
+    "canonical": "rel(connects_to, in, 2):(display_name:core-sw-1)",
+    "ast": {"traverse":{"depth":2,"dir":"in","form":"rel","p":{"cmp":{"f":"display_name","op":":","v":"core-sw-1"}},"rel":"connects_to","t":"connects_to"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT r2.from_asset_id AS id, 1 AS depth FROM asset_relationships r2 WHERE r2.to_asset_id = a.id AND r2.status = $1 AND r2.type = $3 AND r2.from_asset_id \u003c\u003e a.id UNION SELECT r3.from_asset_id, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON r3.to_asset_id = w1.id WHERE w1.depth \u003c $2 AND r3.status = $1 AND r3.type = $3 AND r3.from_asset_id \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE (a4.display_name ILIKE $4))","arg_count":4,"args":["active",2,"connects_to","%core-sw-1%"]}
+  },
+  {
+    "name": "example-03-production-servers-no-owner",
+    "query": "environment:production class:hardware.computer.server not exists(owner_email)",
+    "note": "§9.3; a class may be named by key or by path",
+    "canonical": "environment:production and class:hardware.computer.server and not exists(owner_email)",
+    "ast": {"and":[{"cmp":{"f":"environment","op":":","v":"production"}},{"cmp":{"f":"class","op":":","v":"hardware.computer.server"}},{"not":{"exists":{"f":"owner_email"}}}]},
+    "sql": {"where":"((lower((a.environment)::text) = $1) AND (a.class_path = $2 OR a.class_path LIKE $3) AND NOT ((a.owner_email IS NOT NULL)))","arg_count":3,"args":["production","hardware.computer.server","hardware.computer.server.%"]}
+  },
+  {
+    "name": "example-04-openssl-on-443",
+    "query": "class:server and software:(name:openssl and version \u003c 3.0) and endpoint:(port:443)",
+    "note": "§9.4; §5.5 version comparison on the normalised sort key",
+    "canonical": "class:server and software:(name:openssl and version \u003c 3.0) and endpoint:(port:443)",
+    "ast": {"and":[{"cmp":{"f":"class","op":":","v":"server"}},{"sub":{"c":"software","p":{"and":[{"cmp":{"f":"name","op":":","v":"openssl"}},{"cmp":{"f":"version","op":"\u003c","v":"3.0"}}]}}},{"sub":{"c":"endpoint","p":{"cmp":{"f":"port","op":":","v":"443"}}}}]},
+    "sql": {"where":"((a.class_path = $1 OR a.class_path LIKE $2) AND EXISTS (SELECT 1 FROM software_installs si1 JOIN software_products sp2 ON sp2.id = si1.product_id WHERE si1.asset_id = a.id AND ((sp2.name ILIKE $3) AND (sp2.version_sort COLLATE \"C\" \u003c $4))) AND EXISTS (SELECT 1 FROM asset_endpoints e3 WHERE e3.asset_id = a.id AND (e3.port = $5)))","arg_count":5,"args":["hardware.computer.server","hardware.computer.server.%","%openssl%","00000003.00000000.00000000.00000000.00000000.00000000|~",443]}
+  },
+  {
+    "name": "example-05-certs-expiring-on-payroll-dependencies",
+    "query": "cert:(not_after \u003c now+30d) and depends_on(3):(display_name:\"Payroll\")",
+    "note": "§9.5",
+    "canonical": "cert:(not_after \u003c now+30d) and depends_on(3):(display_name:Payroll)",
+    "ast": {"and":[{"sub":{"c":"cert","p":{"cmp":{"f":"not_after","op":"\u003c","v":"now+30d"}}}},{"traverse":{"depth":3,"dir":"out","form":"named","p":{"cmp":{"f":"display_name","op":":","v":"Payroll"}},"rel":"depends_on","t":"depends_on"}}]},
+    "sql": {"where":"(EXISTS (SELECT 1 FROM certificates c1 JOIN crypto_implementation_certificates cic2 ON cic2.certificate_id = c1.id JOIN crypto_implementations ci3 ON ci3.id = cic2.crypto_implementation_id LEFT JOIN asset_endpoints e4 ON e4.id = ci3.endpoint_id WHERE COALESCE(e4.asset_id, ci3.asset_id) = a.id AND (c1.not_after \u003c $1)) AND EXISTS (WITH RECURSIVE w5(id, depth) AS (SELECT r6.to_asset_id AS id, 1 AS depth FROM asset_relationships r6 WHERE r6.from_asset_id = a.id AND r6.status = $2 AND r6.type = $4 AND r6.to_asset_id \u003c\u003e a.id UNION SELECT r7.to_asset_id, w5.depth + 1 FROM w5 JOIN asset_relationships r7 ON r7.from_asset_id = w5.id WHERE w5.depth \u003c $3 AND r7.status = $2 AND r7.type = $4 AND r7.to_asset_id \u003c\u003e a.id) SELECT 1 FROM w5 JOIN assets a8 ON a8.id = w5.id WHERE (a8.display_name ILIKE $5)))","arg_count":5,"args":["2026-10-11T12:00:00Z","active",3,"depends_on","%Payroll%"]}
+  },
+  {
+    "name": "example-06-approved-but-quiet",
+    "query": "last_seen \u003c now-30d and status:monitoring",
+    "note": "§9.6; 30 days is not a whole number of weeks, so the duration stays",
+    "canonical": "last_seen \u003c now-30d and status:monitoring",
+    "ast": {"and":[{"cmp":{"f":"last_seen","op":"\u003c","v":"now-30d"}},{"cmp":{"f":"status","op":":","v":"monitoring"}}]},
+    "sql": {"where":"((a.last_seen_at \u003c $1) AND (lower((a.asset_status)::text) = $2))","arg_count":2,"args":["2026-08-12T12:00:00Z","monitoring"]}
+  },
+  {
+    "name": "example-07-unidentified-in-one-range",
+    "query": "class:unknown_host and primary_address:198.51.100.0/24",
+    "note": "§9.7; ':' on inet is CIDR containment",
+    "canonical": "class:unknown_host and primary_address:198.51.100.0/24",
+    "ast": {"and":[{"cmp":{"f":"class","op":":","v":"unknown_host"}},{"cmp":{"f":"primary_address","op":":","v":"198.51.100.0/24"}}]},
+    "sql": {"where":"((a.class_path = $1 OR a.class_path LIKE $2) AND (a.primary_address \u003c\u003c= $3::inet))","arg_count":3,"args":["unknown_host","unknown\\_host.%","198.51.100.0/24"]}
+  },
+  {
+    "name": "example-08-production-end-of-life",
+    "query": "finding:(producer:eol and severity \u003e= high) and environment:production",
+    "note": "§9.8; §5.1 subject resolution over the asset and its descendants",
+    "canonical": "finding:(producer:eol and severity \u003e= high) and environment:production",
+    "ast": {"and":[{"sub":{"c":"finding","p":{"and":[{"cmp":{"f":"producer","op":":","v":"eol"}},{"cmp":{"f":"severity","op":"\u003e=","v":"high"}}]}}},{"cmp":{"f":"environment","op":":","v":"production"}}]},
+    "sql": {"where":"(EXISTS (SELECT 1 FROM findings f1 WHERE ((f1.subject_type = $1 AND f1.subject_id = a.id) OR (f1.subject_type = $2 AND f1.subject_id IN (SELECT e2.id FROM asset_endpoints e2 WHERE e2.asset_id = a.id)) OR (f1.subject_type = $3 AND f1.subject_id IN (SELECT ci3.id FROM crypto_implementations ci3 LEFT JOIN asset_endpoints e4 ON e4.id = ci3.endpoint_id WHERE COALESCE(e4.asset_id, ci3.asset_id) = a.id)) OR (f1.subject_type = $4 AND f1.subject_id IN (SELECT c5.id FROM certificates c5 JOIN crypto_implementation_certificates cic6 ON cic6.certificate_id = c5.id JOIN crypto_implementations ci7 ON ci7.id = cic6.crypto_implementation_id LEFT JOIN asset_endpoints e8 ON e8.id = ci7.endpoint_id WHERE COALESCE(e8.asset_id, ci7.asset_id) = a.id)) OR (f1.subject_type = $5 AND f1.subject_id IN (SELECT si9.id FROM software_installs si9 WHERE si9.asset_id = a.id)) OR (f1.subject_type = $6 AND f1.subject_id IN (SELECT r10.id FROM asset_relationships r10 WHERE r10.from_asset_id = a.id OR r10.to_asset_id = a.id)) OR (f1.subject_type = $7 AND f1.subject_id IN (SELECT k11.id FROM keys k11 JOIN implementation_keys ik12 ON ik12.key_id = k11.id JOIN crypto_implementations ci13 ON ci13.id = ik12.implementation_id LEFT JOIN asset_endpoints e14 ON e14.id = ci13.endpoint_id WHERE COALESCE(e14.asset_id, ci13.asset_id) = a.id))) AND ((lower((f1.producer)::text) = $8) AND (f1.score \u003e= $9))) AND (lower((a.environment)::text) = $10))","arg_count":10,"args":["asset","endpoint","crypto_configuration","certificate","software_install","relationship","key","eol",70,"production"]}
+  },
+  {
+    "name": "example-09-hardware-nobody-scored",
+    "query": "risk:not_assessed and class:hardware",
+    "note": "§9.9",
+    "canonical": "risk:not_assessed and class:hardware",
+    "ast": {"and":[{"cmp":{"f":"risk","op":":","v":"not_assessed"}},{"cmp":{"f":"class","op":":","v":"hardware"}}]},
+    "sql": {"where":"((coalesce(array_length(a.risk_assessed_by, 1), 0) = 0) AND (a.class_path = $1 OR a.class_path LIKE $2))","arg_count":2,"args":["hardware","hardware.%"]}
+  },
+  {
+    "name": "example-10-has-endpoints-none-tcp",
+    "query": "exists(endpoint) and not endpoint:(transport:tcp)",
+    "note": "§9.10; §5.1's distinction from a bare NOT EXISTS",
+    "canonical": "exists(endpoint) and not endpoint:(transport:tcp)",
+    "ast": {"and":[{"sub":{"c":"endpoint"}},{"not":{"sub":{"c":"endpoint","p":{"cmp":{"f":"transport","op":":","v":"tcp"}}}}}]},
+    "sql": {"where":"(EXISTS (SELECT 1 FROM asset_endpoints e1 WHERE e1.asset_id = a.id) AND NOT EXISTS (SELECT 1 FROM asset_endpoints e2 WHERE e2.asset_id = a.id AND (lower((e2.transport)::text) = $1)))","arg_count":1,"args":["tcp"]}
+  },
+  {
+    "name": "example-11-tag-and-column-disagree",
+    "query": "tag.env:prod and not environment:production",
+    "note": "§9.11",
+    "canonical": "tag.env:prod and not environment:production",
+    "ast": {"and":[{"cmp":{"f":"tag.env","op":":","v":"prod"}},{"not":{"cmp":{"f":"environment","op":":","v":"production"}}}]},
+    "sql": {"where":"((lower((a.tags -\u003e\u003e $1)) = $2) AND NOT ((lower((a.environment)::text) = $3)))","arg_count":3,"args":["env","prod","production"]}
+  },
+  {
+    "name": "example-12-model-proposed-unreviewed",
+    "query": "source:inferred and status:pending",
+    "twin": "example-12-model-proposed-unreviewed-ok",
+    "note": "§9.12 as written. 'pending' is not an asset_status value (DATA_MODEL §2 has pending_approval), so the catalogue rejects it — see README, spec contradiction 4",
+    "canonical": "source:inferred and status:pending",
+    "ast": {"and":[{"cmp":{"f":"source","op":":","v":"inferred"}},{"cmp":{"f":"status","op":":","v":"pending"}}]},
+    "errors": [{"code":"unknown_value"}]
+  },
+  {
+    "name": "example-12-model-proposed-unreviewed-ok",
+    "query": "source:inferred and status:pending_approval",
+    "note": "§9.12 with the status value the schema actually carries",
+    "canonical": "source:inferred and status:pending_approval",
+    "ast": {"and":[{"cmp":{"f":"source","op":":","v":"inferred"}},{"cmp":{"f":"status","op":":","v":"pending_approval"}}]},
+    "sql": {"where":"((lower((a.class_source_kind)::text) = $1) AND (lower((a.asset_status)::text) = $2))","arg_count":2,"args":["inferred","pending_approval"]}
+  },
+  {
+    "name": "example-13-merge-proposals",
+    "query": "proposed_by:matcher",
+    "note": "§9.13; §4.3 sugar for source=inferred and source_ref=\u003cproducer\u003e",
+    "canonical": "proposed_by:matcher",
+    "ast": {"cmp":{"f":"proposed_by","op":":","v":"matcher"}},
+    "sql": {"where":"(a.class_source_kind IN ($1, $2) AND (lower(a.class_source_ref) = $3))","arg_count":3,"args":["inferred","rule","matcher"]}
+  },
+  {
+    "name": "derived-proposed-by-is-case-insensitive",
+    "query": "proposed_by:Matcher",
+    "note": "S5: `proposed_by` is keyword-typed, so `:` folds case like every other keyword. The derived builder used to compare verbatim",
+    "canonical": "proposed_by:Matcher",
+    "ast": {"cmp":{"f":"proposed_by","op":":","v":"Matcher"}},
+    "sql": {"where":"(a.class_source_kind IN ($1, $2) AND (lower(a.class_source_ref) = $3))","arg_count":3,"args":["inferred","rule","matcher"]}
+  },
+  {
+    "name": "derived-proposed-by-wildcard",
+    "query": "proposed_by:match*",
+    "note": "S5: a `*` on a keyword field is a LIKE pattern. It used to be bound as the literal string \"match*\", which matched nothing",
+    "canonical": "proposed_by:match*",
+    "ast": {"cmp":{"f":"proposed_by","op":":","v":"match*"}},
+    "sql": {"where":"(a.class_source_kind IN ($1, $2) AND (a.class_source_ref ILIKE $3))","arg_count":3,"args":["inferred","rule","match%"]}
+  },
+  {
+    "name": "derived-proposed-by-presence",
+    "query": "proposed_by:*",
+    "note": "S5: `field:*` is the presence spelling and works on a derived field too. It used to validate and then fail `untranslatable`",
+    "canonical": "proposed_by:*",
+    "ast": {"cmp":{"f":"proposed_by","op":":","v":"*"}},
+    "sql": {"where":"(a.class_source_kind IN ($1, $2) AND (a.class_source_ref IS NOT NULL))","arg_count":2,"args":["inferred","rule"]}
+  },
+  {
+    "name": "derived-strength-not-equal-is-not-exists",
+    "query": "strength != weak",
+    "target": "crypto_configuration",
+    "note": "S5 + S3: the strength lens is row-shaped (worst-component-wins), so `!=` is \"no algorithm is weak\", not \"some algorithm is not weak\"",
+    "canonical": "strength != weak",
+    "ast": {"cmp":{"f":"strength","op":"!=","v":"weak"}},
+    "sql": {"where":"NOT EXISTS (SELECT 1 FROM crypto_implementation_algorithms cia1 JOIN algorithms alg2 ON alg2.id = cia1.algorithm_id WHERE cia1.crypto_implementation_id = ci.id AND (alg2.strength = $1))","arg_count":1,"args":["weak"]}
+  },
+  {
+    "name": "derived-algorithm-deprecated-false",
+    "query": "algorithm.deprecated:false",
+    "target": "crypto_configuration",
+    "note": "S5: the derived boolean's value is an AGGREGATE over the linked algorithms, so `:false` is \"uses none that are deprecated\". Comparing per row would have made it \"uses some that are not\"",
+    "canonical": "algorithm.deprecated:false",
+    "ast": {"cmp":{"f":"algorithm.deprecated","op":":","v":"false"}},
+    "sql": {"where":"((EXISTS (SELECT 1 FROM crypto_implementation_algorithms cia1 JOIN algorithms alg2 ON alg2.id = cia1.algorithm_id WHERE cia1.crypto_implementation_id = ci.id AND lower(alg2.deprecation_status) IN ($1, $2))) = $3)","arg_count":3,"args":["deprecated","obsolete",false]}
+  },
+  {
+    "name": "example-14-guests-on-one-firmware",
+    "query": "hosted_on:(class=hypervisor and attr.firmware_version ~ \"^7\\\\.0\\\\.\")",
+    "note": "§9.14",
+    "canonical": "hosted_on:(class=hypervisor and attr.firmware_version ~ \"^7\\\\.0\\\\.\")",
+    "ast": {"traverse":{"depth":1,"dir":"out","form":"named","p":{"and":[{"cmp":{"f":"class","op":"=","v":"hypervisor"}},{"match":{"f":"attr.firmware_version","re":"^7\\.0\\."}}]},"rel":"hosted_on","t":"hosted_on"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT r2.to_asset_id AS id, 1 AS depth FROM asset_relationships r2 WHERE r2.from_asset_id = a.id AND r2.status = $1 AND r2.type = $3 AND r2.to_asset_id \u003c\u003e a.id UNION SELECT r3.to_asset_id, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON r3.from_asset_id = w1.id WHERE w1.depth \u003c $2 AND r3.status = $1 AND r3.type = $3 AND r3.to_asset_id \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE ((a4.class_key = $4) AND ((a4.attributes -\u003e\u003e $5) ~ $6)))","arg_count":6,"args":["active",1,"hosted_on","hypervisor","firmware_version","^7\\.0\\."]}
+  },
+  {
+    "name": "example-15-cloud-with-vulnerabilities",
+    "query": "class:cloud_resource and attr.provider:aws and attr.region:us-east-1 and finding:(kind:known_vulnerability)",
+    "note": "§9.15",
+    "canonical": "class:cloud_resource and attr.provider:aws and attr.region:us-east-1 and finding:(kind:known_vulnerability)",
+    "ast": {"and":[{"cmp":{"f":"class","op":":","v":"cloud_resource"}},{"cmp":{"f":"attr.provider","op":":","v":"aws"}},{"cmp":{"f":"attr.region","op":":","v":"us-east-1"}},{"sub":{"c":"finding","p":{"cmp":{"f":"kind","op":":","v":"known_vulnerability"}}}}]},
+    "sql": {"where":"((a.class_path = $1 OR a.class_path LIKE $2) AND (lower((a.attributes -\u003e\u003e $3)) = $4) AND (lower((a.attributes -\u003e\u003e $5)) = $6) AND EXISTS (SELECT 1 FROM findings f1 WHERE ((f1.subject_type = $7 AND f1.subject_id = a.id) OR (f1.subject_type = $8 AND f1.subject_id IN (SELECT e2.id FROM asset_endpoints e2 WHERE e2.asset_id = a.id)) OR (f1.subject_type = $9 AND f1.subject_id IN (SELECT ci3.id FROM crypto_implementations ci3 LEFT JOIN asset_endpoints e4 ON e4.id = ci3.endpoint_id WHERE COALESCE(e4.asset_id, ci3.asset_id) = a.id)) OR (f1.subject_type = $10 AND f1.subject_id IN (SELECT c5.id FROM certificates c5 JOIN crypto_implementation_certificates cic6 ON cic6.certificate_id = c5.id JOIN crypto_implementations ci7 ON ci7.id = cic6.crypto_implementation_id LEFT JOIN asset_endpoints e8 ON e8.id = ci7.endpoint_id WHERE COALESCE(e8.asset_id, ci7.asset_id) = a.id)) OR (f1.subject_type = $11 AND f1.subject_id IN (SELECT si9.id FROM software_installs si9 WHERE si9.asset_id = a.id)) OR (f1.subject_type = $12 AND f1.subject_id IN (SELECT r10.id FROM asset_relationships r10 WHERE r10.from_asset_id = a.id OR r10.to_asset_id = a.id)) OR (f1.subject_type = $13 AND f1.subject_id IN (SELECT k11.id FROM keys k11 JOIN implementation_keys ik12 ON ik12.key_id = k11.id JOIN crypto_implementations ci13 ON ci13.id = ik12.implementation_id LEFT JOIN asset_endpoints e14 ON e14.id = ci13.endpoint_id WHERE COALESCE(e14.asset_id, ci13.asset_id) = a.id))) AND (lower((f1.kind)::text) = $14)))","arg_count":14,"args":["cloud_resource","cloud\\_resource.%","provider","aws","region","us-east-1","asset","endpoint","crypto_configuration","certificate","software_install","relationship","key","known_vulnerability"]}
+  },
+  {
+    "name": "example-16-physical-not-cloud",
+    "query": "id.serial_number:* and not id.cloud_resource_id:*",
+    "note": "§9.16",
+    "canonical": "id.serial_number:* and not id.cloud_resource_id:*",
+    "ast": {"and":[{"cmp":{"f":"id.serial_number","op":":","v":"*"}},{"not":{"cmp":{"f":"id.cloud_resource_id","op":":","v":"*"}}}]},
+    "sql": {"where":"(EXISTS (SELECT 1 FROM asset_identifiers ai1 WHERE ai1.asset_id = a.id AND ai1.kind = $1 AND (ai1.value IS NOT NULL)) AND NOT (EXISTS (SELECT 1 FROM asset_identifiers ai2 WHERE ai2.asset_id = a.id AND ai2.kind = $2 AND (ai2.value IS NOT NULL))))","arg_count":2,"args":["serial_number","cloud_resource_id"]}
+  },
+  {
+    "name": "example-17-plaintext-management-exposed",
+    "query": "endpoint:(port in (23, 161, 512, 513))",
+    "note": "§9.17",
+    "canonical": "endpoint:(port in (23, 161, 512, 513))",
+    "ast": {"sub":{"c":"endpoint","p":{"in":{"f":"port","v":["23","161","512","513"]}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM asset_endpoints e1 WHERE e1.asset_id = a.id AND ((e1.port = $1) OR (e1.port = $2) OR (e1.port = $3) OR (e1.port = $4)))","arg_count":4,"args":[23,161,512,513]}
+  },
+  {
+    "name": "example-18-scope-production-excluding-lab",
+    "query": "environment:production and not tag:(dev or test)",
+    "note": "§9.18, as amended by §12 A1: the scope's second value was `prod`, which environment_type cannot hold",
+    "canonical": "environment:production and not (tag:dev or tag:test)",
+    "ast": {"and":[{"cmp":{"f":"environment","op":":","v":"production"}},{"not":{"or":[{"cmp":{"f":"tag","op":":","v":"dev"}},{"cmp":{"f":"tag","op":":","v":"test"}}]}}]},
+    "sql": {"where":"((lower((a.environment)::text) = $1) AND NOT ((EXISTS (SELECT 1 FROM jsonb_each_text(a.tags) AS tg1(key, value) WHERE (tg1.key ILIKE $2) OR (tg1.value ILIKE $3)) OR EXISTS (SELECT 1 FROM jsonb_each_text(a.tags) AS tg2(key, value) WHERE (tg2.key ILIKE $4) OR (tg2.value ILIKE $5)))))","arg_count":5,"args":["production","%dev%","%dev%","%test%","%test%"]}
+  },
+  {
+    "name": "example-19-scope-cardholder-segment",
+    "query": "segment_id=550e8400-e29b-41d4-a716-446655440000 or tag.pci:true",
+    "note": "§9.19 with a real uuid in place of the placeholder",
+    "canonical": "segment_id=550e8400-e29b-41d4-a716-446655440000 or tag.pci:true",
+    "ast": {"or":[{"cmp":{"f":"segment_id","op":"=","v":"550e8400-e29b-41d4-a716-446655440000"}},{"cmp":{"f":"tag.pci","op":":","v":"true"}}]},
+    "sql": {"where":"((a.network_segment_id = $1::uuid) OR (lower((a.tags -\u003e\u003e $2)) = $3))","arg_count":3,"args":["550e8400-e29b-41d4-a716-446655440000","pci","true"]}
+  },
+  {
+    "name": "example-20-measurement-cert-expiry-days",
+    "query": "value \u003e= 30",
+    "target": "measurement",
+    "twin": "example-20-measurement-cert-expiry-days-ok",
+    "note": "§9.20; §8 reserves 'value' for a measurement's extracted scalar. The target has no table: the compliance extractor evaluates it",
+    "canonical": "value \u003e= 30",
+    "ast": {"cmp":{"f":"value","op":"\u003e=","v":"30"}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "example-21-measurement-os-eol-days",
+    "query": "fact.eol.os.date \u003e now+90d",
+    "note": "§9.21 over asset facts",
+    "canonical": "fact.eol.os.date \u003e now+90d",
+    "ast": {"cmp":{"f":"fact.eol.os.date","op":"\u003e","v":"now+90d"}},
+    "sql": {"where":"((SELECT (CASE WHEN (af1.value #\u003e\u003e $1::text[]) ~ $2 THEN ((af1.value #\u003e\u003e $1::text[]))::timestamptz END) FROM asset_facts af1 WHERE af1.asset_id = a.id AND af1.key = $7 ORDER BY array_position(ARRAY[$3, $4, $5, $6], af1.source_kind), af1.observed_at DESC LIMIT 1) \u003e $8)","arg_count":8,"args":["{}","^[0-9]{4}-[0-9]{2}-[0-9]{2}([T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?)?","measured","declared","imported","inferred","eol.os.date","2026-12-10T12:00:00Z"]}
+  },
+  {
+    "name": "example-22-measurement-asset-has-owner",
+    "query": "exists(owner_email)",
+    "note": "§9.22",
+    "canonical": "exists(owner_email)",
+    "ast": {"exists":{"f":"owner_email"}},
+    "sql": {"where":"(a.owner_email IS NOT NULL)","arg_count":0}
+  },
+  {
+    "name": "example-23-measurement-mgmt-plaintext",
+    "query": "not endpoint:(service_name:telnet)",
+    "note": "§9.23; NOT EXISTS, which also matches an asset with no endpoints (§5.1)",
+    "canonical": "not endpoint:(service_name:telnet)",
+    "ast": {"not":{"sub":{"c":"endpoint","p":{"cmp":{"f":"service_name","op":":","v":"telnet"}}}}},
+    "sql": {"where":"NOT EXISTS (SELECT 1 FROM asset_endpoints e1 WHERE e1.asset_id = a.id AND (lower(e1.service_name) = $1))","arg_count":1,"args":["telnet"]}
+  },
+  {
+    "name": "example-24-alert-trigger",
+    "query": "finding:(producer:vulnerability and score \u003e= 90) and environment:production",
+    "note": "§9.24",
+    "canonical": "finding:(producer:vulnerability and score \u003e= 90) and environment:production",
+    "ast": {"and":[{"sub":{"c":"finding","p":{"and":[{"cmp":{"f":"producer","op":":","v":"vulnerability"}},{"cmp":{"f":"score","op":"\u003e=","v":"90"}}]}}},{"cmp":{"f":"environment","op":":","v":"production"}}]},
+    "sql": {"where":"(EXISTS (SELECT 1 FROM findings f1 WHERE ((f1.subject_type = $1 AND f1.subject_id = a.id) OR (f1.subject_type = $2 AND f1.subject_id IN (SELECT e2.id FROM asset_endpoints e2 WHERE e2.asset_id = a.id)) OR (f1.subject_type = $3 AND f1.subject_id IN (SELECT ci3.id FROM crypto_implementations ci3 LEFT JOIN asset_endpoints e4 ON e4.id = ci3.endpoint_id WHERE COALESCE(e4.asset_id, ci3.asset_id) = a.id)) OR (f1.subject_type = $4 AND f1.subject_id IN (SELECT c5.id FROM certificates c5 JOIN crypto_implementation_certificates cic6 ON cic6.certificate_id = c5.id JOIN crypto_implementations ci7 ON ci7.id = cic6.crypto_implementation_id LEFT JOIN asset_endpoints e8 ON e8.id = ci7.endpoint_id WHERE COALESCE(e8.asset_id, ci7.asset_id) = a.id)) OR (f1.subject_type = $5 AND f1.subject_id IN (SELECT si9.id FROM software_installs si9 WHERE si9.asset_id = a.id)) OR (f1.subject_type = $6 AND f1.subject_id IN (SELECT r10.id FROM asset_relationships r10 WHERE r10.from_asset_id = a.id OR r10.to_asset_id = a.id)) OR (f1.subject_type = $7 AND f1.subject_id IN (SELECT k11.id FROM keys k11 JOIN implementation_keys ik12 ON ik12.key_id = k11.id JOIN crypto_implementations ci13 ON ci13.id = ik12.implementation_id LEFT JOIN asset_endpoints e14 ON e14.id = ci13.endpoint_id WHERE COALESCE(e14.asset_id, ci13.asset_id) = a.id))) AND ((lower((f1.producer)::text) = $8) AND (f1.score \u003e= $9))) AND (lower((a.environment)::text) = $10))","arg_count":10,"args":["asset","endpoint","crypto_configuration","certificate","software_install","relationship","key","vulnerability",90,"production"]}
+  },
+  {
+    "name": "example-25-quantum-exposed-public-surface",
+    "query": "endpoint:(port:443) and crypto:(algorithm.deprecated:true) and ownership:internal",
+    "note": "§9.25; algorithm.deprecated is one of §8's two derived fields, due in workstream 1.9",
+    "canonical": "endpoint:(port:443) and crypto:(algorithm.deprecated:true) and ownership:internal",
+    "ast": {"and":[{"sub":{"c":"endpoint","p":{"cmp":{"f":"port","op":":","v":"443"}}}},{"sub":{"c":"crypto","p":{"cmp":{"f":"algorithm.deprecated","op":":","v":"true"}}}},{"cmp":{"f":"ownership","op":":","v":"internal"}}]},
+    "sql": {"where":"(EXISTS (SELECT 1 FROM asset_endpoints e1 WHERE e1.asset_id = a.id AND (e1.port = $1)) AND EXISTS (SELECT 1 FROM crypto_implementations ci2 LEFT JOIN asset_endpoints e3 ON e3.id = ci2.endpoint_id WHERE COALESCE(e3.asset_id, ci2.asset_id) = a.id AND ((EXISTS (SELECT 1 FROM crypto_implementation_algorithms cia4 JOIN algorithms alg5 ON alg5.id = cia4.algorithm_id WHERE cia4.crypto_implementation_id = ci2.id AND lower(alg5.deprecation_status) IN ($2, $3))) = $4)) AND (lower((a.asset_ownership)::text) = $5))","arg_count":5,"args":[443,"deprecated","obsolete",true,"internal"]}
+  },
+  {
+    "name": "compat-scope-environment",
+    "query": "environment:production",
+    "note": "§8: include.environment [production, prod] → environment:production — the legacy free-text `prod` has no rows to carry (§12 A1)",
+    "canonical": "environment:production",
+    "ast": {"cmp":{"f":"environment","op":":","v":"production"}},
+    "sql": {"where":"(lower((a.environment)::text) = $1)","arg_count":1,"args":["production"]}
+  },
+  {
+    "name": "compat-scope-ownership",
+    "query": "ownership in (internal, third_party)",
+    "note": "§8: include.asset_ownership",
+    "canonical": "ownership in (internal, third_party)",
+    "ast": {"in":{"f":"ownership","v":["internal","third_party"]}},
+    "sql": {"where":"((lower((a.asset_ownership)::text) = $1) OR (lower((a.asset_ownership)::text) = $2))","arg_count":2,"args":["internal","third_party"]}
+  },
+  {
+    "name": "compat-scope-risk-level",
+    "query": "risk in (high, critical)",
+    "note": "§8: include.risk_level",
+    "canonical": "risk in (high, critical)",
+    "ast": {"in":{"f":"risk","v":["high","critical"]}},
+    "sql": {"where":"((CASE WHEN coalesce(array_length(a.risk_assessed_by, 1), 0) \u003e 0 THEN (a.risk_score \u003e= $1 AND a.risk_score \u003c $2) END) OR (CASE WHEN coalesce(array_length(a.risk_assessed_by, 1), 0) \u003e 0 THEN (a.risk_score \u003e= $3) END))","arg_count":3,"args":[70,90,90]}
+  },
+  {
+    "name": "compat-scope-tags-any-of",
+    "query": "tag:(dev or test)",
+    "note": "§8: include.tags_any_of",
+    "canonical": "tag:dev or tag:test",
+    "ast": {"or":[{"cmp":{"f":"tag","op":":","v":"dev"}},{"cmp":{"f":"tag","op":":","v":"test"}}]},
+    "sql": {"where":"(EXISTS (SELECT 1 FROM jsonb_each_text(a.tags) AS tg1(key, value) WHERE (tg1.key ILIKE $1) OR (tg1.value ILIKE $2)) OR EXISTS (SELECT 1 FROM jsonb_each_text(a.tags) AS tg2(key, value) WHERE (tg2.key ILIKE $3) OR (tg2.value ILIKE $4)))","arg_count":4,"args":["%dev%","%dev%","%test%","%test%"]}
+  },
+  {
+    "name": "compat-scope-exclude",
+    "query": "environment:production and not (tag:dev or tag:test)",
+    "note": "§8: an exclude clause is 'not (A or B)' appended with and",
+    "canonical": "environment:production and not (tag:dev or tag:test)",
+    "ast": {"and":[{"cmp":{"f":"environment","op":":","v":"production"}},{"not":{"or":[{"cmp":{"f":"tag","op":":","v":"dev"}},{"cmp":{"f":"tag","op":":","v":"test"}}]}}]},
+    "sql": {"where":"((lower((a.environment)::text) = $1) AND NOT ((EXISTS (SELECT 1 FROM jsonb_each_text(a.tags) AS tg1(key, value) WHERE (tg1.key ILIKE $2) OR (tg1.value ILIKE $3)) OR EXISTS (SELECT 1 FROM jsonb_each_text(a.tags) AS tg2(key, value) WHERE (tg2.key ILIKE $4) OR (tg2.value ILIKE $5)))))","arg_count":5,"args":["production","%dev%","%dev%","%test%","%test%"]}
+  },
+  {
+    "name": "compat-scope-empty",
+    "query": "",
+    "note": "§8: an empty predicate matches everything under RLS",
+    "ast": null,
+    "sql": {"where":"TRUE","arg_count":0}
+  },
+  {
+    "name": "compat-rule-observation",
+    "query": "source:sensor and network.ownership:internal and confidence \u003e= 0.8",
+    "target": "observation",
+    "twin": "compat-rule-observation-ok",
+    "note": "§8: an approval rule's conditions. The observation target has no table",
+    "canonical": "source:sensor and network.ownership:internal and confidence \u003e= 0.8",
+    "ast": {"and":[{"cmp":{"f":"source","op":":","v":"sensor"}},{"cmp":{"f":"network.ownership","op":":","v":"internal"}},{"cmp":{"f":"confidence","op":"\u003e=","v":"0.8"}}]},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "compat-rule-segment-present",
+    "query": "exists(network.segment_id)",
+    "target": "observation",
+    "twin": "compat-rule-segment-present-ok",
+    "note": "§8: require_network_segment_match",
+    "canonical": "exists(network.segment_id)",
+    "ast": {"exists":{"f":"network.segment_id"}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "compat-stale-lens",
+    "query": "last_seen \u003c now-90d",
+    "note": "§8: last_seen_before",
+    "canonical": "last_seen \u003c now-90d",
+    "ast": {"cmp":{"f":"last_seen","op":"\u003c","v":"now-90d"}},
+    "sql": {"where":"(a.last_seen_at \u003c $1)","arg_count":1,"args":["2026-06-13T12:00:00Z"]}
+  },
+  {
+    "name": "compat-risk-at-least",
+    "query": "risk \u003e= high",
+    "note": "§8: risk_at_least",
+    "canonical": "risk \u003e= high",
+    "ast": {"cmp":{"f":"risk","op":"\u003e=","v":"high"}},
+    "sql": {"where":"(CASE WHEN coalesce(array_length(a.risk_assessed_by, 1), 0) \u003e 0 THEN (a.risk_score \u003e= $1) END)","arg_count":1,"args":[70]}
+  },
+  {
+    "name": "compat-determined",
+    "query": "exists(risk_assessed_by)",
+    "note": "§8: the assessment three-state",
+    "canonical": "exists(risk_assessed_by)",
+    "ast": {"exists":{"f":"risk_assessed_by"}},
+    "sql": {"where":"(coalesce(array_length(a.risk_assessed_by, 1), 0) \u003e 0)","arg_count":0}
+  },
+  {
+    "name": "compat-strength-lens",
+    "query": "strength:weak",
+    "target": "crypto_configuration",
+    "note": "§8: the strength select; the second derived field due in 1.9",
+    "canonical": "strength:weak",
+    "ast": {"cmp":{"f":"strength","op":":","v":"weak"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM crypto_implementation_algorithms cia1 JOIN algorithms alg2 ON alg2.id = cia1.algorithm_id WHERE cia1.crypto_implementation_id = ci.id AND (lower(alg2.strength) = $1))","arg_count":1,"args":["weak"]}
+  },
+  {
+    "name": "compat-cert-expiring-within",
+    "query": "cert:(not_after \u003c now+30d)",
+    "note": "§8: MCP cert_expiring_within",
+    "canonical": "cert:(not_after \u003c now+30d)",
+    "ast": {"sub":{"c":"cert","p":{"cmp":{"f":"not_after","op":"\u003c","v":"now+30d"}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM certificates c1 JOIN crypto_implementation_certificates cic2 ON cic2.certificate_id = c1.id JOIN crypto_implementations ci3 ON ci3.id = cic2.crypto_implementation_id LEFT JOIN asset_endpoints e4 ON e4.id = ci3.endpoint_id WHERE COALESCE(e4.asset_id, ci3.asset_id) = a.id AND (c1.not_after \u003c $1))","arg_count":1,"args":["2026-10-11T12:00:00Z"]}
+  },
+  {
+    "name": "compat-has-certificates",
+    "query": "exists(cert)",
+    "note": "§8: MCP has_certificates — exists() over a collection",
+    "canonical": "exists(cert)",
+    "ast": {"sub":{"c":"cert"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM certificates c1 JOIN crypto_implementation_certificates cic2 ON cic2.certificate_id = c1.id JOIN crypto_implementations ci3 ON ci3.id = cic2.crypto_implementation_id LEFT JOIN asset_endpoints e4 ON e4.id = ci3.endpoint_id WHERE COALESCE(e4.asset_id, ci3.asset_id) = a.id)","arg_count":0}
+  },
+  {
+    "name": "compat-uses-deprecated-algorithms",
+    "query": "crypto:(algorithm.deprecated:true)",
+    "note": "§8: MCP uses_deprecated_algorithms",
+    "canonical": "crypto:(algorithm.deprecated:true)",
+    "ast": {"sub":{"c":"crypto","p":{"cmp":{"f":"algorithm.deprecated","op":":","v":"true"}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM crypto_implementations ci1 LEFT JOIN asset_endpoints e2 ON e2.id = ci1.endpoint_id WHERE COALESCE(e2.asset_id, ci1.asset_id) = a.id AND ((EXISTS (SELECT 1 FROM crypto_implementation_algorithms cia3 JOIN algorithms alg4 ON alg4.id = cia3.algorithm_id WHERE cia3.crypto_implementation_id = ci1.id AND lower(alg4.deprecation_status) IN ($1, $2))) = $3))","arg_count":3,"args":["deprecated","obsolete",true]}
+  },
+  {
+    "name": "compat-measurement-presence",
+    "query": "not exists(owner_email)",
+    "note": "§8: RulePredicate presence, negated",
+    "canonical": "not exists(owner_email)",
+    "ast": {"not":{"exists":{"f":"owner_email"}}},
+    "sql": {"where":"NOT ((a.owner_email IS NOT NULL))","arg_count":0}
+  },
+  {
+    "name": "compat-measurement-range",
+    "query": "risk_score:[40 to 69]",
+    "note": "§8: RulePredicate range",
+    "canonical": "risk_score:[40 to 69]",
+    "ast": {"range":{"f":"risk_score","hi":"69","lo":"40"}},
+    "sql": {"where":"((a.risk_score \u003e= $1) AND (a.risk_score \u003c= $2))","arg_count":2,"args":[40,69]}
+  },
+  {
+    "name": "tvl-unknown-attribute",
+    "query": "attr.cpu_count \u003c 3",
+    "note": "§5.2: an asset with no cpu_count matches neither this…",
+    "canonical": "attr.cpu_count \u003c 3",
+    "ast": {"cmp":{"f":"attr.cpu_count","op":"\u003c","v":"3"}},
+    "sql": {"where":"((CASE WHEN (a.attributes -\u003e\u003e $1) ~ $2 THEN ((a.attributes -\u003e\u003e $1))::numeric END) \u003c $3)","arg_count":3,"args":["cpu_count","^-?[0-9]+(\\.[0-9]+)?$",3]}
+  },
+  {
+    "name": "tvl-unknown-attribute-negated",
+    "query": "not (attr.cpu_count \u003c 3)",
+    "note": "§5.2: …nor this. The guarded cast yields NULL, so SQL's own three-valued logic does the work",
+    "canonical": "not attr.cpu_count \u003c 3",
+    "ast": {"not":{"cmp":{"f":"attr.cpu_count","op":"\u003c","v":"3"}}},
+    "sql": {"where":"NOT (((CASE WHEN (a.attributes -\u003e\u003e $1) ~ $2 THEN ((a.attributes -\u003e\u003e $1))::numeric END) \u003c $3))","arg_count":3,"args":["cpu_count","^-?[0-9]+(\\.[0-9]+)?$",3]}
+  },
+  {
+    "name": "tvl-not-exists-sub",
+    "query": "not endpoint:(port:443)",
+    "note": "§5.1: NOT EXISTS also matches an asset with no endpoints at all",
+    "canonical": "not endpoint:(port:443)",
+    "ast": {"not":{"sub":{"c":"endpoint","p":{"cmp":{"f":"port","op":":","v":"443"}}}}},
+    "sql": {"where":"NOT EXISTS (SELECT 1 FROM asset_endpoints e1 WHERE e1.asset_id = a.id AND (e1.port = $1))","arg_count":1,"args":[443]}
+  },
+  {
+    "name": "tvl-assessed-and-no-443",
+    "query": "exists(endpoint) and not endpoint:(port:443)",
+    "note": "§5.1: the narrower claim, written out",
+    "canonical": "exists(endpoint) and not endpoint:(port:443)",
+    "ast": {"and":[{"sub":{"c":"endpoint"}},{"not":{"sub":{"c":"endpoint","p":{"cmp":{"f":"port","op":":","v":"443"}}}}}]},
+    "sql": {"where":"(EXISTS (SELECT 1 FROM asset_endpoints e1 WHERE e1.asset_id = a.id) AND NOT EXISTS (SELECT 1 FROM asset_endpoints e2 WHERE e2.asset_id = a.id AND (e2.port = $1)))","arg_count":1,"args":[443]}
+  },
+  {
+    "name": "tvl-informational-is-assessed",
+    "query": "risk:informational",
+    "note": "§5.2: assessed and scored zero",
+    "canonical": "risk:informational",
+    "ast": {"cmp":{"f":"risk","op":":","v":"informational"}},
+    "sql": {"where":"(CASE WHEN coalesce(array_length(a.risk_assessed_by, 1), 0) \u003e 0 THEN (a.risk_score \u003e= $1 AND a.risk_score \u003c $2) END)","arg_count":2,"args":[0,1]}
+  },
+  {
+    "name": "tvl-not-assessed-is-empty-coverage",
+    "query": "risk:not_assessed",
+    "note": "§5.2: risk_assessed_by is empty",
+    "canonical": "risk:not_assessed",
+    "ast": {"cmp":{"f":"risk","op":":","v":"not_assessed"}},
+    "sql": {"where":"(coalesce(array_length(a.risk_assessed_by, 1), 0) = 0)","arg_count":0}
+  },
+  {
+    "name": "tvl-band-above-the-top-rung",
+    "query": "risk \u003e critical",
+    "note": "§5.2: nothing is above the top band, so no scored row matches — but an unscored one is UNKNOWN, not false, or its negation would sweep up every asset nobody assessed",
+    "canonical": "risk \u003e critical",
+    "ast": {"cmp":{"f":"risk","op":"\u003e","v":"critical"}},
+    "sql": {"where":"(CASE WHEN coalesce(array_length(a.risk_assessed_by, 1), 0) \u003e 0 THEN (a.risk_score \u003e= $1 AND a.risk_score \u003c $1) END)","arg_count":1,"args":[90]}
+  },
+  {
+    "name": "tvl-band-at-or-below-the-top-rung",
+    "query": "risk \u003c= critical",
+    "note": "§5.2: every scored row matches and an unscored one is UNKNOWN. An IS NOT NULL test would answer false where the honest answer is 'not assessed'",
+    "canonical": "risk \u003c= critical",
+    "ast": {"cmp":{"f":"risk","op":"\u003c=","v":"critical"}},
+    "sql": {"where":"(CASE WHEN coalesce(array_length(a.risk_assessed_by, 1), 0) \u003e 0 THEN (a.risk_score \u003e= $1 OR a.risk_score \u003c $1) END)","arg_count":1,"args":[90]}
+  },
+  {
+    "name": "tvl-version-unparseable-is-unknown",
+    "query": "software:(version \u003c 3.0)",
+    "note": "§5.5: a version that did not parse has a NULL sort key and is UNKNOWN, never 'less than'",
+    "canonical": "software:(version \u003c 3.0)",
+    "ast": {"sub":{"c":"software","p":{"cmp":{"f":"version","op":"\u003c","v":"3.0"}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM software_installs si1 JOIN software_products sp2 ON sp2.id = si1.product_id WHERE si1.asset_id = a.id AND (sp2.version_sort COLLATE \"C\" \u003c $1))","arg_count":1,"args":["00000003.00000000.00000000.00000000.00000000.00000000|~"]}
+  },
+  {
+    "name": "tvl-band-severity-label",
+    "query": "finding:(severity:critical)",
+    "note": "§5.5: a finding carries a stored label, so equality uses it and ordering uses the ladder",
+    "canonical": "finding:(severity:critical)",
+    "ast": {"sub":{"c":"finding","p":{"cmp":{"f":"severity","op":":","v":"critical"}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM findings f1 WHERE ((f1.subject_type = $1 AND f1.subject_id = a.id) OR (f1.subject_type = $2 AND f1.subject_id IN (SELECT e2.id FROM asset_endpoints e2 WHERE e2.asset_id = a.id)) OR (f1.subject_type = $3 AND f1.subject_id IN (SELECT ci3.id FROM crypto_implementations ci3 LEFT JOIN asset_endpoints e4 ON e4.id = ci3.endpoint_id WHERE COALESCE(e4.asset_id, ci3.asset_id) = a.id)) OR (f1.subject_type = $4 AND f1.subject_id IN (SELECT c5.id FROM certificates c5 JOIN crypto_implementation_certificates cic6 ON cic6.certificate_id = c5.id JOIN crypto_implementations ci7 ON ci7.id = cic6.crypto_implementation_id LEFT JOIN asset_endpoints e8 ON e8.id = ci7.endpoint_id WHERE COALESCE(e8.asset_id, ci7.asset_id) = a.id)) OR (f1.subject_type = $5 AND f1.subject_id IN (SELECT si9.id FROM software_installs si9 WHERE si9.asset_id = a.id)) OR (f1.subject_type = $6 AND f1.subject_id IN (SELECT r10.id FROM asset_relationships r10 WHERE r10.from_asset_id = a.id OR r10.to_asset_id = a.id)) OR (f1.subject_type = $7 AND f1.subject_id IN (SELECT k11.id FROM keys k11 JOIN implementation_keys ik12 ON ik12.key_id = k11.id JOIN crypto_implementations ci13 ON ci13.id = ik12.implementation_id LEFT JOIN asset_endpoints e14 ON e14.id = ci13.endpoint_id WHERE COALESCE(e14.asset_id, ci13.asset_id) = a.id))) AND (lower(f1.severity) = $8))","arg_count":8,"args":["asset","endpoint","crypto_configuration","certificate","software_install","relationship","key","critical"]}
+  },
+  {
+    "name": "tvl-band-below-excludes-the-unassessed",
+    "query": "risk \u003c high",
+    "note": "§5.2, ADR-0005 D4: risk_score defaults to 0 and is never NULL, so every band form must be wrapped in the coverage guard or this matches every asset nobody scored",
+    "canonical": "risk \u003c high",
+    "ast": {"cmp":{"f":"risk","op":"\u003c","v":"high"}},
+    "sql": {"where":"(CASE WHEN coalesce(array_length(a.risk_assessed_by, 1), 0) \u003e 0 THEN (a.risk_score \u003c $1) END)","arg_count":1,"args":[70]}
+  },
+  {
+    "name": "tvl-band-below-negated-excludes-them-too",
+    "query": "not (risk \u003c high)",
+    "note": "§5.2: the guard is a CASE with no ELSE so NULL propagates through NOT — the negation must exclude an unassessed asset as firmly as the term does",
+    "canonical": "not risk \u003c high",
+    "ast": {"not":{"cmp":{"f":"risk","op":"\u003c","v":"high"}}},
+    "sql": {"where":"NOT ((CASE WHEN coalesce(array_length(a.risk_assessed_by, 1), 0) \u003e 0 THEN (a.risk_score \u003c $1) END))","arg_count":1,"args":[70]}
+  },
+  {
+    "name": "tvl-band-equality-is-guarded",
+    "query": "risk != high",
+    "note": "§5.2: inequality is guarded like every other band form",
+    "canonical": "risk != high",
+    "ast": {"cmp":{"f":"risk","op":"!=","v":"high"}},
+    "sql": {"where":"(CASE WHEN coalesce(array_length(a.risk_assessed_by, 1), 0) \u003e 0 THEN NOT (a.risk_score \u003e= $1 AND a.risk_score \u003c $2) END)","arg_count":2,"args":[70,90]}
+  },
+  {
+    "name": "tvl-band-in-is-guarded",
+    "query": "risk in (high, critical)",
+    "note": "§5.2: each arm of an `in` carries the guard, so the OR of two UNKNOWNs is UNKNOWN",
+    "canonical": "risk in (high, critical)",
+    "ast": {"in":{"f":"risk","v":["high","critical"]}},
+    "sql": {"where":"((CASE WHEN coalesce(array_length(a.risk_assessed_by, 1), 0) \u003e 0 THEN (a.risk_score \u003e= $1 AND a.risk_score \u003c $2) END) OR (CASE WHEN coalesce(array_length(a.risk_assessed_by, 1), 0) \u003e 0 THEN (a.risk_score \u003e= $3) END))","arg_count":3,"args":[70,90,90]}
+  },
+  {
+    "name": "tvl-band-range-is-guarded",
+    "query": "risk:[low to high]",
+    "note": "§5.2: a band range is guarded too, and reads the ladder's bounds",
+    "canonical": "risk:[low to high]",
+    "ast": {"range":{"f":"risk","hi":"high","lo":"low"}},
+    "sql": {"where":"(CASE WHEN coalesce(array_length(a.risk_assessed_by, 1), 0) \u003e 0 THEN (a.risk_score \u003e= $1 AND a.risk_score \u003c $2) END)","arg_count":2,"args":[1,90]}
+  },
+  {
+    "name": "tvl-band-severity-range-reads-the-label",
+    "query": "finding:(severity:[low to high])",
+    "note": "§13 A2: a band range reads the SAME column equality does — the stored label on findings, the score where there is none",
+    "canonical": "finding:(severity:[low to high])",
+    "ast": {"sub":{"c":"finding","p":{"range":{"f":"severity","hi":"high","lo":"low"}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM findings f1 WHERE ((f1.subject_type = $1 AND f1.subject_id = a.id) OR (f1.subject_type = $2 AND f1.subject_id IN (SELECT e2.id FROM asset_endpoints e2 WHERE e2.asset_id = a.id)) OR (f1.subject_type = $3 AND f1.subject_id IN (SELECT ci3.id FROM crypto_implementations ci3 LEFT JOIN asset_endpoints e4 ON e4.id = ci3.endpoint_id WHERE COALESCE(e4.asset_id, ci3.asset_id) = a.id)) OR (f1.subject_type = $4 AND f1.subject_id IN (SELECT c5.id FROM certificates c5 JOIN crypto_implementation_certificates cic6 ON cic6.certificate_id = c5.id JOIN crypto_implementations ci7 ON ci7.id = cic6.crypto_implementation_id LEFT JOIN asset_endpoints e8 ON e8.id = ci7.endpoint_id WHERE COALESCE(e8.asset_id, ci7.asset_id) = a.id)) OR (f1.subject_type = $5 AND f1.subject_id IN (SELECT si9.id FROM software_installs si9 WHERE si9.asset_id = a.id)) OR (f1.subject_type = $6 AND f1.subject_id IN (SELECT r10.id FROM asset_relationships r10 WHERE r10.from_asset_id = a.id OR r10.to_asset_id = a.id)) OR (f1.subject_type = $7 AND f1.subject_id IN (SELECT k11.id FROM keys k11 JOIN implementation_keys ik12 ON ik12.key_id = k11.id JOIN crypto_implementations ci13 ON ci13.id = ik12.implementation_id LEFT JOIN asset_endpoints e14 ON e14.id = ci13.endpoint_id WHERE COALESCE(e14.asset_id, ci13.asset_id) = a.id))) AND (lower(f1.severity) IN ($8, $9, $10)))","arg_count":10,"args":["asset","endpoint","crypto_configuration","certificate","software_install","relationship","key","high","medium","low"]}
+  },
+  {
+    "name": "error-not-assessed-ordered-bad",
+    "query": "risk \u003c not_assessed",
+    "note": "S10: not_assessed is the ABSENCE of a score, not a rung, so it cannot be ordered against. The translator used to ignore the operator here and return every unassessed asset",
+    "canonical": "risk \u003c not_assessed",
+    "ast": {"cmp":{"f":"risk","op":"\u003c","v":"not_assessed"}},
+    "errors": [{"code":"operator_not_allowed"}]
+  },
+  {
+    "name": "error-not-assessed-ordered-ok",
+    "query": "risk:not_assessed",
+    "note": "S10: the nearest legal query",
+    "canonical": "risk:not_assessed",
+    "ast": {"cmp":{"f":"risk","op":":","v":"not_assessed"}},
+    "sql": {"where":"(coalesce(array_length(a.risk_assessed_by, 1), 0) = 0)","arg_count":0}
+  },
+  {
+    "name": "error-not-assessed-range-bad",
+    "query": "risk:[not_assessed to high]",
+    "note": "S9: this validated and then failed `untranslatable`, a code §6 reserves for a parser bug. It is an operator the value does not accept, and says so",
+    "canonical": "risk:[not_assessed to high]",
+    "ast": {"range":{"f":"risk","hi":"high","lo":"not_assessed"}},
+    "errors": [{"code":"operator_not_allowed"}]
+  },
+  {
+    "name": "error-not-assessed-range-ok",
+    "query": "risk:[informational to high]",
+    "note": "S9: the nearest legal query — a range between two real rungs",
+    "canonical": "risk:[informational to high]",
+    "ast": {"range":{"f":"risk","hi":"high","lo":"informational"}},
+    "sql": {"where":"(CASE WHEN coalesce(array_length(a.risk_assessed_by, 1), 0) \u003e 0 THEN (a.risk_score \u003e= $1 AND a.risk_score \u003c $2) END)","arg_count":2,"args":[0,90]}
+  },
+  {
+    "name": "not-assessed-inequality-is-allowed",
+    "query": "risk != not_assessed",
+    "note": "§5.2: `:`, `=` and `!=` are the three operators not_assessed accepts — \"has been assessed\" is a legitimate question",
+    "canonical": "risk != not_assessed",
+    "ast": {"cmp":{"f":"risk","op":"!=","v":"not_assessed"}},
+    "sql": {"where":"NOT (coalesce(array_length(a.risk_assessed_by, 1), 0) = 0)","arg_count":0}
+  },
+  {
+    "name": "canonical-uppercase-keywords",
+    "query": "Environment:Production AND Class:server",
+    "note": "§2/§10: field names and keywords are case-insensitive and lowercase; values are not touched",
+    "canonical": "environment:Production and class:server",
+    "ast": {"and":[{"cmp":{"f":"environment","op":":","v":"Production"}},{"cmp":{"f":"class","op":":","v":"server"}}]},
+    "sql": {"where":"((lower((a.environment)::text) = $1) AND (a.class_path = $2 OR a.class_path LIKE $3))","arg_count":3,"args":["production","hardware.computer.server","hardware.computer.server.%"]}
+  },
+  {
+    "name": "canonical-duration-hours",
+    "query": "last_seen \u003c now-24h",
+    "note": "§10: 24h becomes 1d",
+    "canonical": "last_seen \u003c now-1d",
+    "ast": {"cmp":{"f":"last_seen","op":"\u003c","v":"now-1d"}},
+    "sql": {"where":"(a.last_seen_at \u003c $1)","arg_count":1,"args":["2026-09-10T12:00:00Z"]}
+  },
+  {
+    "name": "canonical-duration-stays",
+    "query": "last_seen \u003c now-90d",
+    "note": "§10: 90d stays 90d",
+    "canonical": "last_seen \u003c now-90d",
+    "ast": {"cmp":{"f":"last_seen","op":"\u003c","v":"now-90d"}},
+    "sql": {"where":"(a.last_seen_at \u003c $1)","arg_count":1,"args":["2026-06-13T12:00:00Z"]}
+  },
+  {
+    "name": "canonical-duration-spelled",
+    "query": "last_seen \u003c now-6months",
+    "note": "§2: spelled aliases; calendar units convert only among themselves",
+    "canonical": "last_seen \u003c now-6mo",
+    "ast": {"cmp":{"f":"last_seen","op":"\u003c","v":"now-6mo"}},
+    "sql": {"where":"(a.last_seen_at \u003c $1)","arg_count":1,"args":["2026-03-11T12:00:00Z"]}
+  },
+  {
+    "name": "canonical-quoted-date-shaped-string-kept",
+    "query": "hostname=\"now-24h\"",
+    "note": "S7: the formatter is type-free, so it rewrote any value SHAPED like a relative date — `hostname=\"now-24h\"` became `hostname=now-1d`, a different predicate that still parses. A quoted literal is never rewritten, and keeps its quotes so the next pass cannot rewrite it either",
+    "canonical": "hostname=\"now-24h\"",
+    "ast": {"cmp":{"f":"hostname","op":"=","v":"now-24h"}},
+    "sql": {"where":"(a.hostname = $1)","arg_count":1,"args":["now-24h"]}
+  },
+  {
+    "name": "canonical-free-text-date-shaped-string-kept",
+    "query": "\"now-24h\"",
+    "note": "S7: free text is a substring search over names, identifiers and tags (§5.4) and can never be an instant, so it is never date-canonicalised",
+    "canonical": "now-24h",
+    "ast": {"text":"now-24h"},
+    "sql": {"where":"(a.display_name ILIKE $1 OR a.hostname ILIKE $1 OR EXISTS (SELECT 1 FROM asset_identifiers ai1 WHERE ai1.asset_id = a.id AND ai1.value ILIKE $1) OR EXISTS (SELECT 1 FROM jsonb_each_text(a.tags) AS tg2(key, value) WHERE tg2.key ILIKE $1 OR tg2.value ILIKE $1))","arg_count":1,"args":["%now-24h%"]}
+  },
+  {
+    "name": "canonical-redundant-parens",
+    "query": "(class:server)",
+    "note": "§10: redundant parentheses are removed",
+    "canonical": "class:server",
+    "ast": {"cmp":{"f":"class","op":":","v":"server"}},
+    "sql": {"where":"(a.class_path = $1 OR a.class_path LIKE $2)","arg_count":2,"args":["hardware.computer.server","hardware.computer.server.%"]}
+  },
+  {
+    "name": "canonical-precedence-parens-kept",
+    "query": "(environment:production or environment:staging) and class:server",
+    "note": "§10: parentheses that carry precedence stay",
+    "canonical": "(environment:production or environment:staging) and class:server",
+    "ast": {"and":[{"or":[{"cmp":{"f":"environment","op":":","v":"production"}},{"cmp":{"f":"environment","op":":","v":"staging"}}]},{"cmp":{"f":"class","op":":","v":"server"}}]},
+    "sql": {"where":"(((lower((a.environment)::text) = $1) OR (lower((a.environment)::text) = $2)) AND (a.class_path = $3 OR a.class_path LIKE $4))","arg_count":4,"args":["production","staging","hardware.computer.server","hardware.computer.server.%"]}
+  },
+  {
+    "name": "canonical-nested-or-kept",
+    "query": "class:server or (environment:production or environment:staging)",
+    "note": "§10: removing these would flatten the tree, so they stay",
+    "canonical": "class:server or (environment:production or environment:staging)",
+    "ast": {"or":[{"cmp":{"f":"class","op":":","v":"server"}},{"or":[{"cmp":{"f":"environment","op":":","v":"production"}},{"cmp":{"f":"environment","op":":","v":"staging"}}]}]},
+    "sql": {"where":"((a.class_path = $1 OR a.class_path LIKE $2) OR ((lower((a.environment)::text) = $3) OR (lower((a.environment)::text) = $4)))","arg_count":4,"args":["hardware.computer.server","hardware.computer.server.%","production","staging"]}
+  },
+  {
+    "name": "canonical-value-quoting",
+    "query": "display_name:\"has space\" and display_name:\"plain\"",
+    "note": "§10: a value is quoted iff it is not a safe bareword",
+    "canonical": "display_name:\"has space\" and display_name:plain",
+    "ast": {"and":[{"cmp":{"f":"display_name","op":":","v":"has space"}},{"cmp":{"f":"display_name","op":":","v":"plain"}}]},
+    "sql": {"where":"((a.display_name ILIKE $1) AND (a.display_name ILIKE $2))","arg_count":2,"args":["%has space%","%plain%"]}
+  },
+  {
+    "name": "canonical-literal-asterisk-stays-quoted",
+    "query": "display_name:\"five*\"",
+    "note": "unquoting this would turn a literal asterisk into a wildcard",
+    "canonical": "display_name:\"five*\"",
+    "ast": {"cmp":{"f":"display_name","op":":","v":{"s":"five*"}}},
+    "sql": {"where":"(a.display_name ILIKE $1)","arg_count":1,"args":["%five*%"]}
+  },
+  {
+    "name": "canonical-depth-one-dropped",
+    "query": "depends_on(1):(class:server)",
+    "note": "one hop is the grammar's default, so the argument is dropped",
+    "canonical": "depends_on:(class:server)",
+    "ast": {"traverse":{"depth":1,"dir":"out","form":"named","p":{"cmp":{"f":"class","op":":","v":"server"}},"rel":"depends_on","t":"depends_on"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT r2.to_asset_id AS id, 1 AS depth FROM asset_relationships r2 WHERE r2.from_asset_id = a.id AND r2.status = $1 AND r2.type = $3 AND r2.to_asset_id \u003c\u003e a.id UNION SELECT r3.to_asset_id, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON r3.from_asset_id = w1.id WHERE w1.depth \u003c $2 AND r3.status = $1 AND r3.type = $3 AND r3.to_asset_id \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE (a4.class_path = $4 OR a4.class_path LIKE $5))","arg_count":5,"args":["active",1,"depends_on","hardware.computer.server","hardware.computer.server.%"]}
+  },
+  {
+    "name": "canonical-clause-order-preserved",
+    "query": "risk_score \u003e= 1 and risk_score \u003c= 10",
+    "note": "§10: not rewritten to a range, not reordered",
+    "canonical": "risk_score \u003e= 1 and risk_score \u003c= 10",
+    "ast": {"and":[{"cmp":{"f":"risk_score","op":"\u003e=","v":"1"}},{"cmp":{"f":"risk_score","op":"\u003c=","v":"10"}}]},
+    "sql": {"where":"((a.risk_score \u003e= $1) AND (a.risk_score \u003c= $2))","arg_count":2,"args":[1,10]}
+  },
+  {
+    "name": "error-syntax-bad",
+    "query": "environment:",
+    "note": "§10: a field with no value",
+    "errors": [{"code":"syntax_error"}]
+  },
+  {
+    "name": "error-syntax-ok",
+    "query": "environment:production",
+    "note": "the nearest passing query",
+    "canonical": "environment:production",
+    "ast": {"cmp":{"f":"environment","op":":","v":"production"}},
+    "sql": {"where":"(lower((a.environment)::text) = $1)","arg_count":1,"args":["production"]}
+  },
+  {
+    "name": "error-syntax-unterminated-string-bad",
+    "query": "display_name:\"web",
+    "note": "§2: an unterminated string is an error",
+    "errors": [{"code":"syntax_error"}]
+  },
+  {
+    "name": "error-syntax-unterminated-string-ok",
+    "query": "display_name:\"web\"",
+    "note": "the nearest passing query",
+    "canonical": "display_name:web",
+    "ast": {"cmp":{"f":"display_name","op":":","v":"web"}},
+    "sql": {"where":"(a.display_name ILIKE $1)","arg_count":1,"args":["%web%"]}
+  },
+  {
+    "name": "error-syntax-unknown-escape-bad",
+    "query": "hostname ~ \"^web\\d\"",
+    "note": "§2: the escape set is \\\\ \\\" \\' \\n \\t \\r \\uXXXX, and \\d is not one of them",
+    "errors": [{"code":"syntax_error"}]
+  },
+  {
+    "name": "error-syntax-unknown-escape-ok",
+    "query": "hostname ~ \"^web\\\\d\"",
+    "note": "the nearest passing query: the backslash is escaped, so the regex receives \\d",
+    "canonical": "hostname ~ \"^web\\\\d\"",
+    "ast": {"match":{"f":"hostname","re":"^web\\d"}},
+    "sql": {"where":"(a.hostname ~ $1)","arg_count":1,"args":["^web\\d"]}
+  },
+  {
+    "name": "error-syntax-keyword-as-value-bad",
+    "query": "environment:and",
+    "note": "§2: a keyword must be quoted to be used as a value",
+    "errors": [{"code":"syntax_error"}]
+  },
+  {
+    "name": "error-syntax-keyword-as-value-ok",
+    "query": "business_unit:\"and\"",
+    "note": "the nearest passing query. The FIELD differs from its twin deliberately: what this pins is that quoting rescues a keyword, and `environment` is a closed set that would reject \"and\" for a second, unrelated reason (§12 A1)",
+    "canonical": "business_unit:\"and\"",
+    "ast": {"cmp":{"f":"business_unit","op":":","v":"and"}},
+    "sql": {"where":"(lower(a.business_unit) = $1)","arg_count":1,"args":["and"]}
+  },
+  {
+    "name": "error-syntax-range-missing-to-bad",
+    "query": "risk_score:[40 69]",
+    "note": "§3: a range is written [low to high]",
+    "errors": [{"code":"syntax_error"}]
+  },
+  {
+    "name": "error-syntax-range-missing-to-ok",
+    "query": "risk_score:[40 to 69]",
+    "note": "the nearest passing query",
+    "canonical": "risk_score:[40 to 69]",
+    "ast": {"range":{"f":"risk_score","hi":"69","lo":"40"}},
+    "sql": {"where":"((a.risk_score \u003e= $1) AND (a.risk_score \u003c= $2))","arg_count":2,"args":[40,69]}
+  },
+  {
+    "name": "error-unknown-field-misspelled-relationship-bad",
+    "query": "depands_on:(class:server)",
+    "note": "a misspelled relationship name is a field that does not resolve, not a syntax error: ':' is legal inside a bare value, so the group holds one value. The validator's suggestion names the relationship",
+    "canonical": "depands_on:class:server",
+    "ast": {"cmp":{"f":"depands_on","op":":","v":"class:server"}},
+    "errors": [{"code":"unknown_field"}]
+  },
+  {
+    "name": "error-unknown-field-misspelled-relationship-ok",
+    "query": "depends_on:(class:server)",
+    "note": "the nearest passing query",
+    "canonical": "depends_on:(class:server)",
+    "ast": {"traverse":{"depth":1,"dir":"out","form":"named","p":{"cmp":{"f":"class","op":":","v":"server"}},"rel":"depends_on","t":"depends_on"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT r2.to_asset_id AS id, 1 AS depth FROM asset_relationships r2 WHERE r2.from_asset_id = a.id AND r2.status = $1 AND r2.type = $3 AND r2.to_asset_id \u003c\u003e a.id UNION SELECT r3.to_asset_id, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON r3.from_asset_id = w1.id WHERE w1.depth \u003c $2 AND r3.status = $1 AND r3.type = $3 AND r3.to_asset_id \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE (a4.class_path = $4 OR a4.class_path LIKE $5))","arg_count":5,"args":["active",1,"depends_on","hardware.computer.server","hardware.computer.server.%"]}
+  },
+  {
+    "name": "error-unknown-field-bad",
+    "query": "environment:production and hostnaem:web-1",
+    "note": "§10's worked example",
+    "canonical": "environment:production and hostnaem:web-1",
+    "ast": {"and":[{"cmp":{"f":"environment","op":":","v":"production"}},{"cmp":{"f":"hostnaem","op":":","v":"web-1"}}]},
+    "errors": [{"code":"unknown_field"}]
+  },
+  {
+    "name": "error-unknown-field-ok",
+    "query": "environment:production and hostname:web-1",
+    "note": "the nearest passing query",
+    "canonical": "environment:production and hostname:web-1",
+    "ast": {"and":[{"cmp":{"f":"environment","op":":","v":"production"}},{"cmp":{"f":"hostname","op":":","v":"web-1"}}]},
+    "sql": {"where":"((lower((a.environment)::text) = $1) AND (a.hostname ILIKE $2))","arg_count":2,"args":["production","%web-1%"]}
+  },
+  {
+    "name": "error-unknown-field-namespace-bad",
+    "query": "attr.not_registered:1",
+    "note": "§4.2: an unregistered class attribute",
+    "canonical": "attr.not_registered:1",
+    "ast": {"cmp":{"f":"attr.not_registered","op":":","v":"1"}},
+    "errors": [{"code":"unknown_field"}]
+  },
+  {
+    "name": "error-unknown-field-namespace-ok",
+    "query": "attr.cpu_count:1",
+    "note": "the nearest passing query",
+    "canonical": "attr.cpu_count:1",
+    "ast": {"cmp":{"f":"attr.cpu_count","op":":","v":"1"}},
+    "sql": {"where":"((CASE WHEN (a.attributes -\u003e\u003e $1) ~ $2 THEN ((a.attributes -\u003e\u003e $1))::numeric END) = $3)","arg_count":3,"args":["cpu_count","^-?[0-9]+(\\.[0-9]+)?$",1]}
+  },
+  {
+    "name": "error-unknown-field-bare-namespace-bad",
+    "query": "attr:1",
+    "note": "a namespace is not a field",
+    "canonical": "attr:1",
+    "ast": {"cmp":{"f":"attr","op":":","v":"1"}},
+    "errors": [{"code":"unknown_field"}]
+  },
+  {
+    "name": "error-unknown-field-bare-namespace-ok",
+    "query": "attr.cpu_count:1",
+    "note": "the nearest passing query",
+    "canonical": "attr.cpu_count:1",
+    "ast": {"cmp":{"f":"attr.cpu_count","op":":","v":"1"}},
+    "sql": {"where":"((CASE WHEN (a.attributes -\u003e\u003e $1) ~ $2 THEN ((a.attributes -\u003e\u003e $1))::numeric END) = $3)","arg_count":3,"args":["cpu_count","^-?[0-9]+(\\.[0-9]+)?$",1]}
+  },
+  {
+    "name": "error-operator-not-allowed-bad",
+    "query": "environment \u003c production",
+    "note": "§4.4: keyword fields have no ordering",
+    "canonical": "environment \u003c production",
+    "ast": {"cmp":{"f":"environment","op":"\u003c","v":"production"}},
+    "errors": [{"code":"operator_not_allowed"}]
+  },
+  {
+    "name": "error-operator-not-allowed-ok",
+    "query": "environment:production",
+    "note": "the nearest passing query",
+    "canonical": "environment:production",
+    "ast": {"cmp":{"f":"environment","op":":","v":"production"}},
+    "sql": {"where":"(lower((a.environment)::text) = $1)","arg_count":1,"args":["production"]}
+  },
+  {
+    "name": "error-operator-not-allowed-class-bad",
+    "query": "class != server",
+    "note": "§4.4: class accepts '=' exactly, not '!='",
+    "canonical": "class != server",
+    "ast": {"cmp":{"f":"class","op":"!=","v":"server"}},
+    "errors": [{"code":"operator_not_allowed"}]
+  },
+  {
+    "name": "error-operator-not-allowed-class-ok",
+    "query": "not class=server",
+    "note": "the nearest passing query, with the three-valued rule visible",
+    "canonical": "not class=server",
+    "ast": {"not":{"cmp":{"f":"class","op":"=","v":"server"}}},
+    "sql": {"where":"NOT ((a.class_key = $1))","arg_count":1,"args":["server"]}
+  },
+  {
+    "name": "error-operator-not-allowed-regex-on-number-bad",
+    "query": "risk_score ~ \"7.\"",
+    "note": "§4.4: numbers take no regex",
+    "canonical": "risk_score ~ \"7.\"",
+    "ast": {"match":{"f":"risk_score","re":"7."}},
+    "errors": [{"code":"operator_not_allowed"}]
+  },
+  {
+    "name": "error-operator-not-allowed-regex-on-number-ok",
+    "query": "risk_score \u003e= 70",
+    "note": "the nearest passing query",
+    "canonical": "risk_score \u003e= 70",
+    "ast": {"cmp":{"f":"risk_score","op":"\u003e=","v":"70"}},
+    "sql": {"where":"(a.risk_score \u003e= $1)","arg_count":1,"args":[70]}
+  },
+  {
+    "name": "error-type-mismatch-bad",
+    "query": "risk \u003e= 70",
+    "note": "§10's second worked example: risk is a band",
+    "canonical": "risk \u003e= 70",
+    "ast": {"cmp":{"f":"risk","op":"\u003e=","v":"70"}},
+    "errors": [{"code":"type_mismatch"}]
+  },
+  {
+    "name": "error-type-mismatch-ok",
+    "query": "risk_score \u003e= 70",
+    "note": "the nearest passing query",
+    "canonical": "risk_score \u003e= 70",
+    "ast": {"cmp":{"f":"risk_score","op":"\u003e=","v":"70"}},
+    "sql": {"where":"(a.risk_score \u003e= $1)","arg_count":1,"args":[70]}
+  },
+  {
+    "name": "error-type-mismatch-date-bad",
+    "query": "last_seen \u003c soon",
+    "note": "§5.5: a date is an ISO timestamp or now±one duration",
+    "canonical": "last_seen \u003c soon",
+    "ast": {"cmp":{"f":"last_seen","op":"\u003c","v":"soon"}},
+    "errors": [{"code":"type_mismatch"}]
+  },
+  {
+    "name": "error-type-mismatch-date-ok",
+    "query": "last_seen \u003c now-30d",
+    "note": "the nearest passing query",
+    "canonical": "last_seen \u003c now-30d",
+    "ast": {"cmp":{"f":"last_seen","op":"\u003c","v":"now-30d"}},
+    "sql": {"where":"(a.last_seen_at \u003c $1)","arg_count":1,"args":["2026-08-12T12:00:00Z"]}
+  },
+  {
+    "name": "error-type-mismatch-chained-date-bad",
+    "query": "last_seen \u003c now-1mo-15d",
+    "note": "§11 Q5: date arithmetic does not chain in v1",
+    "canonical": "last_seen \u003c now-1mo-15d",
+    "ast": {"cmp":{"f":"last_seen","op":"\u003c","v":"now-1mo-15d"}},
+    "errors": [{"code":"type_mismatch"}]
+  },
+  {
+    "name": "error-type-mismatch-chained-date-ok",
+    "query": "last_seen \u003c now-45d",
+    "note": "the nearest passing query",
+    "canonical": "last_seen \u003c now-45d",
+    "ast": {"cmp":{"f":"last_seen","op":"\u003c","v":"now-45d"}},
+    "sql": {"where":"(a.last_seen_at \u003c $1)","arg_count":1,"args":["2026-07-28T12:00:00Z"]}
+  },
+  {
+    "name": "error-duration-overflow-bad",
+    "query": "last_seen \u003c now-200000d",
+    "note": "S8: 200000 days is 1.7e10 seconds and time.Duration overflows there, so this silently WRAPPED to an instant in the future and matched every asset instead of none",
+    "canonical": "last_seen \u003c now-200000d",
+    "ast": {"cmp":{"f":"last_seen","op":"\u003c","v":"now-200000d"}},
+    "errors": [{"code":"type_mismatch"}]
+  },
+  {
+    "name": "error-duration-overflow-ok",
+    "query": "last_seen \u003c now-36500d",
+    "note": "S8, other polarity: the largest count the day unit accepts (§13 A5: 100 years) still parses",
+    "canonical": "last_seen \u003c now-36500d",
+    "ast": {"cmp":{"f":"last_seen","op":"\u003c","v":"now-36500d"}},
+    "sql": {"where":"(a.last_seen_at \u003c $1)","arg_count":1,"args":["1926-10-06T12:00:00Z"]}
+  },
+  {
+    "name": "error-type-mismatch-uuid-bad",
+    "query": "segment_id=not-a-uuid",
+    "note": "§4.4: uuid",
+    "canonical": "segment_id=not-a-uuid",
+    "ast": {"cmp":{"f":"segment_id","op":"=","v":"not-a-uuid"}},
+    "errors": [{"code":"type_mismatch"}]
+  },
+  {
+    "name": "error-type-mismatch-uuid-ok",
+    "query": "segment_id=550e8400-e29b-41d4-a716-446655440000",
+    "note": "the nearest passing query",
+    "canonical": "segment_id=550e8400-e29b-41d4-a716-446655440000",
+    "ast": {"cmp":{"f":"segment_id","op":"=","v":"550e8400-e29b-41d4-a716-446655440000"}},
+    "sql": {"where":"(a.network_segment_id = $1::uuid)","arg_count":1,"args":["550e8400-e29b-41d4-a716-446655440000"]}
+  },
+  {
+    "name": "error-unknown-value-bad",
+    "query": "status:monitorng",
+    "note": "§6: an enum member that does not exist",
+    "canonical": "status:monitorng",
+    "ast": {"cmp":{"f":"status","op":":","v":"monitorng"}},
+    "errors": [{"code":"unknown_value"}]
+  },
+  {
+    "name": "error-unknown-value-ok",
+    "query": "status:monitoring",
+    "note": "the nearest passing query",
+    "canonical": "status:monitoring",
+    "ast": {"cmp":{"f":"status","op":":","v":"monitoring"}},
+    "sql": {"where":"(lower((a.asset_status)::text) = $1)","arg_count":1,"args":["monitoring"]}
+  },
+  {
+    "name": "error-unknown-value-class-bad",
+    "query": "class:serverr",
+    "note": "§6: the class key must exist",
+    "canonical": "class:serverr",
+    "ast": {"cmp":{"f":"class","op":":","v":"serverr"}},
+    "errors": [{"code":"unknown_value"}]
+  },
+  {
+    "name": "error-unknown-value-class-ok",
+    "query": "class:server",
+    "note": "the nearest passing query",
+    "canonical": "class:server",
+    "ast": {"cmp":{"f":"class","op":":","v":"server"}},
+    "sql": {"where":"(a.class_path = $1 OR a.class_path LIKE $2)","arg_count":2,"args":["hardware.computer.server","hardware.computer.server.%"]}
+  },
+  {
+    "name": "error-unknown-value-relationship-bad",
+    "query": "rel(depands_on, out):(class:server)",
+    "note": "§6: the relationship name must be one of the twenty",
+    "canonical": "rel(depands_on, out):(class:server)",
+    "ast": {"traverse":{"depth":1,"dir":"out","form":"rel","p":{"cmp":{"f":"class","op":":","v":"server"}},"rel":"depands_on","t":"depands_on"}},
+    "errors": [{"code":"unknown_value"}]
+  },
+  {
+    "name": "error-unknown-value-relationship-ok",
+    "query": "rel(depends_on, out):(class:server)",
+    "note": "the nearest passing query",
+    "canonical": "rel(depends_on, out):(class:server)",
+    "ast": {"traverse":{"depth":1,"dir":"out","form":"rel","p":{"cmp":{"f":"class","op":":","v":"server"}},"rel":"depends_on","t":"depends_on"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT r2.to_asset_id AS id, 1 AS depth FROM asset_relationships r2 WHERE r2.from_asset_id = a.id AND r2.status = $1 AND r2.type = $3 AND r2.to_asset_id \u003c\u003e a.id UNION SELECT r3.to_asset_id, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON r3.from_asset_id = w1.id WHERE w1.depth \u003c $2 AND r3.status = $1 AND r3.type = $3 AND r3.to_asset_id \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE (a4.class_path = $4 OR a4.class_path LIKE $5))","arg_count":5,"args":["active",1,"depends_on","hardware.computer.server","hardware.computer.server.%"]}
+  },
+  {
+    "name": "error-unknown-value-reverse-label-in-rel-bad",
+    "query": "rel(used_by, out):(class:server)",
+    "note": "the explicit form takes a canonical type; a reverse label plus a direction has no defined meaning",
+    "canonical": "rel(used_by, out):(class:server)",
+    "ast": {"traverse":{"depth":1,"dir":"out","form":"rel","p":{"cmp":{"f":"class","op":":","v":"server"}},"rel":"used_by","t":"used_by"}},
+    "errors": [{"code":"unknown_value"}]
+  },
+  {
+    "name": "error-unknown-value-reverse-label-in-rel-ok",
+    "query": "used_by:(class:server)",
+    "note": "the nearest passing query",
+    "canonical": "used_by:(class:server)",
+    "ast": {"traverse":{"depth":1,"dir":"in","form":"named","p":{"cmp":{"f":"class","op":":","v":"server"}},"rel":"used_by","t":"depends_on"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT r2.from_asset_id AS id, 1 AS depth FROM asset_relationships r2 WHERE r2.to_asset_id = a.id AND r2.status = $1 AND r2.type = $3 AND r2.from_asset_id \u003c\u003e a.id UNION SELECT r3.from_asset_id, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON r3.to_asset_id = w1.id WHERE w1.depth \u003c $2 AND r3.status = $1 AND r3.type = $3 AND r3.from_asset_id \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE (a4.class_path = $4 OR a4.class_path LIKE $5))","arg_count":5,"args":["active",1,"depends_on","hardware.computer.server","hardware.computer.server.%"]}
+  },
+  {
+    "name": "error-depth-exceeded-bad",
+    "query": "depends_on(4):(class:server)",
+    "note": "§5.6: the default budget is 3",
+    "canonical": "depends_on(4):(class:server)",
+    "ast": {"traverse":{"depth":4,"dir":"out","form":"named","p":{"cmp":{"f":"class","op":":","v":"server"}},"rel":"depends_on","t":"depends_on"}},
+    "errors": [{"code":"depth_exceeded"}]
+  },
+  {
+    "name": "error-depth-exceeded-ok",
+    "query": "depends_on(3):(class:server)",
+    "note": "the nearest passing query",
+    "canonical": "depends_on(3):(class:server)",
+    "ast": {"traverse":{"depth":3,"dir":"out","form":"named","p":{"cmp":{"f":"class","op":":","v":"server"}},"rel":"depends_on","t":"depends_on"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT r2.to_asset_id AS id, 1 AS depth FROM asset_relationships r2 WHERE r2.from_asset_id = a.id AND r2.status = $1 AND r2.type = $3 AND r2.to_asset_id \u003c\u003e a.id UNION SELECT r3.to_asset_id, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON r3.from_asset_id = w1.id WHERE w1.depth \u003c $2 AND r3.status = $1 AND r3.type = $3 AND r3.to_asset_id \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE (a4.class_path = $4 OR a4.class_path LIKE $5))","arg_count":5,"args":["active",3,"depends_on","hardware.computer.server","hardware.computer.server.%"]}
+  },
+  {
+    "name": "error-depth-exceeded-nested-bad",
+    "query": "depends_on(2):(hosted_on(2):(class:hypervisor))",
+    "note": "§5.6: the budget is the sum along the deepest nested path — 2 + 2",
+    "canonical": "depends_on(2):(hosted_on(2):(class:hypervisor))",
+    "ast": {"traverse":{"depth":2,"dir":"out","form":"named","p":{"traverse":{"depth":2,"dir":"out","form":"named","p":{"cmp":{"f":"class","op":":","v":"hypervisor"}},"rel":"hosted_on","t":"hosted_on"}},"rel":"depends_on","t":"depends_on"}},
+    "errors": [{"code":"depth_exceeded"}]
+  },
+  {
+    "name": "error-depth-exceeded-nested-ok",
+    "query": "depends_on(2):(hosted_on:(class:hypervisor))",
+    "note": "2 + 1 = 3, exactly the budget",
+    "canonical": "depends_on(2):(hosted_on:(class:hypervisor))",
+    "ast": {"traverse":{"depth":2,"dir":"out","form":"named","p":{"traverse":{"depth":1,"dir":"out","form":"named","p":{"cmp":{"f":"class","op":":","v":"hypervisor"}},"rel":"hosted_on","t":"hosted_on"}},"rel":"depends_on","t":"depends_on"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT r2.to_asset_id AS id, 1 AS depth FROM asset_relationships r2 WHERE r2.from_asset_id = a.id AND r2.status = $1 AND r2.type = $3 AND r2.to_asset_id \u003c\u003e a.id UNION SELECT r3.to_asset_id, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON r3.from_asset_id = w1.id WHERE w1.depth \u003c $2 AND r3.status = $1 AND r3.type = $3 AND r3.to_asset_id \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE EXISTS (WITH RECURSIVE w5(id, depth) AS (SELECT r6.to_asset_id AS id, 1 AS depth FROM asset_relationships r6 WHERE r6.from_asset_id = a4.id AND r6.status = $4 AND r6.type = $6 AND r6.to_asset_id \u003c\u003e a4.id UNION SELECT r7.to_asset_id, w5.depth + 1 FROM w5 JOIN asset_relationships r7 ON r7.from_asset_id = w5.id WHERE w5.depth \u003c $5 AND r7.status = $4 AND r7.type = $6 AND r7.to_asset_id \u003c\u003e a4.id) SELECT 1 FROM w5 JOIN assets a8 ON a8.id = w5.id WHERE (a8.class_path = $7 OR a8.class_path LIKE $8)))","arg_count":8,"args":["active",2,"depends_on","active",1,"hosted_on","virtual.hypervisor","virtual.hypervisor.%"]}
+  },
+  {
+    "name": "error-depth-exceeded-hard-max-bad",
+    "query": "depends_on(7):(class:server)",
+    "note": "§5.6: 6 is the hard maximum whatever the configuration says",
+    "options": {"traversal_budget":10},
+    "canonical": "depends_on(7):(class:server)",
+    "ast": {"traverse":{"depth":7,"dir":"out","form":"named","p":{"cmp":{"f":"class","op":":","v":"server"}},"rel":"depends_on","t":"depends_on"}},
+    "errors": [{"code":"depth_exceeded"}]
+  },
+  {
+    "name": "error-depth-exceeded-hard-max-ok",
+    "query": "depends_on(6):(class:server)",
+    "note": "the nearest passing query",
+    "options": {"traversal_budget":10},
+    "canonical": "depends_on(6):(class:server)",
+    "ast": {"traverse":{"depth":6,"dir":"out","form":"named","p":{"cmp":{"f":"class","op":":","v":"server"}},"rel":"depends_on","t":"depends_on"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT r2.to_asset_id AS id, 1 AS depth FROM asset_relationships r2 WHERE r2.from_asset_id = a.id AND r2.status = $1 AND r2.type = $3 AND r2.to_asset_id \u003c\u003e a.id UNION SELECT r3.to_asset_id, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON r3.from_asset_id = w1.id WHERE w1.depth \u003c $2 AND r3.status = $1 AND r3.type = $3 AND r3.to_asset_id \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE (a4.class_path = $4 OR a4.class_path LIKE $5))","arg_count":5,"args":["active",6,"depends_on","hardware.computer.server","hardware.computer.server.%"]}
+  },
+  {
+    "name": "error-regex-invalid-bad",
+    "query": "hostname ~ \"^web[0-9\"",
+    "note": "§6: the pattern must compile as RE2",
+    "canonical": "hostname ~ \"^web[0-9\"",
+    "ast": {"match":{"f":"hostname","re":"^web[0-9"}},
+    "errors": [{"code":"regex_invalid"}]
+  },
+  {
+    "name": "error-regex-invalid-ok",
+    "query": "hostname ~ \"^web[0-9]\"",
+    "note": "the nearest passing query",
+    "canonical": "hostname ~ \"^web[0-9]\"",
+    "ast": {"match":{"f":"hostname","re":"^web[0-9]"}},
+    "sql": {"where":"(a.hostname ~ $1)","arg_count":1,"args":["^web[0-9]"]}
+  },
+  {
+    "name": "error-regex-repetition-bad",
+    "query": "hostname ~ \"a{256}\"",
+    "note": "§13 A9: a single repetition count may not exceed 255 — Postgres's own DUPMAX. §6 said 1000, so every count from 256 up validated here and was refused by the database at query time",
+    "canonical": "hostname ~ \"a{256}\"",
+    "ast": {"match":{"f":"hostname","re":"a{256}"}},
+    "errors": [{"code":"regex_invalid"}]
+  },
+  {
+    "name": "error-regex-repetition-ok",
+    "query": "hostname ~ \"a{255}\"",
+    "note": "§13 A9: 255 is exactly Postgres's limit, and still legal",
+    "canonical": "hostname ~ \"a{255}\"",
+    "ast": {"match":{"f":"hostname","re":"a{255}"}},
+    "sql": {"where":"(a.hostname ~ $1)","arg_count":1,"args":["a{255}"]}
+  },
+  {
+    "name": "error-regex-word-boundary-bad",
+    "query": "hostname ~ \"\\\\bweb\\\\b\"",
+    "note": "§13 A6: the pattern runs in Postgres, not Go, and ARE reads \\b as a BACKSPACE. This compiled as RE2, validated, and returned the wrong rows with no error anywhere",
+    "canonical": "hostname ~ \"\\\\bweb\\\\b\"",
+    "ast": {"match":{"f":"hostname","re":"\\bweb\\b"}},
+    "errors": [{"code":"regex_invalid"}]
+  },
+  {
+    "name": "error-regex-word-boundary-ok",
+    "query": "hostname ~ \"^web$\"",
+    "note": "§13 A6: anchors are in the subset and mean the same thing in both dialects",
+    "canonical": "hostname ~ \"^web$\"",
+    "ast": {"match":{"f":"hostname","re":"^web$"}},
+    "sql": {"where":"(a.hostname ~ $1)","arg_count":1,"args":["^web$"]}
+  },
+  {
+    "name": "error-regex-inline-flag-midpattern-bad",
+    "query": "hostname ~ \"web(?i)01\"",
+    "note": "§13 A6: Postgres raises 'invalid regular expression' for (?i) anywhere but the start, so this stored a query the database refuses to run",
+    "canonical": "hostname ~ \"web(?i)01\"",
+    "ast": {"match":{"f":"hostname","re":"web(?i)01"}},
+    "errors": [{"code":"regex_invalid"}]
+  },
+  {
+    "name": "error-regex-inline-flag-midpattern-ok",
+    "query": "hostname ~ \"(?i)web01\"",
+    "note": "§13 A6: (?i) is allowed as a PREFIX, which is the one place both dialects agree",
+    "canonical": "hostname ~ \"(?i)web01\"",
+    "ast": {"match":{"f":"hostname","re":"(?i)web01"}},
+    "sql": {"where":"(a.hostname ~ $1)","arg_count":1,"args":["(?i)web01"]}
+  },
+  {
+    "name": "error-regex-nested-repetition-bad",
+    "query": "hostname ~ \"(a{100}){100}\"",
+    "note": "T6: a nested counted repetition multiplies — this is ten thousand, not a hundred. The old check took the largest single bound and saw 100",
+    "canonical": "hostname ~ \"(a{100}){100}\"",
+    "ast": {"match":{"f":"hostname","re":"(a{100}){100}"}},
+    "errors": [{"code":"regex_invalid"}]
+  },
+  {
+    "name": "error-regex-nested-repetition-ok",
+    "query": "hostname ~ \"(a{10}){100}\"",
+    "note": "T6: a thousand is exactly the cap, and still legal",
+    "canonical": "hostname ~ \"(a{10}){100}\"",
+    "ast": {"match":{"f":"hostname","re":"(a{10}){100}"}},
+    "sql": {"where":"(a.hostname ~ $1)","arg_count":1,"args":["(a{10}){100}"]}
+  },
+  {
+    "name": "error-regex-length-bad",
+    "query": "hostname ~ \"^web[0-9]{2}$\"",
+    "note": "§6: the pattern length cap, exercised with a small cap so the fixture stays readable",
+    "options": {"max_regex_len":8},
+    "canonical": "hostname ~ \"^web[0-9]{2}$\"",
+    "ast": {"match":{"f":"hostname","re":"^web[0-9]{2}$"}},
+    "errors": [{"code":"regex_invalid"}]
+  },
+  {
+    "name": "error-regex-length-ok",
+    "query": "hostname ~ \"^web\"",
+    "note": "the nearest passing query",
+    "options": {"max_regex_len":8},
+    "canonical": "hostname ~ \"^web\"",
+    "ast": {"match":{"f":"hostname","re":"^web"}},
+    "sql": {"where":"(a.hostname ~ $1)","arg_count":1,"args":["^web"]}
+  },
+  {
+    "name": "error-query-too-long-bad",
+    "query": "environment:production and class:server",
+    "note": "§6: the 4096-byte cap, exercised with a small cap",
+    "options": {"max_bytes":20},
+    "canonical": "environment:production and class:server",
+    "ast": {"and":[{"cmp":{"f":"environment","op":":","v":"production"}},{"cmp":{"f":"class","op":":","v":"server"}}]},
+    "errors": [{"code":"query_too_long"}]
+  },
+  {
+    "name": "error-query-too-long-ok",
+    "query": "class:server",
+    "note": "the nearest passing query",
+    "options": {"max_bytes":20},
+    "canonical": "class:server",
+    "ast": {"cmp":{"f":"class","op":":","v":"server"}},
+    "sql": {"where":"(a.class_path = $1 OR a.class_path LIKE $2)","arg_count":2,"args":["hardware.computer.server","hardware.computer.server.%"]}
+  },
+  {
+    "name": "error-too-many-clauses-leaves-bad",
+    "query": "class:server and environment:production and status:monitoring",
+    "note": "§6: the 64-term cap",
+    "options": {"max_leaves":2},
+    "canonical": "class:server and environment:production and status:monitoring",
+    "ast": {"and":[{"cmp":{"f":"class","op":":","v":"server"}},{"cmp":{"f":"environment","op":":","v":"production"}},{"cmp":{"f":"status","op":":","v":"monitoring"}}]},
+    "errors": [{"code":"too_many_clauses"}]
+  },
+  {
+    "name": "error-too-many-clauses-leaves-ok",
+    "query": "class:server and environment:production",
+    "note": "the nearest passing query",
+    "options": {"max_leaves":2},
+    "canonical": "class:server and environment:production",
+    "ast": {"and":[{"cmp":{"f":"class","op":":","v":"server"}},{"cmp":{"f":"environment","op":":","v":"production"}}]},
+    "sql": {"where":"((a.class_path = $1 OR a.class_path LIKE $2) AND (lower((a.environment)::text) = $3))","arg_count":3,"args":["hardware.computer.server","hardware.computer.server.%","production"]}
+  },
+  {
+    "name": "error-too-many-clauses-subs-bad",
+    "query": "endpoint:(port:443) and cert:(key_size:2048)",
+    "note": "§6: the 16 sub-predicate cap",
+    "options": {"max_subs":1},
+    "canonical": "endpoint:(port:443) and cert:(key_size:2048)",
+    "ast": {"and":[{"sub":{"c":"endpoint","p":{"cmp":{"f":"port","op":":","v":"443"}}}},{"sub":{"c":"cert","p":{"cmp":{"f":"key_size","op":":","v":"2048"}}}}]},
+    "errors": [{"code":"too_many_clauses"}]
+  },
+  {
+    "name": "error-too-many-clauses-subs-ok",
+    "query": "endpoint:(port:443)",
+    "note": "the nearest passing query",
+    "options": {"max_subs":1},
+    "canonical": "endpoint:(port:443)",
+    "ast": {"sub":{"c":"endpoint","p":{"cmp":{"f":"port","op":":","v":"443"}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM asset_endpoints e1 WHERE e1.asset_id = a.id AND (e1.port = $1))","arg_count":1,"args":[443]}
+  },
+  {
+    "name": "error-too-many-clauses-parens-bad",
+    "query": "(((class:server)))",
+    "note": "§6: the 16-level parenthesis cap",
+    "options": {"max_paren_depth":2},
+    "canonical": "class:server",
+    "ast": {"cmp":{"f":"class","op":":","v":"server"}},
+    "errors": [{"code":"too_many_clauses"}]
+  },
+  {
+    "name": "error-too-many-clauses-parens-ok",
+    "query": "((class:server))",
+    "note": "the nearest passing query",
+    "options": {"max_paren_depth":2},
+    "canonical": "class:server",
+    "ast": {"cmp":{"f":"class","op":":","v":"server"}},
+    "sql": {"where":"(a.class_path = $1 OR a.class_path LIKE $2)","arg_count":2,"args":["hardware.computer.server","hardware.computer.server.%"]}
+  },
+  {
+    "name": "error-too-many-clauses-in-values-bad",
+    "query": "environment in (production, staging, development)",
+    "note": "§6: the 256-value list cap",
+    "options": {"max_in_values":2},
+    "canonical": "environment in (production, staging, development)",
+    "ast": {"in":{"f":"environment","v":["production","staging","development"]}},
+    "errors": [{"code":"too_many_clauses"}]
+  },
+  {
+    "name": "error-too-many-clauses-in-values-ok",
+    "query": "environment in (production, staging)",
+    "note": "the nearest passing query",
+    "options": {"max_in_values":2},
+    "canonical": "environment in (production, staging)",
+    "ast": {"in":{"f":"environment","v":["production","staging"]}},
+    "sql": {"where":"((lower((a.environment)::text) = $1) OR (lower((a.environment)::text) = $2))","arg_count":2,"args":["production","staging"]}
+  },
+  {
+    "name": "error-untranslatable-collection-bad",
+    "query": "finding:(kind:stale)",
+    "target": "endpoint",
+    "note": "§6: findings are not reachable from an endpoint, and there is no SQL shape for the pair",
+    "canonical": "finding:(kind:stale)",
+    "ast": {"sub":{"c":"finding","p":{"cmp":{"f":"kind","op":":","v":"stale"}}}},
+    "errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "error-untranslatable-collection-ok",
+    "query": "asset:(class:server)",
+    "target": "endpoint",
+    "note": "the nearest passing query: reach the asset first",
+    "canonical": "asset:(class:server)",
+    "ast": {"sub":{"c":"asset","p":{"cmp":{"f":"class","op":":","v":"server"}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM assets a1 WHERE a1.id = e.asset_id AND (a1.class_path = $1 OR a1.class_path LIKE $2))","arg_count":2,"args":["hardware.computer.server","hardware.computer.server.%"]}
+  },
+  {
+    "name": "error-untranslatable-free-text-bad",
+    "query": "payroll",
+    "target": "certificate",
+    "note": "§5.4's column set exists only on an asset",
+    "canonical": "payroll",
+    "ast": {"text":"payroll"},
+    "errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "error-untranslatable-free-text-ok",
+    "query": "subject_dn:payroll",
+    "target": "certificate",
+    "note": "the nearest passing query: name the field",
+    "canonical": "subject_dn:payroll",
+    "ast": {"cmp":{"f":"subject_dn","op":":","v":"payroll"}},
+    "sql": {"where":"(c.subject_dn ILIKE $1)","arg_count":1,"args":["%payroll%"]}
+  },
+  {
+    "name": "error-untranslatable-traversal-bad",
+    "query": "depends_on:(class:server)",
+    "target": "certificate",
+    "note": "relationships join assets",
+    "canonical": "depends_on:(class:server)",
+    "ast": {"traverse":{"depth":1,"dir":"out","form":"named","p":{"cmp":{"f":"class","op":":","v":"server"}},"rel":"depends_on","t":"depends_on"}},
+    "errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "error-untranslatable-traversal-ok",
+    "query": "asset:(depends_on:(class:server))",
+    "target": "certificate",
+    "note": "the nearest passing query",
+    "canonical": "asset:(depends_on:(class:server))",
+    "ast": {"sub":{"c":"asset","p":{"traverse":{"depth":1,"dir":"out","form":"named","p":{"cmp":{"f":"class","op":":","v":"server"}},"rel":"depends_on","t":"depends_on"}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM crypto_implementation_certificates cic1 JOIN crypto_implementations ci2 ON ci2.id = cic1.crypto_implementation_id LEFT JOIN asset_endpoints e3 ON e3.id = ci2.endpoint_id JOIN assets a4 ON a4.id = COALESCE(e3.asset_id, ci2.asset_id) WHERE cic1.certificate_id = c.id AND EXISTS (WITH RECURSIVE w5(id, depth) AS (SELECT r6.to_asset_id AS id, 1 AS depth FROM asset_relationships r6 WHERE r6.from_asset_id = a4.id AND r6.status = $1 AND r6.type = $3 AND r6.to_asset_id \u003c\u003e a4.id UNION SELECT r7.to_asset_id, w5.depth + 1 FROM w5 JOIN asset_relationships r7 ON r7.from_asset_id = w5.id WHERE w5.depth \u003c $2 AND r7.status = $1 AND r7.type = $3 AND r7.to_asset_id \u003c\u003e a4.id) SELECT 1 FROM w5 JOIN assets a8 ON a8.id = w5.id WHERE (a8.class_path = $4 OR a8.class_path LIKE $5)))","arg_count":5,"args":["active",1,"depends_on","hardware.computer.server","hardware.computer.server.%"]}
+  },
+  {
+    "name": "observation-target-has-no-sql",
+    "query": "source:sensor",
+    "target": "observation",
+    "twin": "observation-target-has-no-sql-ok",
+    "note": "§4.1: an observation is evaluated in the identification engine, not in SQL. It validates; translation refuses",
+    "canonical": "source:sensor",
+    "ast": {"cmp":{"f":"source","op":":","v":"sensor"}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "example-20-measurement-cert-expiry-days-ok",
+    "query": "risk_score \u003e= 30",
+    "note": "T2 twin of example-20: the same threshold shape on a target that HAS a table, so the untranslatable above is the table-less target and not the predicate",
+    "canonical": "risk_score \u003e= 30",
+    "ast": {"cmp":{"f":"risk_score","op":"\u003e=","v":"30"}},
+    "sql": {"where":"(a.risk_score \u003e= $1)","arg_count":1,"args":[30]}
+  },
+  {
+    "name": "compat-rule-observation-ok",
+    "query": "source:inferred and confidence_score \u003e= 1",
+    "note": "T2 twin of compat-rule-observation: the same shape against the asset target, which does have a table",
+    "canonical": "source:inferred and confidence_score \u003e= 1",
+    "ast": {"and":[{"cmp":{"f":"source","op":":","v":"inferred"}},{"cmp":{"f":"confidence_score","op":"\u003e=","v":"1"}}]},
+    "sql": {"where":"((lower((a.class_source_kind)::text) = $1) AND (a.confidence_score \u003e= $2))","arg_count":2,"args":["inferred",1]}
+  },
+  {
+    "name": "compat-rule-segment-present-ok",
+    "query": "exists(segment_id)",
+    "note": "T2 twin of compat-rule-segment-present: the same presence test on the asset target",
+    "canonical": "exists(segment_id)",
+    "ast": {"exists":{"f":"segment_id"}},
+    "sql": {"where":"(a.network_segment_id IS NOT NULL)","arg_count":0}
+  },
+  {
+    "name": "observation-target-has-no-sql-ok",
+    "query": "source:inferred",
+    "note": "T2 twin of observation-target-has-no-sql: `source` resolves on the asset target too, and there it translates",
+    "canonical": "source:inferred",
+    "ast": {"cmp":{"f":"source","op":":","v":"inferred"}},
+    "sql": {"where":"(lower((a.class_source_kind)::text) = $1)","arg_count":1,"args":["inferred"]}
+  },
+  {
+    "name": "target-endpoint",
+    "query": "port:443 and transport:tcp",
+    "target": "endpoint",
+    "note": "§4.1: every target has its own first-class field set",
+    "canonical": "port:443 and transport:tcp",
+    "ast": {"and":[{"cmp":{"f":"port","op":":","v":"443"}},{"cmp":{"f":"transport","op":":","v":"tcp"}}]},
+    "sql": {"where":"((e.port = $1) AND (lower((e.transport)::text) = $2))","arg_count":2,"args":[443,"tcp"]}
+  },
+  {
+    "name": "target-certificate",
+    "query": "not_after \u003c now+30d and self_signed:true",
+    "target": "certificate",
+    "note": "§4.3 certificate fields",
+    "canonical": "not_after \u003c now+30d and self_signed:true",
+    "ast": {"and":[{"cmp":{"f":"not_after","op":"\u003c","v":"now+30d"}},{"cmp":{"f":"self_signed","op":":","v":"true"}}]},
+    "sql": {"where":"((c.not_after \u003c $1) AND (c.is_self_signed = $2))","arg_count":2,"args":["2026-10-11T12:00:00Z",true]}
+  },
+  {
+    "name": "target-finding",
+    "query": "producer:crypto and severity \u003e= high and subject_type:certificate",
+    "target": "finding",
+    "note": "§4.3 finding fields",
+    "canonical": "producer:crypto and severity \u003e= high and subject_type:certificate",
+    "ast": {"and":[{"cmp":{"f":"producer","op":":","v":"crypto"}},{"cmp":{"f":"severity","op":"\u003e=","v":"high"}},{"cmp":{"f":"subject_type","op":":","v":"certificate"}}]},
+    "sql": {"where":"((lower((f.producer)::text) = $1) AND (f.score \u003e= $2) AND (lower((f.subject_type)::text) = $3))","arg_count":3,"args":["crypto",70,"certificate"]}
+  },
+  {
+    "name": "target-software-install",
+    "query": "name:openssl and version \u003e= 3.0",
+    "target": "software_install",
+    "note": "§4.3 software_install fields",
+    "canonical": "name:openssl and version \u003e= 3.0",
+    "ast": {"and":[{"cmp":{"f":"name","op":":","v":"openssl"}},{"cmp":{"f":"version","op":"\u003e=","v":"3.0"}}]},
+    "sql": {"where":"(EXISTS (SELECT 1 FROM software_products sp1 WHERE sp1.id = si.product_id AND (sp1.name ILIKE $1)) AND EXISTS (SELECT 1 FROM software_products sp2 WHERE sp2.id = si.product_id AND (sp2.version_sort COLLATE \"C\" \u003e= $2)))","arg_count":2,"args":["%openssl%","00000003.00000000.00000000.00000000.00000000.00000000|~"]}
+  },
+  {
+    "name": "target-relationship",
+    "query": "type:depends_on and status:active and confidence \u003e= 0.9",
+    "target": "relationship",
+    "note": "§4.3 relationship fields",
+    "canonical": "type:depends_on and status:active and confidence \u003e= 0.9",
+    "ast": {"and":[{"cmp":{"f":"type","op":":","v":"depends_on"}},{"cmp":{"f":"status","op":":","v":"active"}},{"cmp":{"f":"confidence","op":"\u003e=","v":"0.9"}}]},
+    "sql": {"where":"((lower((r.type)::text) = $1) AND (lower((r.status)::text) = $2) AND (r.confidence \u003e= $3))","arg_count":3,"args":["depends_on","active",0.9]}
+  },
+  {
+    "name": "target-crypto-configuration",
+    "query": "protocol:tls and protocol_version:\"TLS 1.0\"",
+    "target": "crypto_configuration",
+    "note": "the crypto_configuration target (§4.1; §4.3 gives no field table for it)",
+    "canonical": "protocol:tls and protocol_version:\"TLS 1.0\"",
+    "ast": {"and":[{"cmp":{"f":"protocol","op":":","v":"tls"}},{"cmp":{"f":"protocol_version","op":":","v":"TLS 1.0"}}]},
+    "sql": {"where":"((lower((ci.protocol)::text) = $1) AND (lower(ci.protocol_version) = $2))","arg_count":2,"args":["tls","tls 1.0"]}
+  },
+  {
+    "name": "target-endpoint-reaches-asset",
+    "query": "port:443 and asset:(environment:production)",
+    "target": "endpoint",
+    "note": "§4.1: a target may reach its owning asset with asset:(…)",
+    "canonical": "port:443 and asset:(environment:production)",
+    "ast": {"and":[{"cmp":{"f":"port","op":":","v":"443"}},{"sub":{"c":"asset","p":{"cmp":{"f":"environment","op":":","v":"production"}}}}]},
+    "sql": {"where":"((e.port = $1) AND EXISTS (SELECT 1 FROM assets a1 WHERE a1.id = e.asset_id AND (lower((a1.environment)::text) = $2)))","arg_count":2,"args":[443,"production"]}
+  },
+  {
+    "name": "shape-asset-crypto-includes-an-endpointless-configuration",
+    "query": "crypto:(protocol:TLS)",
+    "note": "§5.1: `crypto:(…)` is EXISTS over the asset's configurations, and crypto_implementations.endpoint_id is NULL by design for an at-rest one — so the endpoint is LEFT JOINed and asset_id is the fallback, exactly as shared/findings.AssetSubjects resolves it",
+    "canonical": "crypto:(protocol:TLS)",
+    "ast": {"sub":{"c":"crypto","p":{"cmp":{"f":"protocol","op":":","v":"TLS"}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM crypto_implementations ci1 LEFT JOIN asset_endpoints e2 ON e2.id = ci1.endpoint_id WHERE COALESCE(e2.asset_id, ci1.asset_id) = a.id AND (lower((ci1.protocol)::text) = $1))","arg_count":1,"args":["tls"]}
+  },
+  {
+    "name": "shape-asset-cert-includes-an-endpointless-certificate",
+    "query": "cert:(key_algorithm:RSA)",
+    "note": "§5.1: the same fallback one join further down — a certificate reachable only through an endpoint-less configuration still belongs to the asset. The junction is the only link read",
+    "canonical": "cert:(key_algorithm:RSA)",
+    "ast": {"sub":{"c":"cert","p":{"cmp":{"f":"key_algorithm","op":":","v":"RSA"}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM certificates c1 JOIN crypto_implementation_certificates cic2 ON cic2.certificate_id = c1.id JOIN crypto_implementations ci3 ON ci3.id = cic2.crypto_implementation_id LEFT JOIN asset_endpoints e4 ON e4.id = ci3.endpoint_id WHERE COALESCE(e4.asset_id, ci3.asset_id) = a.id AND (lower(c1.public_key_algorithm) = $1))","arg_count":1,"args":["rsa"]}
+  },
+  {
+    "name": "shape-endpoint-crypto-stays-endpoint-bound",
+    "query": "crypto:(protocol:TLS)",
+    "target": "endpoint",
+    "note": "§5.1: the reverse polarity — configurations of ONE socket, so a configuration with no endpoint is correctly absent here. `endpoint_id = e.id` is UNKNOWN on NULL, which excludes it rather than attaching it to an arbitrary endpoint",
+    "canonical": "crypto:(protocol:TLS)",
+    "ast": {"sub":{"c":"crypto","p":{"cmp":{"f":"protocol","op":":","v":"TLS"}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM crypto_implementations ci1 WHERE ci1.endpoint_id = e.id AND (lower((ci1.protocol)::text) = $1))","arg_count":1,"args":["tls"]}
+  },
+  {
+    "name": "shape-endpoint-cert-stays-endpoint-bound",
+    "query": "cert:(self_signed:true)",
+    "target": "endpoint",
+    "note": "§5.1: same, one join further down",
+    "canonical": "cert:(self_signed:true)",
+    "ast": {"sub":{"c":"cert","p":{"cmp":{"f":"self_signed","op":":","v":"true"}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM certificates c1 JOIN crypto_implementation_certificates cic2 ON cic2.certificate_id = c1.id JOIN crypto_implementations ci3 ON ci3.id = cic2.crypto_implementation_id WHERE ci3.endpoint_id = e.id AND (c1.is_self_signed = $1))","arg_count":1,"args":[true]}
+  },
+  {
+    "name": "shape-crypto-configuration-cert",
+    "query": "cert:(self_signed:true)",
+    "target": "crypto_configuration",
+    "note": "§5.1: a configuration's certificates are whatever the junction links to it; no endpoint is in this chain at all",
+    "canonical": "cert:(self_signed:true)",
+    "ast": {"sub":{"c":"cert","p":{"cmp":{"f":"self_signed","op":":","v":"true"}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM certificates c1 JOIN crypto_implementation_certificates cic2 ON cic2.certificate_id = c1.id WHERE cic2.crypto_implementation_id = ci.id AND (c1.is_self_signed = $1))","arg_count":1,"args":[true]}
+  },
+  {
+    "name": "shape-crypto-configuration-reaches-asset",
+    "query": "protocol:tls and asset:(environment:production)",
+    "target": "crypto_configuration",
+    "note": "§4.1 + §5.1: the inverse of asset/crypto, and it has to agree with it — an endpoint-less configuration reaches its asset through crypto_implementations.asset_id",
+    "canonical": "protocol:tls and asset:(environment:production)",
+    "ast": {"and":[{"cmp":{"f":"protocol","op":":","v":"tls"}},{"sub":{"c":"asset","p":{"cmp":{"f":"environment","op":":","v":"production"}}}}]},
+    "sql": {"where":"((lower((ci.protocol)::text) = $1) AND EXISTS (SELECT 1 FROM assets a1 WHERE a1.id = COALESCE((SELECT e2.asset_id FROM asset_endpoints e2 WHERE e2.id = ci.endpoint_id), ci.asset_id) AND (lower((a1.environment)::text) = $2)))","arg_count":2,"args":["tls","production"]}
+  },
+  {
+    "name": "shape-certificate-reaches-asset",
+    "query": "self_signed:true and asset:(environment:production)",
+    "target": "certificate",
+    "note": "§4.1 + §5.1: the inverse of asset/cert, walking up junction → configuration → (endpoint, where there is one) → asset",
+    "canonical": "self_signed:true and asset:(environment:production)",
+    "ast": {"and":[{"cmp":{"f":"self_signed","op":":","v":"true"}},{"sub":{"c":"asset","p":{"cmp":{"f":"environment","op":":","v":"production"}}}}]},
+    "sql": {"where":"((c.is_self_signed = $1) AND EXISTS (SELECT 1 FROM crypto_implementation_certificates cic1 JOIN crypto_implementations ci2 ON ci2.id = cic1.crypto_implementation_id LEFT JOIN asset_endpoints e3 ON e3.id = ci2.endpoint_id JOIN assets a4 ON a4.id = COALESCE(e3.asset_id, ci2.asset_id) WHERE cic1.certificate_id = c.id AND (lower((a4.environment)::text) = $2)))","arg_count":2,"args":[true,"production"]}
+  },
+  {
+    "name": "shape-array-contains",
+    "query": "risk_assessed_by:crypto",
+    "note": "§4.4: keyword[] ':' is array-contains",
+    "canonical": "risk_assessed_by:crypto",
+    "ast": {"cmp":{"f":"risk_assessed_by","op":":","v":"crypto"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM unnest(a.risk_assessed_by) AS v1 WHERE lower(v1) = $1)","arg_count":1,"args":["crypto"]}
+  },
+  {
+    "name": "shape-fact-number",
+    "query": "fact.sw.package_count \u003e= 9",
+    "note": "§7.2 shape 3 over asset_facts, with the guarded cast of §5.2",
+    "canonical": "fact.sw.package_count \u003e= 9",
+    "ast": {"cmp":{"f":"fact.sw.package_count","op":"\u003e=","v":"9"}},
+    "sql": {"where":"((SELECT (CASE WHEN (af1.value #\u003e\u003e $1::text[]) ~ $2 THEN ((af1.value #\u003e\u003e $1::text[]))::numeric END) FROM asset_facts af1 WHERE af1.asset_id = a.id AND af1.key = $7 ORDER BY array_position(ARRAY[$3, $4, $5, $6], af1.source_kind), af1.observed_at DESC LIMIT 1) \u003e= $8)","arg_count":8,"args":["{}","^-?[0-9]+(\\.[0-9]+)?$","measured","declared","imported","inferred","sw.package_count",9]}
+  },
+  {
+    "name": "shape-fact-keyword",
+    "query": "fact.os.name:linux",
+    "note": "§4.2 fact namespace. §13 A4: asset_facts is unique per (asset, key, SOURCE), so a fact term compares against the ONE reconciled value — the highest-precedence producer's row, measured \u003e declared \u003e imported \u003e inferred, most recently observed first within a kind",
+    "canonical": "fact.os.name:linux",
+    "ast": {"cmp":{"f":"fact.os.name","op":":","v":"linux"}},
+    "sql": {"where":"(lower((SELECT (af1.value #\u003e\u003e $1::text[]) FROM asset_facts af1 WHERE af1.asset_id = a.id AND af1.key = $6 ORDER BY array_position(ARRAY[$2, $3, $4, $5], af1.source_kind), af1.observed_at DESC LIMIT 1)) = $7)","arg_count":7,"args":["{}","measured","declared","imported","inferred","os.name","linux"]}
+  },
+  {
+    "name": "fact-negated-is-unknown-when-absent",
+    "query": "not fact.os.name:linux",
+    "note": "§13 A4, §5.2: a scalar subquery that returns no row yields NULL, so an asset nobody recorded the key for is UNKNOWN on the term AND its negation. The old EXISTS became NOT EXISTS, which was TRUE for it",
+    "canonical": "not fact.os.name:linux",
+    "ast": {"not":{"cmp":{"f":"fact.os.name","op":":","v":"linux"}}},
+    "sql": {"where":"NOT ((lower((SELECT (af1.value #\u003e\u003e $1::text[]) FROM asset_facts af1 WHERE af1.asset_id = a.id AND af1.key = $6 ORDER BY array_position(ARRAY[$2, $3, $4, $5], af1.source_kind), af1.observed_at DESC LIMIT 1)) = $7))","arg_count":7,"args":["{}","measured","declared","imported","inferred","os.name","linux"]}
+  },
+  {
+    "name": "fact-presence-is-not-reconciled",
+    "query": "exists(fact.os.name)",
+    "note": "§13 A4: presence asks whether ANY producer recorded the key, so it stays an EXISTS over the raw rows",
+    "canonical": "exists(fact.os.name)",
+    "ast": {"exists":{"f":"fact.os.name"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM asset_facts af1 WHERE af1.asset_id = a.id AND af1.key = $1 AND ((af1.value #\u003e\u003e $2::text[]) IS NOT NULL))","arg_count":2,"args":["os.name","{}"]}
+  },
+  {
+    "name": "shape-jsonb-boolean",
+    "query": "attr.controller_managed:true",
+    "note": "§7.2 shape 2 with a boolean",
+    "canonical": "attr.controller_managed:true",
+    "ast": {"cmp":{"f":"attr.controller_managed","op":":","v":"true"}},
+    "sql": {"where":"((CASE WHEN lower((a.attributes -\u003e\u003e $1)) IN ($2, $3) THEN (lower((a.attributes -\u003e\u003e $1)))::boolean END) = $4)","arg_count":4,"args":["controller_managed","true","false",true]}
+  },
+  {
+    "name": "presence-jsonb-tests-raw-text",
+    "query": "exists(attr.cpu_count)",
+    "note": "S4: presence reads the raw -\u003e\u003e text, before the declared-type cast. attr.cpu_count is numeric in the catalogue, so casting first made a stored non-numeric value read as ABSENT",
+    "canonical": "exists(attr.cpu_count)",
+    "ast": {"exists":{"f":"attr.cpu_count"}},
+    "sql": {"where":"((a.attributes -\u003e\u003e $1) IS NOT NULL)","arg_count":1,"args":["cpu_count"]}
+  },
+  {
+    "name": "presence-jsonb-star-tests-raw-text",
+    "query": "attr.cpu_count:*",
+    "note": "S4: `field:*` is the same presence test as exists(), so it reads the raw text too",
+    "canonical": "attr.cpu_count:*",
+    "ast": {"cmp":{"f":"attr.cpu_count","op":":","v":"*"}},
+    "sql": {"where":"((a.attributes -\u003e\u003e $1) IS NOT NULL)","arg_count":1,"args":["cpu_count"]}
+  },
+  {
+    "name": "presence-fact-tests-raw-text",
+    "query": "exists(fact.sw.package_count)",
+    "note": "S4: a fact presence test stays an EXISTS over the raw rows, with no cast inside it",
+    "canonical": "exists(fact.sw.package_count)",
+    "ast": {"exists":{"f":"fact.sw.package_count"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM asset_facts af1 WHERE af1.asset_id = a.id AND af1.key = $1 AND ((af1.value #\u003e\u003e $2::text[]) IS NOT NULL))","arg_count":2,"args":["sw.package_count","{}"]}
+  },
+  {
+    "name": "comparison-jsonb-keeps-its-cast",
+    "query": "attr.cpu_count \u003c 3",
+    "note": "S4, other polarity: a comparison must keep the guarded cast, or an unparseable value raises a runtime cast error instead of reading UNKNOWN (§5.2)",
+    "canonical": "attr.cpu_count \u003c 3",
+    "ast": {"cmp":{"f":"attr.cpu_count","op":"\u003c","v":"3"}},
+    "sql": {"where":"((CASE WHEN (a.attributes -\u003e\u003e $1) ~ $2 THEN ((a.attributes -\u003e\u003e $1))::numeric END) \u003c $3)","arg_count":3,"args":["cpu_count","^-?[0-9]+(\\.[0-9]+)?$",3]}
+  },
+  {
+    "name": "shape-inet-equality",
+    "query": "primary_address=198.51.100.7",
+    "note": "§4.4: '=' on inet is equality, not containment",
+    "canonical": "primary_address=198.51.100.7",
+    "ast": {"cmp":{"f":"primary_address","op":"=","v":"198.51.100.7"}},
+    "sql": {"where":"(a.primary_address = $1::inet)","arg_count":1,"args":["198.51.100.7"]}
+  },
+  {
+    "name": "shape-traverse-any-direction",
+    "query": "rel(connects_to, any, 3):(class:server)",
+    "note": "§5.6: the 'any' direction walks both ends",
+    "canonical": "rel(connects_to, any, 3):(class:server)",
+    "ast": {"traverse":{"depth":3,"dir":"any","form":"rel","p":{"cmp":{"f":"class","op":":","v":"server"}},"rel":"connects_to","t":"connects_to"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT CASE WHEN r2.from_asset_id = a.id THEN r2.to_asset_id ELSE r2.from_asset_id END AS id, 1 AS depth FROM asset_relationships r2 WHERE (r2.from_asset_id = a.id OR r2.to_asset_id = a.id) AND r2.status = $1 AND r2.type = $3 AND CASE WHEN r2.from_asset_id = a.id THEN r2.to_asset_id ELSE r2.from_asset_id END \u003c\u003e a.id UNION SELECT CASE WHEN r3.from_asset_id = w1.id THEN r3.to_asset_id ELSE r3.from_asset_id END, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON (r3.from_asset_id = w1.id OR r3.to_asset_id = w1.id) WHERE w1.depth \u003c $2 AND r3.status = $1 AND r3.type = $3 AND CASE WHEN r3.from_asset_id = w1.id THEN r3.to_asset_id ELSE r3.from_asset_id END \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE (a4.class_path = $4 OR a4.class_path LIKE $5))","arg_count":5,"args":["active",3,"connects_to","hardware.computer.server","hardware.computer.server.%"]}
+  },
+  {
+    "name": "shape-not-exists-traversal",
+    "query": "not depends_on:(class:database_instance)",
+    "note": "negating a traversal",
+    "canonical": "not depends_on:(class:database_instance)",
+    "ast": {"not":{"traverse":{"depth":1,"dir":"out","form":"named","p":{"cmp":{"f":"class","op":":","v":"database_instance"}},"rel":"depends_on","t":"depends_on"}}},
+    "sql": {"where":"NOT (EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT r2.to_asset_id AS id, 1 AS depth FROM asset_relationships r2 WHERE r2.from_asset_id = a.id AND r2.status = $1 AND r2.type = $3 AND r2.to_asset_id \u003c\u003e a.id UNION SELECT r3.to_asset_id, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON r3.from_asset_id = w1.id WHERE w1.depth \u003c $2 AND r3.status = $1 AND r3.type = $3 AND r3.to_asset_id \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE (a4.class_path = $4 OR a4.class_path LIKE $5)))","arg_count":5,"args":["active",1,"depends_on","application.database_instance","application.database\\_instance.%"]}
+  },
+  {
+    "name": "shape-nested-sub-in-traversal",
+    "query": "depends_on(2):(endpoint:(port:443))",
+    "note": "a child collection inside a traversal",
+    "canonical": "depends_on(2):(endpoint:(port:443))",
+    "ast": {"traverse":{"depth":2,"dir":"out","form":"named","p":{"sub":{"c":"endpoint","p":{"cmp":{"f":"port","op":":","v":"443"}}}},"rel":"depends_on","t":"depends_on"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT r2.to_asset_id AS id, 1 AS depth FROM asset_relationships r2 WHERE r2.from_asset_id = a.id AND r2.status = $1 AND r2.type = $3 AND r2.to_asset_id \u003c\u003e a.id UNION SELECT r3.to_asset_id, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON r3.from_asset_id = w1.id WHERE w1.depth \u003c $2 AND r3.status = $1 AND r3.type = $3 AND r3.to_asset_id \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE EXISTS (SELECT 1 FROM asset_endpoints e5 WHERE e5.asset_id = a4.id AND (e5.port = $4)))","arg_count":4,"args":["active",2,"depends_on",443]}
+  },
+  {
+    "name": "observation-source-agent",
+    "query": "source:agent",
+    "target": "observation",
+    "twin": "observation-source-agent-ok",
+    "note": "the strongest provenance a rule can key on: our own agent on the host",
+    "canonical": "source:agent",
+    "ast": {"cmp":{"f":"source","op":":","v":"agent"}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-source-in-set",
+    "query": "source in (sensor, agent)",
+    "target": "observation",
+    "twin": "observation-source-in-set-ok",
+    "note": "the two measured sources, as a set rather than two rules",
+    "canonical": "source in (sensor, agent)",
+    "ast": {"in":{"f":"source","v":["sensor","agent"]}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-source-not-manual",
+    "query": "not source:manual",
+    "target": "observation",
+    "twin": "observation-source-not-manual-ok",
+    "note": "negation over an enum: everything a person did not type by hand",
+    "canonical": "not source:manual",
+    "ast": {"not":{"cmp":{"f":"source","op":":","v":"manual"}}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-confidence-band",
+    "query": "confidence \u003e= 0.9",
+    "target": "observation",
+    "twin": "observation-confidence-band-ok",
+    "note": "the numeric comparison an auto-approval threshold is written as",
+    "canonical": "confidence \u003e= 0.9",
+    "ast": {"cmp":{"f":"confidence","op":"\u003e=","v":"0.9"}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-confidence-range",
+    "query": "confidence:[0.5 to 0.9]",
+    "target": "observation",
+    "twin": "observation-confidence-range-ok",
+    "note": "a RANGE over the same field; a rule can want a middle band, not just a floor",
+    "canonical": "confidence:[0.5 to 0.9]",
+    "ast": {"range":{"f":"confidence","hi":"0.9","lo":"0.5"}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-class-subtree",
+    "query": "class:hardware",
+    "target": "observation",
+    "twin": "observation-class-subtree-ok",
+    "note": "class is a SUBTREE match here exactly as it is on an asset",
+    "canonical": "class:hardware",
+    "ast": {"cmp":{"f":"class","op":":","v":"hardware"}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-class-leaf",
+    "query": "class:hardware.computer.server",
+    "target": "observation",
+    "twin": "observation-class-leaf-ok",
+    "note": "and a leaf still selects only itself",
+    "canonical": "class:hardware.computer.server",
+    "ast": {"cmp":{"f":"class","op":":","v":"hardware.computer.server"}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-class-not-in",
+    "query": "class not in (external, unknown_host)",
+    "target": "observation",
+    "twin": "observation-class-not-in-ok",
+    "note": "the shape a rule uses to say 'anything we could actually identify'",
+    "canonical": "class not in (external, unknown_host)",
+    "ast": {"in":{"f":"class","neg":true,"v":["external","unknown_host"]}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-hostname-substring",
+    "query": "hostname:prod",
+    "target": "observation",
+    "twin": "observation-hostname-substring-ok",
+    "note": "loose match on the observed name, the way the rail's search box writes it",
+    "canonical": "hostname:prod",
+    "ast": {"cmp":{"f":"hostname","op":":","v":"prod"}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-hostname-exact",
+    "query": "hostname=\"db-01.example.test\"",
+    "target": "observation",
+    "twin": "observation-hostname-exact-ok",
+    "note": "exact match; a rule about ONE host must not match its neighbours",
+    "canonical": "hostname=db-01.example.test",
+    "ast": {"cmp":{"f":"hostname","op":"=","v":"db-01.example.test"}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-hostname-wildcard",
+    "query": "hostname:*.example.test",
+    "target": "observation",
+    "twin": "observation-hostname-wildcard-ok",
+    "note": "a wildcard over the name — the commonest thing a tenant writes",
+    "canonical": "hostname:*.example.test",
+    "ast": {"cmp":{"f":"hostname","op":":","v":"*.example.test"}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-hostname-regex",
+    "query": "hostname ~ \"^db-[0-9]+$\"",
+    "target": "observation",
+    "twin": "observation-hostname-regex-ok",
+    "note": "a regex, which the caps in §6 bound",
+    "canonical": "hostname ~ \"^db-[0-9]+$\"",
+    "ast": {"match":{"f":"hostname","re":"^db-[0-9]+$"}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-address-exact",
+    "query": "address=198.51.100.10",
+    "target": "observation",
+    "twin": "observation-address-exact-ok",
+    "note": "an inet-typed field compared to a literal address",
+    "canonical": "address=198.51.100.10",
+    "ast": {"cmp":{"f":"address","op":"=","v":"198.51.100.10"}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-network-private",
+    "query": "network.type:private",
+    "target": "observation",
+    "twin": "observation-network-private-ok",
+    "note": "the dotted path a nested object is addressed by (§13 A8)",
+    "canonical": "network.type:private",
+    "ast": {"cmp":{"f":"network.type","op":":","v":"private"}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-network-ownership-third-party",
+    "query": "network.ownership:third_party",
+    "target": "observation",
+    "twin": "observation-network-ownership-third-party-ok",
+    "note": "the field an approval rule uses to keep a vendor's endpoint out of inventory",
+    "canonical": "network.ownership:third_party",
+    "ast": {"cmp":{"f":"network.ownership","op":":","v":"third_party"}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-network-segment-exact",
+    "query": "network.segment_id=0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+    "target": "observation",
+    "twin": "observation-network-segment-exact-ok",
+    "note": "a rule scoped to ONE segment, by id",
+    "canonical": "network.segment_id=0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+    "ast": {"cmp":{"f":"network.segment_id","op":"=","v":"0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f"}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-no-segment",
+    "query": "not exists(network.segment_id)",
+    "target": "observation",
+    "twin": "observation-no-segment-ok",
+    "note": "the negative: an observation from nowhere the tenant has mapped",
+    "canonical": "not exists(network.segment_id)",
+    "ast": {"not":{"exists":{"f":"network.segment_id"}}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-first-seen-recent",
+    "query": "first_seen \u003e now-7d",
+    "target": "observation",
+    "twin": "observation-first-seen-recent-ok",
+    "note": "a relative date over the observation's own timestamp",
+    "canonical": "first_seen \u003e now-1w",
+    "ast": {"cmp":{"f":"first_seen","op":"\u003e","v":"now-1w"}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-first-seen-before",
+    "query": "first_seen \u003c now-90d",
+    "target": "observation",
+    "twin": "observation-first-seen-before-ok",
+    "note": "and the other direction, which a backfill rule needs",
+    "canonical": "first_seen \u003c now-90d",
+    "ast": {"cmp":{"f":"first_seen","op":"\u003c","v":"now-90d"}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-and-or-grouped",
+    "query": "(source:sensor or source:agent) and network.ownership:internal and confidence \u003e= 0.8",
+    "target": "observation",
+    "twin": "observation-and-or-grouped-ok",
+    "note": "precedence: the parenthesised OR must not swallow the ANDs after it",
+    "canonical": "(source:sensor or source:agent) and network.ownership:internal and confidence \u003e= 0.8",
+    "ast": {"and":[{"or":[{"cmp":{"f":"source","op":":","v":"sensor"}},{"cmp":{"f":"source","op":":","v":"agent"}}]},{"cmp":{"f":"network.ownership","op":":","v":"internal"}},{"cmp":{"f":"confidence","op":"\u003e=","v":"0.8"}}]},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-negated-group",
+    "query": "not (network.ownership:third_party or class:external)",
+    "target": "observation",
+    "twin": "observation-negated-group-ok",
+    "note": "de Morgan's shape, which an evaluator gets wrong more often than a parser",
+    "canonical": "not (network.ownership:third_party or class:external)",
+    "ast": {"not":{"or":[{"cmp":{"f":"network.ownership","op":":","v":"third_party"}},{"cmp":{"f":"class","op":":","v":"external"}}]}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-full-rule",
+    "query": "source in (sensor, agent) and class:hardware and network.ownership:internal and confidence \u003e= 0.85 and exists(network.segment_id)",
+    "target": "observation",
+    "twin": "observation-full-rule-ok",
+    "note": "a whole auto-approval rule as a tenant would actually write one",
+    "canonical": "source in (sensor, agent) and class:hardware and network.ownership:internal and confidence \u003e= 0.85 and exists(network.segment_id)",
+    "ast": {"and":[{"in":{"f":"source","v":["sensor","agent"]}},{"cmp":{"f":"class","op":":","v":"hardware"}},{"cmp":{"f":"network.ownership","op":":","v":"internal"}},{"cmp":{"f":"confidence","op":"\u003e=","v":"0.85"}},{"exists":{"f":"network.segment_id"}}]},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-asset-field-rejected",
+    "query": "risk_score \u003e= 70",
+    "target": "observation",
+    "twin": "observation-asset-field-rejected-ok",
+    "note": "an ASSET field on the observation target: an in-flight discovery has no risk score yet, and accepting one would silently match nothing",
+    "canonical": "risk_score \u003e= 70",
+    "ast": {"cmp":{"f":"risk_score","op":"\u003e=","v":"70"}},
+    "errors": [{"code":"unknown_field"}]
+  },
+  {
+    "name": "observation-sub-predicate-rejected",
+    "query": "endpoint:(port:443)",
+    "target": "observation",
+    "twin": "observation-sub-predicate-rejected-ok",
+    "note": "an observation carries no child collections; a sub-predicate here must be refused rather than evaluated against nothing",
+    "canonical": "endpoint:(port:443)",
+    "ast": {"sub":{"c":"endpoint","p":{"cmp":{"f":"port","op":":","v":"443"}}}},
+    "errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-source-agent-ok",
+    "query": "source:measured",
+    "note": "T2 twin of observation-source-agent: the same shape against the asset target, which does have a table",
+    "canonical": "source:measured",
+    "ast": {"cmp":{"f":"source","op":":","v":"measured"}},
+    "sql": {"where":"(lower((a.class_source_kind)::text) = $1)","arg_count":1,"args":["measured"]}
+  },
+  {
+    "name": "observation-source-in-set-ok",
+    "query": "source in (measured, imported)",
+    "note": "T2 twin of observation-source-in-set: the same shape against the asset target, which does have a table",
+    "canonical": "source in (measured, imported)",
+    "ast": {"in":{"f":"source","v":["measured","imported"]}},
+    "sql": {"where":"((lower((a.class_source_kind)::text) = $1) OR (lower((a.class_source_kind)::text) = $2))","arg_count":2,"args":["measured","imported"]}
+  },
+  {
+    "name": "observation-source-not-manual-ok",
+    "query": "not source:declared",
+    "note": "T2 twin of observation-source-not-manual: the same shape against the asset target, which does have a table",
+    "canonical": "not source:declared",
+    "ast": {"not":{"cmp":{"f":"source","op":":","v":"declared"}}},
+    "sql": {"where":"NOT ((lower((a.class_source_kind)::text) = $1))","arg_count":1,"args":["declared"]}
+  },
+  {
+    "name": "observation-confidence-band-ok",
+    "query": "confidence_score \u003e= 90",
+    "note": "T2 twin of observation-confidence-band: the same shape against the asset target, which does have a table",
+    "canonical": "confidence_score \u003e= 90",
+    "ast": {"cmp":{"f":"confidence_score","op":"\u003e=","v":"90"}},
+    "sql": {"where":"(a.confidence_score \u003e= $1)","arg_count":1,"args":[90]}
+  },
+  {
+    "name": "observation-confidence-range-ok",
+    "query": "confidence_score:[50 to 90]",
+    "note": "T2 twin of observation-confidence-range: the same shape against the asset target, which does have a table",
+    "canonical": "confidence_score:[50 to 90]",
+    "ast": {"range":{"f":"confidence_score","hi":"90","lo":"50"}},
+    "sql": {"where":"((a.confidence_score \u003e= $1) AND (a.confidence_score \u003c= $2))","arg_count":2,"args":[50,90]}
+  },
+  {
+    "name": "observation-class-subtree-ok",
+    "query": "class:hardware",
+    "note": "T2 twin of observation-class-subtree: the same shape against the asset target, which does have a table",
+    "canonical": "class:hardware",
+    "ast": {"cmp":{"f":"class","op":":","v":"hardware"}},
+    "sql": {"where":"(a.class_path = $1 OR a.class_path LIKE $2)","arg_count":2,"args":["hardware","hardware.%"]}
+  },
+  {
+    "name": "observation-class-leaf-ok",
+    "query": "class:hardware.computer.server",
+    "note": "T2 twin of observation-class-leaf: the same shape against the asset target, which does have a table",
+    "canonical": "class:hardware.computer.server",
+    "ast": {"cmp":{"f":"class","op":":","v":"hardware.computer.server"}},
+    "sql": {"where":"(a.class_path = $1 OR a.class_path LIKE $2)","arg_count":2,"args":["hardware.computer.server","hardware.computer.server.%"]}
+  },
+  {
+    "name": "observation-class-not-in-ok",
+    "query": "class not in (external, unknown_host)",
+    "note": "T2 twin of observation-class-not-in: the same shape against the asset target, which does have a table",
+    "canonical": "class not in (external, unknown_host)",
+    "ast": {"in":{"f":"class","neg":true,"v":["external","unknown_host"]}},
+    "sql": {"where":"NOT ((a.class_path = $1 OR a.class_path LIKE $2) OR (a.class_path = $3 OR a.class_path LIKE $4))","arg_count":4,"args":["external","external.%","unknown_host","unknown\\_host.%"]}
+  },
+  {
+    "name": "observation-hostname-substring-ok",
+    "query": "hostname:prod",
+    "note": "T2 twin of observation-hostname-substring: the same shape against the asset target, which does have a table",
+    "canonical": "hostname:prod",
+    "ast": {"cmp":{"f":"hostname","op":":","v":"prod"}},
+    "sql": {"where":"(a.hostname ILIKE $1)","arg_count":1,"args":["%prod%"]}
+  },
+  {
+    "name": "observation-hostname-exact-ok",
+    "query": "hostname=\"db-01.example.test\"",
+    "note": "T2 twin of observation-hostname-exact: the same shape against the asset target, which does have a table",
+    "canonical": "hostname=db-01.example.test",
+    "ast": {"cmp":{"f":"hostname","op":"=","v":"db-01.example.test"}},
+    "sql": {"where":"(a.hostname = $1)","arg_count":1,"args":["db-01.example.test"]}
+  },
+  {
+    "name": "observation-hostname-wildcard-ok",
+    "query": "hostname:*.example.test",
+    "note": "T2 twin of observation-hostname-wildcard: the same shape against the asset target, which does have a table",
+    "canonical": "hostname:*.example.test",
+    "ast": {"cmp":{"f":"hostname","op":":","v":"*.example.test"}},
+    "sql": {"where":"(a.hostname ILIKE $1)","arg_count":1,"args":["%.example.test"]}
+  },
+  {
+    "name": "observation-hostname-regex-ok",
+    "query": "hostname ~ \"^db-[0-9]+$\"",
+    "note": "T2 twin of observation-hostname-regex: the same shape against the asset target, which does have a table",
+    "canonical": "hostname ~ \"^db-[0-9]+$\"",
+    "ast": {"match":{"f":"hostname","re":"^db-[0-9]+$"}},
+    "sql": {"where":"(a.hostname ~ $1)","arg_count":1,"args":["^db-[0-9]+$"]}
+  },
+  {
+    "name": "observation-address-exact-ok",
+    "query": "primary_address=198.51.100.10",
+    "note": "T2 twin of observation-address-exact: the same shape against the asset target, which does have a table",
+    "canonical": "primary_address=198.51.100.10",
+    "ast": {"cmp":{"f":"primary_address","op":"=","v":"198.51.100.10"}},
+    "sql": {"where":"(a.primary_address = $1::inet)","arg_count":1,"args":["198.51.100.10"]}
+  },
+  {
+    "name": "observation-network-private-ok",
+    "query": "ownership:internal",
+    "note": "T2 twin of observation-network-private: the same shape against the asset target, which does have a table",
+    "canonical": "ownership:internal",
+    "ast": {"cmp":{"f":"ownership","op":":","v":"internal"}},
+    "sql": {"where":"(lower((a.asset_ownership)::text) = $1)","arg_count":1,"args":["internal"]}
+  },
+  {
+    "name": "observation-network-ownership-third-party-ok",
+    "query": "ownership:third_party",
+    "note": "T2 twin of observation-network-ownership-third-party: the same shape against the asset target, which does have a table",
+    "canonical": "ownership:third_party",
+    "ast": {"cmp":{"f":"ownership","op":":","v":"third_party"}},
+    "sql": {"where":"(lower((a.asset_ownership)::text) = $1)","arg_count":1,"args":["third_party"]}
+  },
+  {
+    "name": "observation-network-segment-exact-ok",
+    "query": "segment_id=0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+    "note": "T2 twin of observation-network-segment-exact: the same shape against the asset target, which does have a table",
+    "canonical": "segment_id=0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+    "ast": {"cmp":{"f":"segment_id","op":"=","v":"0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f"}},
+    "sql": {"where":"(a.network_segment_id = $1::uuid)","arg_count":1,"args":["0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f"]}
+  },
+  {
+    "name": "observation-no-segment-ok",
+    "query": "not exists(segment_id)",
+    "note": "T2 twin of observation-no-segment: the same shape against the asset target, which does have a table",
+    "canonical": "not exists(segment_id)",
+    "ast": {"not":{"exists":{"f":"segment_id"}}},
+    "sql": {"where":"NOT ((a.network_segment_id IS NOT NULL))","arg_count":0}
+  },
+  {
+    "name": "observation-first-seen-recent-ok",
+    "query": "first_seen \u003e now-7d",
+    "note": "T2 twin of observation-first-seen-recent: the same shape against the asset target, which does have a table",
+    "canonical": "first_seen \u003e now-1w",
+    "ast": {"cmp":{"f":"first_seen","op":"\u003e","v":"now-1w"}},
+    "sql": {"where":"(a.first_discovered_at \u003e $1)","arg_count":1,"args":["2026-09-04T12:00:00Z"]}
+  },
+  {
+    "name": "observation-first-seen-before-ok",
+    "query": "first_seen \u003c now-90d",
+    "note": "T2 twin of observation-first-seen-before: the same shape against the asset target, which does have a table",
+    "canonical": "first_seen \u003c now-90d",
+    "ast": {"cmp":{"f":"first_seen","op":"\u003c","v":"now-90d"}},
+    "sql": {"where":"(a.first_discovered_at \u003c $1)","arg_count":1,"args":["2026-06-13T12:00:00Z"]}
+  },
+  {
+    "name": "observation-and-or-grouped-ok",
+    "query": "(source:measured or source:imported) and ownership:internal and confidence_score \u003e= 80",
+    "note": "T2 twin of observation-and-or-grouped: the same shape against the asset target, which does have a table",
+    "canonical": "(source:measured or source:imported) and ownership:internal and confidence_score \u003e= 80",
+    "ast": {"and":[{"or":[{"cmp":{"f":"source","op":":","v":"measured"}},{"cmp":{"f":"source","op":":","v":"imported"}}]},{"cmp":{"f":"ownership","op":":","v":"internal"}},{"cmp":{"f":"confidence_score","op":"\u003e=","v":"80"}}]},
+    "sql": {"where":"(((lower((a.class_source_kind)::text) = $1) OR (lower((a.class_source_kind)::text) = $2)) AND (lower((a.asset_ownership)::text) = $3) AND (a.confidence_score \u003e= $4))","arg_count":4,"args":["measured","imported","internal",80]}
+  },
+  {
+    "name": "observation-negated-group-ok",
+    "query": "not (ownership:third_party or class:external)",
+    "note": "T2 twin of observation-negated-group: the same shape against the asset target, which does have a table",
+    "canonical": "not (ownership:third_party or class:external)",
+    "ast": {"not":{"or":[{"cmp":{"f":"ownership","op":":","v":"third_party"}},{"cmp":{"f":"class","op":":","v":"external"}}]}},
+    "sql": {"where":"NOT (((lower((a.asset_ownership)::text) = $1) OR (a.class_path = $2 OR a.class_path LIKE $3)))","arg_count":3,"args":["third_party","external","external.%"]}
+  },
+  {
+    "name": "observation-full-rule-ok",
+    "query": "source in (measured, imported) and class:hardware and ownership:internal and confidence_score \u003e= 85 and exists(segment_id)",
+    "note": "T2 twin of observation-full-rule: the same shape against the asset target, which does have a table",
+    "canonical": "source in (measured, imported) and class:hardware and ownership:internal and confidence_score \u003e= 85 and exists(segment_id)",
+    "ast": {"and":[{"in":{"f":"source","v":["measured","imported"]}},{"cmp":{"f":"class","op":":","v":"hardware"}},{"cmp":{"f":"ownership","op":":","v":"internal"}},{"cmp":{"f":"confidence_score","op":"\u003e=","v":"85"}},{"exists":{"f":"segment_id"}}]},
+    "sql": {"where":"(((lower((a.class_source_kind)::text) = $1) OR (lower((a.class_source_kind)::text) = $2)) AND (a.class_path = $3 OR a.class_path LIKE $4) AND (lower((a.asset_ownership)::text) = $5) AND (a.confidence_score \u003e= $6) AND (a.network_segment_id IS NOT NULL))","arg_count":6,"args":["measured","imported","hardware","hardware.%","internal",85]}
+  },
+  {
+    "name": "observation-asset-field-rejected-ok",
+    "query": "risk_score \u003e= 70",
+    "note": "T2 twin of observation-asset-field-rejected: the same shape against the asset target, which does have a table",
+    "canonical": "risk_score \u003e= 70",
+    "ast": {"cmp":{"f":"risk_score","op":"\u003e=","v":"70"}},
+    "sql": {"where":"(a.risk_score \u003e= $1)","arg_count":1,"args":[70]}
+  },
+  {
+    "name": "observation-sub-predicate-rejected-ok",
+    "query": "endpoint:(port:443)",
+    "note": "T2 twin of observation-sub-predicate-rejected: the same shape against the asset target, which does have a table",
+    "canonical": "endpoint:(port:443)",
+    "ast": {"sub":{"c":"endpoint","p":{"cmp":{"f":"port","op":":","v":"443"}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM asset_endpoints e1 WHERE e1.asset_id = a.id AND (e1.port = $1))","arg_count":1,"args":[443]}
+  }
+]

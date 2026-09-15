@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
@@ -7,24 +8,36 @@ import { clients } from '../../lib/clients';
 import { DTable, CellMono, CellTxt, PageWrap, queryNote, relTime, isCloudSourced, deviceTypeLabel } from './kit';
 import { Icon } from '../../components/ui';
 import { useDevices } from './queries';
+import { classLabel } from '../inventory/asset-shape';
 import { DeviceFormModal, DeviceDeleteModal, TestConnectionModal, DiscoverDeviceModal } from './device-modals';
 
-// Discovery → Devices — the mock's `discovery-devices` table, live from
-// device-interrogation-service: the network devices registered for
-// interrogation (F5 / Palo Alto / Cisco / Fortinet / UniFi …). Adds the write
-// surface: add / discover-and-add (toolbar), edit / delete / interrogate /
-// test-connection (per row). All writes are gated on discovery.manage.
+// Discovery → Devices — now "assets with management configured".
+//
+// Under ADR-0002 there is no separate device record: sub-task C made a device
+// the MANAGEMENT half of an asset (`Device.id` and `Device.asset_id` are the
+// same value, and `class` is the asset's class). So this page is a filter of the
+// inventory — the assets someone has given the platform credentials for — and
+// the rows link to the same asset page every other list links to.
+//
+// What is genuinely per-device, and why the page stays: management address,
+// vendor firmware, the interrogation connection status, and the interrogate /
+// test-connection actions. Those belong to the management configuration, not to
+// the asset, and there is nowhere else in the product they fit.
+//
+// Removing management is "unmanage", not "delete": the ASSET survives. Deleting
+// an asset is an inventory action and lives on the asset page.
 
 type Device = deviceInterrogationComponents['schemas']['Device'];
 
 const COLS = [
-  { label: 'Device', w: '1.4fr' },
-  { label: 'IP', w: '1fr' },
-  { label: 'Type', w: '1fr' },
-  { label: 'Firmware', w: '1.2fr' },
-  { label: 'Last interrogated', w: '140px' },
+  { label: 'Asset', w: '1.4fr' },
+  { label: 'Management address', w: '1fr' },
+  { label: 'Class', w: '1fr' },
+  { label: 'Interrogator', w: '1fr' },
+  { label: 'Firmware', w: '1fr' },
+  { label: 'Last interrogated', w: '130px' },
   { label: 'Connection', w: '110px', align: 'right' as const },
-  { label: '', w: '150px', align: 'right' as const },
+  { label: '', w: '176px', align: 'right' as const },
 ];
 
 function connColor(status?: string | null): string {
@@ -52,6 +65,7 @@ function RowBtn({ icon, title, onClick, danger, disabled }: { icon: string; titl
 }
 
 export function DevicesPage() {
+  const navigate = useNavigate();
   const q = useDevices();
   const qc = useQueryClient();
   const devices = q.data ?? [];
@@ -87,12 +101,16 @@ export function DevicesPage() {
   });
 
   const note = queryNote(q, devices.length === 0, {
-    thing: 'devices',
-    emptyMessage: 'No network devices are registered for interrogation yet.',
+    thing: 'managed assets',
+    emptyTitle: 'Nothing is managed yet',
+    emptyMessage: 'These are the assets you have given the platform credentials for, so it can log in and read their cryptographic configuration. Add one here, or discover and add it in a single step.',
   });
 
   return (
     <PageWrap title="Devices" count={q.isLoading ? '' : devices.length}>
+      <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--app-t3)' }}>
+        Assets with management configured — the ones the platform holds credentials for and can interrogate directly. Everything here is also in Inventory; this page is where its management settings live.
+      </p>
       {/* Gates below name the permission each route enforces
           (device-interrogation-service/internal/api/router.go): POST /devices and
           /devices/discover-and-create are DiscoveryCreate; PUT /devices/:id is
@@ -101,7 +119,7 @@ export function DevicesPage() {
       <PermissionGate permission={TENANT_PERMISSIONS.discovery.create}>
         <div style={{ display: 'flex', gap: 9, marginBottom: 14 }}>
           <button className="ui-btn accent" onClick={() => { setEditing(null); setFormOpen(true); }}>
-            <Icon name="plus" size={13} />Add device
+            <Icon name="plus" size={13} />Add managed asset
           </button>
           <button className="ui-btn" onClick={() => setDiscoverOpen(true)}>
             <Icon name="radar" size={13} />Discover & add
@@ -134,7 +152,15 @@ export function DevicesPage() {
                     {[d.vendor, d.model].filter(Boolean).join(' · ')}
                   </div>
                 </div>
+                {/* The MANAGEMENT address — where we log in to interrogate it.
+                    Distinct from the asset's endpoints, which are what it
+                    serves; a switch is managed on one address and serves on
+                    others. */}
                 <CellMono v={d.ip_address} c="var(--app-t3)" />
+                {/* What the thing IS, from the class registry. `device_type` in
+                    the next column is which interrogator drives it — the two
+                    were conflated under the old four-value `asset_type`. */}
+                <CellTxt v={classLabel(d.class)} />
                 <CellTxt v={deviceTypeLabel(d.device_type)} />
                 <CellTxt v={d.firmware_version} />
                 <CellTxt v={d.last_interrogated_at ? relTime(d.last_interrogated_at) : 'never'} c="var(--app-t3)" />
@@ -142,6 +168,11 @@ export function DevicesPage() {
                   {(d.connection_status || 'unknown').replace('_', ' ')}
                 </span>
                 <span style={{ display: 'inline-flex', gap: 4, justifyContent: 'flex-end' }}>
+                  <RowBtn
+                    icon="external-link"
+                    title="Open this asset's page"
+                    onClick={() => { void navigate(`/inventory/assets/${d.asset_id || d.id}`); }}
+                  />
                   <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage}>
                     <RowBtn
                       icon={interrogatingId === d.id ? 'loader' : 'activity'}
@@ -159,10 +190,13 @@ export function DevicesPage() {
                     />
                   </PermissionGate>
                   <PermissionGate permission={TENANT_PERMISSIONS.discovery.update}>
-                    <RowBtn icon="wrench" title="Edit device" onClick={() => { setEditing(d); setFormOpen(true); }} />
+                    <RowBtn icon="wrench" title="Edit management settings" onClick={() => { setEditing(d); setFormOpen(true); }} />
                   </PermissionGate>
                   <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage}>
-                    <RowBtn icon="x-circle" title="Delete device" danger onClick={() => setDeleting(d)} />
+                    {/* Unmanage, not delete. This removes the management
+                        configuration and its credentials; the ASSET stays in
+                        Inventory with everything ever discovered about it. */}
+                    <RowBtn icon="unplug" title="Stop managing this asset" danger onClick={() => setDeleting(d)} />
                   </PermissionGate>
                 </span>
               </>

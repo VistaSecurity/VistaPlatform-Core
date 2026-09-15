@@ -1,0 +1,19 @@
+{
+  "SPHardwareDataType": [
+    {
+      "_name": "hardware_overview",
+      "activation_lock_status": "activation_lock_disabled",
+      "boot_rom_version": "10151.121.1",
+      "chip_type": "Apple M2 Pro",
+      "machine_model": "Mac14,12",
+      "machine_name": "Mac mini",
+      "model_number": "Z170000W3LL/A",
+      "number_processors": "proc 12:8:4",
+      "os_loader_version": "10151.121.1",
+      "physical_memory": "32 GB",
+      "platform_UUID": "5D3A2C71-9F44-4E0B-B6A1-7C2E4F8D9012",
+      "provisioning_UDID": "00008103-000A2C1E0C50001E",
+      "serial_number": "H2WEXAMPLE01"
+    }
+  ]
+}

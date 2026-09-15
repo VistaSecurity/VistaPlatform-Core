@@ -5,11 +5,20 @@ import toast from 'react-hot-toast';
 import type { Asset } from '@vistasecurity/api-contract';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
-import { Icon, Modal, RiskChip, LevelDot, levelFromScore, riskColor, type RiskLevel } from '../../components/ui';
-import { findLens } from './lenses';
+import { Icon, Modal, RiskChip, LevelDot, levelFromScore, type RiskLevel } from '../../components/ui';
+import { findLens, resolveLensAlias, type InventoryLens } from './lenses';
+import { STALE_DAYS } from './stale-threshold';
+import { AssetsLens } from './assets-lens';
+import { useMergeProposals } from './asset-queries';
+import { useRelationshipProposals } from './relationship-queries';
+import { useClassProposals } from '../discovery/class-proposal-queries';
+import { assetIdentity, assetRisk, classLabel, primaryAddressPort } from './asset-shape';
 import { AssetDrawer, CertDrawer, ConfigDrawer, KeyDrawer, type Certificate, type CryptoConfig, type Key, type OpenAsset, type OpenCert, type OpenConfig, type OpenKey } from './drawers';
 import { AssetFormModal } from './asset-form-modal';
+import { SoftwareLens } from './software-lens';
+import { MapShell } from './map-shell';
 import { CertificateUploadModal } from './certificate-upload-modal';
+import { ImportSpreadsheetModal } from '../discovery/import-modal';
 import { StaleRowActions, StaleBulkBar } from './bulk-actions';
 import {
   DATA_PROTECTION_CSV_HEADER, dataProtectionCsvRow, resourceTypeParam, determinedParam,
@@ -18,16 +27,16 @@ import {
 import { DP_GRID, DataProtectionDrawer, DataProtectionRow, useCryptoApplications } from './data-protection-view';
 import {
   type Strength, STRENGTH_META, STRENGTH_OPTS, ENV_OPTS, RISK_OPTS, configStrength,
-  segmentForAsset, stripInetMask, stripEmptyParens, keyAlgorithmLabel,
-  assetIdentity, assetLocation, assetService, assetRisk, protocolBadges,
-  configCount, certCount, assetStatusBadge, relativeTime,
+  stripInetMask, stripEmptyParens, keyAlgorithmLabel,
 } from './lens-helpers';
 
 // Inventory — lens-based view. One backend dataset reshaped by angle. The active
 // lens comes from the URL (`?lens=`); the switcher lives in the LEFT SIDEBAR.
 //
-//   infrastructure  → grouped accordion: asset header → expand → its configs
-//   network         → accordion grouped by network segment → asset child rows
+//   assets          → the class-faceted list (ADR-0006 D2) — its own component
+//   software        → the product-anchored catalogue (SoftwareLens)
+//   map             → TWO views behind MapShell (`?view=`): the neighbourhood
+//                     GRAPH around one asset, and the tenant-wide topology tree
 //   stale           → flat asset table filtered to not-seen-recently / non-active
 //   connections     → 3rd-party external connections (own dataset)
 //   certificate / configuration / tls / ssh → flat config tables
@@ -35,16 +44,28 @@ import {
 // Drill-down goes through one drawer STACK: config (base) → asset → certificate,
 // any direction, top drawer closes first (Esc / scrim).
 
-const PAGE_SIZE = 50;
-const STALE_DAYS = 14;
+// CODE-SPLIT ON PURPOSE, one layer down. `map-lens` is the only module in the
+// app that pulls in `@xyflow/react` and dagre, and most visits to Inventory are
+// to a list; a static import would put a graph library in the bundle every user
+// downloads in order to look at a table. `MapShell` (ADR-0006 D4, workstream
+// 3.8) owns the `?view=` switch between the neighbourhood and the topology and
+// lazily loads whichever half is asked for — so this page imports the switch,
+// not either renderer.
 
-// Count of discovered assets waiting in the approval queue. New discoveries
-// land as pending_approval and are EXCLUDED from every inventory lens until a
-// user approves them (Discovery → Approvals) — without this count, a fresh
-// tenant sees sensors reporting and an empty Inventory with nothing saying why.
-// page_size 1: only pagination.total is needed.
+const PAGE_SIZE = 50;
+
+// Count of everything waiting in the approval queue. New discoveries land as
+// pending_approval and are EXCLUDED from every inventory lens until a user
+// approves them (Discovery → Approvals) — without this count, a fresh tenant
+// sees sensors reporting and an empty Inventory with nothing saying why.
+//
+// It counts every ROW KIND (ADR-0006 D6): Approvals is one queue — discovered
+// assets, merge proposals, relationship proposals and class proposals — so a
+// banner that counted only some of it would send a user to a page with more work
+// on it than the banner admitted. page_size 1: only pagination.total is needed
+// from the asset half.
 function usePendingApprovalCount() {
-  return useQuery({
+  const assetsQ = useQuery({
     queryKey: ['inventory', 'pending-approval-count'],
     queryFn: async () => {
       const { data, error } = await clients.inventory.GET('/infrastructure-assets', {
@@ -54,6 +75,20 @@ function usePendingApprovalCount() {
       return data.pagination?.total ?? (data.assets?.length ?? 0);
     },
   });
+  const proposalsQ = useMergeProposals();
+  // The third row kind (ADR-0006 D6). The banner claims to count what is
+  // "awaiting review", so leaving a kind out of it makes the number quietly
+  // smaller than the queue it points at.
+  const relProposalsQ = useRelationshipProposals();
+  // And the fourth (workstream 2.10b): a class the rules argued about an asset
+  // that already has one. Same reason again — a banner that counted three of
+  // four kinds sends a user to a page with more work on it than the banner
+  // admitted.
+  const classProposalsQ = useClassProposals();
+  // `total`, not the page length: each list stops at the server's limit, so a
+  // tenant with 132 proposals was told its queue held 50.
+  return (assetsQ.data ?? 0) + (proposalsQ.data?.total ?? 0)
+    + (relProposalsQ.data?.total ?? 0) + (classProposalsQ.data?.total ?? 0);
 }
 
 function useAssets(page: number, search: string, enabled: boolean, lastSeenBefore?: string) {
@@ -155,18 +190,6 @@ function useElevateConnection() {
   });
 }
 
-function useSegments(enabled: boolean) {
-  return useQuery({
-    queryKey: ['inventory', 'segments'],
-    queryFn: async () => {
-      const { data, error } = await clients.inventory.GET('/network-segments');
-      if (error || !data) throw new Error('Failed to load network segments');
-      return data.network_segments ?? [];
-    },
-    enabled,
-  });
-}
-
 function daysSince(iso?: string | null): number | null {
   if (!iso) return null;
   return Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
@@ -212,11 +235,44 @@ const KEY_GRID = '18px minmax(0,1.6fr) minmax(0,1.2fr) 100px 90px 120px';
 const STALE_GRID = '22px minmax(0,1.6fr) 1fr 1fr 110px 70px 84px';
 const CONN_GRID = '22px minmax(0,1.6fr) 1fr minmax(0,1.4fr) 90px 100px 90px 104px';
 
+/**
+ * A lens the nav already shows but whose data does not exist yet (Map, Software).
+ *
+ * The nav entry is deliberate — the shape of the inventory is part of what the
+ * navigation communicates — but the BODY must say when it arrives and why. An
+ * empty table under "Map" would read as "you have no relationships", which is a
+ * claim about the tenant rather than about the release.
+ */
+function LensPlaceholder({ lens }: { lens: InventoryLens }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '16px 26px 12px' }}>
+        <h2 style={{ margin: 0, fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 16, color: 'var(--app-t1)', display: 'flex', alignItems: 'center', gap: 9 }}>
+          <Icon name={lens.icon} size={17} style={{ color: 'var(--accent)' }} />{lens.label}
+        </h2>
+      </div>
+      <div className="panel" style={{ flex: 1, minHeight: 0, margin: '0 26px 14px', borderRadius: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div data-testid="lens-placeholder" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, padding: '40px 26px', textAlign: 'center' }}>
+          <Icon name={lens.icon} size={30} style={{ color: 'var(--accent)' }} />
+          <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--app-t1)' }}>
+            {lens.label} arrives in {lens.placeholder?.phase}
+          </div>
+          <div style={{ fontSize: 12.5, color: 'var(--app-t3)', maxWidth: 560, lineHeight: 1.65 }}>
+            {lens.placeholder?.message}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function InventoryPage() {
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
-  const pendingCount = usePendingApprovalCount().data ?? 0;
-  const def = findLens(params.get('lens'));
+  const pendingCount = usePendingApprovalCount();
+  const lensParam = params.get('lens');
+  const alias = resolveLensAlias(lensParam);
+  const def = findLens(alias ? alias.lens : lensParam);
   const lens = def.key;
   const isConfig = def.anchor === 'config';
   const [page, setPage] = useState(1);
@@ -243,6 +299,7 @@ export function InventoryPage() {
   const [formOpen, setFormOpen] = useState(false);
   const [editAsset, setEditAsset] = useState<Asset | null>(null);
   const [certUploadOpen, setCertUploadOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
 
   const openConfig: OpenConfig = (config) => setStack((s) => [...s, { kind: 'config', config }]);
   const openAsset: OpenAsset = (assetId, seed) => setStack((s) => [...s, { kind: 'asset', assetId, seed }]);
@@ -261,6 +318,27 @@ export function InventoryPage() {
   const qParam = params.get('q');
   useEffect(() => { if (qParam !== null) { setSearch(qParam); setPage(1); } }, [qParam]);
 
+  // A retired lens key repairs the URL in place rather than quietly rendering
+  // something else under the old name. `?lens=infrastructure` was the default
+  // for the whole of the previous UI, so those bookmarks are real.
+  useEffect(() => {
+    if (!alias) return;
+    const next = new URLSearchParams(params);
+    next.set('lens', alias.lens);
+    if (alias.query) next.set('query', alias.query);
+    setParams(next, { replace: true });
+  }, [alias, params, setParams]);
+
+  // The query string — the ONE predicate behind the class-faceted list
+  // (ADR-0006 D2). It lives in the URL so a filtered view is shareable, and so
+  // a saved view is nothing more than this text under a name.
+  const query = params.get('query') ?? '';
+  const setQuery = (q: string) => {
+    const next = new URLSearchParams(params);
+    if (q) next.set('query', q); else next.delete('query');
+    setParams(next, { replace: true });
+  };
+
   const isConn = lens === 'connections';
   const isCert = def.anchor === 'cert';
   const isKey = def.anchor === 'key';
@@ -271,7 +349,16 @@ export function InventoryPage() {
   const staleCutoff = lens === 'stale'
     ? new Date(Math.floor(Date.now() / 3600000) * 3600000 - STALE_DAYS * 86400000).toISOString()
     : undefined;
-  const assetsQ = useAssets(page, search, def.anchor === 'asset' && !isConn, staleCutoff);
+  // Only the lenses that RENDER from this dataset ask for it. `assets`, `map`
+  // and `software` all carry the asset anchor, but each holds its own query and
+  // returns early before this result is read — so without the exclusions the
+  // page fetches a page of fifty assets per visit and throws it away. That is
+  // not hypothetical: it is what happened here until the `placeholder` clause
+  // was added, and `map` had to be NAMED when it stopped being a placeholder,
+  // because that clause silently stopped covering it.
+  const usesAssetDataset = def.anchor === 'asset' && !isConn && !def.placeholder
+    && lens !== 'assets' && lens !== 'map' && lens !== 'software';
+  const assetsQ = useAssets(page, search, usesAssetDataset, staleCutoff);
   // #H-6: "Unknown" must be offered — the server already partitions the whole
   // set into internal / third_party / unknown (see effectiveOwnershipExpr in
   // certificate_service.go), but the filter dropdown previously only exposed
@@ -281,7 +368,6 @@ export function InventoryPage() {
   const keysQ = useKeys(isKey);
   const configsQ = useConfigs(page, search, isConfig, def.protocol);
   const connsQ = useConnections(page, search, isConn);
-  const segsQ = useSegments(lens === 'network');
   // Data Protection: at-rest crypto applications (buckets, databases). The risk
   // filter is pushed to the server as `risk_at_least`, built from the SHARED
   // band minimums (LEVEL_MIN) rather than a hand-typed threshold.
@@ -356,9 +442,16 @@ export function InventoryPage() {
         configs.map((c) => [c.asset_hostname, c.asset_environment, c.protocol, c.protocol_version, c.cipher_suite, c.key_exchange_algorithm, c.signature_algorithm, c.symmetric_encryption, c.hash_algorithm, c.key_size as number, levelOfC(c as CryptoConfig), c.risk_score as number]));
     } else {
       const rows = lens === 'stale' ? staleAssets : assets;
+      // `address` is the PRIMARY ENDPOINT's address and port (blank when the
+      // asset has no network face), and `class` replaces the retired
+      // `asset_type`. An importer reading the old header against the new export
+      // gets nothing rather than something wrong, which is the point.
       downloadCsv(`vista-inventory-${lens}-${stamp}.csv`,
-        ['hostname', 'ip', 'port', 'type', 'environment', 'segment', 'status', 'last_seen_at', 'risk_score'],
-        rows.map((a) => [a.hostname, a.ip_address, a.port, a.asset_type, a.environment, a.network_segment_name || a.business_unit, a.asset_status, a.last_seen_at, typeof a.risk_score === 'number' ? a.risk_score : 0]));
+        ['name', 'address', 'class', 'environment', 'segment', 'status', 'last_seen_at', 'risk_score'],
+        rows.map((a) => {
+          const ident = assetIdentity(a);
+          return [ident.primary, primaryAddressPort(a), classLabel(a.class_key), a.environment, a.network_segment_name || a.business_unit, a.asset_status, a.last_seen_at, typeof a.risk_score === 'number' ? a.risk_score : 0];
+        }));
     }
   };
 
@@ -465,42 +558,26 @@ export function InventoryPage() {
       );
     }
 
-    if (lens === 'network') {
-      const segs = segsQ.data ?? [];
-      const byName = new Map<string, Asset[]>();
-      // Pre-seed with all known segments so empty ones still render
-      for (const seg of segs) byName.set(seg.name as string, []);
-      for (const a of assets) {
-        const k = a.network_segment_name ?? segmentForAsset(a.ip_address, segs) ?? 'Unsegmented';
-        if (!byName.has(k)) byName.set(k, []);
-        byName.get(k)!.push(a);
-      }
-      if (byName.size === 0) return <Center icon="inbox" tone="var(--app-t3)" title="Nothing here" message={search ? 'Nothing matches your search.' : 'No assets discovered yet.'} />;
-      const groups = [...byName.entries()].sort((x, y) => y[1].length - x[1].length);
-      return groups.map(([name, list], gi) => {
-        const meta = segs.find((s) => s.name === name);
-        return <SegmentGroup key={name} name={name} meta={meta} assets={list} openAsset={openAsset} defaultOpen={gi < 3} />;
-      });
-    }
-
     if (lens === 'stale') {
       if (staleAssets.length === 0) return <Center icon="clock-alert" tone="var(--ok)" title="No stale assets" message={`Nothing has gone unseen for over ${STALE_DAYS} days.`} />;
       return (
         <>
           <StaleBulkBar assetIds={staleAssets.map((a) => a.id as string)} />
-          <Header grid={STALE_GRID} cols={['', 'Host', 'Type', 'Segment', 'Status', 'Last seen', '']} />
+          <Header grid={STALE_GRID} cols={['', 'Asset', 'Class', 'Segment', 'Status', 'Last seen', '']} />
           {staleAssets.map((a) => {
-            const risk = typeof a.risk_score === 'number' ? a.risk_score : 0;
-            const level = a.risk_level || levelFromScore(risk);
+            const risk = assetRisk(a);
+            const ident = assetIdentity(a);
             const d = daysSince(a.last_seen_at);
             return (
-              <div key={a.id} className="row-hover" onClick={() => openAsset(a.id as string, a)} style={{ display: 'grid', gridTemplateColumns: STALE_GRID, gap: 12, padding: '0 16px', minHeight: 46, alignItems: 'center', borderBottom: '1px solid var(--app-border)', cursor: 'pointer' }}>
-                <RiskChip level={level} size={22} />
+              <div key={a.id} className="row-hover" onClick={() => { void navigate(`/inventory/assets/${a.id}`); }} style={{ display: 'grid', gridTemplateColumns: STALE_GRID, gap: 12, padding: '0 16px', minHeight: 46, alignItems: 'center', borderBottom: '1px solid var(--app-border)', cursor: 'pointer' }}>
+                <RiskChip level={risk.level} assessed={risk.assessed} size={22} title={risk.title} />
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.hostname || '—'}</div>
-                  <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>{a.ip_address || ''}</div>
+                  <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{ident.primary}</div>
+                  {/* The primary endpoint's address, or nothing. Never a
+                      fabricated port for an asset that has no network face. */}
+                  <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>{primaryAddressPort(a)}</div>
                 </div>
-                <Txt v={a.asset_type} />
+                <Txt v={classLabel(a.class_key)} />
                 <Txt v={a.network_segment_name || a.business_unit} />
                 <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--warn)', background: 'color-mix(in srgb, var(--warn) 11%, transparent)', borderRadius: 40, padding: '2px 9px', justifySelf: 'start', textTransform: 'capitalize' }}>{a.asset_status || 'unknown'}</span>
                 <span className="mono" style={{ fontSize: 12, color: 'var(--warn-strong)' }}>{d != null ? `${d}d` : '—'}</span>
@@ -546,22 +623,70 @@ export function InventoryPage() {
       );
     }
 
-    // infrastructure — grouped accordion: asset header → expand → its configs
-    if (assets.length === 0) {
-      const emptyMsg = search
-        ? 'Nothing matches your search.'
-        : pendingCount > 0
-          ? `${pendingCount} discovered asset${pendingCount === 1 ? '' : 's'} are awaiting approval in Discovery → Approvals — they appear here once approved.`
-          : 'No assets discovered yet.';
-      return <Center icon="inbox" tone="var(--app-t3)" title="Nothing here" message={emptyMsg} />;
-    }
+    // Every asset-anchored lens except `stale` is the class-faceted list now,
+    // which renders above this function — reaching here means a lens key with
+    // no branch, which is a registry/page mismatch worth saying out loud.
     return (
-      <>
-        <InfraHeader />
-        {assets.map((a) => <AssetGroup key={a.id} asset={a} openConfig={openConfig} openAsset={openAsset} />)}
-      </>
+      <Center
+        icon="circle-help"
+        tone="var(--app-t3)"
+        title="No view for this lens"
+        message={`“${lens}” is in the lens registry but this page has no renderer for it.`}
+        action={{ label: 'Go to All assets', onClick: () => { void navigate('/inventory?lens=assets'); } }}
+      />
     );
   };
+
+  // The class-faceted list (ADR-0006 D2) is its own component: it holds a facet
+  // rail, a query editor and a per-class column set, none of which the
+  // crypto-anchored lenses want. Returning early keeps this page's remaining
+  // branches as the crypto module they now are, rather than growing a
+  // fourteenth `if` around a second page's worth of chrome.
+  if (lens === 'assets') {
+    return (
+      <>
+        <AssetsLens
+          query={query}
+          onQueryChange={setQuery}
+          page={page}
+          onPageChange={setPage}
+          pendingCount={pendingCount}
+          onNewAsset={() => { setEditAsset(null); setFormOpen(true); }}
+          // The empty state offers all three ways in — discover, import, add —
+          // because on a fresh tenant "no assets yet" is a question about how to
+          // get some, not a statement about the inventory.
+          onImport={() => setImportOpen(true)}
+        />
+        {formOpen && (
+          <AssetFormModal
+            open={formOpen}
+            asset={editAsset}
+            onClose={() => { setFormOpen(false); setEditAsset(null); }}
+          />
+        )}
+        <ImportSpreadsheetModal open={importOpen} onClose={() => setImportOpen(false)} lockedTarget="assets" />
+      </>
+    );
+  }
+
+  // The software catalogue is product-anchored, not asset-anchored: it answers
+  // "who runs log4j 2.14?" and drills through to the assets. Same reason
+  // AssetsLens returns early — its toolbar and table belong to it, not to the
+  // crypto lenses this page's remaining branches are.
+  if (lens === 'software') {
+    return <SoftwareLens />;
+  }
+
+  // The map is the neighbourhood GRAPH (ADR-0006 D4), not a table reshaped, so
+  // it returns early for the same reason the two above do. Lazy, so the graph
+  // library loads when somebody asks for a map and never otherwise.
+  if (lens === 'map') {
+    return <MapShell />;
+  }
+
+  if (def.placeholder) {
+    return <LensPlaceholder lens={def} />;
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
@@ -691,216 +816,6 @@ export function InventoryPage() {
   );
 }
 
-// ---- infrastructure accordion group -------------------------------------
-// Sticky header for the Infrastructure lens. Column visibility mirrors the row
-// exactly (same .infra-* classes), so a hidden segment takes its heading with it.
-function InfraHeader() {
-  return (
-    <div className="infra-grid" style={{ height: 34, borderBottom: '1px solid var(--app-border2)', position: 'sticky', top: 0, background: 'var(--app-panel)', zIndex: 1 }}>
-      <span />
-      <span className="eyebrow-app">Identity</span>
-      <span className="eyebrow-app infra-lg">Location</span>
-      <span className="eyebrow-app infra-xl">Service</span>
-      <span className="eyebrow-app">Risk</span>
-      <span className="eyebrow-app infra-md">Crypto</span>
-      <span className="eyebrow-app infra-md">Certs</span>
-      <span className="eyebrow-app">Status</span>
-      <span />
-    </div>
-  );
-}
-
-// Environment is a deployment-context label, not a severity — but production
-// carries more consequence than a lab, so it gets the louder tone.
-const ENV_TONE = (env: string): string => {
-  const e = env.toLowerCase();
-  if (e.startsWith('prod')) return 'var(--warn-strong)';
-  if (e.startsWith('stag') || e.startsWith('uat')) return 'var(--warn)';
-  return 'var(--neutral)';
-};
-
-function AssetGroup({ asset, openConfig, openAsset }: { asset: Asset; openConfig: OpenConfig; openAsset: OpenAsset }) {
-  const a = asset as Record<string, unknown> & Asset;
-  const [open, setOpen] = useState(false);
-
-  // Every segment below is derived by a pure helper in lens-helpers.ts so the
-  // "field the service doesn't know" cases are unit-tested rather than eyeballed.
-  const ident = assetIdentity(a);
-  const loc = assetLocation(a);
-  const svc = assetService(a);
-  const risk = assetRisk(a);
-  // 2 badges + a "+N" marker: three badges plus the count overflow the Crypto
-  // cell once the grid narrows to its md template.
-  const { badges, overflow } = protocolBadges(a, 2);
-  const cfgN = configCount(a);
-  const certN = certCount(a);
-  const status = assetStatusBadge(a);
-
-  // Children lazy-load on first expand; same query key as AssetDrawer → cache reuse.
-  // NOTE: this stays `enabled: open`. The row's protocol badges come from the
-  // list payload's protocol_summary precisely so this query is NOT needed to
-  // paint a row — enabling it eagerly would fire one request per visible row.
-  const childrenQ = useQuery({
-    queryKey: ['asset-configs', a.id],
-    queryFn: async () => {
-      const { data, error } = await clients.inventory.GET('/crypto-configurations', { params: { query: { asset_id: a.id as string, page: 1, page_size: 100 } } });
-      if (error || !data) throw new Error('Failed to load configs');
-      return data.crypto_implementations ?? [];
-    },
-    enabled: open,
-  });
-  const kids = childrenQ.data ?? [];
-
-  return (
-    <div>
-      <div className="row-hover infra-grid" style={{ minHeight: 48, borderTop: '1px solid var(--app-border)', background: 'var(--app-panel2)' }}>
-        {/* 1 · caret + risk chip. The chip is the at-a-glance severity; its
-            title says "not assessed" when nothing resolved, so a grey
-            Informational chip never reads as a clean bill of health. */}
-        <button
-          onClick={() => setOpen((o) => !o)}
-          aria-expanded={open}
-          aria-label={`${open ? 'Collapse' : 'Expand'} ${ident.primary}`}
-          title={risk.title}
-          style={{ display: 'inline-flex', alignItems: 'center', gap: 6, border: 'none', background: 'transparent', cursor: 'pointer', padding: 0 }}
-        >
-          <Icon name="chevron-right" size={14} style={{ flex: 'none', color: 'var(--app-t3)', transition: 'transform .18s ease', transform: open ? 'rotate(90deg)' : 'none' }} />
-          <RiskChip level={risk.level} size={22} />
-        </button>
-
-        {/* 2 · Identity */}
-        <button onClick={() => setOpen((o) => !o)} style={{ minWidth: 0, border: 'none', background: 'transparent', cursor: 'pointer', textAlign: 'left', padding: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={ident.primary}>{ident.primary}</div>
-          {ident.secondary && (
-            <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={ident.secondary}>{ident.secondary}</div>
-          )}
-        </button>
-
-        {/* 3 · Location (lg+). Neither known → ONE em dash, not a stack of two. */}
-        <div className="infra-lg" style={{ minWidth: 0 }}>
-          {loc.environment && (
-            <span style={{ fontSize: 10.5, fontWeight: 700, color: ENV_TONE(loc.environment), background: `color-mix(in srgb, ${ENV_TONE(loc.environment)} 12%, transparent)`, borderRadius: 6, padding: '1px 7px', textTransform: 'capitalize' }}>{loc.environment}</span>
-          )}
-          {(loc.path || !loc.environment) && (
-            <div style={{ fontSize: 11, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: loc.environment ? 2 : 0 }} title={loc.path ?? 'No environment, segment or business unit recorded'}>{loc.path ?? '—'}</div>
-          )}
-        </div>
-
-        {/* 4 · Service (xl+) */}
-        <div className="infra-xl" style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 12, color: svc.name ? 'var(--app-t2)' : 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={svc.name ?? 'Service not identified'}>{svc.name ?? '—'}</div>
-          {svc.version && <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>{svc.version}</div>}
-        </div>
-
-        {/* 5 · Risk. Score 0 = NOT ASSESSED, shown as '—' plus an explicit
-            caption — never as a low/green result. */}
-        <div style={{ minWidth: 0, textAlign: 'right' }} title={risk.title}>
-          <div className="mono" style={{ fontSize: 13, fontWeight: 600, color: risk.assessed ? riskColor(risk.level) : 'var(--app-t3)' }}>{risk.label}</div>
-          <div style={{ fontSize: 10, color: 'var(--app-t3)', whiteSpace: 'nowrap' }}>{risk.assessed ? risk.level : 'not assessed'}</div>
-        </div>
-
-        {/* 6 · Crypto summary (md+): protocol badges + configuration count. */}
-        <div className="infra-md" style={{ alignItems: 'center', gap: 5, minWidth: 0, flexWrap: 'nowrap', overflow: 'hidden' }}>
-          {badges.map((b) => (
-            <span key={b.label} title={b.title} className="mono" style={{ fontSize: 10.5, fontWeight: 700, flex: 'none', color: b.assessed ? riskColor(b.level) : 'var(--app-t3)', background: b.assessed ? `color-mix(in srgb, ${riskColor(b.level)} 12%, transparent)` : 'var(--app-track)', borderRadius: 6, padding: '1px 6px' }}>{b.label}</span>
-          ))}
-          {overflow > 0 && <span className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', flex: 'none' }} title={`${overflow} more protocol${overflow === 1 ? '' : 's'} — expand the row to see them`}>+{overflow}</span>}
-          {/* An explicit zero reads as a bug ("0 cfg"); say what it means instead.
-              A NULL count (service didn't send one) shows nothing at all. */}
-          {cfgN === 0 && badges.length === 0
-            ? <span style={{ fontSize: 10.5, color: 'var(--app-t3)', flex: 'none' }}>no crypto seen</span>
-            : cfgN != null && (
-              <span className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', flex: 'none', marginLeft: badges.length ? 2 : 0 }} title={`${cfgN} crypto configuration${cfgN === 1 ? '' : 's'} on this asset`}>{cfgN} cfg</span>
-            )}
-        </div>
-
-        {/* 7 · Certs (md+) */}
-        <div className="infra-md" style={{ alignItems: 'center', gap: 4 }} title={`${certN} certificate${certN === 1 ? '' : 's'} on this asset`}>
-          <Icon name="file-badge" size={13} style={{ color: certN > 0 ? 'var(--accent)' : 'var(--app-t3)' }} />
-          <span className="mono" style={{ fontSize: 11.5, color: certN > 0 ? 'var(--app-t2)' : 'var(--app-t3)' }}>{certN}</span>
-        </div>
-
-        {/* 8 · Status + relative last-seen */}
-        <div style={{ minWidth: 0, textAlign: 'right' }}>
-          {status && (
-            <span style={{ fontSize: 10, fontWeight: 700, color: status.tone, background: `color-mix(in srgb, ${status.tone} 12%, transparent)`, borderRadius: 6, padding: '1px 6px', textTransform: 'capitalize' }}>{status.text}</span>
-          )}
-          <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', marginTop: status ? 2 : 0 }} title={a.last_seen_at ? `Last seen ${a.last_seen_at as string}` : 'Never seen'}>{relativeTime(a.last_seen_at as string | undefined)}</div>
-        </div>
-
-        {/* drill-through to the asset drawer */}
-        <button onClick={() => openAsset(a.id as string, a)} title="Asset details" className="ui-btn sm ghost icon" style={{ width: 30, height: 28, padding: 0, justifySelf: 'end' }}>
-          <Icon name="circle-alert" size={14} />
-        </button>
-      </div>
-      {open && (
-        <div style={{ background: 'var(--app-bg)' }}>
-          {childrenQ.isLoading ? (
-            <ChildNote text="Loading configurations…" />
-          ) : childrenQ.isError ? (
-            <ChildNote text="Couldn't load configurations." />
-          ) : kids.length === 0 ? (
-            <ChildNote text="No crypto configurations on this asset." />
-          ) : (
-            kids.map((c) => <ConfigChildRow key={(c as CryptoConfig).id} config={c as CryptoConfig} onClick={() => openConfig(c as CryptoConfig)} />)
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ---- network lens: segment accordion -------------------------------------
-interface SegmentMeta { value?: string; environment?: string; network_type?: string; location_name?: string }
-
-function SegmentGroup({ name, meta, assets, openAsset, defaultOpen }: {
-  name: string; meta?: SegmentMeta; assets: Asset[]; openAsset: OpenAsset; defaultOpen: boolean;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  const worst = assets.reduce((m, a) => Math.max(m, typeof a.risk_score === 'number' ? a.risk_score : 0), 0);
-  const sub = [meta?.value, meta?.environment, meta?.location_name].filter(Boolean).join(' · ');
-  return (
-    <div>
-      <button onClick={() => setOpen((o) => !o)} className="row-hover" style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', padding: '11px 16px', border: 'none', borderTop: '1px solid var(--app-border)', background: 'var(--app-panel2)', cursor: 'pointer', textAlign: 'left' }}>
-        <Icon name="chevron-right" size={15} style={{ flex: 'none', color: 'var(--app-t3)', transition: 'transform .18s ease', transform: open ? 'rotate(90deg)' : 'none' }} />
-        <RiskChip level={levelFromScore(worst)} size={24} />
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--app-t1)' }}>{name}</div>
-          <div className="mono" style={{ fontSize: 11, color: 'var(--app-t3)' }}>{sub || `${assets.length} assets`}</div>
-        </div>
-        <span className="mono" style={{ fontSize: 12, color: 'var(--app-t2)', flex: 'none' }}>{assets.length}</span>
-      </button>
-      {open && (
-        <div style={{ background: 'var(--app-bg)' }}>
-          {assets.length === 0
-            ? <ChildNote text="No assets discovered in this segment yet." />
-            : assets.map((a) => <AssetChildRow key={a.id} asset={a} onClick={() => openAsset(a.id as string, a)} />)}
-        </div>
-      )}
-    </div>
-  );
-}
-
-const ASSET_CHILD_GRID = '18px minmax(0,1.6fr) 1fr 1fr 90px';
-
-function AssetChildRow({ asset, onClick }: { asset: Asset; onClick: () => void }) {
-  const a = asset as Record<string, unknown> & Asset;
-  const risk = typeof a.risk_score === 'number' ? a.risk_score : 0;
-  const riskLevel = asset.risk_level || levelFromScore(risk);
-  return (
-    <button onClick={onClick} className="row-hover" style={{ display: 'grid', gridTemplateColumns: ASSET_CHILD_GRID, gap: 12, alignItems: 'center', width: '100%', padding: '0 16px 0 40px', minHeight: 38, border: 'none', borderBottom: '1px solid var(--app-border)', background: 'transparent', cursor: 'pointer', textAlign: 'left' }}>
-      <LevelDot level={riskLevel} />
-      <div style={{ minWidth: 0 }}>
-        <div className="mono" style={{ fontSize: 12.5, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{(a.hostname as string) || '—'}</div>
-        <div style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{[a.asset_type, a.operating_system].filter(Boolean).join(' · ')}</div>
-      </div>
-      <Txt v={a.environment as string} cap />
-      <Mono v={(a.ip_address as string) || ''} small />
-      <span className="mono" style={{ fontSize: 12, color: 'var(--app-t2)', textAlign: 'right' }}>{risk || '—'}</span>
-    </button>
-  );
-}
-
 const CHILD_GRID = '18px minmax(0,1.5fr) minmax(0,1.3fr) 1fr 56px';
 
 function ConfigChildRow({ config, onClick, showHost }: { config: CryptoConfig; onClick: () => void; showHost?: boolean }) {
@@ -1027,10 +942,6 @@ function FilterSelect({ label, value, onChange, options }: { label: string; valu
     </select>
   );
 }
-function ChildNote({ text }: { text: string }) {
-  return <div style={{ padding: '12px 16px 12px 40px', fontSize: 12, color: 'var(--app-t3)' }}>{text}</div>;
-}
-
 function Header({ grid, cols }: { grid: string; cols: string[] }) {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: grid, gap: 12, padding: '0 16px', height: 34, alignItems: 'center', borderBottom: '1px solid var(--app-border2)', position: 'sticky', top: 0, background: 'var(--app-panel)', zIndex: 1 }}>

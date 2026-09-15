@@ -6,28 +6,30 @@ This glossary maps the Vista Platform's internal terminology to the correspondin
 
 ### Infrastructure Asset
 
-An infrastructure asset represents a discoverable network endpoint — a server, workstation, network appliance, or service — that hosts or uses cryptographic configurations.
+An infrastructure asset represents **one thing** in your estate — a server, a workstation, a switch, a virtual machine, a cloud resource, a business service. Its network faces are **endpoints** (address, port, service) hanging off it, and its cryptographic configurations hang off those, so a host with three listeners is one CI with three endpoints rather than three CIs.
 
 | Context | Term / CI Type |
 |---------|---------------|
-| **Platform (internal DB table)** | `network_assets` |
+| **Platform (internal DB table)** | `assets` (with `asset_endpoints` and `asset_identifiers`) |
 | **Platform (display name)** | Infrastructure Asset |
 | **Platform (CI category)** | `infrastructure_asset` |
-| **ServiceNow** | `cmdb_ci_server` (servers), `cmdb_ci_computer` (endpoints), `cmdb_ci_service` (services), `cmdb_ci_hardware` (appliances) |
+| **ServiceNow** | `cmdb_ci_server`, `cmdb_ci_computer`, `cmdb_ci_netgear`, `cmdb_ci_vm_instance`, `cmdb_ci_service` — by class, see below |
 | **Device42** | Device (`/api/1.0/devices/`) |
 | **SolarWinds** | Node (`Orion.Nodes`) |
 | **Oomnitza** | Asset (`/api/v3/assets`) |
 | **Unified View** | `v_ci_inventory` (category: `infrastructure_asset`) |
 
-**Sub-type mapping (ServiceNow):**
+**Class mapping (ServiceNow).** The platform's class — what kind of thing the asset is — chooses the CI class. Classes form a tree, so a class with no mapping of its own uses its nearest mapped ancestor.
 
-| Asset Type (Platform) | ServiceNow CI Class |
-|-----------------------|---------------------|
+| Class (Platform) | ServiceNow CI Class |
+|------------------|---------------------|
 | `server` | `cmdb_ci_server` |
-| `endpoint` | `cmdb_ci_computer` |
-| `service` | `cmdb_ci_service` |
-| `appliance` | `cmdb_ci_hardware` |
-| (other) | `cmdb_ci_hardware` |
+| `workstation`, `laptop` | `cmdb_ci_computer` |
+| `switch`, `router`, `firewall`, `load_balancer` (under `network_device`) | `cmdb_ci_netgear` |
+| `virtual_machine` | `cmdb_ci_vm_instance` |
+| `object_storage`, `managed_database`, `key_store`, … (under `cloud_resource`) | `cmdb_ci_cloud_service_account` |
+| `business_service`, `technical_service` (under `service`) | `cmdb_ci_service` |
+| (anything else under `hardware`) | `cmdb_ci_hardware` |
 
 ---
 

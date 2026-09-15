@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{\"spdxVersion\":\"SPDX-2.3\",\"packages\":[{\"name\":\"a\",\"SPDXID\":\"SPDXRef-a\"}],\"relationships\":[{\"spdxElementId\":\"SPDXRef-a\",\"relationshipType\":\"CONTAINS\",\"relatedSpdxElement\":\"SPDXRef-a\"}]}")

@@ -267,14 +267,23 @@ func TierImpactAnalysis(c *gin.Context) {
 
 	// RLS: cross-tenant — platform stats counting assets/users/sensors per tenant
 	// across ALL tenants on this tier (driven by tenants.subscription_tier_id, a
-	// global column). Runs on the bypass role (Phase 4); network_assets/users/
+	// global column). Runs on the bypass role (Phase 4); assets/users/
 	// sensors are RLS-policied but this aggregate spans every tenant, so it
 	// cannot set a single app.tenant_id.
+	//
+	// These counts are shown BESIDE the tier's limits to answer "who would this
+	// change break", so each has to be the number the corresponding gate
+	// measures — live rows only (shared/services.LimitEnforcementService counts
+	// `deleted_at IS NULL`). Soft-deleted rows were counted here, which
+	// overstated every tenant's usage against the cap it is being compared to.
+	//
+	// An asset is a host, not one of its listening ports (phase 1): count
+	// `assets`, never a join through `asset_endpoints`.
 	rows, err := tierService.BypassDB().Query(`
 		SELECT t.id, t.name,
-			COALESCE((SELECT COUNT(*) FROM network_assets na WHERE na.tenant_id = t.id), 0) AS asset_count,
-			COALESCE((SELECT COUNT(*) FROM users u WHERE u.tenant_id = t.id), 0) AS user_count,
-			COALESCE((SELECT COUNT(*) FROM sensors s WHERE s.tenant_id = t.id), 0) AS sensor_count
+			COALESCE((SELECT COUNT(*) FROM assets a WHERE a.tenant_id = t.id AND a.deleted_at IS NULL), 0) AS asset_count,
+			COALESCE((SELECT COUNT(*) FROM users u WHERE u.tenant_id = t.id AND u.deleted_at IS NULL), 0) AS user_count,
+			COALESCE((SELECT COUNT(*) FROM sensors s WHERE s.tenant_id = t.id AND s.deleted_at IS NULL), 0) AS sensor_count
 		FROM tenants t
 		WHERE t.subscription_tier_id = $1 AND t.deleted_at IS NULL
 		ORDER BY t.name ASC

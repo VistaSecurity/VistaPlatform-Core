@@ -22,6 +22,28 @@ const PLAN_TYPES = [
 const PRIORITIES = ['low', 'medium', 'high', 'critical'];
 
 const SEV_COLOR: Record<string, string> = { critical: 'var(--danger)', high: 'var(--warn-strong)', medium: 'var(--warn)', low: 'var(--ok)' };
+
+/**
+ * The noun for a plan item's finding subject. `finding` is the honest fallback
+ * for a producer whose subject kind this list has no word for yet.
+ *
+ * One entry per `subject_types` value in `standards/findings-registry.yaml`;
+ * `subject-noun.test.ts` fails if the registry gains a type this map has not.
+ * The fallback made omissions invisible — a plan item on a key or a
+ * relationship read simply "finding", so the reader could not tell a key from
+ * an endpoint in their own remediation plan.
+ */
+export const SUBJECT_NOUN: Record<string, string> = {
+  asset: 'asset',
+  endpoint: 'endpoint',
+  certificate: 'certificate',
+  key: 'key',
+  crypto_configuration: 'configuration',
+  software_install: 'installed software',
+  relationship: 'relationship',
+  control: 'control',
+  framework: 'framework',
+};
 const STATUS_COLOR: Record<string, string> = { active: 'var(--ok)', draft: 'var(--neutral)', completed: 'var(--info)', cancelled: 'var(--danger)' };
 // Plan lifecycle advancement (PUT /plans/{id}).
 const NEXT_PLAN_STATUS: Record<string, { to: string; label: string }> = {
@@ -44,7 +66,7 @@ export function CreatePlanModal({ open, onClose }: { open: boolean; onClose: () 
       if (!response.ok || error || !data) throw new Error('Failed to create plan');
       return data;
     },
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['remediation', 'plans'] }); onClose(); },
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['remediation', 'plans'] }); onClose(); },
   });
 
   return (
@@ -54,7 +76,7 @@ export function CreatePlanModal({ open, onClose }: { open: boolean; onClose: () 
       description="Group related findings into one initiative and track progress as a unit."
       primary={<button className="ui-btn accent" disabled={!title.trim() || create.isPending} onClick={() => create.mutate()}>{create.isPending ? 'Creating…' : 'Create plan'}</button>}
       secondary={<button className="ui-btn" onClick={onClose} disabled={create.isPending}>Cancel</button>}
-      footerNote={create.isError ? <span style={{ color: 'var(--danger-text)' }}>{(create.error as Error).message}</span> : undefined}
+      footerNote={create.isError ? <span style={{ color: 'var(--danger-text)' }}>{create.error.message}</span> : undefined}
     >
       <ModalField label="Title"><ModalInput data-autofocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Q3 PQC migration — payments" /></ModalField>
       <ModalField label="Description"><ModalInput value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Optional" /></ModalField>
@@ -76,6 +98,33 @@ export function CreatePlanModal({ open, onClose }: { open: boolean; onClose: () 
       </div>
     </Modal>
   );
+}
+
+/**
+ * Whether a plan item's notes were drafted by the Remediator seam and accepted
+ * by a person (ADR-0008 D4.1 / D5).
+ *
+ * Reads `source_kind`, not the presence of `source_ref`: the KIND is the claim —
+ * `inferred` means a model proposed it — while the ref only says which one. An
+ * item with neither is the ordinary case and carries no chip, and that absence
+ * is a real state rather than a default: the column is deliberately not
+ * backfilled, because nobody knows whether a historical item was typed or
+ * imported.
+ *
+ * Exported for the test, which drives both polarities. A chip that cannot be
+ * absent is as wrong as one that cannot appear, and only one of the two is
+ * visible to whoever notices.
+ */
+export function isAIDrafted(item: { source_kind?: string | null }): boolean {
+  return item.source_kind === 'inferred';
+}
+
+/** The chip's tooltip: which model, when the row names one. */
+export function draftedByTitle(sourceRef?: string | null): string {
+  const model = sourceRef?.startsWith('remediator:') ? sourceRef.slice('remediator:'.length) : '';
+  return model && model !== 'model'
+    ? `Drafted by ${model} and accepted by a person. Nothing was done automatically.`
+    : 'Drafted by the AI assistant and accepted by a person. Nothing was done automatically.';
 }
 
 export function PlanDetailDrawer({ plan: seed, onClose }: { plan: RemediationPlan; onClose: () => void }) {
@@ -111,9 +160,9 @@ export function PlanDetailDrawer({ plan: seed, onClose }: { plan: RemediationPla
   });
 
   const invalidate = () => {
-    qc.invalidateQueries({ queryKey: ['remediation', 'plan-items', seed.id] });
-    qc.invalidateQueries({ queryKey: ['remediation', 'plan', seed.id] });
-    qc.invalidateQueries({ queryKey: ['remediation', 'plans'] });
+    void qc.invalidateQueries({ queryKey: ['remediation', 'plan-items', seed.id] });
+    void qc.invalidateQueries({ queryKey: ['remediation', 'plan', seed.id] });
+    void qc.invalidateQueries({ queryKey: ['remediation', 'plans'] });
   };
 
   const advancePlan = useMutation({
@@ -209,17 +258,37 @@ export function PlanDetailDrawer({ plan: seed, onClose }: { plan: RemediationPla
           items.map((it) => {
             const status = it.ticket_status || it.finding_workflow_status || 'open';
             return (
-              <div key={it.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: '1px solid var(--app-border)' }}>
-                <span style={{ width: 8, height: 8, borderRadius: 50, flex: 'none', background: SEV_COLOR[it.finding_severity || ''] || 'var(--app-t3)' }} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 12.5, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{it.finding_summary || it.ticket_title || it.finding_id.slice(0, 8)}</div>
-                  <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', marginTop: 2 }}>
-                    {it.finding_asset_type || 'finding'}{it.ticket_id ? ' · ticketed' : ''} · {String(status).replace('_', ' ')}
+              <div key={it.id} style={{ padding: '10px 0', borderBottom: '1px solid var(--app-border)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 50, flex: 'none', background: SEV_COLOR[it.finding_severity || ''] || 'var(--app-t3)' }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                      <span style={{ fontSize: 12.5, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{it.finding_summary || it.ticket_title || it.finding_id.slice(0, 8)}</span>
+                      {isAIDrafted(it) && (
+                        <span
+                          className="chip"
+                          style={{ flex: 'none', fontSize: 9.5, padding: '1px 5px', color: 'var(--accent)' }}
+                          title={draftedByTitle(it.source_ref)}
+                        >
+                          AI drafted
+                        </span>
+                      )}
+                    </div>
+                    <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', marginTop: 2 }}>
+                      {SUBJECT_NOUN[it.finding_subject_type ?? ''] ?? 'finding'}{it.ticket_id ? ' · ticketed' : ''} · {String(status).replace('_', ' ')}
+                    </div>
                   </div>
+                  <PermissionGate permission={TENANT_PERMISSIONS.compliance.update}>
+                    <button className="ui-btn sm ghost" style={{ color: 'var(--danger-text)', flex: 'none' }} title="Remove from plan" disabled={removeItem.isPending} onClick={() => removeItem.mutate(it.id)}><Icon name="x" size={13} /></button>
+                  </PermissionGate>
                 </div>
-                <PermissionGate permission={TENANT_PERMISSIONS.compliance.update}>
-                  <button className="ui-btn sm ghost" style={{ color: 'var(--danger-text)', flex: 'none' }} title="Remove from plan" disabled={removeItem.isPending} onClick={() => removeItem.mutate(it.id)}><Icon name="x" size={13} /></button>
-                </PermissionGate>
+                {/* The notes ARE the accepted plan — a drafted plan is stored as
+                    this item's notes, citation markers and all. Before this they
+                    had a writer and no reader anywhere, which is the
+                    orphaned-layer shape the feature framework exists to catch. */}
+                {it.notes && (
+                  <p style={{ margin: '6px 0 0 18px', fontSize: 11.5, lineHeight: 1.55, color: 'var(--app-t2)', whiteSpace: 'pre-wrap' }}>{it.notes}</p>
+                )}
               </div>
             );
           })

@@ -1,0 +1,6 @@
+com.apple.pkg.CLTools_Executables
+com.apple.pkg.CLTools_SDK_macOS14
+com.apple.pkg.Core
+com.apple.pkg.XProtectPayloads
+net.example.tooling.agent
+org.openssl.pkg.openssl

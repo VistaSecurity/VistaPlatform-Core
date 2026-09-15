@@ -1,0 +1,38 @@
+GigabitEthernet1/0/1 is up, line protocol is up (connected)
+  Hardware is Gigabit Ethernet, address is 00b0.e1a2.b3c4 (bia 00b0.e1a2.b3c4)
+  Description: MUST-NOT-BE-COLLECTED operator note
+  Internet address is 198.51.100.2/24
+  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,
+     reliability 255/255, txload 1/255, rxload 1/255
+  Encapsulation ARPA, loopback not set
+  Keepalive set (10 sec)
+  Full-duplex, 1000Mb/s, media type is 10/100/1000BaseTX
+  input flow-control is off, output flow-control is unsupported
+  ARP type: ARPA, ARP Timeout 04:00:00
+  Last input 00:00:01, output 00:00:00, output hang never
+     5 minute input rate 12000 bits/sec, 8 packets/sec
+     5 minute output rate 9000 bits/sec, 7 packets/sec
+
+GigabitEthernet1/0/2 is administratively down, line protocol is down (disabled)
+  Hardware is Gigabit Ethernet, address is 00b0.e1a2.b3c5 (bia 00b0.e1a2.b3c5)
+  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,
+     reliability 255/255, txload 1/255, rxload 1/255
+  Encapsulation ARPA, loopback not set
+  ARP type: ARPA, ARP Timeout 04:00:00
+
+GigabitEthernet1/0/3 is down, line protocol is down (notconnect)
+  Hardware is Gigabit Ethernet, address is 00b0.e1a2.b3c6 (bia 00b0.e1a2.b3c6)
+  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,
+  Encapsulation ARPA, loopback not set
+
+Vlan10 is up, line protocol is up
+  Hardware is EtherSVI, address is 00b0.e1a2.b3c0 (bia 00b0.e1a2.b3c0)
+  Internet address is 192.0.2.1/24
+  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,
+  Encapsulation ARPA, loopback not set
+
+Serial0/1/0 is up, line protocol is up
+  Hardware is Multichannel T1
+  Internet address is 203.0.113.1/30
+  MTU 1500 bytes, BW 64 Kbit/sec, DLY 20000 usec,
+  Encapsulation HDLC, loopback not set

@@ -1,0 +1,238 @@
+{
+  "activity_id": 2,
+  "activity_name": "Collect",
+  "category_uid": 5,
+  "category_name": "Discovery",
+  "class_uid": 5001,
+  "class_name": "Device Inventory Info",
+  "type_uid": 500102,
+  "type_name": "Device Inventory Info: Collect",
+  "severity_id": 1,
+  "severity": "Informational",
+  "time": 1789209000000,
+  "metadata": {
+    "version": "1.9.0",
+    "product": {
+      "name": "Vista Platform",
+      "vendor_name": "Vista Security"
+    },
+    "log_name": "vista.inventory_artifact",
+    "original_time": "2026-09-12T10:30:00Z",
+    "correlation_uid": "22222222-2222-4222-8222-222222222222"
+  },
+  "device": {
+    "type_id": 1,
+    "type": "Server",
+    "uid": "a0000000-0000-4000-8000-000000000001",
+    "name": "web-01",
+    "hostname": "web-01.example.com",
+    "ip": "192.0.2.10",
+    "mac": "00:53:00:00:00:10",
+    "domain": "example.com",
+    "vendor_name": "Dell Inc.",
+    "model": "PowerEdge R650",
+    "region": "us-east",
+    "zone": "a",
+    "desc": "Server",
+    "os": {
+      "name": "Ubuntu",
+      "type_id": 200,
+      "type": "Linux",
+      "version": "24.04.1 LTS",
+      "kernel_release": "6.8.0-45-generic"
+    },
+    "risk_score": 72,
+    "first_seen_time": 1786617000000,
+    "last_seen_time": 1789209000000
+  }
+}
+{
+  "activity_id": 2,
+  "activity_name": "Collect",
+  "category_uid": 5,
+  "category_name": "Discovery",
+  "class_uid": 5001,
+  "class_name": "Device Inventory Info",
+  "type_uid": 500102,
+  "type_name": "Device Inventory Info: Collect",
+  "severity_id": 1,
+  "severity": "Informational",
+  "time": 1789209000000,
+  "metadata": {
+    "version": "1.9.0",
+    "product": {
+      "name": "Vista Platform",
+      "vendor_name": "Vista Security"
+    },
+    "log_name": "vista.inventory_artifact",
+    "original_time": "2026-09-12T10:30:00Z",
+    "correlation_uid": "22222222-2222-4222-8222-222222222222"
+  },
+  "device": {
+    "type_id": 10,
+    "type": "Switch",
+    "uid": "a0000000-0000-4000-8000-000000000002",
+    "name": "192.0.2.20",
+    "ip": "192.0.2.20",
+    "vendor_name": "Cisco Systems",
+    "model": "Catalyst 9300-48P",
+    "desc": "Switch",
+    "risk_score": 10,
+    "first_seen_time": 1786617000000,
+    "last_seen_time": 1789209000000
+  }
+}
+{
+  "activity_id": 2,
+  "activity_name": "Collect",
+  "category_uid": 5,
+  "category_name": "Discovery",
+  "class_uid": 5001,
+  "class_name": "Device Inventory Info",
+  "type_uid": 500102,
+  "type_name": "Device Inventory Info: Collect",
+  "severity_id": 1,
+  "severity": "Informational",
+  "time": 1789209000000,
+  "metadata": {
+    "version": "1.9.0",
+    "product": {
+      "name": "Vista Platform",
+      "vendor_name": "Vista Security"
+    },
+    "log_name": "vista.inventory_artifact",
+    "original_time": "2026-09-12T10:30:00Z",
+    "correlation_uid": "22222222-2222-4222-8222-222222222222"
+  },
+  "device": {
+    "type_id": 0,
+    "type": "Unknown",
+    "uid": "a0000000-0000-4000-8000-000000000004",
+    "name": "reports-bucket",
+    "desc": "Object storage",
+    "risk_score": 40,
+    "first_seen_time": 1786617000000,
+    "last_seen_time": 1789209000000
+  }
+}
+{
+  "activity_id": 1,
+  "activity_name": "Create",
+  "category_uid": 2,
+  "category_name": "Findings",
+  "class_uid": 2002,
+  "class_name": "Vulnerability Finding",
+  "type_uid": 200201,
+  "type_name": "Vulnerability Finding: Create",
+  "severity_id": 5,
+  "severity": "Critical",
+  "time": 1789209000000,
+  "metadata": {
+    "version": "1.9.0",
+    "product": {
+      "name": "Vista Platform",
+      "vendor_name": "Vista Security"
+    },
+    "log_name": "vista.inventory_artifact",
+    "original_time": "2026-09-12T10:30:00Z",
+    "correlation_uid": "22222222-2222-4222-8222-222222222222"
+  },
+  "finding_info": {
+    "uid": "d0000000-0000-4000-8000-000000000001",
+    "title": "CVE-2026-0001",
+    "desc": "A flaw in the fixture library.",
+    "types": [
+      "known_vulnerability"
+    ],
+    "src_url": "https://nvd.nist.gov/vuln/detail/CVE-2026-0001",
+    "first_seen_time": 1786617000000,
+    "last_seen_time": 1789209000000
+  },
+  "vulnerabilities": [
+    {
+      "cve": {
+        "uid": "CVE-2026-0001",
+        "desc": "A flaw in the fixture library.",
+        "cvss": [
+          {
+            "version": "3.1",
+            "base_score": 9.8,
+            "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "severity": "critical",
+            "vendor_name": "NVD"
+          }
+        ],
+        "created_time": 1772323200000
+      },
+      "title": "CVE-2026-0001",
+      "desc": "A flaw in the fixture library.",
+      "severity": "Critical",
+      "vendor_name": "NVD",
+      "first_seen_time": 1786617000000,
+      "last_seen_time": 1789209000000
+    }
+  ],
+  "resources": [
+    {
+      "uid": "a0000000-0000-4000-8000-000000000001",
+      "name": "web-01",
+      "type": "server",
+      "hostname": "web-01",
+      "ip": "192.0.2.10"
+    }
+  ],
+  "status_id": 1,
+  "status": "New"
+}
+{
+  "activity_id": 1,
+  "activity_name": "Create",
+  "category_uid": 2,
+  "category_name": "Findings",
+  "class_uid": 2002,
+  "class_name": "Vulnerability Finding",
+  "type_uid": 200201,
+  "type_name": "Vulnerability Finding: Create",
+  "severity_id": 3,
+  "severity": "Medium",
+  "time": 1789209000000,
+  "metadata": {
+    "version": "1.9.0",
+    "product": {
+      "name": "Vista Platform",
+      "vendor_name": "Vista Security"
+    },
+    "log_name": "vista.inventory_artifact",
+    "original_time": "2026-09-12T10:30:00Z",
+    "correlation_uid": "22222222-2222-4222-8222-222222222222"
+  },
+  "finding_info": {
+    "uid": "d0000000-0000-4000-8000-000000000002",
+    "title": "Vendor advisory with no CVE assigned",
+    "desc": "Vendor advisory with no CVE assigned",
+    "types": [
+      "known_vulnerability"
+    ],
+    "first_seen_time": 1786617000000,
+    "last_seen_time": 1789209000000
+  },
+  "vulnerabilities": [
+    {
+      "desc": "Vendor advisory with no CVE assigned",
+      "severity": "Medium",
+      "first_seen_time": 1786617000000,
+      "last_seen_time": 1789209000000
+    }
+  ],
+  "resources": [
+    {
+      "uid": "a0000000-0000-4000-8000-000000000002",
+      "name": "192.0.2.20",
+      "type": "switch",
+      "ip": "192.0.2.20"
+    }
+  ],
+  "status_id": 1,
+  "status": "New"
+}
+

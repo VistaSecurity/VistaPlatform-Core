@@ -202,8 +202,15 @@ type CaptureConfig struct {
 	SamplingRate     float64  `json:"sampling_rate" db:"sampling_rate"`
 	ActiveProbing    bool     `json:"active_probing" db:"active_probing"`
 	NetworkDiscovery bool     `json:"network_discovery" db:"network_discovery"`
-	MaxConnections   int      `json:"max_connections" db:"max_connections"`
-	TimeoutSeconds   int      `json:"timeout_seconds" db:"timeout_seconds"`
+	// HostObservation is the passive host-observation switch (asset-inventory
+	// ADR-0004 D2). A POINTER so that "the platform has no opinion" is
+	// distinguishable from "the platform says off": a plain bool would be
+	// serialised as false by a control plane that has never been told about
+	// the feature, and the sensor would read that as an instruction to disable
+	// something its own config had enabled.
+	HostObservation *bool `json:"host_observation,omitempty" db:"host_observation"`
+	MaxConnections  int   `json:"max_connections" db:"max_connections"`
+	TimeoutSeconds  int   `json:"timeout_seconds" db:"timeout_seconds"`
 	// DedupTTLMinutes is the minimum number of minutes between re-reporting
 	// the same observation.  0 means use the sensor default (60 minutes).
 	DedupTTLMinutes int `json:"dedup_ttl_minutes" db:"dedup_ttl_minutes"`
@@ -257,19 +264,25 @@ type ServiceHints struct {
 
 // SensorDiscoveryInput represents a single discovery submitted by a sensor
 type SensorDiscoveryInput struct {
-	Protocol        string                 `json:"protocol"`
-	SourceIP        string                 `json:"source_ip"`
-	DestIP          string                 `json:"dest_ip"`
-	Port            int                    `json:"port"`
-	Hostname        string                 `json:"hostname,omitempty"`
-	Version         string                 `json:"version"`
-	CipherSuite     string                 `json:"cipher_suite"`
-	KeySize         int                    `json:"key_size"`
-	DiscoveryMethod string                 `json:"discovery_method"`
-	Confidence      float64                `json:"confidence"`
-	RawMetadata     map[string]interface{} `json:"raw_metadata"`
-	ServiceHints    *ServiceHints          `json:"service_hints,omitempty"`
-	Timestamp       time.Time              `json:"timestamp"`
+	Protocol        string `json:"protocol"`
+	SourceIP        string `json:"source_ip"`
+	DestIP          string `json:"dest_ip"`
+	Port            int    `json:"port"`
+	Hostname        string `json:"hostname,omitempty"`
+	Version         string `json:"version"`
+	CipherSuite     string `json:"cipher_suite"`
+	KeySize         int    `json:"key_size"`
+	DiscoveryMethod string `json:"discovery_method"`
+	// DiscoveryType names the KIND of observation, distinct from the method
+	// used to make it. Empty on a crypto discovery — the legacy shape, and
+	// what every sensor before this field sends; "host_observation" on a
+	// passive host-presence row (asset-inventory ADR-0004 D2), whose payload
+	// is under RawMetadata["host_observation"].
+	DiscoveryType string                 `json:"discovery_type,omitempty"`
+	Confidence    float64                `json:"confidence"`
+	RawMetadata   map[string]interface{} `json:"raw_metadata"`
+	ServiceHints  *ServiceHints          `json:"service_hints,omitempty"`
+	Timestamp     time.Time              `json:"timestamp"`
 }
 
 // AirGappedExport represents an air-gapped export
@@ -444,8 +457,47 @@ type SensorHealthMetrics struct {
 	PacketsCaptured  int64     `json:"packets_captured" db:"packets_captured"`
 	DiscoveriesMade  int64     `json:"discoveries_made" db:"discoveries_made"`
 	ErrorsCount      int       `json:"errors_count" db:"errors_count"`
-	RecordedAt       time.Time `json:"recorded_at" db:"recorded_at"`
+
+	// ExtraCounters carries every heartbeat counter that has no column of its
+	// own — today, the eight `host_observations_*` metrics the passive
+	// host-observation pipeline reports.
+	//
+	// It is a pointer so "the sensor reported none" (nil, an older build or the
+	// feature switched off) stays distinguishable from "it reported all zeroes"
+	// (an empty or zeroed map, running and seeing nothing). The contract doc
+	// insists on that distinction for these metrics specifically: they are
+	// absent entirely when the feature is off, because "not running" and
+	// "running and seeing nothing" must not look the same.
+	ExtraCounters *map[string]int64 `json:"extra_counters,omitempty" db:"extra_counters"`
+
+	RecordedAt time.Time `json:"recorded_at" db:"recorded_at"`
 }
+
+// HostObservationCounterPrefix marks the heartbeat counters the passive
+// host-observation pipeline reports. Everything under it is carried into
+// ExtraCounters verbatim; the set grows whenever shared/hostobs gains a decoder,
+// which is why this is a prefix rather than a list.
+const HostObservationCounterPrefix = "host_observations_"
+
+// MaxHeartbeatCounters and MaxHeartbeatCounterKeyLen bound what one heartbeat
+// may put in ExtraCounters.
+//
+// A prefix accepts an OPEN set, and the heartbeat body is written by the sensor
+// — which is customer-operated software holding a registered credential, on an
+// endpoint with no request-size limit. Without a bound, a sensor with a runaway
+// counter loop (or a compromised one) can push an arbitrarily large jsonb value
+// into a row every thirty seconds, into a table nothing prunes. The fixed
+// column set this replaced could not be grown that way; the whole point of jsonb
+// is that it can, so the ceiling has to be stated rather than assumed.
+//
+// 64 against the 8 counters that exist leaves room for several more decoders
+// without anyone having to think about this again, and is still three orders of
+// magnitude short of a problem. 64 bytes is comfortably longer than the longest
+// real name (`host_observations_coalesce_dropped`, 34).
+const (
+	MaxHeartbeatCounters      = 64
+	MaxHeartbeatCounterKeyLen = 64
+)
 
 // SensorDiscovery model for storing discovery batches from sensors
 type SensorDiscovery struct {

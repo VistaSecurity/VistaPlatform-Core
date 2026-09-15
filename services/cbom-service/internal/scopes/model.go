@@ -8,13 +8,17 @@
 package scopes
 
 import (
-	"database/sql/driver"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/vistasecurity/vistaplatform/shared/query"
+	"github.com/vistasecurity/vistaplatform/shared/query/catalog/registrycatalog"
+	"github.com/vistasecurity/vistaplatform/shared/query/queryerr"
 )
 
 // Scope is a tenant-owned predicate definition selecting a subset of inventory.
@@ -24,128 +28,45 @@ import (
 // and names are not locked) but cannot delete them — deletion would orphan
 // existing CBOM artifacts that reference the scope by id.
 type Scope struct {
-	ID          uuid.UUID  `json:"id" db:"id"`
-	TenantID    uuid.UUID  `json:"tenant_id" db:"tenant_id"`
-	Name        string     `json:"name" db:"name"`
-	Description string     `json:"description,omitempty" db:"description"`
-	Predicate   Predicate  `json:"predicate" db:"predicate"`
-	Version     int        `json:"version" db:"version"`
-	IsDefault   bool       `json:"is_default" db:"is_default"`
-	IsSystem    bool       `json:"is_system" db:"is_system"`
-	DeletedAt   *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
-	CreatedBy   uuid.UUID  `json:"created_by" db:"created_by"`
-	UpdatedBy   uuid.UUID  `json:"updated_by" db:"updated_by"`
-	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at" db:"updated_at"`
-}
-
-// Predicate is the JSONB-stored selection rule. An empty Predicate (no Include
-// and no Exclude) matches every asset visible to the tenant under RLS.
-//
-// Evaluation semantics:
-//   - Include: asset must match EVERY populated Include field; within one
-//     field's list the values are OR-ed. An empty Include matches everything.
-//     (This comment used to say OR-across-fields, which no implementation has
-//     ever done and which would make an Include of
-//     {environment: [production], risk_level: [critical]} select every
-//     production asset plus every critical asset anywhere — the opposite of the
-//     narrowing a scope is for.)
-//   - Exclude: asset matching ANY populated Exclude field is removed. Exclusion
-//     wins over inclusion.
-//
-// Field shapes mirror inventory-service's AssetFilters
-// (services/inventory-service/internal/models/asset.go). Evaluation happens in
-// cbom-service: cbom.Builder translates a Predicate into handlers.AssetPredicate
-// and the CBOM assembly applies it to the fetched asset records.
-type Predicate struct {
-	Include *PredicateClause `json:"include,omitempty"`
-	Exclude *PredicateClause `json:"exclude,omitempty"`
-}
-
-// PredicateClause is a set of asset-attribute filters: OR within a field's
-// list, AND across populated fields for Include, OR across populated fields for
-// Exclude. The same shape is used for both clauses.
-//
-// Every field here must be wired into cbom.clauseTranslators. One that is not
-// makes any scope using it fail generation with 422 rather than produce an
-// artifact wider than its stated boundary.
-type PredicateClause struct {
-	Environment    []string `json:"environment,omitempty"`
-	AssetType      []string `json:"asset_type,omitempty"`
-	AssetOwnership []string `json:"asset_ownership,omitempty"`
-	AssetStatus    []string `json:"asset_status,omitempty"`
-	BusinessUnit   []string `json:"business_unit,omitempty"`
-	LocationRegion []string `json:"location_region,omitempty"`
-	RiskLevel      []string `json:"risk_level,omitempty"`
-	// TagsAnyOf matches assets whose JSONB tags column contains ANY of the listed
-	// tag values (case-insensitive). Used for the Non-Dev/Test default scope.
-	TagsAnyOf []string `json:"tags_any_of,omitempty"`
-}
-
-// IsEmpty reports whether a predicate has no rules — matches everything.
-func (p Predicate) IsEmpty() bool {
-	return (p.Include == nil || p.Include.isEmpty()) &&
-		(p.Exclude == nil || p.Exclude.isEmpty())
-}
-
-func (c *PredicateClause) isEmpty() bool {
-	if c == nil {
-		return true
-	}
-	return len(c.Environment) == 0 &&
-		len(c.AssetType) == 0 &&
-		len(c.AssetOwnership) == 0 &&
-		len(c.AssetStatus) == 0 &&
-		len(c.BusinessUnit) == 0 &&
-		len(c.LocationRegion) == 0 &&
-		len(c.RiskLevel) == 0 &&
-		len(c.TagsAnyOf) == 0
-}
-
-// Value implements the database/sql/driver.Valuer interface, allowing the
-// repository to write Predicate directly to a JSONB column.
-//
-// The return type must be exactly `driver.Value` — Go's interface satisfaction
-// check matches signatures by named type, not by underlying type. An earlier
-// version of this method used a local type alias `driverValue = interface{}`
-// thinking it would still satisfy Valuer (since both resolve to interface{}),
-// but at runtime the sql driver fails to detect the method and emits
-// "unsupported type scopes.Predicate, a struct" on INSERT.
-func (p Predicate) Value() (driver.Value, error) {
-	return json.Marshal(p)
-}
-
-// Scan implements the database/sql.Scanner interface, allowing the repository
-// to read Predicate from a JSONB column.
-func (p *Predicate) Scan(src interface{}) error {
-	if src == nil {
-		*p = Predicate{}
-		return nil
-	}
-	switch v := src.(type) {
-	case []byte:
-		return json.Unmarshal(v, p)
-	case string:
-		return json.Unmarshal([]byte(v), p)
-	default:
-		return fmt.Errorf("scopes.Predicate.Scan: unsupported type %T", src)
-	}
+	ID          uuid.UUID `json:"id" db:"id"`
+	TenantID    uuid.UUID `json:"tenant_id" db:"tenant_id"`
+	Name        string    `json:"name" db:"name"`
+	Description string    `json:"description,omitempty" db:"description"`
+	// Query is the boundary, as a query-language string over the `asset`
+	// target (QUERY_LANGUAGE.md). Empty matches every asset under RLS, which
+	// is what the `All` scope is.
+	//
+	// It replaced a jsonb include/exclude predicate whose vocabulary was a
+	// third of the language's and which only cbom-service could evaluate —
+	// so a scope meant one thing to the artifact builder and nothing at all
+	// to the inventory page beside it. Stored in CANONICAL form: an artifact
+	// captures scope_id + scope_version, and two spellings of one predicate
+	// are two versions a diff cannot match.
+	Query     string     `json:"query" db:"query"`
+	Version   int        `json:"version" db:"version"`
+	IsDefault bool       `json:"is_default" db:"is_default"`
+	IsSystem  bool       `json:"is_system" db:"is_system"`
+	DeletedAt *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
+	CreatedBy uuid.UUID  `json:"created_by" db:"created_by"`
+	UpdatedBy uuid.UUID  `json:"updated_by" db:"updated_by"`
+	CreatedAt time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at" db:"updated_at"`
 }
 
 // CreateRequest is the JSON body for POST /scopes.
 type CreateRequest struct {
-	Name        string    `json:"name" binding:"required"`
-	Description string    `json:"description,omitempty"`
-	Predicate   Predicate `json:"predicate"`
+	Name        string `json:"name" binding:"required"`
+	Description string `json:"description,omitempty"`
+	Query       string `json:"query"`
 }
 
-// UpdateRequest is the JSON body for PUT /scopes/:id. Predicate and Name are
-// the meaningful editable fields; updating either bumps version and writes an
+// UpdateRequest is the JSON body for PUT /scopes/:id. Query and Name are the
+// meaningful editable fields; updating either bumps version and writes an
 // audit row.
 type UpdateRequest struct {
-	Name        string    `json:"name" binding:"required"`
-	Description string    `json:"description,omitempty"`
-	Predicate   Predicate `json:"predicate"`
+	Name        string `json:"name" binding:"required"`
+	Description string `json:"description,omitempty"`
+	Query       string `json:"query"`
 }
 
 // ValidateName trims and lowercases-uniqueness is enforced by a DB constraint;
@@ -159,4 +80,80 @@ func ValidateName(name string) error {
 		return fmt.Errorf("scope name exceeds 255 characters")
 	}
 	return nil
+}
+
+// AssetTarget is the query-language target a scope is a predicate over: a scope
+// selects ASSETS, and the artifact is assembled from what those assets carry.
+const AssetTarget = "asset"
+
+// scopeCatalog is the production query catalogue, built once.
+//
+// It takes the default band ladder rather than models.RiskBands. That is a
+// stated compromise, not an oversight: cbom-service cannot import
+// inventory-service's models package, and the two ladders are pinned equal by
+// services/inventory-service/internal/services/query_registry_catalog_test.go.
+// A scope writing `risk >= high` is therefore validated against the same rungs
+// the inventory list bands with — and if that parity test ever fails, this is
+// one of the places it is protecting.
+var scopeCatalog = sync.OnceValue(func() *registrycatalog.Catalog {
+	return query.DefaultCatalog()
+})
+
+// ValidateQuery checks a scope's query and returns its canonical form, which is
+// what gets stored.
+//
+// Validation happens at WRITE time. A scope is an attestation boundary: a
+// predicate that fails when the artifact is generated would either abort a
+// generation the customer expected, or — far worse, and the failure this
+// replaces — be partly ignored and produce evidence covering MORE than the
+// scope said it did.
+func ValidateQuery(src string) (string, error) {
+	if strings.TrimSpace(src) == "" {
+		// The `All` scope. Empty is every asset the tenant may see under RLS.
+		return "", nil
+	}
+	cat := scopeCatalog()
+	node, err := query.Check(src, AssetTarget, cat, query.DefaultOptionsFor(cat).Validate)
+	if err != nil {
+		if list := query.Errors(err); list != nil {
+			return "", &InvalidQueryError{Query: src, Errors: list.Sorted()}
+		}
+		return "", fmt.Errorf("scope query: %w", err)
+	}
+	return query.FormatNode(node), nil
+}
+
+// InvalidQueryError carries QUERY_LANGUAGE §10's structured diagnostics up to
+// the HTTP layer, so a scope editor can render a caret under the offending span
+// instead of a sentence.
+//
+// It exists because `query.Errors` reads the error by TYPE ASSERTION, not
+// errors.As — so wrapping the list in `fmt.Errorf("scope query: %w", …)` made
+// the diagnostics unreachable and every scope write answered with one flattened
+// string. Scopes get the same treatment as the inventory list for the same
+// reason: the caller is a person typing a predicate, and "invalid query" is
+// what the absence of a span looks like from the outside.
+type InvalidQueryError struct {
+	// Query is the text that failed, echoed back so a caller rendering carets
+	// has the string the spans index into.
+	Query string
+	// Errors are every diagnostic, sorted by span.
+	Errors queryerr.List
+}
+
+func (e *InvalidQueryError) Error() string {
+	if len(e.Errors) == 0 {
+		return "scope query is invalid"
+	}
+	return "scope query: " + e.Errors.Error()
+}
+
+// AsInvalidQuery returns the structured diagnostics behind err, if it has any.
+// It uses errors.As, so it still finds them through a wrap.
+func AsInvalidQuery(err error) (*InvalidQueryError, bool) {
+	var qe *InvalidQueryError
+	if errors.As(err, &qe) {
+		return qe, true
+	}
+	return nil, false
 }

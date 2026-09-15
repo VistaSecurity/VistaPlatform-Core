@@ -102,6 +102,12 @@ type f5APIResponse struct {
 }
 
 // f5VirtualServer represents an F5 virtual server (VIP).
+//
+// Neither this type nor f5SSLProfile keeps the raw iControl item it was built
+// from. Both used to, in a `Metadata` field nothing ever read: a whole vendor
+// object held in memory for the length of an interrogation, one serialisation
+// away from being persisted, and invisible to Sanitize because nothing put it
+// in the result. The named fields below are what the conversion uses.
 type f5VirtualServer struct {
 	Name        string
 	Destination string
@@ -109,7 +115,10 @@ type f5VirtualServer struct {
 	Profiles    []map[string]interface{}
 	Source      string
 	Enabled     bool
-	Metadata    map[string]interface{}
+	// Pool is the pool this virtual server forwards to, partition-qualified
+	// ("/Common/web-pool"). It is what makes a VIP's dependency on its backends
+	// measurable rather than inferred (ADR-0004 D1 (5)).
+	Pool string
 }
 
 // f5SSLProfile represents an F5 client-ssl or server-ssl profile.
@@ -122,7 +131,6 @@ type f5SSLProfile struct {
 	DefaultProfile      string
 	SecureRenegotiation string
 	TLSVersion          string
-	Metadata            map[string]interface{}
 }
 
 func (c *f5Client) interrogate(ctx context.Context) (*InterrogateResult, error) {
@@ -145,6 +153,11 @@ func (c *f5Client) interrogate(ctx context.Context) (*InterrogateResult, error) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get virtual servers: %w", err)
 	}
+
+	// Ops facts and the virtual-server → pool-member dependencies
+	// (ADR-0004 D1 item 5, ADR-0003 D2) — see f5_ops.go. Non-fatal, and driven
+	// from the virtual servers already fetched rather than a second read.
+	c.f5CollectOps(ctx, result, virtualServers)
 
 	clientSSLProfiles, err := c.getClientSSLProfiles(ctx)
 	if err != nil {
@@ -254,9 +267,26 @@ func (c *f5Client) getSystemInfo(ctx context.Context) (map[string]interface{}, e
 	}
 	info := make(map[string]interface{})
 	if len(resp.Items) > 0 {
-		info = resp.Items[0]
+		// Projected, not copied. This was the one system call in the package
+		// that put a vendor object into DeviceInfo whole; the response is
+		// benign on every release we have seen, which is not the same thing as
+		// a guarantee about the next one.
+		info = projectF5(resp.Items[0], f5SystemVersionFields)
 	}
 	return info, nil
+}
+
+// projectF5 keeps only the allowlisted fields of an iControl object. The typed
+// structs in f5_ops.go are the stronger form of this; it exists for the two
+// places that still read a map.
+func projectF5(src map[string]interface{}, fields []string) map[string]interface{} {
+	out := make(map[string]interface{}, len(fields))
+	for _, field := range fields {
+		if v, ok := src[field]; ok && v != nil {
+			out[field] = v
+		}
+	}
+	return out
 }
 
 func (c *f5Client) getVirtualServers(ctx context.Context) ([]f5VirtualServer, error) {
@@ -273,7 +303,7 @@ func (c *f5Client) getVirtualServers(ctx context.Context) ([]f5VirtualServer, er
 			Destination: f5GetString(item, "destination"),
 			Source:      f5GetString(item, "source"),
 			Enabled:     f5GetBool(item, "enabled"),
-			Metadata:    item,
+			Pool:        f5GetString(item, "pool"),
 		}
 		if _, port := f5ParseDestination(vs.Destination); port > 0 {
 			vs.Port = port
@@ -310,10 +340,9 @@ func (c *f5Client) getSSLProfiles(ctx context.Context, path string, withCertKeyC
 	var profiles []f5SSLProfile
 	for _, item := range resp.Items {
 		profile := f5SSLProfile{
-			Name:     f5GetString(item, "name"),
-			Kind:     f5GetString(item, "kind"),
-			Ciphers:  f5GetString(item, "ciphers"),
-			Metadata: item,
+			Name:    f5GetString(item, "name"),
+			Kind:    f5GetString(item, "kind"),
+			Ciphers: f5GetString(item, "ciphers"),
 		}
 		if cipherList, ok := item["cipherList"].([]interface{}); ok {
 			for _, cl := range cipherList {
@@ -360,13 +389,13 @@ func (c *f5Client) apiRequest(ctx context.Context, method, url string, body io.R
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var apiResp f5APIResponse
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+	if err := decodeBoundedJSON(resp.Body, "F5 "+url, &apiResp); err != nil {
+		return nil, err
 	}
 	return &apiResp, nil
 }
@@ -556,10 +585,10 @@ func f5DecodeBase64Certificate(base64Data string) string {
 
 // f5Identity extracts structured device identity from F5 sys/version info.
 func f5Identity(sysInfo map[string]interface{}) *DeviceIdentity {
-	id := &DeviceIdentity{Vendor: "F5 Networks"}
+	id := &DeviceIdentity{Vendor: f5Vendor, ClassHint: f5ClassHint()}
 	if version, ok := sysInfo["Version"].(string); ok {
 		id.FirmwareVersion = version
-		id.OSVersion = "TMOS " + version
+		id.OSVersion = f5OSName + " " + version
 	}
 	if product, ok := sysInfo["Product"].(string); ok {
 		id.Model = product

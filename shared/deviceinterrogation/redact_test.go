@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/vistasecurity/vistaplatform/shared/redact"
 )
 
 // The field names below are the real ones observed in a UniFi UDR interrogation
@@ -19,7 +21,7 @@ func TestIsSecretFieldName_RedactsRealVendorSecrets(t *testing.T) {
 		"host_key", "wpa_key",
 	}
 	for _, name := range secret {
-		if !isSecretFieldName(name) {
+		if !redact.IsSecretName(name) {
 			t.Errorf("field %q should be treated as secret material but was not", name)
 		}
 	}
@@ -38,7 +40,7 @@ func TestIsSecretFieldName_RedactsIntegrationCredentialNames(t *testing.T) {
 		"client_secret", "secret_access_key", "credentials",
 	}
 	for _, name := range secret {
-		if !isSecretFieldName(name) {
+		if !redact.IsSecretName(name) {
 			t.Errorf("field %q should be treated as secret material but was not", name)
 		}
 	}
@@ -53,7 +55,7 @@ func TestIsSecretFieldName_AuthIsWholeNameOnly(t *testing.T) {
 		"authentication", "authentication_algorithm", "authenticated",
 	}
 	for _, name := range safe {
-		if isSecretFieldName(name) {
+		if redact.IsSecretName(name) {
 			t.Errorf("posture/shape field %q was redacted; `auth` over-matched as a fragment", name)
 		}
 	}
@@ -72,7 +74,7 @@ func TestIsSecretFieldName_KeepsCryptoPostureFields(t *testing.T) {
 		"model", "firmware_version", "serial", "subject_dn", "issuer_dn",
 	}
 	for _, name := range safe {
-		if isSecretFieldName(name) {
+		if redact.IsSecretName(name) {
 			t.Errorf("posture field %q was redacted; the scrubber is over-strict", name)
 		}
 	}
@@ -96,23 +98,23 @@ func TestRedactMap_RecursesThroughNestedStructures(t *testing.T) {
 	if out["name"] != "Dream Router" || out["key_size"] != 2048 {
 		t.Fatalf("non-secret fields were altered: %#v", out)
 	}
-	if out["x_authkey"] != redactedMarker {
+	if out["x_authkey"] != redact.Marker {
 		t.Errorf("top-level secret not redacted: %v", out["x_authkey"])
 	}
 	nested := out["connectivity"].(map[string]interface{})
-	if nested["x_mesh_psk"] != redactedMarker {
+	if nested["x_mesh_psk"] != redact.Marker {
 		t.Errorf("nested secret not redacted: %v", nested["x_mesh_psk"])
 	}
 	if nested["uplink_type"] != "gateway" {
 		t.Errorf("nested non-secret altered: %v", nested["uplink_type"])
 	}
 	inSlice := out["settings"].([]interface{})[0].(map[string]interface{})
-	if inSlice["x_password"] != redactedMarker {
+	if inSlice["x_password"] != redact.Marker {
 		t.Errorf("secret inside slice not redacted: %v", inSlice["x_password"])
 	}
 
 	// The input must not be mutated — callers may still hold it.
-	if in["x_authkey"] == redactedMarker {
+	if in["x_authkey"] == redact.Marker {
 		t.Error("RedactMap mutated its input")
 	}
 }
@@ -217,5 +219,139 @@ func TestConvertDeviceToAsset_ProjectsOntoAllowlist(t *testing.T) {
 	}
 	if asset.Metadata["model"] != "U7LR" || asset.Metadata["firmware_version"] != "6.6.77.15402" {
 		t.Errorf("inventory fields lost: %#v", asset.Metadata)
+	}
+}
+
+// Sanitize reaches an asset's ServiceHints — and takes only PEM private keys
+// out of it.
+//
+// BOTH polarities, because this guard is easy to get wrong in either
+// direction. `service_name` and `service_version` are free text whose ORIGIN is
+// outside our control (an HTTP or TLS banner, or on a host inventory the name
+// of the process holding a listening socket), so a name-based rule cannot help
+// and a value-based one is the only thing that can. But those same fields are
+// the service posture we are in business to collect: an over-broad rule that
+// took "OpenSSH_9.6" out would silently delete the answer.
+//
+// To mutation-test: delete the sanitizeServiceHints call from Sanitize and the
+// first subtest fails; widen redact.TextPEM past "PRIVATE KEY" and the second
+// does.
+func TestSanitize_ServiceHints(t *testing.T) {
+	const key = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----"
+
+	t.Run("a pasted private key is masked", func(t *testing.T) {
+		result := &InterrogateResult{Assets: []CryptoAsset{{
+			Port: 22,
+			ServiceHints: &ServiceHints{
+				ServiceName:    "sshd " + key,
+				ServiceVersion: key,
+			},
+		}}}
+
+		Sanitize(result)
+
+		blob, err := json.Marshal(result)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if strings.Contains(string(blob), "b3BlbnNzaC1rZXktdjEAAAAA") {
+			t.Errorf("key material survived Sanitize in ServiceHints: %s", blob)
+		}
+		hints := result.Assets[0].ServiceHints
+		if !strings.Contains(hints.ServiceName, redact.Marker) {
+			t.Errorf("service_name was not masked: %q", hints.ServiceName)
+		}
+		// The text AROUND the block is posture and stays.
+		if !strings.HasPrefix(hints.ServiceName, "sshd ") {
+			t.Errorf("masking ate the surrounding banner: %q", hints.ServiceName)
+		}
+	})
+
+	t.Run("real banner posture survives untouched", func(t *testing.T) {
+		// Every one of these is a banner or a process name a collector
+		// legitimately reports, and several NAME a key or a certificate —
+		// which is exactly what an over-broad rule would eat.
+		posture := []*ServiceHints{
+			{ServiceName: "OpenSSH", ServiceVersion: "OpenSSH_9.6p1 Ubuntu-3ubuntu13.5"},
+			{ServiceName: "nginx", ServiceVersion: "nginx/1.24.0 (Ubuntu)"},
+			{ServiceName: "sshd", Confidence: "reported", IdentificationMethod: "host_socket_owner"},
+			{ServiceName: "ssh-agent", ServiceVersion: "OpenSSH_9.6"},
+			{ServiceName: "step-ca", ServiceVersion: "private key store 0.27.2"},
+			{ServiceName: "postgres", ServiceVersion: "PostgreSQL 17.2 with OpenSSL 3.0.13"},
+		}
+		for _, hints := range posture {
+			want := *hints
+			result := &InterrogateResult{Assets: []CryptoAsset{{ServiceHints: hints}}}
+
+			Sanitize(result)
+
+			if *hints != want {
+				t.Errorf("Sanitize altered legitimate service posture:\n got %+v\nwant %+v", *hints, want)
+			}
+		}
+	})
+
+	t.Run("a nil ServiceHints is not a panic", func(t *testing.T) {
+		result := &InterrogateResult{Assets: []CryptoAsset{{Port: 443}}}
+		Sanitize(result)
+		if result.Assets[0].ServiceHints != nil {
+			t.Error("Sanitize invented a ServiceHints")
+		}
+	})
+}
+
+// TestDatabaseFindingRawConfigIsRedacted is gate 1 D2.
+//
+// The database path is the one interrogation that does NOT go through
+// Registry.Get: the service wrapper needs the typed DatabaseEncryptionFinding
+// so it can write `database_encryption_states`, so it called InterrogateDatabase
+// directly and the sanitizing wrapper never saw the result. RawConfig is the
+// engine's whole settings bag — SHOW VARIABLES, pg_settings — and it went into
+// the column verbatim.
+//
+// It drives InterrogateDatabase ITSELF through the per-engine seam, not
+// redact.Map: testing the helper would prove the helper works and say nothing
+// about whether the call site calls it.
+func TestDatabaseFindingRawConfigIsRedacted(t *testing.T) {
+	original := dbInterrogateMy
+	t.Cleanup(func() { dbInterrogateMy = original })
+	dbInterrogateMy = func(context.Context, string) (*DatabaseEncryptionFinding, error) {
+		return &DatabaseEncryptionFinding{
+			Engine:     "mysql",
+			SSLEnabled: true,
+			RawConfig: map[string]interface{}{
+				// Posture: must SURVIVE. A redactor that eats these has made
+				// the feature useless, which is this guard's other polarity.
+				"ssl_cipher":               "TLS_AES_256_GCM_SHA384",
+				"tls_version":              "TLSv1.3",
+				"have_ssl":                 "YES",
+				"ssl_key_size":             "2048",
+				"require_secure_transport": "ON",
+				// Secrets: must NOT.
+				"master_ssl_password": "hunter2",
+				"admin_api_key":       "AKIAIOSFODNN7EXAMPLE",
+				"replication_secret":  "s3cr3t",
+			},
+		}, nil
+	}
+
+	finding, err := InterrogateDatabase(context.Background(),
+		DeviceInfo{DeviceType: "mysql", Hostname: "db.example.test"},
+		Credentials{Username: "u", Password: "p"})
+	if err != nil {
+		t.Fatalf("InterrogateDatabase: %v", err)
+	}
+
+	for _, keep := range []string{"ssl_cipher", "tls_version", "have_ssl", "ssl_key_size", "require_secure_transport"} {
+		if got, _ := finding.RawConfig[keep].(string); got == "" || got == redact.Marker {
+			t.Errorf("%s = %q; crypto POSTURE must survive redaction or the feature reports nothing",
+				keep, finding.RawConfig[keep])
+		}
+	}
+	for _, drop := range []string{"master_ssl_password", "admin_api_key", "replication_secret"} {
+		if got, _ := finding.RawConfig[drop].(string); got != redact.Marker {
+			t.Errorf("%s = %q, want it redacted — a database's settings bag is not ours to keep",
+				drop, got)
+		}
 	}
 }

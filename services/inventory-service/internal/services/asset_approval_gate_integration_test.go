@@ -24,6 +24,8 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/approval"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
+
+	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 )
 
 // newApprovalGateFixture wires an AssetService the way main.go does (with the
@@ -68,7 +70,7 @@ func TestIntegration_CreateAsset_SegmentToggleIsTheOnlyGate(t *testing.T) {
 	assetSvc, _, tenant := newApprovalGateFixture(t)
 
 	onSegment, err := assetSvc.CreateAsset(tenant, models.AssetInput{
-		AssetType: "server", IPAddress: strPtr("192.0.2.10"), Hostname: strPtr("app-1.example.com"),
+		ClassKey: assetclass.KeyServer, IPAddress: strPtr("192.0.2.10"), Hostname: strPtr("app-1.example.com"),
 	})
 	if err != nil {
 		t.Fatalf("create on auto-approve segment: %v", err)
@@ -78,7 +80,7 @@ func TestIntegration_CreateAsset_SegmentToggleIsTheOnlyGate(t *testing.T) {
 	}
 
 	offSegment, err := assetSvc.CreateAsset(tenant, models.AssetInput{
-		AssetType: "server", IPAddress: strPtr("198.51.100.10"), Hostname: strPtr("app-2.example.com"),
+		ClassKey: assetclass.KeyServer, IPAddress: strPtr("198.51.100.10"), Hostname: strPtr("app-2.example.com"),
 	})
 	if err != nil {
 		t.Fatalf("create off auto-approve segment: %v", err)
@@ -89,7 +91,7 @@ func TestIntegration_CreateAsset_SegmentToggleIsTheOnlyGate(t *testing.T) {
 
 	// An address in no segment at all is the default-deny case.
 	unknown, err := assetSvc.CreateAsset(tenant, models.AssetInput{
-		AssetType: "server", IPAddress: strPtr("203.0.113.10"), Hostname: strPtr("app-3.example.com"),
+		ClassKey: assetclass.KeyServer, IPAddress: strPtr("203.0.113.10"), Hostname: strPtr("app-3.example.com"),
 	})
 	if err != nil {
 		t.Fatalf("create outside every segment: %v", err)
@@ -105,7 +107,7 @@ func TestIntegration_CreateAsset_IgnoresCallerSuppliedApprovalStatus(t *testing.
 
 	for _, status := range []string{"monitoring", "active", "approved"} {
 		asset, err := assetSvc.CreateAsset(tenant, models.AssetInput{
-			AssetType:   "server",
+			ClassKey:    assetclass.KeyServer,
 			IPAddress:   strPtr("198.51.100.20"),
 			Hostname:    strPtr("claimed-" + status + ".example.com"),
 			AssetStatus: strPtr(status),
@@ -126,8 +128,8 @@ func TestIntegration_BulkCreateAssets_IgnoresCallerSuppliedApprovalStatus(t *tes
 	assetSvc, _, tenant := newApprovalGateFixture(t)
 
 	res := assetSvc.BulkCreateAssets(tenant, []models.AssetInput{
-		{AssetType: "server", IPAddress: strPtr("198.51.100.30"), Hostname: strPtr("pulled-1.example.com"), AssetStatus: strPtr("monitoring")},
-		{AssetType: "server", IPAddress: strPtr("192.0.2.30"), Hostname: strPtr("pulled-2.example.com")},
+		{ClassKey: assetclass.KeyServer, IPAddress: strPtr("198.51.100.30"), Hostname: strPtr("pulled-1.example.com"), AssetStatus: strPtr("monitoring")},
+		{ClassKey: assetclass.KeyServer, IPAddress: strPtr("192.0.2.30"), Hostname: strPtr("pulled-2.example.com")},
 	})
 	if res.Created != 2 {
 		t.Fatalf("bulk import created %d rows, want 2 (rows: %+v)", res.Created, res.Results)
@@ -166,7 +168,7 @@ func TestIntegration_SegmentRules_EvaluateTheSameForTheDiscoveryPipeline(t *test
 		return c
 	}
 
-	auto, ruleID, err := svc.EvaluateAutoApproval(approval.Discovery{TenantID: tenant, Confidence: 1.0}, classificationFor("192.0.2.40"))
+	auto, ruleID, err := svc.EvaluateAutoApproval(approval.Discovery{TenantID: tenant}.WithConfidence(1.0), classificationFor("192.0.2.40"))
 	if err != nil {
 		t.Fatalf("evaluate on-segment: %v", err)
 	}
@@ -174,7 +176,7 @@ func TestIntegration_SegmentRules_EvaluateTheSameForTheDiscoveryPipeline(t *test
 		t.Fatal("a discovery on an auto-approve segment was not auto-approved by the shared evaluator")
 	}
 
-	auto, _, err = svc.EvaluateAutoApproval(approval.Discovery{TenantID: tenant, Confidence: 1.0}, classificationFor("198.51.100.40"))
+	auto, _, err = svc.EvaluateAutoApproval(approval.Discovery{TenantID: tenant}.WithConfidence(1.0), classificationFor("198.51.100.40"))
 	if err != nil {
 		t.Fatalf("evaluate off-segment: %v", err)
 	}
@@ -187,7 +189,7 @@ func loadAssetStatusByHostname(t *testing.T, svc *AssetService, tenant uuid.UUID
 	t.Helper()
 	var status string
 	if err := svc.db.Get(&status,
-		`SELECT asset_status FROM network_assets WHERE tenant_id = $1 AND hostname = $2 AND deleted_at IS NULL`,
+		`SELECT asset_status FROM assets WHERE tenant_id = $1 AND hostname = $2 AND deleted_at IS NULL`,
 		tenant, hostname); err != nil {
 		t.Fatalf("load asset %s: %v", hostname, err)
 	}

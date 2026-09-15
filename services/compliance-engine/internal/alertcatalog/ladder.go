@@ -1,6 +1,9 @@
 package alertcatalog
 
-import "sort"
+import (
+	"fmt"
+	"sort"
+)
 
 // Rung is one trigger point on an escalating alert ladder. For time ladders
 // (cert expiry) Days is "days remaining at which this rung is crossed".
@@ -88,6 +91,35 @@ func MaxDays(ladder []Rung) int {
 	}
 	return max
 }
+
+// FixedRung returns one rung of a FIXED ladder by index, worst-last.
+//
+// The index is the DETECTOR's own reading of its measure — a CVSS band, a day
+// count — because the registry's `threshold` is free text in the detector's
+// units. What this enforces is that the index EXISTS: a detector written
+// against a four-rung ladder that someone later trimmed to three fails here
+// instead of silently clamping to the worst rung it still has. Same contract,
+// and the same reasoning, as producer.Rung on the findings side.
+func FixedRung(alertType string, i int) (LadderRung, error) {
+	entry, ok := Get(alertType)
+	if !ok {
+		return LadderRung{}, fmt.Errorf("alertcatalog: %q is not in standards/alert-registry.yaml", alertType)
+	}
+	if len(entry.Rungs) == 0 {
+		return LadderRung{}, fmt.Errorf(
+			"alertcatalog: %q declares no fixed rungs (severity_model %q)", alertType, entry.SeverityModel)
+	}
+	if i < 0 || i >= len(entry.Rungs) {
+		return LadderRung{}, fmt.Errorf(
+			"alertcatalog: %q has %d rungs, so rung %d does not exist — the registry ladder changed under this detector",
+			alertType, len(entry.Rungs), i)
+	}
+	return entry.Rungs[i], nil
+}
+
+// SeverityRank is severityRank, for detectors outside this package that need to
+// compare two severities on the same ladder the ladder builder uses.
+func SeverityRank(s string) int { return severityRank(s) }
 
 // severityRank mirrors the alert engine's ordering. "" ranks below info so
 // EffectiveSeverity can use it as the no-rung-crossed sentinel.

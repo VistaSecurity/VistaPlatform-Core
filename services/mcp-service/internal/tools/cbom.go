@@ -35,8 +35,10 @@ func registerCBOMTools(s *mcp.Server, d *Deps) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "vistaplatform_list_cbom_artifacts",
-		Description: "List the tenant's CBOM artifacts — immutable, content-hashed CycloneDX snapshots of the cryptographic inventory, newest first. " +
-			"Each entry includes the scope it was generated from, its content hash, component count and signing status.",
+		Description: "List the tenant's bill-of-materials artifacts — immutable, content-hashed CycloneDX snapshots, newest first. " +
+			"Each entry includes the scope it was generated from, its content hash, entry count, signing status, and its `artifact_kind`: " +
+			"`cbom` (cryptographic), `sbom` (software), `hbom` (hardware) or `inventory` (every asset with endpoints, relationships and open vulnerabilities). " +
+			"Read the kind before drawing a conclusion — an SBOM listing no certificates means it is not a CBOM, not that the tenant has none.",
 		Annotations: readOnly("List CBOM artifacts"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in listArtifactsInput) (*mcp.CallToolResult, any, error) {
 		return d.run(ctx, req, "reports.read", in, func() (any, error) {
@@ -48,14 +50,7 @@ func registerCBOMTools(s *mcp.Server, d *Deps) {
 				}
 				q.Set("scope_id", id)
 			}
-			limit := in.Limit
-			switch {
-			case limit < 1:
-				limit = 25
-			case limit > 100:
-				limit = 100
-			}
-			q.Set("limit", strconv.Itoa(limit))
+			q.Set("limit", strconv.Itoa(clampLimit(in.Limit, 25, 100)))
 			return d.Client.Get(ctx, d.Client.CBOMURL, "/api/v1/cbom-service/cbom/artifacts", q)
 		})
 	})

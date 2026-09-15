@@ -73,6 +73,39 @@ func logAuditActivity(c *gin.Context, eventType, eventCategory, action string, r
 	}
 }
 
+// auditProposalDecision records a HUMAN decision on a proposal — a merge, a
+// relationship edge, a class (security review X.5, X5-09).
+//
+// These routes had no explicit audit entry. The global LogRequest middleware
+// still recorded method, path, status and actor for all of them, so nothing was
+// unaudited — but the record said "POST /approvals/classes/:id/accept, 200" and
+// not which class was applied to which asset, which is the only part anyone
+// reviewing an approval queue afterwards needs.
+//
+// The asymmetry is what made it worth closing: the MACHINE path
+// (AssetService.auditAutoAcceptedMerge) writes a rich record naming the score,
+// the model, the candidates and the reason, precisely because nobody is there
+// to ask. The human path — which is the one with a person who can be asked, and
+// therefore the one an auditor will actually be reconstructing — wrote less.
+//
+// Best-effort, like the machine path: a decision that committed and an audit
+// event that did not send is bad; refusing the decision afterwards would be
+// worse, because it already happened.
+func auditProposalDecision(c *gin.Context, eventType, resourceType string, resourceID uuid.UUID, metadata map[string]any) {
+	rt := resourceType
+	logAuditActivity(c, eventType, auditmiddleware.EventCategoryAsset, decisionAction(eventType),
+		&rt, &resourceID, nil, nil, nil, metadata)
+}
+
+// decisionAction is the `action` verb, derived from the event type's last
+// segment so the two cannot disagree.
+func decisionAction(eventType string) string {
+	if i := strings.LastIndex(eventType, "."); i >= 0 && i+1 < len(eventType) {
+		return eventType[i+1:]
+	}
+	return eventType
+}
+
 // Helper functions
 func getUUIDPtr(value interface{}) *uuid.UUID {
 	if value == nil {

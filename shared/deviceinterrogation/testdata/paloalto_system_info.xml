@@ -1,0 +1,48 @@
+<!--
+  PAN-OS `show system info`, as an appliance returns it. Addresses are from the
+  documentation ranges (RFC 5737) and the serial is invented.
+
+  The last three elements are the point of the fixture: they are the shape of a
+  secret a differently-configured device (or a future PAN-OS version) can put in
+  this response. Nothing binds them, so the projection discards them
+  structurally — that is what the test asserts.
+-->
+<response status="success">
+  <result>
+    <system>
+      <hostname>fw-edge-01</hostname>
+      <ip-address>192.0.2.5</ip-address>
+      <netmask>255.255.255.0</netmask>
+      <default-gateway>192.0.2.1</default-gateway>
+      <is-dhcp>no</is-dhcp>
+      <ipv6-address>unknown</ipv6-address>
+      <ipv6-link-local-address>fe80::21b:17ff:fe0a:b0c/64</ipv6-link-local-address>
+      <mac-address>00:1b:17:0a:0b:0c</mac-address>
+      <time>Thu Sep 11 09:15:00 2026</time>
+      <uptime>8 days, 4:23:11</uptime>
+      <devicename>fw-edge-01</devicename>
+      <family>3200</family>
+      <model>PA-3220</model>
+      <serial>013201001234</serial>
+      <cloud-mode>non-cloud</cloud-mode>
+      <sw-version>11.1.4-h7</sw-version>
+      <global-protect-client-package-version>6.2.1</global-protect-client-package-version>
+      <app-version>8891-8975</app-version>
+      <app-release-date>2026/09/09 18:02:11 PDT</app-release-date>
+      <threat-version>8891-8975</threat-version>
+      <url-filtering-version>20260910.20319</url-filtering-version>
+      <logdb-version>11.1.2</logdb-version>
+      <platform-family>3200</platform-family>
+      <vpn-disable-mode>off</vpn-disable-mode>
+      <multi-vsys>off</multi-vsys>
+      <operational-mode>normal</operational-mode>
+      <device-certificate-status>Valid</device-certificate-status>
+      <snmp-community>MUST-NOT-BE-COLLECTED</snmp-community>
+      <device-certificate-private-key>MUST-NOT-BE-COLLECTED</device-certificate-private-key>
+      <login-banner>Authorised use only
+-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEAMUST-NOT-BE-COLLECTED
+-----END RSA PRIVATE KEY-----</login-banner>
+    </system>
+  </result>
+</response>

@@ -414,7 +414,7 @@ func mergeTags(existingTags, newTags map[string]interface{}) map[string]interfac
 
 // ReclassifyAllAssets reclassifies all assets for a tenant based on current network spaces
 func (s *NetworkSpaceService) ReclassifyAllAssets(tenantID uuid.UUID) (int, error) {
-	// Materialize all tenant assets first (RLS-scoped read over network_assets) so the
+	// Materialize all tenant assets first (RLS-scoped read over assets) so the
 	// per-asset classify/update loop below — which opens its own tenant txs via
 	// ClassifyAsset/GetTagsForAsset — doesn't run inside an open cursor on the pool.
 	type assetRow struct {
@@ -424,8 +424,19 @@ func (s *NetworkSpaceService) ReclassifyAllAssets(tenantID uuid.UUID) (int, erro
 		fqdns    []string
 	}
 	var assets []assetRow
-	query := `SELECT id, ip_address, hostname, fqdns FROM network_assets
-		WHERE tenant_id = $1 AND deleted_at IS NULL`
+	// The address is the asset-level copy of its endpoints' (`primary_address`),
+	// and the FQDNs are identifiers now — `ip_address` and `fqdns` have not been
+	// columns on this table since phase 1, and this query failed outright.
+	query := `SELECT a.id,
+			 host(a.primary_address) AS ip_address,
+			 a.hostname,
+			 COALESCE(ARRAY(
+				 SELECT i.value FROM asset_identifiers i
+				  WHERE i.tenant_id = a.tenant_id AND i.asset_id = a.id AND i.kind = 'fqdn'
+				  ORDER BY i.value
+			 ), ARRAY[]::text[]) AS fqdns
+		FROM assets a
+		WHERE a.tenant_id = $1 AND a.deleted_at IS NULL`
 	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		rows, err := tx.Query(query, tenantID)
 		if err != nil {
@@ -467,10 +478,10 @@ func (s *NetworkSpaceService) ReclassifyAllAssets(tenantID uuid.UUID) (int, erro
 		// Get tags from matching network spaces
 		networkTags, _ := s.GetTagsForAsset(tenantID, a.ipPtr, a.hostname, a.fqdns)
 
-		// RLS-scoped read of current tags + write of ownership/tags over network_assets, in one tenant tx.
+		// RLS-scoped read of current tags + write of ownership/tags over assets, in one tenant tx.
 		err = database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 			var currentTagsJSON []byte
-			_ = tx.QueryRow(`SELECT tags FROM network_assets WHERE id = $1 AND tenant_id = $2`, a.id, tenantID).Scan(&currentTagsJSON)
+			_ = tx.QueryRow(`SELECT tags FROM assets WHERE id = $1 AND tenant_id = $2`, a.id, tenantID).Scan(&currentTagsJSON)
 			var currentTags models.JSONB
 			if len(currentTagsJSON) > 0 {
 				_ = json.Unmarshal(currentTagsJSON, &currentTags)
@@ -480,7 +491,7 @@ func (s *NetworkSpaceService) ReclassifyAllAssets(tenantID uuid.UUID) (int, erro
 			tagsJSON, _ := json.Marshal(mergedTags)
 
 			// Update both ownership and tags
-			updateQuery := `UPDATE network_assets SET asset_ownership = $1, tags = $2, updated_at = NOW() WHERE id = $3 AND tenant_id = $4`
+			updateQuery := `UPDATE assets SET asset_ownership = $1, tags = $2, updated_at = NOW() WHERE id = $3 AND tenant_id = $4`
 			_, e := tx.Exec(updateQuery, ownership, tagsJSON, a.id, tenantID)
 			return e
 		})

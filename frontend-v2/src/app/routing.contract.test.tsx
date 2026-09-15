@@ -21,6 +21,7 @@ import { PUBLIC_PATHS } from './public-routes';
 import { SECTIONS } from './nav';
 import pkg from '../../package.json' with { type: 'json' };
 import App from '../App';
+import { ASSET_TABS, DEFAULT_ASSET_TAB, assetTabPath, findAssetTab } from '../sections/inventory/asset-tabs';
 
 /** Pull the real <Routes> element out of App()'s rendered tree. */
 function findRoutesElement(node: unknown): ReactElement | null {
@@ -112,6 +113,8 @@ describe('tenant console route table (react-router v8)', () => {
     ['/dashboard', '~layout > ~layout > /dashboard'],
     ['/about', '~layout > ~layout > /about'],
     ['/inventory', '~layout > ~layout > /inventory'],
+    ['/inventory/assets/a1b2c3', '~layout > ~layout > /inventory/assets/:id'],
+    ['/inventory/assets/a1b2c3/history', '~layout > ~layout > /inventory/assets/:id/:tab'],
     ['/discovery', '~layout > ~layout > /discovery'],
     ['/discovery/sensors', '~layout > ~layout > /discovery/sensors'],
     ['/discovery/active-scan', '~layout > ~layout > /discovery/active-scan'],
@@ -125,6 +128,32 @@ describe('tenant console route table (react-router v8)', () => {
     ['/profile', '~layout > ~layout > /profile'],
   ])('gated %s resolves through RequireAuth + AppShell', (url, expected) => {
     expect(resolve(url)).toBe(expected);
+  });
+
+  // The asset page (ADR-0006 D3). Two routes, one component: the bare path is
+  // Overview so the URL copied off the first tab is the short one, and `/:tab`
+  // deep-links the rest. The asset page is the destination of the command
+  // palette, every list row, the drawer's "Open full page" and Approvals, so a
+  // regression here breaks four entry points at once.
+  it('the asset page captures :id, and :tab when one is given', () => {
+    expect(paramsFor('/inventory/assets/a1b2c3')).toEqual({ id: 'a1b2c3' });
+    expect(paramsFor('/inventory/assets/a1b2c3/endpoints')).toEqual({ id: 'a1b2c3', tab: 'endpoints' });
+  });
+
+  it('every live asset tab has a resolvable URL', () => {
+    // A tab in the registry with no route is a tab whose deep link 404s. The
+    // registry is the source; this walks it rather than restating the list.
+    for (const tab of ASSET_TABS) {
+      const url = assetTabPath('a1b2c3', tab.key);
+      expect(resolve(url)).toMatch(/\/inventory\/assets\/:id/);
+      expect(paramsFor(url).id).toBe('a1b2c3');
+    }
+  });
+
+  it('an unknown tab segment still resolves to the asset page', () => {
+    // A stale deep link should show the asset on Overview, not a "Not found".
+    expect(resolve('/inventory/assets/a1b2c3/relationships-v2')).toBe('~layout > ~layout > /inventory/assets/:id/:tab');
+    expect(findAssetTab('relationships-v2').key).toBe(DEFAULT_ASSET_TAB);
   });
 
   it('dynamic settings/profile sub-pages still capture :page', () => {

@@ -181,7 +181,7 @@ func (w *PlatformAgentWorker) processNextJob() {
 		nil, // no user context available at worker level
 	)
 	if _, logErr := jobLogger.LogStart(ctx, map[string]interface{}{
-		"device_id":      deviceJob.DeviceID,
+		"asset_id":       deviceJob.AssetID,
 		"integration_id": deviceJob.IntegrationID,
 	}); logErr != nil {
 		log.Printf("[PlatformAgentWorker] Warning: failed to log job start for %s: %v", deviceJob.ID, logErr)
@@ -289,21 +289,12 @@ func (w *PlatformAgentWorker) executeCloudDiscovery(ctx context.Context, job *mo
 		cloudProvider = detected
 	}
 
-	var devices []models.Device
-	var err error
-	switch cloudProvider {
-	case "aws":
-		devices, err = w.cloudService.DiscoverAWSResources(ctx, job.TenantID, integrationID, resourceTypes, regions)
-	case "azure":
-		devices, err = w.cloudService.DiscoverAzureResources(ctx, job.TenantID, integrationID, resourceTypes, resourceGroups)
-	case "gcp":
-		devices, err = w.cloudService.DiscoverGCPResources(ctx, job.TenantID, integrationID, resourceTypes)
-	default:
-		return nil, fmt.Errorf("unknown cloud provider: %s", cloudProvider)
-	}
+	discovery, err := w.cloudService.DiscoverResources(ctx, job.TenantID, integrationID,
+		cloudProvider, resourceTypes, regions, resourceGroups)
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover %s resources: %w", cloudProvider, err)
 	}
+	devices := discovery.Devices
 
 	// Convert devices to discovered assets.
 	//
@@ -334,16 +325,27 @@ func (w *PlatformAgentWorker) executeCloudDiscovery(ctx context.Context, job *mo
 		}
 	}
 
+	metadata := map[string]interface{}{
+		"cloud_provider": cloudProvider,
+		"devices_count":  len(devices),
+		// Enumerated resources produce no crypto asset, so they are added
+		// explicitly: a scheduled run that found 200 instances and no TLS
+		// listener otherwise reports zero.
+		"assets_count": len(assets) + discovery.Enumeration.Total(),
+	}
+	if !discovery.Enumeration.Empty() {
+		metadata["enumeration"] = discovery.Enumeration
+	}
+	if discovery.EnumerationSkipped != "" {
+		metadata["enumeration_skipped"] = discovery.EnumerationSkipped
+	}
+
 	result := &models.JobResult{
 		JobID:       job.ID,
 		Success:     true,
 		Assets:      assets,
 		CompletedAt: time.Now(),
-		Metadata: map[string]interface{}{
-			"cloud_provider": cloudProvider,
-			"devices_count":  len(devices),
-			"assets_count":   len(assets),
-		},
+		Metadata:    metadata,
 	}
 
 	return result, nil
@@ -351,12 +353,12 @@ func (w *PlatformAgentWorker) executeCloudDiscovery(ctx context.Context, job *mo
 
 // executeDeviceInterrogation executes a device interrogation job
 func (w *PlatformAgentWorker) executeDeviceInterrogation(ctx context.Context, job *models.DeviceJob) (*models.JobResult, error) {
-	if job.DeviceID == nil {
-		return nil, fmt.Errorf("device_id is required for device interrogation")
+	if job.AssetID == nil {
+		return nil, fmt.Errorf("asset_id is required for device interrogation")
 	}
 
 	// Get device (scoped to the job's resolved tenant).
-	device, err := w.deviceService.GetDevice(ctx, job.TenantID, *job.DeviceID)
+	device, err := w.deviceService.GetDevice(ctx, job.TenantID, *job.AssetID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get device: %w", err)
 	}
@@ -373,7 +375,7 @@ func (w *PlatformAgentWorker) executeDeviceInterrogation(ctx context.Context, jo
 	// Interrogate device using device interrogation service. This creates its own
 	// discovery job and materializes the targets, findings AND sensor_discoveries
 	// rows there.
-	discoveryJobID, materialized, err := w.deviceInterrogation.InterrogateDevice(ctx, job.TenantID, systemUserID, *job.DeviceID)
+	discoveryJobID, materialized, err := w.deviceInterrogation.InterrogateDevice(ctx, job.TenantID, systemUserID, *job.AssetID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to interrogate device: %w", err)
 	}
@@ -397,6 +399,8 @@ func (w *PlatformAgentWorker) executeDeviceInterrogation(ctx context.Context, jo
 		Assets:      []models.DiscoveredAsset{}, // Assets created via discovery integration
 		CompletedAt: time.Now(),
 		Metadata: map[string]interface{}{
+			"asset_id": device.ID.String(),
+			// Deprecated alias, emitted for one release: the value IS the asset id.
 			"device_id":        device.ID.String(),
 			"device_type":      device.DeviceType,
 			"discovery_job_id": discoveryJobID.String(),
@@ -478,6 +482,8 @@ func (w *PlatformAgentWorker) convertCryptoConfigToAsset(device *models.Device, 
 	}
 
 	// Store device metadata
+	asset.Metadata["asset_id"] = device.ID.String()
+	// Deprecated alias, emitted for one release: the value IS the asset id.
 	asset.Metadata["device_id"] = device.ID.String()
 	asset.Metadata["device_type"] = device.DeviceType
 	if device.Vendor != nil {

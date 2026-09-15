@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.6\",\"components\":[{\"type\":\"library\",\"name\":\"t -----BEGIN CERTIFICATE-----\\nAAAA\\n-----END CERTIFICATE-----\",\"version\":\"1\"}]}")

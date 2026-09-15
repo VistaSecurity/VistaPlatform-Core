@@ -8,13 +8,13 @@ import (
 	"fmt"
 	"net"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/discovery"
 )
 
@@ -23,6 +23,8 @@ type ResultProcessor struct {
 	db                   *sql.DB
 	bypassDB             *sql.DB
 	discoveryIntegration *DiscoveryIntegrationService
+	observations         *ObservationSink
+	hostInventory        *HostInventoryIngest
 }
 
 // NewResultProcessor creates a new result processor. db is the RLS-scoped
@@ -35,17 +37,46 @@ func NewResultProcessor(db, bypassDB *sql.DB) *ResultProcessor {
 		db:                   db,
 		bypassDB:             bypassDB,
 		discoveryIntegration: NewDiscoveryIntegrationService(db, bypassDB),
+		observations:         NewObservationSink(db),
+		hostInventory:        NewHostInventoryIngest(db, bypassDB),
 	}
 }
 
 // ProcessJobResults processes job results and creates discovery findings
 func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID, result *models.JobResult) error {
-	// Get the device job to retrieve tenant_id and device_id. GetJobByID runs on
+	// Get the device job to retrieve tenant_id and asset_id. GetJobByID runs on
 	// the bypass role (keyed by job id; tenant is the output).
 	jobQueue := NewJobQueueService(s.db, s.bypassDB, nil) // Redis not needed for reading
 	deviceJob, err := jobQueue.GetJobByID(ctx, jobID)
 	if err != nil {
 		return fmt.Errorf("failed to get device job: %w", err)
+	}
+
+	// Host inventory takes its OWN path (asset-inventory workstream 2.11b), and
+	// it is not a detour around the pipeline below — it is a different
+	// pipeline, because a host inventory is not a crypto finding.
+	//
+	// It was HELD here through 2.11a, and the reason it was held is the reason
+	// it now branches rather than joins. Handed to the pipeline below, a
+	// host-inventory result would:
+	//
+	//   - create a discovery job and a discovery finding per socket, so a
+	//     laptop with 50 listeners produces 50 findings that describe nothing
+	//     anyone asked about;
+	//   - publish them into sensor_discoveries, where network classification
+	//     routes a 127.0.0.1 endpoint by address — and a loopback socket is not
+	//     a connection between two endpoints at all;
+	//   - reach the identification engine with a subject built by the crypto
+	//     path's builder, which cannot match on an agent id, so every
+	//     collection would mint another nameless asset.
+	//
+	// None of those is a bug in the pipeline below. It is a pipeline for
+	// findings about cryptography, and what a host inventory carries — an OS
+	// name, a package database, a set of sockets, an agent id — has no crypto
+	// posture in it at all. HostInventoryIngest is the consumer that does know
+	// what to do with those, and every guard the hold put up is restated there.
+	if deviceJob.JobType == models.JobTypeHostInventory {
+		return s.materialiseHostInventory(ctx, jobID, deviceJob, result)
 	}
 
 	// Get or create discovery job for this device interrogation
@@ -59,10 +90,18 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 		"source":        sourceType,
 	}
 
-	// Add device_id for device interrogation jobs
-	if deviceJob.DeviceID != nil {
-		jobMetadata["source_device_id"] = deviceJob.DeviceID.String()
-		jobMetadata["device_id"] = deviceJob.DeviceID.String()
+	// Add the target asset for device interrogation jobs.
+	//
+	// `device_id` / `source_device_id` are deprecated aliases carrying the SAME
+	// value (a device's id IS its asset's id as of phase 1). They are emitted
+	// for one release so the discovery-processor and inventory-service readers
+	// that still key on them keep working; dropping them is a follow-up on the
+	// finding shape.
+	if deviceJob.AssetID != nil {
+		jobMetadata["source_asset_id"] = deviceJob.AssetID.String()
+		jobMetadata["asset_id"] = deviceJob.AssetID.String()
+		jobMetadata["source_device_id"] = deviceJob.AssetID.String()
+		jobMetadata["device_id"] = deviceJob.AssetID.String()
 	}
 
 	// Add integration_id for cloud discovery jobs
@@ -97,9 +136,19 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 		}
 	}
 
-	// Update device record with identity info from first asset (if available)
-	if deviceJob.DeviceID != nil && len(result.Assets) > 0 {
-		s.updateDeviceIdentity(ctx, deviceJob.TenantID, *deviceJob.DeviceID, result.Assets[0])
+	// Record what the run observed about the interrogated asset itself: its
+	// hardware identity, the ops facts, the edges, and that we reached it.
+	//
+	// The identity comes from the first asset because that is where the agent
+	// puts the DEVICE's own identity; the facts and edges are per-result and
+	// arrive whether or not any crypto asset did, which is why this is no
+	// longer gated on a non-empty asset list.
+	if deviceJob.AssetID != nil {
+		var first models.DiscoveredAsset
+		if len(result.Assets) > 0 {
+			first = result.Assets[0]
+		}
+		s.recordInterrogationObservations(ctx, deviceJob.TenantID, *deviceJob.AssetID, jobID, first, result)
 	}
 
 	// Record what actually happens to each asset so the outcome is visible in
@@ -203,7 +252,7 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 		certFlags, ocspStatus, ocspDetail, derivedStatus := s.assetCertQualityFlags(asset)
 
 		// Build enriched finding details with source tracking
-		details := s.buildFindingDetails(jobID, deviceJob.DeviceID, deviceJob.IntegrationID, asset, sourceType)
+		details := s.buildFindingDetails(jobID, deviceJob.AssetID, deviceJob.IntegrationID, asset, sourceType)
 		mergeCertFlags(details, certFlags, ocspStatus, ocspDetail)
 		// Only fill validation status when the agent didn't set one; the agent's
 		// vendor-specific result is authoritative when present.
@@ -254,7 +303,7 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 		//
 		// systemSensorID cannot be uuid.Nil here — a missing platform sensor
 		// fails the job before this loop runs.
-		if err := s.writeSensorDiscovery(ctx, systemSensorID, deviceJob.TenantID, deviceJob.DeviceID, deviceJob.IntegrationID, batchID, asset, certFlags, ocspStatus, ocspDetail); err != nil {
+		if err := s.writeSensorDiscovery(ctx, systemSensorID, deviceJob.TenantID, deviceJob.AssetID, deviceJob.IntegrationID, batchID, asset, certFlags, ocspStatus, ocspDetail); err != nil {
 			fmt.Printf("Warning: failed to write sensor discovery for %s: %v\n", targetInput, err)
 			steps.fail(targetInput, StageSensorDiscovery, err)
 		} else {
@@ -685,37 +734,142 @@ func buildSensorDiscoveryMetadata(deviceID *uuid.UUID, integrationID *uuid.UUID,
 	return meta
 }
 
-// updateDeviceIdentity updates the devices table with identity info from the
-// agent, under the resolved tenantID (devices is RLS-scoped).
-func (s *ResultProcessor) updateDeviceIdentity(ctx context.Context, tenantID, deviceID uuid.UUID, asset models.DiscoveredAsset) {
-	if asset.DeviceInfo == nil {
-		return
+// recordInterrogationObservations writes what an agent's run observed about the
+// interrogated asset back onto the asset model.
+//
+// Three destinations, and the split is the point:
+//
+//   - vendor / model / firmware / os version → asset_facts, as MEASURED facts
+//     under `interrogation:<job>`. They used to be columns of `devices`, where
+//     a later interrogation silently overwrote an operator's correction and
+//     nothing recorded that it had.
+//   - serial number → asset_identifiers, because it is how the asset is
+//     recognised, not a property of it.
+// - ops facts and observed edges → asset_facts / asset_relationships,
+//     through the identification engine so a peer becomes an asset.
+//
+// The management row is advanced separately (markInterrogated), because
+// "we reached it" is true whether or not the device told us anything about
+// itself.
+func (s *ResultProcessor) recordInterrogationObservations(
+	ctx context.Context,
+	tenantID, assetID, jobID uuid.UUID,
+	asset models.DiscoveredAsset,
+	result *models.JobResult,
+) {
+	obs := InterrogationObservations{
+		Facts:         result.Facts,
+		Relationships: result.Relationships,
 	}
-
-	di := asset.DeviceInfo
-
-	setClauses, args := deviceIdentitySetClauses(di.Vendor, di.Model, di.FirmwareVersion, di.SerialNumber, 1)
-	if len(setClauses) == 0 {
-		return
+	if asset.DeviceInfo != nil {
+		obs.DeviceIdentity = &di.DeviceIdentity{
+			Vendor:          asset.DeviceInfo.Vendor,
+			Model:           asset.DeviceInfo.Model,
+			FirmwareVersion: asset.DeviceInfo.FirmwareVersion,
+			SerialNumber:    asset.DeviceInfo.SerialNumber,
+			OSVersion:       asset.DeviceInfo.OSVersion,
+		}
 	}
-	argIdx := len(args) + 1
-
-	// Add updated_at and last_interrogated_at
-	setClauses = append(setClauses, "updated_at = NOW(), last_interrogated_at = NOW(), connection_status = 'connected'")
-
-	//nolint:gosec // intentional — placeholder concatenation only; values are parameterized via args slice
-	query := fmt.Sprintf(
-		"UPDATE devices SET %s WHERE id = $%d AND deleted_at IS NULL",
-		strings.Join(setClauses, ", "),
-		argIdx,
-	)
-	args = append(args, deviceID)
-
-	err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		_, e := tx.ExecContext(ctx, query, args...)
-		return e
-	})
-	if err != nil {
-		fmt.Printf("Warning: failed to update device identity for %s: %v\n", deviceID, err)
+	if !obs.Empty() {
+		if err := s.observations.Persist(ctx, tenantID, assetID, interrogationSource(jobID), obs); err != nil {
+			// The crypto assets have already landed. Losing the ops
+			// observations is worth a warning, not a failed job that tells the
+			// operator the interrogation did not happen.
+			fmt.Printf("Warning: failed to persist interrogation observations for asset %s: %v\n", assetID, err)
+		}
 	}
+	s.markInterrogated(ctx, tenantID, assetID)
+}
+
+// markInterrogated advances the asset's management row after a successful run:
+// reached, at this time, with no outstanding error.
+func (s *ResultProcessor) markInterrogated(ctx context.Context, tenantID, assetID uuid.UUID) {
+	now := time.Now().UTC()
+	connected := "connected"
+	if err := upsertManagementOwnTx(ctx, s.db, tenantID, assetID, managementUpsert{
+		ConnectionStatus:        &connected,
+		LastInterrogatedAt:      &now,
+		ClearInterrogationError: true,
+	}); err != nil {
+		fmt.Printf("Warning: failed to update management status for asset %s: %v\n", assetID, err)
+	}
+}
+
+// materialiseHostInventory turns a REMOTE host-inventory collection into
+// inventory (asset-inventory workstream 2.11b).
+//
+// Remote only, because that is the only mode that arrives as a job result: a
+// local collection has no job behind it and posts to its own intake route,
+// which calls the same HostInventoryIngest directly. One consumer, two doors.
+//
+// The counts land on the job row in place of 2.11a's `fatal` line. That line
+// said outright that nothing had been materialised, which was the honest thing
+// to say while nothing was; saying anything like it now, or reporting the
+// finding-shaped zeros the pipeline below would produce, would be the "feature
+// that silently does nothing" failure the other way round.
+//
+// A failure here fails the JOB. That is deliberate and it is the opposite of
+// how the crypto path treats its ops observations: there, the crypto assets
+// have already landed and losing the facts is worth a warning. Here the facts
+// ARE the result, so a run that could not write them produced nothing, and an
+// operator told "completed" would have no way to find that out.
+func (s *ResultProcessor) materialiseHostInventory(
+	ctx context.Context, jobID uuid.UUID, deviceJob *models.DeviceJob, result *models.JobResult,
+) error {
+	agentID := uuid.Nil
+	if deviceJob.AgentID != nil {
+		agentID = *deviceJob.AgentID
+	}
+	if _, err := s.hostInventory.MaterialiseAndRecord(ctx, deviceJob.TenantID, agentID, jobID,
+		hostInventoryObservationsFromResult(result)); err != nil {
+		return fmt.Errorf("host inventory materialisation failed: %w", err)
+	}
+	return nil
+}
+
+// hostInventoryObservationsFromResult rebuilds the collector's observation
+// shape from the job-result envelope it travelled in.
+//
+// The agent submits a host-inventory job result through the ordinary /results
+// route, which carries `models.JobResult` — so the same three pieces the local
+// intake receives as a `di.InterrogateResult` arrive here as Facts, Metadata
+// and a slice of DiscoveredAsset. Reassembling them costs one pass and means
+// the consumer has ONE input shape rather than a local branch and a remote
+// branch that can disagree about what a host inventory is.
+//
+// Only the fields a host inventory actually populates are carried. Every crypto
+// field on DiscoveredAsset is nil on this path by construction — the collector
+// leaves them nil so that "not probed" stays distinguishable from "probed and
+// found nothing" — so copying them would be copying nils with extra steps.
+func hostInventoryObservationsFromResult(result *models.JobResult) *di.InterrogateResult {
+	if result == nil {
+		return nil
+	}
+	out := &di.InterrogateResult{
+		Facts:      result.Facts,
+		DeviceInfo: result.Metadata,
+		Assets:     make([]di.CryptoAsset, 0, len(result.Assets)),
+	}
+	if out.DeviceInfo == nil {
+		out.DeviceInfo = map[string]interface{}{}
+	}
+	for i := range result.Assets {
+		a := &result.Assets[i]
+		asset := di.CryptoAsset{
+			Hostname:  a.Hostname,
+			IPAddress: a.IPAddress,
+			Port:      a.Port,
+			Protocol:  a.Protocol,
+			Metadata:  a.Metadata,
+		}
+		if a.ServiceHints != nil {
+			asset.ServiceHints = &di.ServiceHints{
+				ServiceName:          a.ServiceHints.ServiceName,
+				Confidence:           a.ServiceHints.Confidence,
+				IdentificationMethod: a.ServiceHints.IdentificationMethod,
+			}
+		}
+		out.Assets = append(out.Assets, asset)
+	}
+	return out
 }

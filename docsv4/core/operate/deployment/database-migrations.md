@@ -311,7 +311,7 @@ After applying migrations, verify they were successful:
 SELECT tablename, rowsecurity 
 FROM pg_tables 
 WHERE schemaname = 'public' 
-AND tablename IN ('sensors', 'pending_sensors', 'sensor_discoveries', 'network_assets', 'crypto_implementations');
+AND tablename IN ('sensors', 'pending_sensors', 'sensor_discoveries', 'assets', 'asset_endpoints', 'crypto_implementations');
 
 -- Should show rowsecurity = true
 ```
@@ -323,7 +323,7 @@ AND tablename IN ('sensors', 'pending_sensors', 'sensor_discoveries', 'network_a
 SELECT schemaname, tablename, policyname, permissive, roles, cmd, qual 
 FROM pg_policies 
 WHERE schemaname = 'public' 
-AND tablename IN ('sensors', 'pending_sensors', 'sensor_discoveries', 'network_assets', 'crypto_implementations');
+AND tablename IN ('sensors', 'pending_sensors', 'sensor_discoveries', 'assets', 'asset_endpoints', 'crypto_implementations');
 
 -- Should show policies for each table
 ```

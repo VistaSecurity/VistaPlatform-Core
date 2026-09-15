@@ -51,6 +51,11 @@ type Client struct {
 	integrationID uuid.UUID
 	httpClient    *http.Client
 
+	// computeBaseOverride replaces computeBaseURL for the enumeration calls.
+	// Empty in every production path — NewClient never sets it — and set only
+	// by a test pointing one client at a recorded-response server.
+	computeBaseOverride string
+
 	mu          sync.Mutex
 	accessToken string
 	tokenExpiry time.Time

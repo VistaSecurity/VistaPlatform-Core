@@ -6,6 +6,8 @@ Vista Platform is a multi-tenant SaaS platform that gives organizations complete
 
 In short: Vista Platform answers the question *"What cryptography is running in my environment, and is any of it putting us at risk?"*
 
+New to the platform's vocabulary? [Concepts](./concepts.md) defines asset, endpoint, class, relationship, and the other terms used throughout this documentation, in plain language with examples.
+
 ## Why It Matters
 
 Most organizations have no reliable inventory of the cryptographic algorithms, protocols, and certificates deployed across their infrastructure. Certificates expire without warning, deprecated algorithms like MD5, SHA-1, RC4, and TLS 1.0/1.1 persist undetected, and proving compliance to auditors requires weeks of manual evidence gathering. With quantum computing on the horizon, identifying non-quantum-resistant cryptography is becoming an urgent planning requirement.
@@ -45,7 +47,7 @@ Already have an inventory? Bring it in without re-typing:
 Imported assets are then enriched by discovery just like anything else.
 
 ### Compliance Management
-Map controls to cryptographic requirements, run assessments, and generate evidence packages. The platform supports overrides and waivers with full audit trails. Compliance findings are generated automatically as new assets are discovered, and posture is materialized continuously rather than billed per framework. Tenants activate the frameworks relevant to them. Core ships six, always available: **Security Best Practices**, a **Post-Quantum Readiness** framework that scores quantum exposure across both certificates and crypto-configurations, **Certificate Hygiene**, and three certificate-expiry policies. *Authoring your own frameworks (Custom Policies), retuning shipped thresholds, and the regulated catalog — SOC 2, PCI-DSS, ISO 27001, NIST CSF, IEC 62351-3 — are Enterprise capabilities.*
+Map controls to cryptographic requirements, run assessments, and generate evidence packages. The platform supports overrides and waivers with full audit trails. Compliance findings are generated automatically as new assets are discovered, and posture is materialized continuously rather than billed per framework. Tenants activate the frameworks relevant to them. Core ships eight, always available: **Security Best Practices**, a **Post-Quantum Readiness** framework that scores quantum exposure across both certificates and crypto-configurations, **Certificate Hygiene**, three certificate-expiry policies, **Inventory Hygiene** (is every asset owned, classified, located and recently seen?) and **Lifecycle** (what has outlived its vendor support?). *Authoring your own frameworks (Custom Policies), retuning shipped thresholds, and the regulated catalog — SOC 2, PCI-DSS, ISO 27001, NIST CSF, IEC 62351-3 — are Enterprise capabilities.*
 
 ### Risk Assessment and Remediation
 A built-in algorithm taxonomy covering 100+ cryptographic algorithms provides deprecation status, strength ratings, and NIST mappings. The Crypto Risks dashboard summarizes findings by severity and provides step-by-step remediation guidance, including recommendations for post-quantum cryptography (PQC) migration covering all five NIST PQC algorithm families — the finalized ML-KEM (FIPS 203), ML-DSA (FIPS 204), and SLH-DSA (FIPS 205) standards, plus the NIST-selected FN-DSA and HQC families ahead of their finalization.

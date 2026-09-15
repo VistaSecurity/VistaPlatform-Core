@@ -2,43 +2,132 @@
 
 The **Inventory** page is the heart of Vista Platform. It's where every asset, certificate, cryptographic key, crypto configuration, and third-party connection your environment has discovered comes together in one place.
 
-There is **one inventory** — a single dataset — and **lenses** reshape it. A lens doesn't take you to a different page or a different copy of the data; it re-angles the same underlying inventory so you see it the way the task in front of you needs. Auditing certificate expiry? Switch to the Certificates lens. Checking weak ciphers? Switch to Configuration. Tracking down assets that have gone quiet? Switch to Stale Assets. Same data, different angle.
+There is **one inventory** — a single dataset — and **lenses** reshape it. A lens doesn't take you to a different page or a different copy of the data; it re-angles the same underlying inventory so you see it the way the task in front of you needs. Auditing certificate expiry? Switch to the Certificates lens. Checking weak ciphers? Switch to Configuration. Tracking down assets that have gone quiet? Switch to Stale. Same data, different angle.
 
 ## Where to find it
 
-**Inventory** in the top navigation. The lens switcher lives in the **left sidebar** — each lens is a row you click. The active lens is reflected in the page address (`/inventory?lens=…`), so a lens view is bookmarkable and shareable: send a colleague a link and they land on the exact lens you were looking at.
+**Inventory** in the left navigation rail. Its lenses are grouped into three:
 
-## Switching lenses
-
-Pick a lens from the left sidebar. The page reshapes immediately. A few things to know:
-
-- **Your filters carry over.** Environment, Risk, and Strength filters describe *your slice of interest*, not the lens, so they persist as you switch lenses. The page resets to the first page of results when you change lenses, but your filters stay put.
-- **Search is lens-aware.** The search box at the top filters the current lens against the fields that matter for that lens (hostnames and IPs for assets, common names and issuers for certificates, key types and fingerprints for keys, and so on). Clear it to see everything again.
-- **The count is always honest.** The header shows how many items the current lens holds (e.g. `412 assets`, `28 stale`). When a filter is narrowing the view, it reads `shown of total`.
-
-## The lenses
-
-The first group of lenses are the **primary** lenses, always visible in the sidebar. Below them is a **By Protocol** group that narrows the Configuration view to a single protocol.
-
-### Infrastructure
-
-The default landing view. Each row is one **Infrastructure Asset** — a server, load balancer, network device, or other host Vista Platform knows about. Expand an asset to see the **Crypto Configurations** discovered on it (the protocols, cipher suites, and keys it's actually using).
-
-Each row summarises the asset across seven columns:
-
-| Column | What it shows |
+| Group | Lenses |
 |---|---|
-| **Identity** | Hostname when known, otherwise the address. Below it: the address, asset type and operating system, as far as they're known. |
-| **Location** | Environment badge (production, staging, …) and the network segment or business unit the asset sits in. |
-| **Service** | The identified service and version (for example `nginx` / `v1.25.3`). |
-| **Risk** | The asset's risk score and severity band. A dash with **not assessed** means nothing on the asset has resolved against the algorithm catalogue yet — it is *not* a clean bill of health. |
-| **Crypto** | A badge per protocol found on the asset, coloured by the worst risk seen for that protocol, plus the total number of crypto configurations. A greyed badge is a protocol whose configurations aren't assessed yet. |
-| **Certs** | How many certificates are deployed on the asset. |
-| **Status** | Any abnormal state (pending approval, stale, archived) and when the asset was last seen. |
+| **Assets** | All assets · Map · Software |
+| **Cryptography** | Certificates · Keys · Configuration · TLS · SSH · Data Protection · 3rd Party |
+| **Lifecycle** | Stale · Pending (a link across to Discovery → Approvals) |
 
-Anything Vista Platform genuinely doesn't know shows as a dash rather than a guess. On narrower windows the Location, Service, Crypto and Certs columns drop away in that order, so Identity, Risk and Status always stay visible.
+The active lens is in the page address (`/inventory?lens=…`), so a lens view is bookmarkable and shareable.
 
-**Use it when** you want the asset-centric picture: what do we have, where does it live, and what crypto is running on each thing.
+**Map** and **Software** are in the navigation but not yet built: opening either tells you which release brings it. They are listed now because the shape of the inventory is part of what the navigation tells you.
+
+**Pending** is a link, not a second list. Everything awaiting your review — discovered assets, imports, CMDB pulls and merge proposals — lives in one queue at **Discovery → Approvals**, and Inventory points at it rather than keeping a copy.
+
+## All assets
+
+The default view, and the general inventory. Every row is one **asset** — one *thing*, not one address or one open port. A host running five services is one row here, with its five endpoints on its own page.
+
+### The class facet
+
+Every asset has exactly one **class** — Server, Switch, Object storage, Web application, Business service, and so on — from a fixed taxonomy. The left rail shows that taxonomy as a tree with a count beside each class.
+
+The tree is **hierarchical**, and picking a parent selects everything beneath it: click **Hardware** and you get servers, switches, firewalls and printers together; drill to **Server** and you get only servers. That is why there is one asset list rather than one page per class.
+
+**The columns follow the class you pick.** Choose Server and you get operating system and model; choose Object storage and you get provider and account. Pick a parent class, or none at all, and the columns fall back to what everything shares — because a list mixing servers and switches has no common operating-system column to show.
+
+### The other filters
+
+Beneath the class tree: **Risk**, **Status**, **Provenance**, **Environment**, **Site**, **Segment**, **Owner**, **Business unit**, **Tag**, and **Findings**. Selections within one filter are combined with *or*; across filters with *and*.
+
+Two of them deserve a note, because both are about the difference between "we looked and found nothing" and "nobody looked":
+
+- **Risk → Not assessed** finds assets no producer has scored. That is not a low risk — it is the absence of a risk assessment, and on a fresh tenant it is usually the most useful slice on the page.
+- **Findings → No open findings** finds assets that *were* assessed and came back clean. If you want the ones nobody has looked at, that is Risk → Not assessed, not this.
+
+### The query box
+
+Every filter you click writes into the **query box** at the top of the page, and the query is what actually runs. This is deliberate: the box shows you, in the platform's query language, exactly what your clicks mean — so you learn the language by watching the filters produce it.
+
+You can also type in it directly, which is how you ask for things the checkboxes cannot express:
+
+```
+class:server and risk >= high and environment:production
+class:hardware and risk:not_assessed
+endpoint:(port:443 and protocol:tls)
+tag.tier:gold and last_seen < now-30d
+```
+
+As you type, it suggests the fields and values that exist — it will only ever offer you something the platform accepts. If a query is wrong it underlines the exact word and says what is wrong with it, often with the correction:
+
+```
+environment:production and hostnaem:web-1
+                           ^^^^^^^^
+unknown_field: no field "hostnaem" on assets. did you mean "hostname"?
+```
+
+The query lives in the page address, so a filtered view is shareable: send someone the link and they see the same rows.
+
+If you type something the filters can't represent — a relationship traversal, say — the rail tells you so and **keeps it**. Clicking a checkbox afterwards does not throw away what you typed.
+
+### Saved views
+
+**Views** (beside the query box) saves the current query under a name, for you and your team. A view is nothing more than its query, so applying one puts that query in the box where you can see it, adjust it, and save the result as another view.
+
+### The Address column, and blanks in it
+
+The **Address** column shows the asset's primary endpoint — its address, and its port when it has one.
+
+Some assets have **no address at all**, and the column is genuinely blank for them. An object store or a declared business service has nothing to connect to. A blank here means "this thing has no network endpoint", not "we failed to find one" — and it is why you will never see a made-up port beside one.
+
+## Opening an asset
+
+Click any row to open the **asset page** at its own address (`/inventory/assets/…`), which you can link to. It has tabs:
+
+| Tab | What's on it |
+|---|---|
+| **Overview** | Class and how it was decided; every identifier with its kind, source, confidence and when it was last seen; the class's attributes; ownership and context; status; and risk — with **who assessed it**, or an explicit *Not assessed*. |
+| **Services & Endpoints** | Every network face of the asset: address, port, transport, the identified service and how confidently it was identified, and when it was last seen. |
+| **Relationships** | Arrives in a later release. |
+| **Cryptography** | The crypto configurations discovered on the asset. Click one for the full configuration drawer. |
+| **Findings** | Cryptographic findings on this asset, with the configuration each was found on. |
+| **Software** | Arrives in a later release. |
+| **History** | Two lists. **Class history** first — every class this asset has held, what moved it, and who decided — then the general change log: context edits, merges, approvals, newest first. |
+
+Clicking a row from a list still opens the quick-look **drawer** as well; the drawer has an **Open full page** button when you want the whole record.
+
+### Class history: was this ever something else?
+
+An asset's class decides a great deal — which findings apply to it, which
+approval rules match it, which compliance measurements it is in scope for. So
+when the class changes, everything recorded before the change was recorded about
+a different kind of thing, and the question "was this reclassified?" is usually
+the first one worth asking about a surprising result.
+
+**Inventory → an asset → History** answers it. The *Class history* panel lists
+every class the asset has held, newest first, and each entry says:
+
+- **what moved** — the class before and the class after. The oldest entry has no
+  "before": it is the class the asset was given when it was first discovered.
+- **how** — *Set at discovery* (the classification rules or a collector decided
+  it), *Accepted in Approvals* (a reviewer took a proposed class), *Edited by a
+  person*, or *Stated by an import*.
+- **who**, when a person was involved. Entries with no person were made by the
+  platform; the panel names the mechanism rather than guessing at a user.
+- **why** — the rules that argued for it, or the classifier and how confident it
+  was.
+
+An **empty panel does not mean the class has never changed.** It means nothing
+has been recorded — which is what you will see for assets discovered before this
+record existed. The panel says so rather than showing a clean timeline.
+
+Nothing here can be edited. To change an asset's class, edit the asset, or accept
+a class proposal in **Discovery → Approvals**; either way the change turns up in
+this panel.
+
+### Identifiers, and why they matter
+
+The Overview tab lists the asset's **identifiers** — its FQDN, hostname, addresses, MAC, serial number, cloud resource id, and so on. These are what make one thing one asset: when a sensor sees a host, your CMDB exports it, and someone types it in by hand, the platform matches all three on their identifiers and keeps **one** record rather than three.
+
+Each identifier shows where it came from and how confident the platform is. When the evidence is ambiguous, you get a **merge proposal** in Discovery → Approvals rather than a silent guess. The order the platform tries identifiers in is documented, read-only, at **Settings → Policies → Identification rules**.
+
+## The cryptography lenses
 
 ### Certificates
 
@@ -46,7 +135,7 @@ Every certificate in your inventory, one per row — common name, issuer, key al
 
 **Use it when** you're managing certificate lifecycle — renewals, expiry sweeps, finding weak key sizes, or confirming an uploaded certificate landed.
 
-### Cryptographic Keys
+### Keys
 
 A dedicated inventory of every cryptographic key discovered across your environment — key type and size (or curve), lifecycle state, expiry, and how many assets use each key. A key marked **Unlinked** is in inventory but isn't (yet) referenced by any discovered configuration — expected for imported or newly-catalogued key material, and tracked here so nothing is invisible.
 
@@ -58,27 +147,21 @@ Every discovered **Crypto Configuration**, grouped by strength — Weak, Accepta
 
 **Use it when** you're hunting for weak or deprecated crypto — outdated TLS versions, weak ciphers, small key sizes — across everything at once.
 
-### Network
-
-The same assets as the Infrastructure lens, but grouped by **network segment** instead of listed flat. Each segment is a collapsible group; assets fall under the segment they belong to (or "Unsegmented"). Empty segments still appear, so you can see coverage gaps, not just populated segments.
-
-**Use it when** you want a topology-shaped view — which segment is an asset in, and how is crypto distributed across your network zones.
-
 ### 3rd Party
 
 Outbound connections your assets make to **external** endpoints — SaaS providers, partners, APIs. This is its own dataset (not your internal assets): each row is a destination your environment talks to over TLS, with the protocol, cipher suite, crypto strength, certificate expiry, and when it was last seen. Where you have the right permission, you can **Elevate** a connection to bring it into managed inventory, after which it's tracked like an internal asset and the row shows an "Elevated" badge.
 
 **Use it when** you're assessing third-party crypto exposure — are the vendors and services we depend on using strong TLS? (See [Third-Party and External Connections](./third-party-and-external-connections.md) for detail.)
 
-### Stale Assets
+### Stale
 
 Assets that haven't been seen recently (more than two weeks) or are no longer active. Each row shows how long it's been since the asset was last observed, its status, and quick actions for housekeeping. The staleness cut is applied across the whole inventory, so the count and pagination reflect every stale asset, not just the current page.
 
 **Use it when** you're cleaning up — retiring decommissioned hosts, investigating assets that dropped off the radar, or keeping your inventory honest.
 
-### By Protocol: TLS and SSH
+### TLS and SSH
 
-Two protocol sub-lenses under the **By Protocol** heading. They show the same flat Configuration view as the Configuration lens, pre-narrowed to a single protocol — **TLS** or **SSH** — so you can focus on one without setting a filter.
+Two protocol sub-lenses beneath Configuration. They show the same flat Configuration view, pre-narrowed to a single protocol — **TLS** or **SSH** — so you can focus on one without setting a filter.
 
 **Use it when** you want a clean, protocol-specific list — e.g. reviewing every SSH configuration in one shot.
 
@@ -108,6 +191,15 @@ says **not assessed** — which is not the same as safe. See
 The **Export** button (top right) downloads exactly what you're looking at — the current lens, with your active filters and search applied — as a CSV. Each lens exports the columns that make sense for it (assets export hostnames and segments; certificates export issuers and expiry; keys export sizes and fingerprints; and so on). The file is built right in your browser from the rows already on screen, so there's no waiting.
 
 **Exports are convenience, not evidence.** A page-local CSV is perfect for a quick spreadsheet pivot, a key-length sweep, or sharing a snapshot with a teammate. It is **not** an audit-grade artifact: it has no provenance, no content hash, and no fixed scope boundary. When you need something an auditor can rely on — reproducible, hashed, and tied to a defined boundary — generate a **CBOM artifact** instead. (See [Page-Local Exports](./page-local-exports.md) for the distinction, and [CBOM Artifacts](../cbom/cbom-artifacts.md) for audit-grade output.)
+
+## Where the old lenses went
+
+Two lenses were absorbed by the class facet on All assets, and their bookmarks redirect there:
+
+| Was | Ask for it now |
+|---|---|
+| **Infrastructure** | All assets — it *is* the asset list, with a class facet on top |
+| **Network** | All assets, filtered by **Segment** in the rail (or `segment_id:` in the query) |
 
 ## See also
 

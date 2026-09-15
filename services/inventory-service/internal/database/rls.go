@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 
@@ -45,6 +46,36 @@ func WithTenantTx(ctx context.Context, db *DB, tenantID uuid.UUID, fn func(*sqlx
 		return err
 	}
 	return tx.Commit()
+}
+
+// WithTenantTxTimeout is WithTenantTx with a per-statement ceiling on every
+// statement in the transaction (security review X.5, X5-10).
+//
+// Use it for any read that splices a TENANT-SUPPLIED query-language predicate
+// into its WHERE clause. The validator bounds the shape of such a predicate but
+// cannot bound the TIME one takes: `~` reaches Postgres ARE, a backtracking
+// engine, and a nested unbounded quantifier is inside the permitted subset. A
+// context deadline is not a substitute — cancelling a context sends a cancel
+// request on a second connection and leaves the statement running until the
+// backend notices, while statement_timeout is enforced by the backend itself.
+//
+// SET LOCAL, so it reverts with the transaction and cannot leak onto a pooled
+// connection the next caller gets. The value is interpolated rather than bound
+// because SET does not take parameters; it is a Go duration this package
+// computes, never anything from a request.
+func WithTenantTxTimeout(ctx context.Context, db *DB, tenantID uuid.UUID, timeout time.Duration, fn func(*sqlx.Tx) error) error {
+	return WithTenantTx(ctx, db, tenantID, func(tx *sqlx.Tx) error {
+		if timeout > 0 {
+			ms := timeout.Milliseconds()
+			if ms < 1 {
+				ms = 1
+			}
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL statement_timeout = %d", ms)); err != nil {
+				return fmt.Errorf("rls: set statement_timeout: %w", err)
+			}
+		}
+		return fn(tx)
+	})
 }
 
 // SQLDB returns the underlying *sql.DB for the rare repository method that needs

@@ -200,9 +200,14 @@ func (r *billingRepository) GetTenantUsageRecord(ctx context.Context, tenantID u
 }
 
 func (r *billingRepository) GetRealtimeCounts(ctx context.Context, tenantID uuid.UUID) (sensors, assets, users int) {
-	// RLS-scoped: sensors + users carry tenant_isolation policies (network_assets
-	// is global). Tenant is known, so all three counts run inside one WithTenantTx;
-	// errors are best-effort ignored as before.
+	// RLS-scoped: all three of sensors, users and assets carry tenant_isolation
+	// policies, so every count here needs app.tenant_id set. (The note this
+	// replaces said `assets` was global. It never is now — schema.sql gives
+	// `assets` an assets_tenant_isolation policy — and outside a WithTenantTx
+	// the asset count would silently come back 0 rather than error, which is
+	// the failure mode the v0.5.0 plain-pool sweep chased.) Tenant is known, so
+	// all three run inside one WithTenantTx; errors are best-effort ignored as
+	// before.
 	_ = shareddatabase.WithTenantTx(ctx, r.db, tenantID, func(tx *sql.Tx) error {
 		// Platform-provided sensors (the in-cluster Platform Discovery Sensor and
 		// Platform Device Interrogation Agent, registered by cluster-sensor-service
@@ -214,7 +219,14 @@ func (r *billingRepository) GetRealtimeCounts(ctx context.Context, tenantID uuid
 		// Match inventory-service's definition of a tenant-visible asset
 		// (asset_query_builder.go defaults to asset_status = 'monitoring') so
 		// usage here doesn't count assets still sitting in pending_approval.
-		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND deleted_at IS NULL AND asset_status = 'monitoring'`, tenantID).Scan(&assets)
+		//
+		// One row of `assets` is one asset — a host, not one of its listening
+		// ports. Before phase 1 this table held a row per (host, port), so a
+		// server exposing HTTPS, SSH and LDAPS charged the tenant three; the
+		// faces are asset_endpoints rows now and this count must never join
+		// them. `TestIntegration_RealtimeCounts_CountsHostsNotEndpoints` pins
+		// it, because the number is shown to the customer as their usage.
+		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM assets WHERE tenant_id = $1 AND deleted_at IS NULL AND asset_status = 'monitoring'`, tenantID).Scan(&assets)
 		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE tenant_id = $1 AND deleted_at IS NULL`, tenantID).Scan(&users)
 		return nil
 	})

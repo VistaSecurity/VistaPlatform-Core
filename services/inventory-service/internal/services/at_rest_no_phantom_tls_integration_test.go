@@ -28,8 +28,8 @@ func TestIntegration_AtRestFinding_CreatesNoPhantomTLSConfiguration(t *testing.T
 
 	assetID := uuid.New()
 	mustExec(t, raw, `
-		INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,'b22-kms-key.example.test','service','monitoring',NOW(),NOW(),NOW(),NOW())`, assetID, tenant)
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+		VALUES ($1,$2,'b22-kms-key.example.test','application','application','monitoring',NOW(),NOW(),NOW(),NOW())`, assetID, tenant)
 
 	// Exactly what discoverKMSKeys produces today: protocol AT-REST, port 0, and
 	// key metadata carrying NO resource_type key — which is why the at-rest

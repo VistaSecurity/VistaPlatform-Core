@@ -1,0 +1,67 @@
+<!--
+  PAN-OS `show interface all`. Two views of the same hardware: <ifnet> carries
+  the addresses and the 802.1Q tag, <hw> the MAC, link state and speed. An
+  interface can appear in one and not the other — ethernet1/2.100 is a
+  subinterface with no hardware row, ethernet1/3 is a physical port with no
+  address — which is why the projection merges by name.
+-->
+<response status="success">
+  <result>
+    <ifnet>
+      <entry>
+        <name>ethernet1/1</name>
+        <zone>untrust</zone>
+        <fwd>vr:default</fwd>
+        <vsys>1</vsys>
+        <dyn-addr/>
+        <addr6/>
+        <tag>0</tag>
+        <ip>198.51.100.2/24</ip>
+        <id>16</id>
+        <addr/>
+      </entry>
+      <entry>
+        <name>ethernet1/2.100</name>
+        <zone>trust</zone>
+        <fwd>vr:default</fwd>
+        <vsys>1</vsys>
+        <tag>100</tag>
+        <ip>203.0.113.1/24</ip>
+        <id>17</id>
+      </entry>
+      <entry>
+        <name>ethernet1/3</name>
+        <zone/>
+        <fwd/>
+        <vsys>1</vsys>
+        <tag>0</tag>
+        <ip>N/A</ip>
+        <id>18</id>
+      </entry>
+    </ifnet>
+    <hw>
+      <entry>
+        <name>ethernet1/1</name>
+        <duplex>full</duplex>
+        <type>0</type>
+        <state>up</state>
+        <st>1000/full/up</st>
+        <mac>00:1b:17:0a:0b:0d</mac>
+        <mode>(autoneg)</mode>
+        <speed>1000</speed>
+        <id>16</id>
+      </entry>
+      <entry>
+        <name>ethernet1/3</name>
+        <duplex>unknown</duplex>
+        <type>0</type>
+        <state>down</state>
+        <st>unknown</st>
+        <mac>00:1b:17:0a:0b:0f</mac>
+        <mode>(autoneg)</mode>
+        <speed>unknown</speed>
+        <id>18</id>
+      </entry>
+    </hw>
+  </result>
+</response>

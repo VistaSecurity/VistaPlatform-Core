@@ -1,30 +1,35 @@
 package services
 
-// Pure unit tests for targetKindFromAssetTypes (L-5): GetFindingsByControl's
+// Pure unit tests for targetKindFromSubjectTypes (L-5): GetFindingsByControl's
 // AffectedAssets column used to be labeled "assets" unconditionally, even
 // when a control's active findings were all on certificates or crypto
-// configurations (compliance_findings.asset_type != 'network_asset'). The
-// frontend now reads TargetKind to pick the right noun.
+// configurations (subject_type != 'asset'). The frontend now reads TargetKind
+// to pick the right noun.
 
 import "testing"
 
-func TestTargetKindFromAssetTypes(t *testing.T) {
+func TestTargetKindFromSubjectTypes(t *testing.T) {
 	cases := []struct {
 		name string
 		in   []string
 		want string
 	}{
-		{"all network assets", []string{"network_asset"}, "asset"},
+		{"all assets", []string{"asset"}, "asset"},
 		{"all certificates", []string{"certificate"}, "certificate"},
-		{"all crypto configs", []string{"crypto_implementation"}, "configuration"},
-		{"mixed asset + certificate", []string{"network_asset", "certificate"}, "mixed"},
-		{"mixed all three", []string{"network_asset", "certificate", "crypto_implementation"}, "mixed"},
+		{"all crypto configs", []string{"crypto_configuration"}, "configuration"},
+		{"mixed asset + certificate", []string{"asset", "certificate"}, "mixed"},
+		{"mixed all three", []string{"asset", "certificate", "crypto_configuration"}, "mixed"},
 		{"empty (no findings) defaults to mixed, not silently 'asset'", []string{}, "mixed"},
+		// A subject type this producer does not emit is not silently an asset
+		// either — it takes the same "mixed" default any unrecognised set gets,
+		// and a caller reading "assets" over a software install would be the L-5
+		// bug with a different noun.
+		{"a subject type compliance does not emit", []string{"software_install"}, "asset"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := targetKindFromAssetTypes(tc.in); got != tc.want {
-				t.Errorf("targetKindFromAssetTypes(%v) = %q, want %q", tc.in, got, tc.want)
+			if got := targetKindFromSubjectTypes(tc.in); got != tc.want {
+				t.Errorf("targetKindFromSubjectTypes(%v) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}

@@ -727,6 +727,504 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/catalogs/eol": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Browse the end-of-life catalogue
+         * @description One page of `eol_catalogue` — release cycles and their support dates,
+         *     mirrored from endoflife.date and importable from an offline bundle.
+         *     Platform-scoped: these rows carry no tenant_id and every tenant reads
+         *     the same catalogue. Gated by `catalogs.manage`.
+         *
+         *     `entries` is always present and never null. `total` is the unpaginated
+         *     count for the same filters. A `page_size` above 200 is clamped to 200
+         *     and the response echoes what was actually served.
+         */
+        get: operations["listEolCatalogue"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/catalogs/vulnerabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Browse the vulnerability catalogue
+         * @description One page of `vulnerability_catalogue` — CVEs mirrored from the NVD 2.0
+         *     API and osv.dev's bulk exports. Match rules (CPE / PURL) are NOT joined
+         *     in: a single CVE can carry thousands, and this is a browsing surface.
+         *     Gated by `catalogs.manage`.
+         *
+         *     `cvss_score` may be null while `cvss_vector` is set: OSV publishes a
+         *     vector and no base score, and this product does not compute one from the
+         *     vector rather than invent a number NVD publishes authoritatively.
+         */
+        get: operations["listVulnerabilityCatalogue"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/catalogs/feeds": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Catalogue mirror-feed status
+         * @description One entry per KNOWN feed (`eol`, `nvd`, `osv`), in that order, including
+         *     feeds that have never run — those report `last_status: never` rather
+         *     than being omitted, so the console lists every feed the product has
+         *     rather than only the ones that happened to work.
+         *
+         *     `enabled` is the `CATALOG_FEEDS_ENABLED` kill switch for the deployment.
+         *     When it is false nothing is scheduled AND the manual trigger refuses
+         *     with 409. Gated by `catalogs.manage`.
+         */
+        get: operations["listCatalogFeeds"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/catalogs/feeds/{feed}/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run one catalogue feed now
+         * @description Starts the feed and returns **202** immediately — the run is started,
+         *     not finished. A pass takes minutes (NVD's 5-requests-per-30-seconds
+         *     unkeyed limit alone guarantees it), so the outcome is reported through
+         *     `GET /admin/catalogs/feeds`, which the console polls.
+         *
+         *     409 means either that the deployment has feeds disabled or that a run is
+         *     already in flight; the `error` string says which. Gated by
+         *     `catalogs.manage`.
+         */
+        post: operations["syncCatalogFeed"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/catalogs/import-bundle": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import an offline catalogue bundle
+         * @description Multipart upload (field `file`) of a `catalog-bundle-<date>.tar.gz`
+         *     produced by `make build-catalog-bundle` on a connected install. The
+         *     archive holds `manifest.json` plus one JSONL file per catalogue, and
+         *     EVERY file's SHA-256 and row count is verified against the manifest
+         *     BEFORE a single row is applied — a corrupt transfer must not leave a
+         *     half-imported catalogue behind.
+         *
+         *     Integrity, not entitlement: these catalogues are Core, so the bundle
+         *     carries a hash rather than the ECDSA signature the Enterprise content
+         *     bundle uses. Gated by `catalogs.manage`.
+         *
+         *     400 carries the verification failure verbatim (e.g. a sha256 mismatch
+         *     naming the file) — that message is the operator's diagnosis — and means
+         *     the bundle was refused whole: NOTHING was written.
+         *
+         *     500 is the other outcome and is deliberately a different status: the
+         *     manifest verified and the apply then failed partway, so rows ARE in the
+         *     catalogue. The console renders a different sentence for each, because
+         *     telling an operator "nothing was applied" over a half-imported catalogue
+         *     is worse than telling them nothing. Re-importing the same bundle is the
+         *     repair; import is idempotent.
+         */
+        post: operations["importCatalogBundle"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/catalogs/eol/lookup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ask what the platform knows about a product
+         * @description The ADR-0008 **Enricher** seam with a person on the other end. Resolves a
+         *     vendor/product/version against `eol_catalogue` and the CPE names already
+         *     carried by `vulnerability_matches`, and returns each fact with its full
+         *     provenance — `source_kind`, `source_ref`, `confidence`, `model_id` — plus
+         *     the `source_url` that cites it.
+         *
+         *     The matching is deliberately exact. The cycle is chosen from the
+         *     version's own numeric components, most specific first, and a version
+         *     that matches no cycle resolves to NOTHING rather than to the
+         *     neighbouring cycle: the support date of the release beside yours is not
+         *     your support date, and returning it would be wrong in the reassuring
+         *     direction. A vendor named on both sides must agree; a vendor named on
+         *     neither cannot contradict one.
+         *
+         *     A lookup that resolves nothing is recorded on the gap list
+         *     (`catalog_lookup_misses`, with a count), which is what
+         *     `GET /admin/catalogs/eol/misses` shows and what a proposal run works
+         *     from. That is the intended way to fill the gap list deliberately.
+         *
+         *     The answer is three-valued, and the three are carried as separate
+         *     fields rather than left for a client to infer from an empty array.
+         *     `matched` says a catalogue ROW resolved — which it can do while stating
+         *     nothing, because a row whose `eol_date` is null or which carries no
+         *     `source_url` yields no fact. `miss_recorded` says the gap was counted,
+         *     and is true only when nothing matched and the write succeeded. So
+         *     "resolved", "the catalogue has it and publishes no date", "nothing, and
+         *     it is now on the gap list" and "nothing, and the gap list could not be
+         *     written" are four distinguishable outcomes of one 200. Gated by
+         *     `catalogs.manage`.
+         */
+        post: operations["lookupEolCatalogue"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/catalogs/eol/proposals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The AI proposal review queue
+         * @description One page of `eol_catalogue_proposals` — proposed end-of-life catalogue
+         *     rows awaiting a platform admin's decision (ADR-0008 D3: AI output is a
+         *     proposal, and proposals go through approval).
+         *
+         *     Each row carries the SUBJECT that was asked about and the PROPOSAL that
+         *     came back, kept apart on purpose: a model that answered about a
+         *     different product than the one asked about is exactly what comparing
+         *     them catches.
+         *
+         *     `source_url` and `model_id` are never null. Cite or refuse (D4.4) means
+         *     a proposal that could not cite was dropped before it reached the table,
+         *     and an unattributable one likewise. `confidence` is 0 on everything
+         *     written today — we do not ask a model to score itself, and a number we
+         *     invented would read as a measurement. Gated by `catalogs.manage`.
+         */
+        get: operations["listEolProposals"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/catalogs/eol/proposals/{id}/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Accept a proposal into the catalogue
+         * @description Writes the proposed row into `eol_catalogue` with
+         *     `source_kind: inferred` and the cited `source_url`, and marks the
+         *     proposal accepted with the reviewer's identity — both in one
+         *     transaction, because they are one decision.
+         *
+         *     This is the only route in the product that puts a model's claim into a
+         *     platform catalogue. It is audited with the subject, the proposed dates,
+         *     the model id and the source URL, because the question asked afterwards is
+         *     "who put THIS date in the catalogue and what did they read first", and
+         *     only the cited URL settles it.
+         *
+         *     The accepted catalogue row is visibly marked in Catalog ▸ End-of-life by
+         *     its `source_kind`, permanently.
+         *
+         *     The citation is RE-VALIDATED here rather than trusted from write time —
+         *     https, a public host, not an address literal — because this is the
+         *     moment a claim becomes data every tenant is evaluated against, and "it
+         *     was checked when it was stored" is a promise about a writer that may not
+         *     have existed when this route was written.
+         *
+         *     409 covers both state refusals, and the message says which. Either the
+         *     proposal has already been accepted or rejected — the row exists and the
+         *     reviewer is looking at a stale list, which is a different fix from a bad
+         *     id — or its cited source is not a checkable public page, so it cannot be
+         *     accepted as it stands. Reviewing is deliberately not idempotent: a second
+         *     accept would write a second catalogue row, and answering 200 would tell
+         *     two reviewers they each made the decision. Gated by `catalogs.manage`.
+         */
+        post: operations["acceptEolProposal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/catalogs/eol/proposals/{id}/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reject a proposal
+         * @description Marks the proposal rejected and writes NOTHING to the catalogue. The row
+         *     stays: a rejected proposal is the record of a model having been wrong
+         *     about something, and a queue where rejections vanished could not answer
+         *     "how often is this thing right" — which is the question that decides
+         *     whether the capability is worth running. Audited as heavily as accept
+         *     for the same reason. Gated by `catalogs.manage`.
+         */
+        post: operations["rejectEolProposal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/catalogs/eol/misses": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The catalogue gap list
+         * @description One page of `catalog_lookup_misses`: the vendor/product/version subjects
+         *     the catalogues could not answer for, ordered by how often each has been
+         *     asked about. Counting rather than logging is the point — a product asked
+         *     about four thousand times is a different priority from one asked about
+         *     once, and a log line cannot be sorted.
+         *
+         *     `last_proposed_at` is when a proposal run last asked a model about this
+         *     gap. It is stamped whether or not the ask produced a proposal, because
+         *     "we asked and got nothing usable" is an answer and re-deriving it nightly
+         *     spends an operator's tokens on a settled question. Gated by
+         *     `catalogs.manage`.
+         */
+        get: operations["listCatalogMisses"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/catalogs/eol/enrich": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Propose catalogue rows for the top gaps
+         * @description Starts a proposal run over the most-hit gaps and returns **202** — the
+         *     run is started, not finished. It makes one model call per gap and a
+         *     batch takes minutes, so blocking would time out at the gateway and leave
+         *     the operator unable to tell whether anything happened. The outcome lands
+         *     in the proposal queue, which is what the console reloads.
+         *
+         *     The same pass also runs automatically after each scheduled catalogue-feed
+         *     pass, in that order: a gap the endoflife.date mirror has just filled
+         *     should not have a model asked about it.
+         *
+         *     503 means this deployment cannot propose — a Core build (no generative
+         *     enricher at all) or an Enterprise build with no reachable `AI_PROVIDER`.
+         *     Ask `GET /admin/catalogs/eol/enrich/availability` first; it tells the two
+         *     apart. 409 means a run is already in flight. Gated by `catalogs.manage`.
+         */
+        post: operations["runCatalogEnrichment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/catalogs/eol/enrich/availability": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Whether AI proposals are offered here
+         * @description Served in EVERY edition, including Core, which answers
+         *     `{"available":false,"reason":"edition"}`. The console asks before
+         *     rendering "Propose with AI" rather than after someone clicks it: letting
+         *     a UI infer the capability from a 404 cannot tell "this build has no
+         *     generative enricher" from "the route is broken", and would put a 404 in
+         *     every Core operator's console on every visit to the page.
+         *
+         *     Three fields rather than a bool because the two "no" answers have
+         *     different fixes — an operator who configured a provider and still sees no
+         *     button needs to know which they are looking at. Gated by
+         *     `catalogs.manage`.
+         */
+        get: operations["getCatalogEnrichAvailability"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/catalogs/classification-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Browse the classification rules
+         * @description One page of `classification_rules` — the evidence behind every class
+         *     proposal (asset-inventory ADR-0004 D6). A rule maps something a
+         *     collector observed (an IEEE OUI, an SNMP sysObjectID, an EtherNet/IP
+         *     vendor id, a cloud resource type, a service banner, a port profile, a
+         *     model prefix, or the management platform the device answered) onto a
+         *     vendor and — only where the mapping is unambiguous — an asset class.
+         *
+         *     Platform-scoped: these rows carry no tenant_id and every tenant is
+         *     classified against the same table. Gated by `catalogs.manage`.
+         *
+         *     `rules` is always present and never null. `total` is the unpaginated
+         *     count for the same filters. A `page_size` above 200 is clamped to 200
+         *     and the response echoes what was actually served.
+         *
+         *     `kinds` is the rule-kind vocabulary, served WITH the list so a client's
+         *     filter and form cannot carry their own copy and drift from what the
+         *     engine actually matches.
+         */
+        get: operations["listClassificationRules"];
+        put?: never;
+        /**
+         * Add a classification rule
+         * @description Adds a curated rule. The seeded rules come from
+         *     `standards/classification-rules.yaml`; this is how the catalogue grows
+         *     between releases, which is D6's entire argument for holding the rules as
+         *     data. Gated by `catalogs.manage`.
+         *
+         *     The body is validated against the SAME rules the classifier applies at
+         *     load — pattern shape per kind, a class key that exists in the asset-class
+         *     taxonomy, a confidence inside the band — so a rule that saves is a rule
+         *     that will fire. 400 carries the validator's own message, which names what
+         *     to change.
+         *
+         *     409 means the `(rule_kind, pattern)` pair already has a rule. Edit that
+         *     one rather than adding a second: two rules for one pattern is how a
+         *     catalogue starts disagreeing with itself.
+         */
+        post: operations["createClassificationRule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/catalogs/classification-rules/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Get one classification rule
+         * @description Returns the rule directly (not wrapped). Gated by `catalogs.manage`.
+         */
+        get: operations["getClassificationRule"];
+        /**
+         * Replace a classification rule
+         * @description Replaces the rule. Every field is restated: this is a PUT, so omitting an
+         *     optional field CLEARS it. That is deliberate — clearing a class is how an
+         *     admin turns a rule that guessed into a rule that only names a vendor, and
+         *     a partial update could not express it.
+         *
+         *     Validated exactly as create is. 409 means the new `(rule_kind, pattern)`
+         *     pair belongs to a different rule.
+         *
+         *     Editing a SEEDED rule works, but the next release's seed run restates it
+         *     from `standards/classification-rules.yaml` and the edit is lost. To
+         *     override a seeded answer durably, add a more specific rule instead — a
+         *     longer sysObjectID prefix, a longer model prefix — which wins on its own
+         *     merits. Rules you ADD are never touched by a seed run.
+         */
+        put: operations["updateClassificationRule"];
+        post?: never;
+        /**
+         * Delete a classification rule
+         * @description Removes the rule. A hard delete: a classification rule is a lookup row,
+         *     not a record of something that happened, and a soft-deleted one would
+         *     have to be filtered out of the classifier's load — one more place for a
+         *     rule to be silently absent.
+         *
+         *     Class proposals already made from it are unaffected. A proposal carries a
+         *     COPY of the rules that matched, precisely so a reviewer can still see the
+         *     argument after the rule is gone.
+         *
+         *     Deleting a SEEDED rule works and the next release's seed run puts it
+         *     back. Gated by `catalogs.manage`.
+         */
+        delete: operations["deleteClassificationRule"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/costs/tenants/{id}": {
         parameters: {
             query?: never;
@@ -3946,6 +4444,379 @@ export interface components {
             /** @description The one-time reset link, returned only when email delivery was skipped or failed. */
             reset_link?: string;
         };
+        /** @description A vendor/product/version to resolve against the platform catalogues. */
+        EolLookupRequest: {
+            /**
+             * @description Narrows the search. Omit it and every kind is searched, with the fact key derived from the kind of the row that MATCHED — which is wider and more honest than placing the subject before looking.
+             * @enum {string}
+             */
+            product_kind?: "os" | "software" | "hardware";
+            /** @description Optional. A vendor named here must agree with a vendor named on the catalogue row; a vendor named on neither side cannot contradict one, because NULL on a catalogue row means unknown and not "none". */
+            vendor?: string;
+            product: string;
+            /** @description Optional. The cycle is chosen from this version's numeric components, most specific first (22.04.3 → "22.04.3", then "22.04", then "22"). An empty version resolves only where the product has exactly one row, because then there is nothing to choose between. */
+            version?: string;
+        };
+        /** @description One resolved fact and its ADR-0008 D4.1 provenance. All four provenance fields are on the wire: the claim this feature makes is that an answer says where it came from, and a response missing source_ref would show a date with no way back to the row that stated it. */
+        EolFact: {
+            /** @description The fact key — eol.os.date, eol.sw.date, eol.hw.date, or sw.cpe. */
+            key: string;
+            value: unknown;
+            /** @description The citation. Never empty: an uncited fact is commentary and is not returned. */
+            source_url: string;
+            /**
+             * @description "imported" for a catalogue lookup — the value was READ out of a row a mirror imported, and calling it inferred would understate its provenance as badly as the reverse overstates.
+             * @enum {string}
+             */
+            source_kind: "measured" | "imported" | "declared" | "inferred";
+            /** @description What said it — "catalog:eol:<row id>" or "catalog:vulnerability_match:<cve id>". */
+            source_ref: string;
+            /** @description 0 for a catalogue lookup: it made no estimate. */
+            confidence: number;
+            /** @description Empty for a catalogue lookup — no model was involved, and "" is not a model called unknown. */
+            model_id?: string;
+        };
+        /** @description What the catalogues can say. `facts` is always present (empty, never null). */
+        EolLookupResponse: {
+            facts: components["schemas"]["EolFact"][];
+            /** @description Whether a catalogue ROW resolved for this subject — regardless of whether it yielded a fact. It is deliberately NOT `facts.length > 0`: a row whose `eol_date` is null, or which carries no `source_url`, matches and states nothing. "The catalogue has never heard of this product" and "the catalogue has it and the upstream source publishes no date" are different answers with different fixes, and only the first is a gap. */
+            matched: boolean;
+            /** @description Whether this lookup was counted on the gap list — true only when nothing matched AND the write succeeded. Separate from `!matched` because the console tells an operator their product went on the gap list, and saying so when the write failed asserts something that did not happen. */
+            miss_recorded: boolean;
+            message: string;
+        };
+        /** @description One proposed eol_catalogue row awaiting review. The subject_* fields are what was ASKED about; the proposed_* fields are what came back. */
+        EolProposal: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            product_kind: "os" | "software" | "hardware";
+            /** @description Null means the gap carried no vendor, not that the product has none. */
+            subject_vendor: string | null;
+            subject_product: string;
+            subject_version: string | null;
+            /** @description Never empty: a proposal is a catalogue row and a row names a cycle. */
+            proposed_cycle: string;
+            /** Format: date-time */
+            proposed_release_date: string | null;
+            /**
+             * Format: date-time
+             * @description Null when the model named a cycle but not its end-of-life date. That is the model obeying "never guess a date" and is a legitimate proposal, not a defective one.
+             */
+            proposed_eol_date: string | null;
+            /** Format: date-time */
+            proposed_extended_support_date: string | null;
+            /** @description The cited page. Never null — an uncited proposal was dropped before storage (D4.4). */
+            source_url: string;
+            /** @description Never null — an unattributable proposal was dropped before storage (D4.1). */
+            model_id: string;
+            /**
+             * @description Always "inferred", as a stored field rather than an assumption about the table name.
+             * @enum {string}
+             */
+            source_kind: "inferred";
+            /** @description 0 on everything written today: we do not ask a model to score itself. */
+            confidence: number;
+            /** @enum {string} */
+            status: "pending" | "accepted" | "rejected";
+            /** Format: uuid */
+            reviewer_id: string | null;
+            reviewer_email: string | null;
+            /** Format: date-time */
+            reviewed_at: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        /** @description One page of the proposal queue. `proposals` is always present (empty, never null). */
+        EolProposalListResponse: {
+            proposals: components["schemas"]["EolProposal"][];
+            /** @description Unpaginated row count for the same filter. */
+            total: number;
+            page: number;
+            page_size: number;
+        };
+        /** @description The reviewed proposal, so the console renders the row it changed rather than the row it hoped for. */
+        EolProposalReviewResponse: {
+            proposal: components["schemas"]["EolProposal"];
+            /**
+             * Format: uuid
+             * @description On accept, the eol_catalogue row that was written or updated. Absent on reject, where nothing was written.
+             */
+            eol_entry_id?: string;
+            message: string;
+        };
+        /** @description One gap: a subject the catalogues could not answer for, and how often it has been asked about. The subject is stored verbatim while the uniqueness folds case, so a reviewer sees what was actually asked — a vendor-name mismatch is one of the commonest causes of a miss and a normalised display would hide it. */
+        CatalogMiss: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            product_kind: "os" | "software" | "hardware";
+            vendor: string | null;
+            product: string;
+            version: string | null;
+            /** @description How many lookups this gap has swallowed. The list is ordered by it. */
+            miss_count: number;
+            /** Format: date-time */
+            first_seen_at: string;
+            /** Format: date-time */
+            last_seen_at: string;
+            /**
+             * Format: date-time
+             * @description When a proposal run last asked about this gap, whether or not the ask produced anything. Null means never asked.
+             */
+            last_proposed_at: string | null;
+        };
+        /** @description One page of the gap list. `misses` is always present (empty, never null). */
+        CatalogMissListResponse: {
+            misses: components["schemas"]["CatalogMiss"][];
+            total: number;
+            page: number;
+            page_size: number;
+        };
+        /** @description Acknowledgement that a proposal run was STARTED (202). The outcome arrives in the proposal queue. */
+        CatalogEnrichRunResponse: {
+            status: string;
+            message: string;
+        };
+        /** @description Whether "Propose with AI" is offered on this deployment. Three fields rather than a bool because the two "no" answers have different fixes. */
+        CatalogEnrichAvailability: {
+            /** @description Whether a proposal run could succeed right now. */
+            available: boolean;
+            /**
+             * @description "edition" — this build has no generative enricher (Core). The lookup enricher, the gap list and the review queue are all still present. "no_provider" — the build has one, but AI_PROVIDER names nothing reachable; the operator configures a provider. Empty when available.
+             * @enum {string}
+             */
+            reason?: "edition" | "no_provider";
+            /** @description The configured provider name ("none", "anthropic", "openai-compatible"). */
+            provider?: string;
+        };
+        /** @description One release cycle of one product. Identity is (product_kind, vendor, product, cycle). */
+        EolCatalogueEntry: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            product_kind: "os" | "software" | "hardware";
+            /** @description Null means UNKNOWN, not "none". The mirror leaves it null rather than writing "Unknown", which would make the identity index treat two different products as one row the day the real vendor is filled in. */
+            vendor: string | null;
+            product: string;
+            /** @description The release train, e.g. "22.04", "3.11", "17". */
+            cycle: string;
+            /** Format: date-time */
+            release_date: string | null;
+            /**
+             * Format: date-time
+             * @description Null when the source has not announced a date — including when it says support has ended but gives no date. A fabricated date would give the EOL producer a precise-looking days-past-EOL number derived from nothing.
+             */
+            eol_date: string | null;
+            /** Format: date-time */
+            extended_support_date: string | null;
+            source_url: string | null;
+            /** @enum {string} */
+            source_kind: "measured" | "declared" | "imported" | "inferred";
+            /** Format: date-time */
+            updated_at?: string;
+        };
+        /** @description One page of the end-of-life catalogue. `entries` is always present (empty, never null). */
+        EolCatalogueListResponse: {
+            entries: components["schemas"]["EolCatalogueEntry"][];
+            /** @description Unpaginated row count for the same filters. */
+            total: number;
+            page: number;
+            page_size: number;
+        };
+        /**
+         * @description How a rule's `pattern` is matched (asset-inventory ADR-0004 D6). Mirrors
+         *     the `rule_kind` CHECK on `classification_rules` and the matcher set in
+         *     `shared/classify`; adding a value is a change in all three at once — and
+         *     in this enum, which is the one in a different language and therefore the
+         *     one that gets left behind. `TestClassificationRuleKind_SpecMatchesTheEngine`
+         *     compares the two and fails either way round.
+         *
+         *     * `oui` — the 24-bit IEEE assignment at the front of a MAC, as 6
+         *       uppercase hex digits with no separators.
+         *     * `sysobjectid` — an OID prefix under the IANA private-enterprise arc
+         *       `1.3.6.1.4.1`, matched on arc boundaries; longest prefix wins.
+         *     * `enip` — an ODVA vendor id in decimal, from an EtherNet/IP List
+         *       Identity response.
+         *     * `cloud_type` — a provider resource type as the cloud collectors spell
+         *       it (`aws_s3_bucket`).
+         *     * `banner` — a Go RE2 regexp matched against every captured banner. The
+         *       pattern carries its own anchoring.
+         *     * `port_profile` — an ascending comma-separated port list, matching only
+         *       when EVERY listed port is open.
+         *     * `model` — a case-insensitive prefix of the model or product id the
+         *       device stated; longest prefix wins, and a rule that names a vendor
+         *       fires only for that vendor.
+         *     * `platform` — the collector path's own identity for the device: the
+         *       management API it answered (`panos`), or the profile it was registered
+         *       under (`cisco_asa`).
+         *     * `cdp_capabilities` — an ascending comma-separated SET of Cisco CDP
+         *       capability names (`router,switch`), spelled as the decoder in
+         *       `shared/hostobs` spells them. Matches only when EVERY name is
+         *       advertised, and only the matching rules naming the MOST capabilities
+         *       are returned, so a combination refines rather than argues with the
+         *       single-capability rules under it.
+         *     * `lldp_capability` — the same matching over IEEE 802.1AB system
+         *       capabilities. Two kinds and not one because the vocabularies use
+         *       different words for overlapping ideas: CDP's `switch` says the device
+         *       switches, while 802.1AB's `bridge` is the bridging FUNCTION, which an
+         *       access point and a desk phone also perform.
+         *     * `mdns_service` — one DNS-SD service type in its registry spelling,
+         *       lowercase (`_ipp._tcp`). Exact, case-insensitive.
+         * @enum {string}
+         */
+        ClassificationRuleKind: "oui" | "sysobjectid" | "enip" | "cloud_type" | "banner" | "port_profile" | "model" | "platform" | "cdp_capabilities" | "lldp_capability" | "mdns_service";
+        /**
+         * @description One curated rule. Identity is `(rule_kind, pattern)`.
+         *
+         *     `class_key` is NULLABLE and usually null on an OUI rule, which is the
+         *     table's whole posture: a manufacturer that sells servers, switches and
+         *     printers under one assignment gets a VENDOR and no class, because a
+         *     wrong class is worse than none — an absent class shows as unclassified
+         *     and invites someone to look, a wrong one shows as a fact.
+         */
+        ClassificationRule: {
+            /** Format: uuid */
+            id: string;
+            rule_kind: components["schemas"]["ClassificationRuleKind"];
+            /** @description The thing matched, in the kind's own syntax. */
+            pattern: string;
+            /** @description Asset class key from the platform taxonomy, or null. Null means the rule deliberately proposes NO class — not "unknown class", and not an empty string. */
+            class_key: string | null;
+            /** @description The manufacturer this pattern identifies. On a `model` rule it is also a guard: the rule fires only when the observed vendor agrees or is absent. */
+            vendor: string | null;
+            /** @description The specific model, where the pattern pins one. Rarely set. */
+            model: string | null;
+            /**
+             * Format: double
+             * @description What the rule ASSERTS, 0.50–0.95 — not how sure we are that the pattern matched, which is exact. A vendor-only rule carries the confidence of its vendor claim, so it sits HIGHER than the class-bearing rules beside it: it asserts less. 1.0 is refused because nothing here is a measurement.
+             */
+            confidence: number;
+            /** @description Where the mapping comes from. A rule that cannot cite anything is somebody's memory. */
+            source_url: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        /**
+         * @description A rule to create, or the full replacement for an existing one. On PUT
+         *     every field is restated and an omitted optional field is CLEARED —
+         *     clearing a class is how an admin turns a rule that guessed into a rule
+         *     that only names a vendor.
+         *
+         *     At least one of `class_key`, `vendor` or `model` must be populated: a
+         *     rule that asserts nothing can only waste a reviewer's time, and the
+         *     database refuses it too.
+         */
+        ClassificationRuleInput: {
+            rule_kind: components["schemas"]["ClassificationRuleKind"];
+            pattern: string;
+            class_key?: string | null;
+            vendor?: string | null;
+            model?: string | null;
+            /** Format: double */
+            confidence: number;
+            source_url?: string | null;
+        };
+        /** @description One page of the classification rules. `rules` is always present (empty, never null). */
+        ClassificationRuleListResponse: {
+            rules: components["schemas"]["ClassificationRule"][];
+            /** @description Unpaginated row count for the same filters. */
+            total: number;
+            page: number;
+            page_size: number;
+            /** @description The rule-kind vocabulary, served with the list so a client's filter and form cannot keep their own copy and drift from what the engine matches. */
+            kinds: components["schemas"]["ClassificationRuleKind"][];
+        };
+        /** @description One CVE. `cve_id` is the identity — there is no surrogate key. */
+        VulnerabilityCatalogueEntry: {
+            cve_id: string;
+            /** @description Which CVSS ladder the score came from ("4.0", "3.1", "2.0"). Recorded so a reader never has to guess. */
+            cvss_version: string | null;
+            cvss_score: number | null;
+            cvss_vector: string | null;
+            /**
+             * @description The CVSS qualitative band. Derived from the score when the feed omits the word, so a 9.8 never renders as "—".
+             * @enum {string|null}
+             */
+            severity: "none" | "low" | "medium" | "high" | "critical" | null;
+            /** Format: date-time */
+            published_at: string | null;
+            /** Format: date-time */
+            modified_at: string | null;
+            description: string | null;
+            /** @enum {string} */
+            source_kind: "measured" | "declared" | "imported" | "inferred";
+        };
+        /** @description One page of the vulnerability catalogue. `vulnerabilities` is always present (empty, never null). */
+        VulnerabilityCatalogueListResponse: {
+            vulnerabilities: components["schemas"]["VulnerabilityCatalogueEntry"][];
+            /** @description Unpaginated row count for the same filters. */
+            total: number;
+            page: number;
+            page_size: number;
+        };
+        /** @description Where one mirror feed got to and how it went. */
+        CatalogFeedStatus: {
+            /** @enum {string} */
+            feed: "eol" | "nvd" | "osv";
+            /** @description Opaque and per-feed: NVD stores the end of the last modification window it consumed, OSV a JSON map of per-ecosystem watermarks, and the EOL feed the date it last completed a full pass. Advanced only on success, so a failed run retries its window rather than skipping it. */
+            cursor: string | null;
+            /** Format: date-time */
+            last_run_at: string | null;
+            /**
+             * @description `never` is a real answer — the feed has not run — as distinct from a run whose outcome was lost.
+             * @enum {string}
+             */
+            last_status: "never" | "running" | "ok" | "error";
+            last_error: string | null;
+            /** @description Catalogue rows written by the last successful run. */
+            row_count: number;
+            /** Format: date-time */
+            updated_at?: string | null;
+        };
+        /** @description Status of every catalogue feed, plus the deployment-level switches the console renders. */
+        CatalogFeedListResponse: {
+            feeds: components["schemas"]["CatalogFeedStatus"][];
+            /** @description The CATALOG_FEEDS_ENABLED kill switch. False ⇒ nothing scheduled and manual sync refused with 409. */
+            enabled: boolean;
+            /** @description Scheduled cadence between passes. */
+            interval_seconds: number;
+        };
+        /** @description Acknowledgement that a feed run was STARTED (202). The outcome arrives via GET /admin/catalogs/feeds. */
+        CatalogFeedSyncResponse: {
+            /** @enum {string} */
+            feed: "eol" | "nvd" | "osv";
+            /** @enum {string} */
+            status: "running";
+            message: string;
+        };
+        /** @description One verified file from an offline bundle's manifest. */
+        CatalogBundleFile: {
+            name: string;
+            sha256: string;
+            rows: number;
+            bytes: number;
+        };
+        /** @description What an offline-bundle import applied, after every file passed its SHA-256 and row-count check. */
+        CatalogBundleImportResponse: {
+            files: components["schemas"]["CatalogBundleFile"][];
+            /** @description End-of-life rows the database affected. The upsert is ON CONFLICT DO UPDATE, so re-importing the same bundle reports the same number again — it answers "how much of the bundle was applied", not "how much changed". */
+            eol_rows: number;
+            /** @description CVE rows the database affected. Same DO UPDATE semantics as eol_rows. */
+            vulnerability_rows: number;
+            /** @description Match rules the database actually WROTE. These are INSERT ... DO NOTHING, so re-importing a bundle the catalogue already holds reports 0 — not the count of rules in the file, which would claim tens of thousands of writes that did not happen. */
+            match_rows: number;
+            /**
+             * Format: date-time
+             * @description When the bundle was built on the connected install.
+             */
+            generated_at?: string;
+            message: string;
+        };
     };
     responses: {
         /** @description Invalid request. */
@@ -5309,6 +6180,513 @@ export interface operations {
                     "application/json": components["schemas"]["LegacyError"];
                 };
             };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    listEolCatalogue: {
+        parameters: {
+            query?: {
+                /** @description Case-insensitive substring over product, vendor and cycle. */
+                search?: string;
+                /** @description Filter by product kind. */
+                kind?: "os" | "software" | "hardware";
+                /** @description 1-based page number (default 1). */
+                page?: number;
+                /** @description Rows per page (default 50, max 200). */
+                page_size?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of the end-of-life catalogue. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EolCatalogueListResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    listVulnerabilityCatalogue: {
+        parameters: {
+            query?: {
+                /** @description Case-insensitive substring over the CVE id and description. */
+                search?: string;
+                /** @description Filter by CVSS qualitative band. */
+                severity?: "none" | "low" | "medium" | "high" | "critical";
+                /** @description 1-based page number (default 1). */
+                page?: number;
+                /** @description Rows per page (default 50, max 200). */
+                page_size?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of the vulnerability catalogue. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VulnerabilityCatalogueListResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    listCatalogFeeds: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Status of every catalogue feed. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogFeedListResponse"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    syncCatalogFeed: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                feed: "eol" | "nvd" | "osv";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The sync was started. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogFeedSyncResponse"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
+            500: components["responses"]["LegacyServerError"];
+            /** @description The feed runner is not configured in this deployment. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+        };
+    };
+    importCatalogBundle: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    /** Format: binary */
+                    file: string;
+                };
+            };
+        };
+        responses: {
+            /** @description The bundle was verified and applied. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogBundleImportResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            500: components["responses"]["LegacyServerError"];
+            /** @description Bundle import is not configured in this deployment. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+        };
+    };
+    lookupEolCatalogue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EolLookupRequest"];
+            };
+        };
+        responses: {
+            /** @description What the catalogues can say, possibly nothing. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EolLookupResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    listEolProposals: {
+        parameters: {
+            query?: {
+                /** @description Filter by review status. Omit for all. */
+                status?: "pending" | "accepted" | "rejected";
+                /** @description 1-based page number (default 1). */
+                page?: number;
+                /** @description Rows per page (default 50, max 200). */
+                page_size?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of the proposal queue. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EolProposalListResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    acceptEolProposal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Accepted; the catalogue row was written. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EolProposalReviewResponse"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    rejectEolProposal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Rejected. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EolProposalReviewResponse"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    listCatalogMisses: {
+        parameters: {
+            query?: {
+                /** @description 1-based page number (default 1). */
+                page?: number;
+                /** @description Rows per page (default 50, max 200). */
+                page_size?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of the gap list. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogMissListResponse"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    runCatalogEnrichment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The proposal run was started. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogEnrichRunResponse"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            409: components["responses"]["LegacyConflict"];
+            500: components["responses"]["LegacyServerError"];
+            /** @description AI end-of-life proposals are not available on this deployment. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+        };
+    };
+    getCatalogEnrichAvailability: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Whether a proposal run could succeed right now. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogEnrichAvailability"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+        };
+    };
+    listClassificationRules: {
+        parameters: {
+            query?: {
+                /** @description Case-insensitive substring over pattern, vendor, model and class key. */
+                search?: string;
+                /** @description Filter by rule kind. */
+                kind?: components["schemas"]["ClassificationRuleKind"];
+                /** @description 1-based page number (default 1). */
+                page?: number;
+                /** @description Rows per page (default 50, max 200). */
+                page_size?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of the classification rules. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClassificationRuleListResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    createClassificationRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClassificationRuleInput"];
+            };
+        };
+        responses: {
+            /** @description The rule was created. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClassificationRule"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            409: components["responses"]["LegacyConflict"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    getClassificationRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rule. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClassificationRule"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    updateClassificationRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClassificationRuleInput"];
+            };
+        };
+        responses: {
+            /** @description The updated rule. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClassificationRule"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    deleteClassificationRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rule was deleted. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
         };
     };

@@ -14,6 +14,8 @@ import (
 // they are filters and UUIDs — but the MCP surface is exactly where a future
 // "run this query" argument would land, and a denylist would have shipped it.
 var allowedArgs = map[string]bool{
+	// MUTATION-TESTED: adding "question" here fails TestAskQuestionIsNeverRecorded.
+	//
 	// pagination / ordering
 	"page":       true,
 	"page_size":  true,
@@ -21,15 +23,13 @@ var allowedArgs = map[string]bool{
 	"sort_by":    true,
 	"sort_order": true,
 
-	// asset filters
-	"asset_type":                 true,
-	"environment":                true,
-	"risk_level":                 true,
-	"business_unit":              true,
-	"asset_status":               true,
-	"has_certificates":           true,
-	"cert_expiring_within_days":  true,
-	"uses_deprecated_algorithms": true,
+	// asset facets — a closed vocabulary of facet LEVEL names (class, risk,
+	// environment, …). These are code, not tenant data: an unknown one is
+	// refused by the platform rather than reaching SQL.
+	"facets": true,
+
+	// compliance filters
+	"environment": true,
 
 	// certificate filters
 	"expiring_days": true,
@@ -43,7 +43,6 @@ var allowedArgs = map[string]bool{
 	"deprecation_status": true,
 	"pqc":                true,
 
-	// compliance filters
 	"severity": true,
 
 	// identifiers — which object was read is the point of the record
@@ -58,14 +57,46 @@ var allowedArgs = map[string]bool{
 
 // previewArgs are free-text arguments recorded only as a truncated preview,
 // under a "<name>_preview" key so nobody mistakes the stored value for the
-// exact query. Same treatment shared/middleware/audit gives ?search=.
-var previewArgs = map[string]bool{
-	"search": true,
-	"issuer": true,
+// exact query. Same treatment shared/middleware/audit gives ?search=. The value
+// is that argument's own cap in bytes.
+//
+// `query` is here rather than in allowedArgs, and it is the case the allowlist
+// comment anticipated: the query language IS the "run this query" argument, and
+// a query is free text a caller composed — it can carry an owner's email or a
+// serial number it learned two calls ago. Which query an agent ran is the most
+// useful line in this record, so it gets a longer cap than a search box rather
+// than being dropped; it is still bounded, and still a preview, because the
+// stored string is evidence of a request, not a copy of the tenant's data.
+var previewArgs = map[string]int{
+	"search": 64,
+	"issuer": 64,
+	"text":   64,
+	"query":  256,
 }
 
-// previewLen bounds a recorded free-text preview.
-const previewLen = 64
+// `question` — `vistaplatform_ask`'s only argument — is deliberately in NEITHER
+// map, so the allowlist drops it.
+//
+// It is the one argument on this surface that is a PROMPT, and ADR-0008 D4.7 is
+// that prompts are not stored unless the tenant opts in. That opt-in lives in
+// `tenant_admin_settings.config->'ai'.record_questions` and is enforced inside
+// `ai.WithAudit`, one layer down, where the question actually crosses the
+// provider boundary. Recording it here as well would write the text to a second
+// rail that never asked — an opt-in honoured in one place and bypassed in
+// another is not an opt-in.
+//
+// What the record still says is everything it says for every other tool: who
+// called, which tool, whether it was denied, how long it took and how much of
+// the tenant's inventory came back. "Which assets did this select" is answerable
+// from the grounding record the seam writes, where the canonical query — the
+// platform's own derived artefact, not a word the user typed — is recorded
+// unconditionally.
+//
+// `TestAskQuestionIsNeverRecorded` pins this, in both polarities.
+
+// AskQuestionArg is the argument name that must never be recorded. Exported so
+// the guard names it once rather than spelling it in a test and in a comment.
+const AskQuestionArg = "question"
 
 // projectArgs turns a tool's typed input struct into the subset of arguments
 // that may be recorded. Input structs use omitempty, so absent filters simply
@@ -85,13 +116,13 @@ func projectArgs(in any) map[string]any {
 
 	out := map[string]any{}
 	for k, v := range raw {
-		switch {
-		case previewArgs[k]:
+		switch cap, isPreview := previewArgs[k]; {
+		case isPreview:
 			s, ok := v.(string)
 			if !ok || s == "" {
 				continue
 			}
-			out[k+"_preview"] = truncate(s, previewLen)
+			out[k+"_preview"] = truncate(s, cap)
 		case allowedArgs[k]:
 			out[k] = v
 		}

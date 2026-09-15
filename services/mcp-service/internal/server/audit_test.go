@@ -67,7 +67,7 @@ func (s *auditSink) summary() string {
 func TestAuditRecordsSuccessfulToolCall(t *testing.T) {
 	f := newFixture(t)
 	result := callTool(t, f, f.validPAT, "vistaplatform_query_assets",
-		map[string]any{"search": "web", "environment": []string{"production"}, "page_size": 10})
+		map[string]any{"query": `environment:production and hostname:web`, "limit": 10})
 	if result["isError"] == true {
 		t.Fatalf("tool errored: %v", result)
 	}
@@ -108,19 +108,21 @@ func TestAuditRecordsSuccessfulToolCall(t *testing.T) {
 		t.Errorf("result_bytes = %v, want > 0", e.Metadata["result_bytes"])
 	}
 
-	// Arguments are projected, and the free-text one is a preview.
+	// Arguments are projected, and the query — the whole request, on this
+	// surface — is recorded as a bounded preview. Which query an agent ran is
+	// the line someone reconstructing what it read actually needs.
 	args, ok := e.Metadata["arguments"].(map[string]any)
 	if !ok {
 		t.Fatalf("arguments not recorded: %v", e.Metadata)
 	}
-	if args["search_preview"] != "web" {
-		t.Errorf("search_preview = %v, want web", args["search_preview"])
+	if args["query_preview"] != `environment:production and hostname:web` {
+		t.Errorf("query_preview = %v, want the query that was run", args["query_preview"])
 	}
-	if _, leaked := args["search"]; leaked {
-		t.Error("raw search argument recorded; only the preview should be")
+	if _, leaked := args["query"]; leaked {
+		t.Error("raw query argument recorded; only the bounded preview should be")
 	}
-	if env, _ := args["environment"].([]any); len(env) != 1 || env[0] != "production" {
-		t.Errorf("environment filter not recorded: %v", args["environment"])
+	if lim, _ := args["limit"].(float64); lim != 10 {
+		t.Errorf("limit not recorded: %v", args["limit"])
 	}
 
 	// The data itself must never be in the record.

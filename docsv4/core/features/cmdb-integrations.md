@@ -156,7 +156,7 @@ Field mapping controls how platform entity attributes are translated to CMDB CI 
 |---------------|------------|-------------|
 | `asset_name` | `ci_name` | Configuration item display name |
 | `asset_id` | `ci_id` | Unique configuration item identifier |
-| `asset_type` | `ci_class` | CI classification (Server, Application, etc.) |
+| `class_key` | `cmdb_ci_type` | The asset's class, mapped to the CMDB's own CI class (see **CI Type Mapping** below) |
 | `ip_address` | `ip_address` | Primary IP address |
 | `fqdn` | `fqdn` | Fully qualified domain name |
 | `operating_system` | `os_name` | Operating system name and version |
@@ -169,13 +169,16 @@ Field mapping controls how platform entity attributes are translated to CMDB CI 
 
 ### CI Type Mapping
 
-Each entity category in the platform is mapped to a platform-specific CI class:
+Each asset is mapped to a CI class by its **class** — the kind of thing it is. The mapping is per profile, so a CMDB with its own conventions can be told about them; these are the defaults:
 
-| Platform Entity | ServiceNow | Device42 | SolarWinds | Oomnitza |
+| Platform class | ServiceNow | Device42 | SolarWinds | Oomnitza |
 |----------------|------------|----------|------------|----------|
-| Infrastructure Asset (server) | `cmdb_ci_server` | `device` | `Orion.Nodes` | `assets` |
-| Infrastructure Asset (endpoint) | `cmdb_ci_computer` | `device` | `Orion.Nodes` | `assets` |
-| Infrastructure Asset (service) | `cmdb_ci_service` | `device` | `Orion.Nodes` | `assets` |
+| Server | `cmdb_ci_server` | `device` | `Orion.Nodes` | `assets` |
+| Workstation / Laptop | `cmdb_ci_computer` | `device` | `Orion.Nodes` | `assets` |
+| Network Device (switch, router, firewall, load balancer) | `cmdb_ci_netgear` | `device` | `Orion.Nodes` | `assets` |
+| Virtual Machine | `cmdb_ci_vm_instance` | `device` | `Orion.Nodes` | `assets` |
+| Cloud Resource (object storage, managed database, key store, …) | `cmdb_ci_cloud_service_account` | `device` | `Orion.Nodes` | `assets` |
+| Business Service / Technical Service | `cmdb_ci_service` | `device` | `Orion.Nodes` | `assets` |
 | Certificate | `cmdb_ci_certificate` | `certificate` | Custom property | `assets` (custom fields) |
 | Key | `cmdb_ci_credential` | Custom field on device | Custom property | `assets` (custom fields) |
 | Crypto Configuration | `u_crypto_configuration` (custom) | Custom field on device | Custom property | `assets` (custom fields) |

@@ -60,7 +60,7 @@ func (r *Repository) withTenantSession(ctx context.Context, tenantID uuid.UUID, 
 	return tx.Commit()
 }
 
-const scopeColumns = `id, tenant_id, name, description, predicate, version,
+const scopeColumns = `id, tenant_id, name, description, query, version,
 	is_default, is_system, deleted_at, created_by, updated_by, created_at, updated_at`
 
 // List returns all non-deleted scopes for the given tenant, ordered by
@@ -130,18 +130,18 @@ func (r *Repository) Create(ctx context.Context, s *Scope) error {
 	return r.withTenantSession(ctx, s.TenantID, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
 			INSERT INTO public.scopes
-				(tenant_id, name, description, predicate, version, is_default, is_system,
+				(tenant_id, name, description, query, version, is_default, is_system,
 				 created_by, updated_by)
 			VALUES ($1, $2, $3, $4, 1, $5, $6, $7, $8)
 			RETURNING id, created_at, updated_at, version
-		`, s.TenantID, s.Name, s.Description, s.Predicate, s.IsDefault, s.IsSystem,
+		`, s.TenantID, s.Name, s.Description, s.Query, s.IsDefault, s.IsSystem,
 			s.CreatedBy, s.UpdatedBy,
 		).Scan(&s.ID, &s.CreatedAt, &s.UpdatedAt, &s.Version)
 	})
 }
 
-// Update overwrites name/description/predicate. Version is bumped iff name or
-// predicate actually changed (the audit trigger fires on the same condition).
+// Update overwrites name/description/query. Version is bumped iff name or
+// query actually changed (the audit trigger fires on the same condition).
 // Returns ErrNotFound if the row is missing.
 func (r *Repository) Update(ctx context.Context, tenantID, scopeID uuid.UUID, updatedBy uuid.UUID, req UpdateRequest) (*Scope, error) {
 	if err := ValidateName(req.Name); err != nil {
@@ -157,17 +157,17 @@ func (r *Repository) Update(ctx context.Context, tenantID, scopeID uuid.UUID, up
 			UPDATE public.scopes
 			SET name = $1::text,
 				description = $2,
-				predicate = $3,
+				query = $3,
 				updated_by = $4,
 				updated_at = now(),
 				version = CASE
-					WHEN name::text IS DISTINCT FROM $1::text OR predicate IS DISTINCT FROM $3
+					WHEN name::text IS DISTINCT FROM $1::text OR query IS DISTINCT FROM $3
 					THEN version + 1
 					ELSE version
 				END
 			WHERE id = $5 AND tenant_id = $6 AND deleted_at IS NULL
 			RETURNING `+scopeColumns+`
-		`, req.Name, req.Description, req.Predicate, updatedBy, scopeID, tenantID)
+		`, req.Name, req.Description, req.Query, updatedBy, scopeID, tenantID)
 		s, scanErr := scanScope(row)
 		if errors.Is(scanErr, sql.ErrNoRows) {
 			return ErrNotFound
@@ -230,7 +230,7 @@ func scanScope(r interface{ Scan(...interface{}) error }) (Scope, error) {
 	var s Scope
 	var description sql.NullString
 	err := r.Scan(
-		&s.ID, &s.TenantID, &s.Name, &description, &s.Predicate, &s.Version,
+		&s.ID, &s.TenantID, &s.Name, &description, &s.Query, &s.Version,
 		&s.IsDefault, &s.IsSystem, &s.DeletedAt,
 		&s.CreatedBy, &s.UpdatedBy, &s.CreatedAt, &s.UpdatedAt,
 	)

@@ -42,7 +42,7 @@ func TestIntegration_GetNextJob_CarriesDeviceAddressToAgent(t *testing.T) {
 	job, err := jobQueue.CreateJob(ctx, models.CreateDeviceJobRequest{
 		TenantID:   tenant,
 		JobType:    models.JobTypeDeviceInterrogation,
-		DeviceID:   &dev.ID,
+		AssetID:    &dev.ID,
 		Parameters: map[string]interface{}{"device_type": "unifi"},
 	})
 	if err != nil {
@@ -102,7 +102,7 @@ func TestIntegration_GetNextJob_CarriesDeviceTypeToAgent(t *testing.T) {
 	job, err := jobQueue.CreateJob(ctx, models.CreateDeviceJobRequest{
 		TenantID:   tenant,
 		JobType:    models.JobTypeDeviceInterrogation,
-		DeviceID:   &dev.ID,
+		AssetID:    &dev.ID,
 		Parameters: map[string]interface{}{}, // what the scheduler actually sends
 	})
 	if err != nil {
@@ -150,7 +150,7 @@ func TestIntegration_EnrichJobTarget_KeepsExplicitDeviceType(t *testing.T) {
 	job, err := jobQueue.CreateJob(ctx, models.CreateDeviceJobRequest{
 		TenantID:   tenant,
 		JobType:    models.JobTypeDeviceInterrogation,
-		DeviceID:   &dev.ID,
+		AssetID:    &dev.ID,
 		Parameters: map[string]interface{}{"device_type": "paloalto"},
 	})
 	if err != nil {
@@ -176,18 +176,25 @@ func TestIntegration_EnrichJobTarget_KeepsExplicitDeviceType(t *testing.T) {
 // reason, rather than being handed to an agent that will report a misleading
 // connection or auth error against its own host.
 //
-// The devices table's `device_identifier` CHECK requires one of hostname /
-// ip_address / management_url to be NOT NULL — but an empty string satisfies
-// it, so an addressless device is reachable and this guard is not dead code.
+// An addressless managed asset is still reachable, and this guard is not dead
+// code: a device identified only by its SERIAL NUMBER is a perfectly valid
+// asset — the identification engine accepts it, and a cloud resource or a
+// CMDB-imported device routinely has one — but there is nothing for an agent to
+// connect to. That is the case constructed here.
+//
+// (The empty-hostname shape this used to build is no longer reachable: an
+// observation whose only identifier is "" carries no identifier at all, and
+// CreateDevice refuses it rather than minting an asset nothing can ever match
+// again.)
 func TestIntegration_GetNextJob_RefusesAddresslessDevice(t *testing.T) {
 	db := testdb.Connect(t)
 	tenant := testdb.NewTenant(t, db)
 	ctx := context.Background()
 
-	blank := ""
+	serial := "SN-" + uuid.New().String()[:8]
 	dev, err := NewDeviceService(db).CreateDevice(ctx, tenant, models.CreateDeviceRequest{
-		DeviceType: "unifi",
-		Hostname:   &blank, // NOT NULL, satisfies the CHECK, reaches nothing
+		DeviceType:   "unifi",
+		SerialNumber: &serial, // identifiable, but not addressable
 	})
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
@@ -197,7 +204,7 @@ func TestIntegration_GetNextJob_RefusesAddresslessDevice(t *testing.T) {
 	job, err := jobQueue.CreateJob(ctx, models.CreateDeviceJobRequest{
 		TenantID:   tenant,
 		JobType:    models.JobTypeDeviceInterrogation,
-		DeviceID:   &dev.ID,
+		AssetID:    &dev.ID,
 		Parameters: map[string]interface{}{"device_type": "unifi"},
 	})
 	if err != nil {
@@ -232,7 +239,7 @@ func TestIntegration_GetNextJob_DoesNotLeakAddressAcrossTenants(t *testing.T) {
 	job := &models.Job{
 		ID:         uuid.New(),
 		Type:       string(models.JobTypeDeviceInterrogation),
-		DeviceID:   &dev.ID,
+		AssetID:    &dev.ID,
 		Parameters: map[string]interface{}{"device_type": "unifi"},
 	}
 

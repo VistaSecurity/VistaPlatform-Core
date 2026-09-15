@@ -230,6 +230,9 @@ func (c *SensorManagerClient) Register() (*models.SensorConfig, error) {
 		if nd, ok := registrationResp.Features["network_discovery"]; ok {
 			config.CaptureConfig.NetworkDiscovery = nd
 		}
+		if ho, ok := registrationResp.Features["host_observation"]; ok {
+			config.CaptureConfig.HostObservation = &ho
+		}
 	}
 
 	return &config, nil

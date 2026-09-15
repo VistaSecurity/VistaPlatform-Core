@@ -7,6 +7,115 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.1] - 2026-09-14
+
+This is the first release of the **general asset inventory**: the product now
+inventories every kind of asset, not only cryptographic material. Assets are
+configuration items with endpoints as children, one identification engine sits
+behind every intake, relationships are a typed graph with a map, posture is one
+findings table with an explicit coverage record, and the AI seams default to no
+provider at all. Tracked as one epic in the private repository.
+
+### Highlights
+
+- **One identification engine, one class taxonomy.** Sensor ingest, active scan,
+  cloud enumeration, PCAP, import, CMDB pull and interrogation all resolve through the
+  same rule-based engine, so what a thing *is* is argued from a curated rule table and
+  shows its working — a Class history panel lists every class an asset has held, and a
+  disagreement becomes a class proposal in Approvals rather than an overwrite.
+
+- **Relationships, and a map.** Assets record how they are connected as a typed
+  graph with provenance on every edge, and an inferred edge stays inferred until
+  something confirms it. Inventory → **Map** goes live with a neighbourhood walk, an
+  aggregated **Topology** view, and an answer to what breaks if an asset dies.
+
+- **Collection breadth.** Six vendor collectors (UniFi, Palo Alto, Cisco, Fortinet,
+  F5, SNMP) widened to operational facts and observed edges; cloud discovery inventories
+  the compute and network estate with containment; CycloneDX and SPDX bills of materials
+  become software inventory; and **the host agent's inventory of its own machine
+  becomes an asset**, local or remote.
+
+- **A query language, saved views, and MCP.** One validated language spans the
+  Inventory facet rail, saved views, compliance measurement and the read-only MCP
+  tools — `software:(name:openssl and version < 3.0)` is a predicate the catalogue
+  validates, not a filter parameter — and those tools now cover assets, software,
+  relationships, neighbourhood and impact, under your own row-level security.
+
+- **One findings table, and its producers.** Configuration, drift, end-of-life,
+  vulnerability, hygiene, crypto and compliance all write through
+  `shared/findings/producer` into one `findings` table, each finding naming its
+  subject and carrying bounded evidence. End-of-life and vulnerability answers come
+  from **offline** catalogue bundles, each showing the row that said it.
+
+- **Risk that can go down, and says who has looked.** Per-asset risk is recomputed
+  as the maximum over an asset's cryptographic configurations from the algorithm
+  catalogue, with an explicit coverage record — "not assessed" is never reported as
+  clean. PQC exposure uses the same NIST IR 8547 denylist everywhere, now including
+  keys: a `Vulnerable to quantum attack` finding names the key.
+
+- **Alerts.** Findings-driven alerts with de-escalation, three new types (vulnerable
+  software, end of life, inventory hygiene) and a "Changed since baseline" drift alert.
+
+- **AI-native seams that are Enterprise and off by default.** Eight seams sit behind
+  one redact-then-audit provider boundary; `ai.provider` defaults to `none`, every
+  seam has a rule-based implementation that answers, and no model is in any scoring,
+  risk or compliance path. The five generative seams — narrator, author, enricher,
+  ask/query, remediator — are Enterprise, and where a model translates a question it
+  returns **one line of the query language**, shown to you editable, never rows.
+
+### Breaking / Upgrading
+
+- **Fresh install only. There is no upgrade path from a `core-v0.x` release.** The
+  port-as-asset tables (`network_assets`, `devices`) and the `asset_type` enum were
+  dropped rather than migrated — no backfill, no compatibility view (ADR-0007), because
+  there are no installs of that model to carry forward. Start a new database. From
+  1.0.0 onward the chart re-applies the schema on every upgrade as before, and its
+  `NOTES.txt` asks you to **`pg_dump` first**; please do.
+- **Credentials are re-entered and sensors re-enrol.** Credential encryption is at
+  v2 with new HKDF constants and the old ones deleted, so anything encrypted under
+  them cannot be decrypted: integration and device credentials need re-entering, and
+  sensors re-enrolling, on the first deploy.
+- **A finding names its subject, and severity is one lowercase ladder** —
+  `compliance_findings` is gone, `(asset_id, asset_type)` became
+  `(subject_id, subject_type)`, severities are `info`/`low`/`medium`/`high`/`critical`.
+- **The per-field asset filters are gone from the MCP tool surface, with no
+  deprecation window** — `query_assets` takes a query string, and an old filter is a
+  schema violation refused before any backend call. The REST API keeps them for one
+  release, translated into the language server-side.
+- **Windows Server 2019 or later** (or Windows 10 1809+) is the documented minimum for
+  the device agent's host and any Windows host it collects from remotely — that is where
+  the OpenSSH Server feature PowerShell-over-SSH needs is. WinRM remains unsupported.
+
+### Editions
+
+Core is the whole general asset inventory — discovery, identification, relationships
+and the map, the query language and saved views, findings, risk and PQC exposure,
+alerts, CBOM generation with CycloneDX export — plus **8 free compliance
+frameworks**, including the new Inventory Hygiene and Lifecycle. Enterprise adds the
+regulated bundle (SOC 2, PCI-DSS, ISO 27001, NIST CSF, IEC 62351-3), every generative
+AI implementation, and the external-system connectors (NetBox, CMDB/ITSM sync, SIEM
+forwarding). The authoritative list is generated, not asserted:
+[`docsv4/core/editions.md`](docsv4/core/editions.md) — and Core answers `402 Payment
+Required` at the edge for an Enterprise capability rather than hiding it exists.
+
+### Verify
+
+No key to trust — the signing identity *is* the workflow that built it (chart included):
+
+```bash
+cosign verify ghcr.io/vistasecurity/auth-service:<version> \
+  --certificate-identity-regexp 'https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+**Full list of changes:** [`docsv4/core/releases/1.0.0.md`](docsv4/core/releases/1.0.0.md)
+— every Added, Changed, Fixed, Removed, Security, Documentation and Internal
+entry. 1.0.0 replaced the asset model, so its full entry is an order of
+magnitude longer than a release entry normally is; it lives beside the rest of
+the product documentation so this file stays readable.
+
+<!-- release-notes-end -->
+
 ## [0.12.5] - 2026-09-08
 
 A security release, and the most consequential thing in it is not a new bug: two

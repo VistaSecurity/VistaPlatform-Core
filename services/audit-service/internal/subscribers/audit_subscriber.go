@@ -10,6 +10,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/audit-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/audit-service/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/events"
+	sharedaudit "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 )
 
 // alertEvaluator is the narrow surface of *services.AlertService the subscriber
@@ -168,9 +169,14 @@ func convertAuditEventToActivityLog(e *events.AuditEvent) *models.ActivityLog {
 	if log.EventType == "" {
 		log.EventType = e.Action
 	}
+	// The fallback has to be a category audit.activity_logs ACCEPTS. It used
+	// to be "api", which the valid_event_category CHECK rejects, so an envelope
+	// with no category was discarded on INSERT — and the billing webhook
+	// processor, the one publisher that sends none, lost every billing.* event
+	// it ever recorded. "system" is the CHECK's own catch-all.
 	log.EventCategory = e.EventCategory
 	if log.EventCategory == "" {
-		log.EventCategory = "api"
+		log.EventCategory = sharedaudit.EventCategorySystem
 	}
 
 	// UserType: propagate from the event; the activity_logs CHECK constraint

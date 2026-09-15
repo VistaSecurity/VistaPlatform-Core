@@ -35,9 +35,8 @@ func insertSearchableConfig(t *testing.T, db *database.DB, tenant uuid.UUID, hos
 	t.Helper()
 	asset := uuid.New()
 	if _, err := db.Exec(`
-		INSERT INTO network_assets (id, tenant_id, hostname, ip_address, asset_type, asset_status,
-		                            last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,$3,$4::inet,'server','monitoring',NOW(),NOW(),NOW(),NOW())`,
+		INSERT INTO assets (id, tenant_id, hostname, primary_address, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, $4::inet, 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`,
 		asset, tenant, hostname, ip); err != nil {
 		t.Fatalf("insert asset %s: %v", hostname, err)
 	}

@@ -43,8 +43,8 @@ func insertMonitoredAsset(t *testing.T, db *database.DB, tenant uuid.UUID, daysA
 	t.Helper()
 	id := uuid.New()
 	_, err := db.Exec(`
-		INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1, $2, $3, 'server', 'monitoring', NOW() - ($4 || ' days')::interval, NOW() - ($4 || ' days')::interval, NOW(), NOW())`,
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, 'server', 'hardware.computer.server', 'monitoring', NOW() - ($4 || ' days')::interval, NOW() - ($4 || ' days')::interval, NOW(), NOW())`,
 		id, tenant, "stale-"+id.String()[:8]+".example.test", daysAgo)
 	if err != nil {
 		t.Fatalf("insert asset: %v", err)
@@ -55,7 +55,7 @@ func insertMonitoredAsset(t *testing.T, db *database.DB, tenant uuid.UUID, daysA
 func staleStatus(t *testing.T, db *database.DB, assetID uuid.UUID) *string {
 	t.Helper()
 	var s *string
-	if err := db.QueryRow(`SELECT stale_status FROM network_assets WHERE id = $1`, assetID).Scan(&s); err != nil {
+	if err := db.QueryRow(`SELECT stale_status FROM assets WHERE id = $1`, assetID).Scan(&s); err != nil {
 		t.Fatalf("read stale_status: %v", err)
 	}
 	return s
@@ -125,8 +125,8 @@ func TestIntegration_StaleDetector_RespectsExplicitOptOut(t *testing.T) {
 // TestIntegration_StaleAssetDetector_EnumeratorNeedsBypassRole pins the RLS
 // wiring of the cross-tenant enumerator.
 //
-// `network_assets` is a security_invoker VIEW over the RLS-protected
-// network_assets_partitioned, so RLS applies to the caller exactly as it would
+// `assets` is a security_invoker VIEW over the RLS-protected
+// assets, so RLS applies to the caller exactly as it would
 // on a table. Point the enumerator at the RLS-scoped crypto_app handle and it
 // returns zero tenants — the detector then no-ops while logging success, so
 // nothing ever ages or archives.

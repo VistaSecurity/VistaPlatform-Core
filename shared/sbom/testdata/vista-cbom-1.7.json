@@ -1,0 +1,81 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.7",
+  "version": 1,
+  "serialNumber": "urn:uuid:9f2c1e44-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+  "metadata": {
+    "timestamp": "2026-09-11T12:00:00Z",
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "name": "Vista Platform CBOM Generator",
+          "version": "1.0.0",
+          "group": "io.vistasecurity"
+        }
+      ]
+    },
+    "component": {
+      "type": "application",
+      "bom-ref": "cbom-9f2c1e44-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+      "name": "Production scope CBOM",
+      "version": "1.0",
+      "description": "Cryptographic Bill of Materials containing 3 components"
+    },
+    "lifecycles": [
+      {
+        "phase": "operations"
+      }
+    ]
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "lib-openssl",
+      "name": "OpenSSL",
+      "version": "3.0.13",
+      "purl": "pkg:generic/openssl@3.0.13"
+    },
+    {
+      "type": "cryptographic-asset",
+      "bom-ref": "alg-rsa",
+      "name": "RSA-2048",
+      "cryptoProperties": {
+        "assetType": "algorithm",
+        "algorithmProperties": {
+          "primitive": "signature",
+          "certificationLevel": [
+            "none"
+          ]
+        }
+      },
+      "properties": [
+        {
+          "name": "vista:algorithm-family",
+          "value": "RSA"
+        }
+      ]
+    },
+    {
+      "type": "cryptographic-asset",
+      "bom-ref": "cert-1",
+      "name": "example.com",
+      "cryptoProperties": {
+        "assetType": "certificate",
+        "certificateProperties": {
+          "subjectName": "CN=example.com",
+          "issuerName": "CN=Test CA",
+          "notValidAfter": "2027-01-01T00:00:00Z"
+        }
+      }
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "lib-openssl",
+      "provides": [
+        "alg-rsa"
+      ]
+    }
+  ]
+}

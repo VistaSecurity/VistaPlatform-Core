@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -777,8 +778,8 @@ func (r *sensorRepository) RecordHealthMetrics(ctx context.Context, metrics *mod
 	query := `
 		INSERT INTO sensor_health_metrics (id, sensor_id, uptime_seconds, memory_usage_bytes,
 		                                  cpu_usage_percent, packets_captured, discoveries_made,
-		                                  errors_count, recorded_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
+		                                  errors_count, extra_counters, recorded_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)`
 
 	// Ingestion write (heartbeat path): sensor_health_metrics has no tenant_id
 	// column; its RLS policy isolates via an EXISTS subquery through sensors. The
@@ -793,7 +794,7 @@ func (r *sensorRepository) RecordHealthMetrics(ctx context.Context, metrics *mod
 		_, e := tx.ExecContext(ctx, query,
 			metrics.ID, metrics.SensorID, metrics.UptimeSeconds, metrics.MemoryUsageBytes,
 			metrics.CPUUsagePercent, metrics.PacketsCaptured, metrics.DiscoveriesMade,
-			metrics.ErrorsCount, metrics.RecordedAt,
+			metrics.ErrorsCount, marshalExtraCounters(metrics.ExtraCounters), metrics.RecordedAt,
 		)
 		return e
 	})
@@ -807,7 +808,7 @@ func (r *sensorRepository) RecordHealthMetrics(ctx context.Context, metrics *mod
 func (r *sensorRepository) GetLatestHealthMetrics(ctx context.Context, sensorID uuid.UUID) (*models.SensorHealthMetrics, error) {
 	query := `
 		SELECT id, sensor_id, uptime_seconds, memory_usage_bytes, cpu_usage_percent,
-		       packets_captured, discoveries_made, errors_count, recorded_at
+		       packets_captured, discoveries_made, errors_count, extra_counters, recorded_at
 		FROM sensor_health_metrics
 		WHERE sensor_id = $1
 		ORDER BY recorded_at DESC
@@ -823,11 +824,13 @@ func (r *sensorRepository) GetLatestHealthMetrics(ctx context.Context, sensorID 
 	metrics := &models.SensorHealthMetrics{}
 	found := false
 	err = shareddatabase.WithTenantTx(ctx, r.db, tenantID, func(tx *sql.Tx) error {
+		var extra []byte
 		scanErr := tx.QueryRowContext(ctx, query, sensorID).Scan(
 			&metrics.ID, &metrics.SensorID, &metrics.UptimeSeconds, &metrics.MemoryUsageBytes,
 			&metrics.CPUUsagePercent, &metrics.PacketsCaptured, &metrics.DiscoveriesMade,
-			&metrics.ErrorsCount, &metrics.RecordedAt,
+			&metrics.ErrorsCount, &extra, &metrics.RecordedAt,
 		)
+		metrics.ExtraCounters = unmarshalExtraCounters(extra)
 		if scanErr == sql.ErrNoRows {
 			return nil
 		}
@@ -850,7 +853,7 @@ func (r *sensorRepository) GetLatestHealthMetrics(ctx context.Context, sensorID 
 func (r *sensorRepository) GetHealthMetricsHistory(ctx context.Context, sensorID uuid.UUID, since time.Time, limit int) ([]*models.SensorHealthMetrics, error) {
 	query := `
 		SELECT id, sensor_id, uptime_seconds, memory_usage_bytes, cpu_usage_percent,
-		       packets_captured, discoveries_made, errors_count, recorded_at
+		       packets_captured, discoveries_made, errors_count, extra_counters, recorded_at
 		FROM sensor_health_metrics
 		WHERE sensor_id = $1 AND recorded_at >= $2
 		ORDER BY recorded_at DESC
@@ -874,13 +877,15 @@ func (r *sensorRepository) GetHealthMetricsHistory(ctx context.Context, sensorID
 		for rows.Next() {
 			m := &models.SensorHealthMetrics{}
 
+			var extra []byte
 			if e := rows.Scan(
 				&m.ID, &m.SensorID, &m.UptimeSeconds, &m.MemoryUsageBytes,
 				&m.CPUUsagePercent, &m.PacketsCaptured, &m.DiscoveriesMade,
-				&m.ErrorsCount, &m.RecordedAt,
+				&m.ErrorsCount, &extra, &m.RecordedAt,
 			); e != nil {
 				return e
 			}
+			m.ExtraCounters = unmarshalExtraCounters(extra)
 
 			metrics = append(metrics, m)
 		}
@@ -942,4 +947,43 @@ func (r *sensorRepository) ListSensorDiscoveries(ctx context.Context, sensorID u
 	}
 
 	return discoveries, nil
+}
+
+// marshalExtraCounters renders the heartbeat's uncolumned counters for the
+// jsonb column, preserving the nil/empty distinction.
+//
+// nil in, SQL NULL out. NULL means "the sensor reported no such counters" — an
+// older build, or host observation switched off — and `{}` would mean "it
+// reported an empty set", which is a different fact about the segment. The
+// contract doc requires exactly this for the host_observations_* metrics:
+// absent entirely when the feature is off, so that "not running" and "running
+// and seeing nothing" do not look the same.
+//
+// A marshal failure returns NULL and says so. The alternative — failing the
+// whole heartbeat over a diagnostic counter — would take a sensor offline to
+// protect a number nobody is looking at yet.
+func marshalExtraCounters(c *map[string]int64) interface{} {
+	if c == nil {
+		return nil
+	}
+	b, err := json.Marshal(*c)
+	if err != nil {
+		log.Printf("Warning: could not marshal heartbeat counters (%v); storing NULL", err)
+		return nil
+	}
+	return string(b)
+}
+
+// unmarshalExtraCounters reads the column back, preserving the same
+// distinction: SQL NULL and unreadable JSON both come back nil.
+func unmarshalExtraCounters(raw []byte) *map[string]int64 {
+	if len(raw) == 0 {
+		return nil
+	}
+	var out map[string]int64
+	if err := json.Unmarshal(raw, &out); err != nil {
+		log.Printf("Warning: could not read heartbeat counters back (%v); reporting none", err)
+		return nil
+	}
+	return &out
 }

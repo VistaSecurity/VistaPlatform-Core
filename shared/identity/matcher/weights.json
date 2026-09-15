@@ -1,0 +1,29 @@
+{
+  "model_id": "matcher-logreg-v1",
+  "trained_on": "73 synthetic fixtures",
+  "weights": {
+    "bias": -3.210698025,
+    "class_conflict": -0.955552197,
+    "class_equal": -0.058423958,
+    "class_related": 0.708573632,
+    "id_conflict_singleton": -2.679314485,
+    "id_match_breadth": 2.546697604,
+    "id_match_singleton": 2.983005722,
+    "id_match_strong": 2.912616047,
+    "id_match_weak": 1.518452435,
+    "model_conflict": -0.256200248,
+    "model_match": 0.495095165,
+    "name_sequential": -0.364279595,
+    "name_similarity": 0.271978938,
+    "recency": 1.12651611,
+    "segment_conflict": -1.138463175,
+    "segment_match": 0.933893923,
+    "source_cross": 0.717921258,
+    "source_same": -0.92249051,
+    "vendor_conflict": -1.039489856,
+    "vendor_match": -0.378346021
+  },
+  "accuracy": 1,
+  "precision": 1,
+  "recall": 1
+}

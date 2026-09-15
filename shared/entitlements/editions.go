@@ -80,6 +80,16 @@ var editionByItem = map[string]Edition{
 	// CMDB/ITSM — ServiceNow, Device42, SolarWinds — is the paid surface.
 	"cmdb_sync": EditionEnterprise,
 
+	// --- Enterprise: network source of truth ----------------------------
+	// Core keeps every discovery path that FINDS a device. Reading a
+	// customer's NetBox — their statement of what the network is meant to
+	// be, and the sites/prefixes/VLANs that give an address its meaning —
+	// is the paid surface, alongside the drift view that compares the two.
+	// Listed separately from cmdb_sync rather than folded into it: a CMDB
+	// sync PUSHES inventory out, this PULLS topology in, and a tenant may
+	// well want one without the other.
+	"connector_netbox": EditionEnterprise,
+
 	// --- Enterprise + MSP: audit forwarding -----------------------------
 	// Core logs every audit event and serves every audit query. Forwarding
 	// them to an external SIEM (Splunk, Datadog, Elastic, webhook) is paid.

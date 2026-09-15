@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/services"
+	sharedfindings "github.com/vistasecurity/vistaplatform/shared/findings"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 )
 
@@ -22,6 +24,7 @@ import (
 // of every findingsService method the workspace handlers call.
 type findingsStore interface {
 	ListFindings(tenantID uuid.UUID, filters services.FindingListFilters, page, pageSize int) ([]models.ComplianceFinding, int, error)
+	CountFindingsByProducer(tenantID uuid.UUID, filters services.FindingListFilters) (map[string]int, error)
 	AssignFindingOwner(tenantID, findingID, assignedTo, assignedBy uuid.UUID, notes *string) error
 	UnassignFindingOwner(tenantID, findingID uuid.UUID) error
 	GetFinding(tenantID, findingID uuid.UUID) (*models.ComplianceFinding, error)
@@ -932,9 +935,13 @@ func (h *WorkspaceHandlers) GetFindingHistory(c *gin.Context) {
 }
 
 // ListFindings returns a paginated, filterable tenant-wide findings list
-// (). Filters: workflow_status, severity, assigned_to, unassigned,
-// control_id, framework_id. Joined asset detail rides on each finding so the
-// caller can render rows without per-asset fetches.
+// (). Filters: producer, workflow_status, severity, assigned_to,
+// unassigned, control_id, framework_id. Joined asset detail rides on each
+// finding so the caller can render rows without per-asset fetches.
+//
+// EVERY producer by default. `producer_counts` in the response is the tally the
+// page's producer chips render, computed under the same filters minus the
+// producer one — so a chip's number and the list it leads to cannot disagree.
 func (h *WorkspaceHandlers) ListFindings(c *gin.Context) {
 	tenantUUID, ok := sharedmw.GetTenantIDFromContext(c)
 	if !ok {
@@ -949,6 +956,24 @@ func (h *WorkspaceHandlers) ListFindings(c *gin.Context) {
 		WorkflowStatus: c.Query("workflow_status"),
 		Severity:       c.Query("severity"),
 		Unassigned:     c.Query("unassigned") == "true",
+		// Free text, applied SERVER-side. The page's search box used to narrow
+		// the rows it had already fetched, and it fetches at most five pages —
+		// so a product on the 1,200th finding searched to an empty page that
+		// read as "nothing matches". Unknown terms are not refused the way an
+		// unknown `producer` is: a search that finds nothing is an answer,
+		// where a filter key that does not exist is a caller bug.
+		Search: c.Query("q"),
+	}
+	if v := c.Query("producer"); v != "" {
+		// Refused, not ignored. An unregistered key silently dropped would page
+		// through EVERY producer's findings while the caller believed it had
+		// narrowed to one — a filter that reads as applied and is not.
+		if _, known := sharedfindings.GetProducer(v); !known {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Unknown producer: " + v + " (see standards/findings-registry.yaml)"})
+			return
+		}
+		filters.Producer = v
 	}
 	if v := c.Query("assigned_to"); v != "" {
 		id, err := uuid.Parse(v)
@@ -974,11 +999,53 @@ func (h *WorkspaceHandlers) ListFindings(c *gin.Context) {
 		}
 		filters.FrameworkID = &id
 	}
+	// subject_type + subject_id, together or not at all. This is the filter the
+	// software table's "3 vulnerabilities" cell links through, so it has to
+	// select exactly the rows that produced the number.
+	//
+	// Refused rather than half-applied, in BOTH directions: a lone subject_id
+	// would match across subject vocabularies (nothing stops an asset id and a
+	// software-install id colliding), and a lone subject_type is the producer
+	// filter with a worse name. Either alone is a caller bug, and answering it
+	// with a wider set is the "filter that reads as applied and is not" this
+	// handler already refuses for `producer`.
+	subjectType, subjectID := c.Query("subject_type"), c.Query("subject_id")
+	if (subjectType == "") != (subjectID == "") {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "subject_type and subject_id must be given together"})
+		return
+	}
+	if subjectType != "" {
+		if !slices.Contains(sharedfindings.SubjectTypes, subjectType) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Unknown subject_type: " + subjectType + " (see standards/findings-registry.yaml)"})
+			return
+		}
+		id, err := uuid.Parse(subjectID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid subject_id"})
+			return
+		}
+		filters.SubjectType, filters.SubjectID = subjectType, &id
+	}
 
 	findings, total, err := h.findingsService.ListFindings(tenantUUID, filters, page, pageSize)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list findings"})
 		return
+	}
+
+	// The per-producer tally. A failure here does NOT fail the page: the counts
+	// are a navigation aid and the findings are the answer, so an empty map
+	// (which the client renders as zeroes it can still click through) beats a
+	// 500 over a COUNT.
+	//
+	// Normalised to a non-nil map before it is serialised: a nil Go map is JSON
+	// `null`, and a client doing `counts[p] ?? 0` over null throws rather than
+	// rendering zeroes.
+	producerCounts, countErr := h.findingsService.CountFindingsByProducer(tenantUUID, filters)
+	if countErr != nil || producerCounts == nil {
+		producerCounts = map[string]int{}
 	}
 
 	if page < 1 {
@@ -990,7 +1057,10 @@ func (h *WorkspaceHandlers) ListFindings(c *gin.Context) {
 	if pageSize > 200 {
 		pageSize = 200
 	}
-	c.JSON(http.StatusOK, gin.H{"findings": findings, "total": total, "page": page, "page_size": pageSize})
+	c.JSON(http.StatusOK, gin.H{
+		"findings": findings, "total": total, "page": page, "page_size": pageSize,
+		"producer_counts": producerCounts,
+	})
 }
 
 // GetFindingsByAsset retrieves all findings for a specific asset

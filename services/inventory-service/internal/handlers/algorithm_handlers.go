@@ -6,10 +6,12 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
+	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 )
 
 // algorithmReader is the slice of *services.AlgorithmService the algorithm
@@ -328,9 +330,10 @@ func (h *AlgorithmHandler) GetAlgorithmUsage(c *gin.Context) {
 	}
 	var assets []assetUsage
 	assetsQuery := `
-		SELECT DISTINCT na.id as asset_id, na.hostname, na.ip_address, na.port
+		SELECT DISTINCT na.id as asset_id, na.hostname, host(COALESCE(e.address, na.primary_address)) AS ip_address, e.port
 		FROM crypto_implementations ci
-		JOIN network_assets na ON ci.asset_id = na.id
+		JOIN assets na ON na.tenant_id = ci.tenant_id AND na.id = ci.asset_id
+		LEFT JOIN asset_endpoints e ON e.tenant_id = ci.tenant_id AND e.id = ci.endpoint_id
 		WHERE ci.tenant_id = $1::uuid
 		  AND ci.deleted_at IS NULL
 		  AND (
@@ -563,7 +566,7 @@ func (h *AlgorithmHandler) UpdateAlgorithm(c *gin.Context) {
 	}
 	logAuditActivity(c,
 		"configuration.algorithm.updated",
-		"configuration",
+		auditmiddleware.EventCategoryConfig,
 		"update",
 		&resourceType,
 		&resourceID,
@@ -716,7 +719,7 @@ func (h *AlgorithmHandler) CreateAlgorithm(c *gin.Context) {
 	}
 	logAuditActivity(c,
 		"configuration.algorithm.created",
-		"configuration",
+		auditmiddleware.EventCategoryConfig,
 		"create",
 		&resourceType,
 		&resourceID,

@@ -1,0 +1,77 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.7",
+  "version": 1,
+  "serialNumber": "urn:uuid:22222222-2222-4222-8222-222222222222",
+  "metadata": {
+    "timestamp": "2026-09-12T10:30:00Z",
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "name": "Vista Platform xBOM Generator",
+          "version": "1.0.0",
+          "group": "io.vistasecurity"
+        }
+      ]
+    },
+    "component": {
+      "type": "application",
+      "bom-ref": "xbom-22222222-2222-4222-8222-222222222222",
+      "name": "Software Bill of Materials — Production",
+      "version": "1.0",
+      "description": "Every distinct software product installed on the assets in scope, with the assets each was found on."
+    },
+    "lifecycles": [
+      {
+        "phase": "operations"
+      }
+    ]
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "software/b0000000-0000-4000-8000-000000000001",
+      "name": "openssl",
+      "version": "3.0.14",
+      "purl": "pkg:deb/ubuntu/openssl@3.0.14",
+      "cpe": "cpe:2.3:a:openssl:openssl:3.0.14:*:*:*:*:*:*:*",
+      "group": "OpenSSL",
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache-2.0"
+          }
+        }
+      ],
+      "evidence": {
+        "occurrences": [
+          {
+            "location": "/usr/lib/x86_64-linux-gnu",
+            "additionalContext": "web-01"
+          },
+          {
+            "location": "asset/a0000000-0000-4000-8000-000000000002",
+            "additionalContext": "192.0.2.20"
+          }
+        ]
+      }
+    },
+    {
+      "type": "library",
+      "bom-ref": "software/b0000000-0000-4000-8000-000000000002",
+      "name": "nginx",
+      "version": "1.27.0",
+      "purl": "pkg:deb/ubuntu/nginx@1.27.0",
+      "group": "F5",
+      "evidence": {
+        "occurrences": [
+          {
+            "location": "/usr/sbin/nginx",
+            "additionalContext": "web-01"
+          }
+        ]
+      }
+    }
+  ]
+}

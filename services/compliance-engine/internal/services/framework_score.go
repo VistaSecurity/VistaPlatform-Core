@@ -162,18 +162,45 @@ func statusForFindings(hasFindings bool) string {
 //     score divergence: an explicitly accepted risk still dragged the rollup down
 //     while the summary page showed the control clean.
 //  2. Does the control have any measurements configured? (→ reasonNoMeasurements.)
-//  3. Does the tenant have ANY inventory a measurement could read? (→
+//  3. Does the tenant have anything THIS CONTROL'S MEASUREMENTS could read? (→
 //     reasonNothingInScope.)
 //
 // Fact 3 deserves its own note, because it is an implication rather than a
-// measurement. Every extractor in measurement_extractor.go reads from
-// crypto_implementations or certificates (network_assets appears only as a JOIN),
-// so an empty pair means every extraction returns zero values and NOTHING can be
-// in scope. It is sound but incomplete: it cannot see a control whose particular
-// measurement finds nothing on a tenant that does have other inventory. The
-// deliberate direction of that incompleteness is towards today's behaviour (PASS),
-// never towards a false "not assessed", and the check is intentionally NOT
-// filtered by deleted_at so it stays a superset of what extractors can see.
+// measurement: it asks what the extractors COULD see, not what they did.
+//
+// It is per SHAPE, and it has to be. Until workstream 3.6 every measurement read
+// `crypto_implementations` or `certificates`, so one tenant-wide "does this
+// tenant have any crypto at all" probe was a sound superset of every extractor's
+// FROM clause. The registry now has five shapes — `asset`, `fact` and `finding`
+// alongside those two — and a tenant with one TLS endpoint satisfied the old
+// probe for ALL of them. That is how the Lifecycle framework came to score 100
+// on an estate the end-of-life catalogue had never resolved a single date for:
+// every LC control has measurements of the `fact` shape, no `eol.*` fact
+// existed, the live evaluator correctly reported NOT ASSESSED, and the stored
+// rollup — which is what the Posture page, the framework card and the dashboard
+// hero read — reported four passing controls out of four. Inventory Hygiene had
+// the same shape of wrong answer through the `finding` shape: IH-005 and IH-006
+// read PASS on a deployment where the hygiene producer had never run, and the
+// score went UP for not looking. (Found by the Gate 3 end-to-end proof,
+// `gate3_frameworks_integration_test.go`.)
+//
+// Each probe MIRRORS its shape's own `From` + `Base` in measurement_shapes.go,
+// minus the per-subject filter, so it stays a superset of what that shape can
+// see. Keep the two in step; a probe looser than its shape reports a posture
+// nothing measured, and a probe tighter than its shape reports NOT ASSESSED over
+// data an extractor can read. [scopeProbes] is where they live, and
+// TestScopeProbeCoversEveryShape fails if a shape is added without one.
+//
+// The crypto_configuration probe did not always mirror its shape either: it was
+// a bare `EXISTS (SELECT 1 FROM crypto_implementations)` until, which meant
+// soft-deleting a tenant's last asset left every control reporting PASS over
+// inventory no extractor could still read.
+//
+// A control is in scope if ANY of its measurements is — the fold is over all of
+// them, so one readable measurement means the control was assessed. That is also
+// the conservative direction: it preserves today's PASS everywhere something is
+// genuinely readable, and only moves a control to NOT ASSESSED when nothing it
+// measures exists at all.
 //
 // # Fact 4: a configured measurement is not an evaluation (B-08)
 //
@@ -260,15 +287,19 @@ func loadControlAssessmentsAt(ctx context.Context, db *sql.DB, tenantID uuid.UUI
 	violated := make(map[uuid.UUID]bool, len(controlIDs))
 	measured := make(map[uuid.UUID]bool, len(controlIDs))
 	unevaluated := make(map[uuid.UUID]bool, len(controlIDs))
-	var hasInventory bool
+	// needs[control] is the set of scope probes its measurements depend on;
+	// satisfied[probe] is whether the tenant has anything that probe can see.
+	needs := make(map[uuid.UUID][]scopeProbeKey, len(controlIDs))
+	satisfied := map[scopeProbeKey]bool{}
 
 	err := shareddatabase.WithTenantTx(ctx, db, tenantID, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `
 			SELECT DISTINCT control_id
-			FROM compliance_findings
+			FROM findings
 			WHERE tenant_id = $1
 			  AND control_id = ANY($2)
 			  AND detection_state = 'ACTIVE'
+			  AND `+complianceProducerScope("findings")+`
 			  AND (workflow_status <> 'SUPPRESSED' OR workflow_status IS NULL)
 		`, tenantID, pq.Array(ids))
 		if err != nil {
@@ -286,10 +317,14 @@ func loadControlAssessmentsAt(ctx context.Context, db *sql.DB, tenantID uuid.UUI
 			return err
 		}
 
+		// The configured measurements, WITH the measurement type each one
+		// names, because fact 3 below is per shape and the shape is a property
+		// of the type.
 		mrows, err := tx.QueryContext(ctx, `
-			SELECT DISTINCT control_id
-			FROM control_measurements
-			WHERE control_id = ANY($1) AND framework_type = $2
+			SELECT cm.control_id, mt.code
+			FROM control_measurements cm
+			JOIN measurement_types mt ON mt.id = cm.measurement_type_id
+			WHERE cm.control_id = ANY($1) AND cm.framework_type = $2
 		`, pq.Array(ids), frameworkType)
 		if err != nil {
 			return fmt.Errorf("load configured measurements: %w", err)
@@ -297,27 +332,18 @@ func loadControlAssessmentsAt(ctx context.Context, db *sql.DB, tenantID uuid.UUI
 		defer func() { _ = mrows.Close() }()
 		for mrows.Next() {
 			var controlID uuid.UUID
-			if err := mrows.Scan(&controlID); err != nil {
+			var code string
+			if err := mrows.Scan(&controlID, &code); err != nil {
 				return fmt.Errorf("scan configured measurement: %w", err)
 			}
 			measured[controlID] = true
+			needs[controlID] = append(needs[controlID], scopeProbeFor(code))
 		}
 		if err := mrows.Err(); err != nil {
 			return err
 		}
 
-		if err := tx.QueryRowContext(ctx, `
-			SELECT EXISTS (
-					SELECT 1
-					FROM crypto_implementations ci
-					JOIN network_assets na ON na.id = ci.asset_id
-					WHERE ci.tenant_id = $1
-						AND na.tenant_id = $1
-						AND ci.deleted_at IS NULL
-						AND na.deleted_at IS NULL
-				)
-			    OR EXISTS (SELECT 1 FROM certificates WHERE tenant_id = $1)
-		`, tenantID).Scan(&hasInventory); err != nil {
+		if err := loadScopeProbes(ctx, tx, tenantID, needs, satisfied); err != nil {
 			return err
 		}
 
@@ -364,7 +390,7 @@ func loadControlAssessmentsAt(ctx context.Context, db *sql.DB, tenantID uuid.UUI
 			assessments[id] = controlAssessment{Status: statusFail}
 		case !measured[id]:
 			assessments[id] = controlAssessment{Status: statusNotAssessed, Reason: reasonNoMeasurements}
-		case !hasInventory:
+		case !anySatisfied(needs[id], satisfied):
 			assessments[id] = controlAssessment{Status: statusNotAssessed, Reason: reasonNothingInScope}
 		case unevaluated[id]:
 			assessments[id] = controlAssessment{Status: statusNotAssessed, Reason: reasonNotEvaluated}

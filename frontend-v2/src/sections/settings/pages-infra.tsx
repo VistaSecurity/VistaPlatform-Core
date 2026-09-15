@@ -1,7 +1,7 @@
 // Settings · infrastructure pages — Locations, Network Segments, Asset
 // Lifecycle. Wired to inventory-service through the typed client. Locations and
 // Network Segments have full CRUD via the now-contracted write endpoints;
-// Asset Lifecycle reads/writes /lifecycle/policy.
+// Asset Lifecycle reads/writes /lifecycle/policy and /settings/drift.
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
@@ -16,6 +16,7 @@ import type { SettingsNavItem } from './nav';
 type Location = inventoryComponents['schemas']['Location'];
 type NetworkSegment = inventoryComponents['schemas']['NetworkSegment'];
 type LifecyclePolicy = inventoryComponents['schemas']['AssetLifecyclePolicy'];
+type DriftSettings = inventoryComponents['schemas']['DriftSettings'];
 
 // Compact per-row Edit / Delete actions, gated on settings.update.
 function RowActions({ onEdit, onDelete }: { onEdit: () => void; onDelete: () => void }) {
@@ -174,7 +175,100 @@ export function AssetLifecyclePage({ meta }: { meta: SettingsNavItem }) {
       ) : (
         <LifecycleForm key={data.updated_at} policy={data} />
       )}
+      <DriftBaselineSection />
     </SPage>
+  );
+}
+
+// ---- Drift baseline (read + write) ----------------------------------------
+//
+// On this page rather than one of its own: it is the second time window the
+// inventory is judged against, beside staleness, and a settings entry per
+// number is how a settings area becomes unnavigable.
+//
+// Its own query and its own save, because it is a different store — the
+// lifecycle policy has a table, this is a key in the tenant's settings document
+// — and folding it into the policy payload would put a jsonb setting behind an
+// API shape that cannot express "leave the rest of the document alone".
+function DriftBaselineSection() {
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['settings', 'drift'],
+    queryFn: async () => {
+      const { data, error } = await clients.inventory.GET('/settings/drift', {});
+      if (error || !data) throw new Error('Failed to load the drift settings');
+      return data.drift;
+    },
+  });
+
+  if (isError) {
+    return (
+      <SSection title="Drift baseline" desc="How far back the platform compares against when deciding something is new.">
+        <SCard><StateNote icon="alert-triangle" tone="var(--danger-text)" title="Couldn't load the drift baseline" message="The drift settings failed to load." /></SCard>
+      </SSection>
+    );
+  }
+  if (isLoading || !data) {
+    return (
+      <SSection title="Drift baseline" desc="How far back the platform compares against when deciding something is new.">
+        <SCard><StateNote icon="loader" tone="var(--app-t3)" title="Loading drift settings…" message="Fetching the drift baseline window." /></SCard>
+      </SSection>
+    );
+  }
+  return <DriftBaselineForm key={data.baseline_days} settings={data} />;
+}
+
+function DriftBaselineForm({ settings }: { settings: DriftSettings }) {
+  const qc = useQueryClient();
+  const [days, setDays] = useState(String(settings.baseline_days));
+
+  const n = Number(days);
+  const valid = Number.isInteger(n) && n >= settings.min_days && n <= settings.max_days;
+  const dirty = n !== settings.baseline_days;
+
+  const save = useMutation({
+    mutationFn: async () => {
+      const { data, error, response } = await clients.inventory.PUT('/settings/drift', {
+        body: { baseline_days: n },
+      });
+      if (!response.ok || error || !data) throw new Error('Failed to save the drift baseline');
+      return data.drift;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['settings', 'drift'] }),
+  });
+
+  return (
+    <SSection title="Drift baseline" desc="How far back the platform compares against when deciding something is new.">
+      <SCard>
+        <SRow
+          label="Baseline window"
+          hint={`Days of history a change is measured against. A device class, protocol, listening port or certificate issuer first seen inside this window is reported as drift; once it has been there for a full window it becomes part of the baseline and the finding closes. ${settings.min_days}–${settings.max_days} days.`}
+          last
+        >
+          <SInput value={days} onChange={setDays} type="number" width={110} />
+        </SRow>
+      </SCard>
+      {!valid && (
+        <div style={{ fontSize: 11.5, color: 'var(--danger-text)', marginTop: 8 }}>
+          The baseline window must be a whole number between {settings.min_days} and {settings.max_days} days.
+        </div>
+      )}
+      <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 8 }}>
+        Nothing is reported as drift until this organization has been observed for a full window — a new tenant is not told that every asset it has is new.
+      </div>
+      <PermissionGate
+        permission={TENANT_PERMISSIONS.settings.update}
+        fallback={<p style={{ fontSize: 12, color: 'var(--app-t3)', marginTop: 14 }}>You don’t have permission to change the drift baseline.</p>}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 16 }}>
+          <button className="ui-btn accent" disabled={!dirty || !valid || save.isPending} onClick={() => save.mutate()}>
+            {save.isPending ? 'Saving…' : 'Save baseline'}
+          </button>
+          {save.isError && <span style={{ fontSize: 12, color: 'var(--danger-text)' }}>Couldn’t save — try again.</span>}
+          {save.isSuccess && !dirty && <span style={{ fontSize: 12, color: GREEN }}>Saved.</span>}
+          {dirty && !save.isPending && <span style={{ fontSize: 11.5, color: AMBER }}>Unsaved changes</span>}
+        </div>
+      </PermissionGate>
+    </SSection>
   );
 }
 

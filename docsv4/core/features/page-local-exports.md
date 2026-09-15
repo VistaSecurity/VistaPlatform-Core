@@ -8,7 +8,7 @@ This is the right tool for: filtering down to a few hundred rows, dropping the r
 
 It's not evidence. The CSV doesn't carry a content hash, a signature, or a provenance record. If you regenerate the same view tomorrow, you'll get different rows (new assets, expired certs, edited tags) — that's expected for a working view, but it means a CSV from this button is a snapshot in a notebook, not a snapshot in a vault.
 
-For audit submissions, vendor questionnaires, or anything where the recipient needs to verify the artifact later, **generate a CBOM instead** (Risk & Compliance → CBOM in the sidebar). A CBOM:
+For audit submissions, vendor questionnaires, or anything where the recipient needs to verify the artifact later, **generate a CBOM instead** (Risk & Compliance → Bills of Materials in the sidebar). A CBOM:
 
 - Locks the rows by content hash so the recipient can verify integrity.
 - Captures `scope_version` so the boundary is reproducible.
@@ -33,4 +33,4 @@ The legacy reporting surface had eight separate "lens reports" that produced PDF
 
 This button is the replacement. It does exactly the job that wasn't worth a templated report: a CSV of the view you're already looking at, with zero ceremony.
 
-For the part that *did* need ceremony — evidence-grade artifacts with provenance — that's now first-class at Risk & Compliance → CBOM (`/risk-compliance/cbom`), and the affordance is much better than the old "Generate Lens Report PDF" workflow.
+For the part that *did* need ceremony — evidence-grade artifacts with provenance — that's now first-class at Risk & Compliance → Bills of Materials (`/risk-compliance/cbom`), and the affordance is much better than the old "Generate Lens Report PDF" workflow.

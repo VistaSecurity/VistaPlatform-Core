@@ -163,6 +163,101 @@ point of collection. Cloud key discovery reads key metadata only.
 See [Device Interrogation User Guide](../guides/device-interrogation-user-guide.md#what-the-platform-records-from-your-devices)
 for the detail.
 
+## Passive host observation
+
+Beyond cryptographic sessions, a sensor also records **host presence and
+names**. Devices on a network announce themselves constantly without being
+asked — ARP when they claim an address, DHCP when they lease one, mDNS and
+NetBIOS when they advertise a name or a service, LLDP and CDP when a switch
+describes itself to its neighbours. The sensor decodes those announcements and
+records what the device said about itself: its hardware (MAC) address, the IP
+addresses bound to it, the names it answers to, the manufacturer registered to
+its MAC prefix, and — for switches and phones that advertise themselves — the
+model they report.
+
+An announcement from a switch is recorded as an observation of **that switch**.
+It is not recorded as a cable between the switch and the sensor: sensors are
+usually fed by a mirror or SPAN port, so a frame reaching the sensor does not
+mean the two are plugged into each other, and the platform does not claim
+otherwise.
+
+This is how the inventory finds devices that never open a TLS connection past
+the sensor: printers, cameras, phones, controllers, and anything else that is on
+the network but not talking to anything the crypto pipeline watches. Uploaded
+PCAP files are decoded the same way, which often makes a capture the only
+practical way to inventory a segment that cannot host a sensor.
+
+Observation is **passive**: the sensor decodes frames the network interface
+already receives and sends nothing onto the wire. It is on by default for every
+sensor profile, including air-gapped ones, and can be turned off per sensor.
+Changing the setting takes effect the next time the sensor restarts.
+
+**No traffic content is recorded.** The sensor reads the announcement headers
+that carry identity and nothing else:
+
+- **MAC addresses and host names are device identifiers**, and the platform
+  stores them as such. Some phones and laptops rotate a randomised MAC for
+  privacy; the platform marks those as not stable and does not treat them as a
+  device's permanent identity.
+- **DNS decoding is off unless you turn it on.** With it off — the default —
+  the sensor does not look at UDP 53 at all. Turning it on is a setting on the
+  sensor host itself, not something the platform can switch on for you.
+
+  When it is on, the sensor decodes DNS *answers* — "this name resolves to this
+  address" — and never the question section. That still means the names being
+  answered for are recorded, so the platform would hold a record of which names
+  the network resolved. That is why it is a deliberate choice rather than a
+  default. Device announcements over mDNS are unaffected and always decoded:
+  a device advertising itself is not somebody looking something up.
+- **Service announcements are recorded by type, not by name.** "This device
+  offers printing" is kept; the user-chosen instance name attached to it is not.
+- **A device's model is recorded only where it says so in a dedicated field.**
+  Switch and phone announcements carry a model field; free-text descriptions are
+  never mined for one, because a model guessed out of prose would be wrong
+  without looking wrong.
+- Free-text device descriptions from switches are truncated, and any private key
+  pasted into one is masked before storage.
+
+### What a passively observed device looks like in Approvals
+
+A passively observed device proposes an asset exactly like any other discovery,
+and waits in **Discovery → Approvals** until you accept it. What is different is
+how little it may know, and the platform says so rather than filling the gaps
+in:
+
+- **Its name is whatever it called itself**, over DHCP, mDNS or NetBIOS — not a
+  name looked up for it. The platform performs no reverse lookup on these
+  devices: your internal host names are never sent to a resolver.
+- **A device with no name at all shows as its address, or as its MAC.** An ARP
+  frame from a camera that answers nothing tells you the camera is there and
+  which manufacturer made the network chip, and that is the whole row. It is
+  still worth approving — it is a device on your network — but it will look
+  sparse next to something discovered by a scan.
+- **Its type is "Unknown host".** The platform does not guess what a device is
+  from its announcements. A device advertising printing is almost certainly a
+  printer, but "almost certainly" is not an inventory entry; set the type when
+  you approve it, or leave it and let a later interrogation fill it in.
+- **The manufacturer is filled in** from the MAC prefix, where the prefix is one
+  the registry knows. A blank manufacturer means *not determined*, not
+  "unknown brand".
+- **It has no ports, no services and no certificates.** Nothing connected to it,
+  so there is nothing to report. A blank crypto section on one of these devices
+  means nobody looked, not that it came back clean.
+- **The same device seen again is the same row.** Its MAC is what ties the
+  sightings together, so a device that later gets a name, or moves to a new
+  address, updates the row you already approved rather than appearing twice. The
+  exception is a phone or laptop using a randomised MAC: those cannot be tracked
+  across rotations, and the platform will not pretend otherwise.
+
+Once approved, these devices sit in the inventory like any other asset — they
+can be tagged, assigned an owner, given a type, and picked up by a later
+interrogation or scan that fills in what passive observation could not see.
+
+Sensor detail (**Discovery → Sensors & Agents →** a sensor **→ Health**) shows
+how many devices a sensor has seen this way over the selected period, and how
+many observations it had to shed. A non-zero shed count means the segment is
+busier than the sensor is sized for, and some devices on it may be missing.
+
 ## Integration with Cluster Sensor Service
 
 Discovery jobs are processed by the `cluster-sensor-service`:

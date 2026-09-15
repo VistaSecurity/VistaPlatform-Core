@@ -29,6 +29,17 @@ const (
 	ethernetIPPort = 44818
 )
 
+// fixtureHost is 127.0.0.3, not 127.0.0.1, on purpose.
+//
+// sensor/internal/discovery's sweep suite needs the SAME well-known ports for the
+// same reason (it took 127.0.0.2), and `make test-parallel`, `make test-race` and
+// `make test-coverage` run both packages at once. Two suites racing for one
+// loopback socket is a flake by construction — and the loser's probes are answered
+// by the other suite's listener, which corrupts assertions rather than failing
+// loudly. The whole of 127.0.0.0/8 is loopback, so one address per suite is free.
+// Pinned by TestTestFixturesBindTheirOwnLoopbackAddress in shared/testdb.
+const fixtureHost = "127.0.0.3"
+
 // TestScanTargetDispatchesUDPProberWithNoOpenTCPPort is the regression test for
 // B-60. Nothing listens on TCP; a BACnet device answers on UDP 47808. Before the
 // fix this returned zero findings and zero errors.
@@ -38,7 +49,7 @@ func TestScanTargetDispatchesUDPProberWithNoOpenTCPPort(t *testing.T) {
 
 	ps := NewPortScanner()
 
-	findings, err := ps.ScanTarget("127.0.0.1", []int32{bacnetPort}, []string{"BACnet"}, nil, nil)
+	findings, err := ps.ScanTarget(fixtureHost, []int32{bacnetPort}, []string{"BACnet"}, nil, nil)
 	if err != nil {
 		t.Fatalf("ScanTarget: %v", err)
 	}
@@ -83,7 +94,7 @@ func TestScanTargetUnansweredUDPProbeCreatesNoFinding(t *testing.T) {
 	ps := NewPortScanner()
 	ps.otProber = shareddisc.NewProber(200 * time.Millisecond)
 
-	findings, err := ps.ScanTarget("127.0.0.1", []int32{bacnetPort}, []string{"BACnet"}, nil, nil)
+	findings, err := ps.ScanTarget(fixtureHost, []int32{bacnetPort}, []string{"BACnet"}, nil, nil)
 	if err != nil {
 		t.Fatalf("ScanTarget: %v", err)
 	}
@@ -112,11 +123,11 @@ func TestUnansweredUDPProbeAnnotatesRatherThanClaimsAbsence(t *testing.T) {
 		ExecutedVia: "nmap",
 		Protocol:    "tcp",
 		Port:        bacnetPort,
-		ResolvedIP:  "127.0.0.1",
+		ResolvedIP:  fixtureHost,
 		Data:        map[string]interface{}{},
 	}}
 
-	findings := ps.dispatchUDPProbes(existing, "127.0.0.1", []int32{bacnetPort}, []string{"BACnet"}, nil)
+	findings := ps.dispatchUDPProbes(existing, fixtureHost, []int32{bacnetPort}, []string{"BACnet"}, nil)
 
 	if len(findings) != 1 {
 		t.Fatalf("findings = %d, want 1 — the outcome belongs on the existing finding, not a new one", len(findings))
@@ -174,7 +185,7 @@ func TestEtherNetIPHasNoTCPPath(t *testing.T) {
 	ps := NewPortScanner()
 	ps.otProber = shareddisc.NewProber(200 * time.Millisecond)
 
-	findings := ps.dispatchUDPProbes(nil, "127.0.0.1", []int32{ethernetIPPort}, []string{"EtherNet_IP"}, nil)
+	findings := ps.dispatchUDPProbes(nil, fixtureHost, []int32{ethernetIPPort}, []string{"EtherNet_IP"}, nil)
 
 	if got := atomic.LoadInt64(&tcpConns); got != 0 {
 		t.Errorf("the EtherNet/IP prober opened %d TCP connection(s) — it is registered as a UDP prober and must not", got)
@@ -210,9 +221,9 @@ func TestDispatchableOTProtocolsKeepsTheAuditColumnHonest(t *testing.T) {
 // purpose: skipping would leave the dispatch untested and green.
 func bindUDP(t *testing.T, port int, counter *int64, reply []byte) {
 	t.Helper()
-	pc, err := net.ListenPacket("udp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	pc, err := net.ListenPacket("udp", net.JoinHostPort(fixtureHost, strconv.Itoa(port)))
 	if err != nil {
-		t.Fatalf("bind loopback UDP %d (must be free on the test host): %v", port, err)
+		t.Fatalf("bind %s UDP %d (must be free on the test host): %v", fixtureHost, port, err)
 	}
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -240,7 +251,7 @@ func bindUDP(t *testing.T, port int, counter *int64, reply []byte) {
 // connections.
 func bindTCP(t *testing.T, port int, counter *int64) {
 	t.Helper()
-	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	ln, err := net.Listen("tcp", net.JoinHostPort(fixtureHost, strconv.Itoa(port)))
 	if err != nil {
 		t.Fatalf("bind loopback TCP %d (must be free on the test host): %v", port, err)
 	}

@@ -7,6 +7,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SessionExpiryHandlers } from '@vistasecurity/api-contract';
 
+// Each case re-imports the real entry point with `vi.resetModules()`, so these
+// are the slowest tests in the suite by an order of magnitude — and under a
+// full parallel run on a loaded machine one of them crossed the 5s default and
+// failed, then passed alone and on every re-run. A flake in an entry-point
+// guard is worse than useless: it trains people to re-run rather than read.
+vi.setConfig({ testTimeout: 15_000 });
+
 interface MainHarness {
   assign: ReturnType<typeof vi.fn>;
   clearTokens: ReturnType<typeof vi.fn>;

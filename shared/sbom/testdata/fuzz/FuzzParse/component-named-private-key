@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{\"specVersion\":\"1.7\",\"components\":[{\"name\":\"PRIVATE KEY\"}]}")

@@ -1,7 +1,7 @@
 # Audit Logging User Guide
 
 **Version:** 1.0  
-**Last Updated:** 2026-02-02
+**Last Updated:** 2026-09-12
 
 This guide provides comprehensive information about audit logging, activity monitoring, and security investigation workflows in the Vista Platform.
 
@@ -92,47 +92,46 @@ Event types follow a consistent naming pattern: `{resource}.{action}`
 
 ## Event Categories
 
-Events are grouped into logical categories for easier filtering and analysis.
+Every event carries one category, and it is the value the **Category** filter
+on the activity log matches against. These are the categories the platform
+records:
 
-### Security
-Events related to authentication, authorization, and security:
-- Login attempts (success/failure)
-- Password changes
-- MFA changes
-- Permission changes
-- API key operations
-- SSO events
+| Category | Covers |
+|----------|--------|
+| `authentication` | Login, logout, token refresh, API tokens, SSO and OAuth flows |
+| `user` | User lifecycle, roles and permissions, profile and preference changes |
+| `tenant` | Tenant lifecycle and tenant-level health |
+| `asset` | Infrastructure assets, crypto configurations, keys, findings, asset approval |
+| `certificate` | Certificate upload, deletion, chain building, expiry and revocation |
+| `discovery` | Sensors and discovery agents, discovery jobs, device interrogation, PCAP intake |
+| `compliance` | Framework activation, control evaluation, compliance findings, tickets |
+| `report` | CBOM artifacts, comparisons and scopes |
+| `config` | Tenant and platform settings changes |
+| `data` | Data access and export, including access through the MCP server |
+| `job` | Background job lifecycle |
+| `system` | Platform operation: monitoring, notifications, resource tracking, the audit trail itself |
 
-### Asset
-Events related to asset lifecycle:
-- Asset CRUD operations
-- Asset discovery
-- Asset classification changes
-- Certificate operations
-- Key management
+Every request the platform serves is recorded under the category of the
+service that served it — a request to the inventory service is `asset`, to a
+discovery service `discovery`, and so on — with a few resource-level
+exceptions (certificates are always `certificate`, tenant lifecycle is always
+`tenant`, settings are always `config`, and sign-in is always
+`authentication`). Handlers that record a richer event of their own name the
+category directly.
 
-### Compliance
-Events related to compliance and risk:
-- Assessment operations
-- Finding lifecycle
-- Control evaluations
-- Report generation
-- Framework changes
+### Upgrading
 
-### System
-Platform-level events:
-- Configuration changes
-- Integration management
-- Backup operations
-- Service health events
-- Performance events
-
-### User
-User management events:
-- User lifecycle
-- Role assignments
-- Profile updates
-- Preference changes
+Before this categorization existed, every request the platform's request
+logger recorded (as opposed to a specific handler naming its own event) was
+filed under `system`, with an event type of the form
+`system.<service>.<action>` — for example `system.inventory-service.create`
+instead of `asset.assets.create`. **Rows written before the upgrade are not
+rewritten** — they keep the category and event type they were recorded with.
+If you have an alert rule or a SIEM filter that matches on
+`event_category = system` or on the `system.<service>.<action>` event-type
+shape, it will continue to match only the old rows; new activity moves to the
+categories in the table above and needs a filter written against those
+instead.
 
 ---
 
@@ -529,4 +528,4 @@ Build complex queries with multiple criteria:
 
 ---
 
-**Last Updated:** 2026-02-02
+**Last Updated:** 2026-09-12

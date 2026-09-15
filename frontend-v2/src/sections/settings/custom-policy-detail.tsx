@@ -4,9 +4,11 @@
 // in the frontend-v2 idiom, over the /frameworks/tenant/* endpoints.
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { draftingOffered } from '@vistasecurity/primitives/authoring';
 import { clients } from '../../lib/clients';
 import { Icon, Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
 import { STag } from './kit';
+import { DraftControlsModal, useDraftingAvailability } from './draft-controls-modal';
 import { notAssessedReasonText } from '../findings/control-status';
 import type { complianceEngineComponents } from '@vistasecurity/api-contract';
 
@@ -75,7 +77,7 @@ function ControlModal({ policyId, control, onClose, qc }: { policyId: string; co
     mutationFn: async () => {
       const body: ControlInput = { control_id: controlId.trim(), title: title.trim(), description, baseline_severity: severity, crypto_relevant: cryptoRelevant };
       if (editing) {
-        const { error, response } = await clients.compliance.PUT('/frameworks/tenant/{id}/controls/{controlId}', { params: { path: { id: policyId, controlId: control!.id } }, body });
+        const { error, response } = await clients.compliance.PUT('/frameworks/tenant/{id}/controls/{controlId}', { params: { path: { id: policyId, controlId: control.id } }, body });
         if (error || !response.ok) throw new Error('Update control failed');
       } else {
         const { error, response } = await clients.compliance.POST('/frameworks/tenant/{id}/controls', { params: { path: { id: policyId } }, body });
@@ -83,8 +85,8 @@ function ControlModal({ policyId, control, onClose, qc }: { policyId: string; co
       }
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['custom-policy', policyId] });
-      qc.invalidateQueries({ queryKey: ['settings', 'tenant-frameworks'] });
+      void qc.invalidateQueries({ queryKey: ['custom-policy', policyId] });
+      void qc.invalidateQueries({ queryKey: ['settings', 'tenant-frameworks'] });
       onClose();
     },
     onError: (e) => setError(errMsg(e)),
@@ -93,7 +95,7 @@ function ControlModal({ policyId, control, onClose, qc }: { policyId: string; co
   return (
     <Modal
       open onClose={onClose} icon="sliders-horizontal" eyebrow="Control"
-      title={editing ? `Edit control — ${control!.control_id}` : 'New control'}
+      title={editing ? `Edit control — ${control.control_id}` : 'New control'}
       description="Controls define what a policy checks. Add measurement rules to a control to make it evaluate."
       footerNote={error ?? undefined}
       primary={<button className="ui-btn sm accent" disabled={invalid || mut.isPending} onClick={() => { setError(null); mut.mutate(); }}>{mut.isPending ? 'Saving…' : editing ? 'Save' : 'Add control'}</button>}
@@ -138,7 +140,7 @@ function blankForm(mtId: string, ruleType: RuleType): RuleForm {
 function formFromMeasurement(m: ControlMeasurement): RuleForm {
   const p = (m.predicate ?? {}) as Record<string, unknown>;
   return {
-    editingId: m.id, mtId: m.measurement_type_id, ruleType: m.rule_type as RuleType,
+    editingId: m.id, mtId: m.measurement_type_id, ruleType: m.rule_type,
     operator: String(p.operator ?? '>='), value: p.value != null ? String(p.value) : '',
     required: p.required !== false, pattern: String(p.pattern ?? ''), flags: String(p.flags ?? 'i'),
     min: p.min != null ? String(p.min) : '', max: p.max != null ? String(p.max) : '',
@@ -193,7 +195,7 @@ function RulesModal({ control, onClose }: { control: Control; onClose: () => voi
         if (error || !response.ok) throw new Error('Add rule failed (check the predicate fits the measurement type)');
       }
     },
-    onSuccess: () => { invalidate(); setForm(null); },
+    onSuccess: () => { void invalidate(); setForm(null); },
   });
   const deleteMut = useMutation({
     mutationFn: async (measurementId: string) => {
@@ -311,10 +313,16 @@ function RulesModal({ control, onClose }: { control: Control; onClose: () => voi
 }
 
 // ─── Controls panel (the expanded policy body) ─────────────────────────────
-export function CustomPolicyControls({ policyId, canManage }: { policyId: string; canManage: boolean }) {
+export function CustomPolicyControls({ policyId, policyName, canManage }: { policyId: string; policyName: string; canManage: boolean }) {
   const qc = useQueryClient();
   const [controlModal, setControlModal] = useState<{ kind: 'closed' } | { kind: 'create' } | { kind: 'edit'; control: Control }>({ kind: 'closed' });
   const [rulesControl, setRulesControl] = useState<Control | null>(null);
+  const [drafting, setDrafting] = useState(false);
+  // ADR-0008's Author seam. Asked only when the user could act on it anyway —
+  // canManage already folds in both the compliance.update permission and the
+  // interim authoring kill-switch, so a tenant who cannot author is not
+  // told whether the deployment has a model.
+  const draftAvailability = useDraftingAvailability(canManage);
 
   const q = useQuery({
     queryKey: ['custom-policy', policyId],
@@ -329,7 +337,7 @@ export function CustomPolicyControls({ policyId, canManage }: { policyId: string
       const { error, response } = await clients.compliance.DELETE('/frameworks/tenant/{id}/controls/{controlId}', { params: { path: { id: policyId, controlId } } });
       if (error || !response.ok) throw new Error('Delete control failed');
     },
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['custom-policy', policyId] }); qc.invalidateQueries({ queryKey: ['settings', 'tenant-frameworks'] }); },
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['custom-policy', policyId] }); void qc.invalidateQueries({ queryKey: ['settings', 'tenant-frameworks'] }); },
   });
 
   const controls = (q.data?.controls ?? []) as Control[];
@@ -340,6 +348,11 @@ export function CustomPolicyControls({ policyId, canManage }: { policyId: string
         <span style={{ fontWeight: 600, fontSize: 12.5, color: 'var(--app-t1)' }}>Controls</span>
         <span className="mono" style={{ fontSize: 11, color: 'var(--app-t3)' }}>{controls.length}</span>
         <div style={{ flex: 1 }} />
+        {canManage && draftingOffered(draftAvailability.data) && (
+          <button className="ui-btn sm" title="Draft controls from the text of a standard" onClick={() => setDrafting(true)}>
+            <Icon name="sparkles" size={13} />Draft from a standard…
+          </button>
+        )}
         {canManage && <button className="ui-btn sm" onClick={() => setControlModal({ kind: 'create' })}><Icon name="plus" size={13} />Add control</button>}
       </div>
       {q.isLoading ? (
@@ -352,6 +365,11 @@ export function CustomPolicyControls({ policyId, canManage }: { policyId: string
             <div key={ctrl.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 8, border: '1px solid var(--app-border)', background: 'var(--app-panel)' }}>
               <span className="mono" style={{ fontSize: 11, fontWeight: 600, color: 'var(--app-t2)', minWidth: 56 }}>{ctrl.control_id}</span>
               <span style={{ flex: 1, fontSize: 12.5, color: 'var(--app-t1)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ctrl.title}</span>
+              {ctrl.source_kind === 'inferred' && (
+                <STag color="var(--info)">
+                  <span title={`Drafted by ${(ctrl.source_ref ?? '').replace(/^author:/, '') || 'a model'} and accepted by you. Unpublished until you publish the policy.`}>drafted</span>
+                </STag>
+              )}
               {ctrl.crypto_relevant && <STag color="var(--info)">crypto</STag>}
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 600, color: SEVERITY_COLOR[ctrl.baseline_severity] ?? 'var(--app-t3)' }}>
                 <span style={{ width: 6, height: 6, borderRadius: 50, background: SEVERITY_COLOR[ctrl.baseline_severity] ?? 'var(--app-t3)' }} />{ctrl.baseline_severity}
@@ -372,6 +390,7 @@ export function CustomPolicyControls({ policyId, canManage }: { policyId: string
         <ControlModal policyId={policyId} control={controlModal.kind === 'edit' ? controlModal.control : null} onClose={() => setControlModal({ kind: 'closed' })} qc={qc} />
       )}
       {rulesControl && <RulesModal control={rulesControl} onClose={() => setRulesControl(null)} />}
+      {drafting && <DraftControlsModal policy={{ id: policyId, name: policyName }} onClose={() => setDrafting(false)} />}
     </div>
   );
 }

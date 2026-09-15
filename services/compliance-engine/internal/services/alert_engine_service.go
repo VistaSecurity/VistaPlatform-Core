@@ -353,6 +353,109 @@ func alertSnoozeActive(status string, snoozedUntil sql.NullTime, now time.Time) 
 	return status == "snoozed" && snoozedUntil.Valid && snoozedUntil.Time.After(now)
 }
 
+// DeescalateOutcome describes what Deescalate did.
+type DeescalateOutcome string
+
+const (
+	// DeescalateLowered means the open alert's severity was reduced.
+	DeescalateLowered DeescalateOutcome = "lowered"
+	// DeescalateUnchanged means there was an open alert but its severity was
+	// already at or below the one offered, so nothing was written.
+	DeescalateUnchanged DeescalateOutcome = "unchanged"
+	// DeescalateNoAlert means nothing is open for (tenant, type, subject).
+	DeescalateNoAlert DeescalateOutcome = "no_alert"
+)
+
+// Deescalate lowers an open alert's severity when the condition behind it got
+// BETTER without going away.
+//
+// # Why this exists
+//
+// Raise only ever moved severity upward: a same-or-lower raise was deduped into
+// a silent touch, so an alert that opened critical stayed critical until the
+// condition cleared entirely. A vulnerable package downgraded from CVSS 9.8 to
+// 5.1 by a partial fix, or an asset whose only remaining drift finding is the
+// low-severity one, kept paging at the worst grade it ever reached — and the
+// Alerts page, which people triage top-down by severity, kept it at the top.
+// "Only ever worse" is not a conservative choice here; it is a wrong number
+// displayed with confidence.
+//
+// # What it does NOT do
+//
+// It never deletes or resolves anything: resolution is ResolveAuto's job and is
+// a statement that the condition is GONE, which is a different claim from "it
+// is milder now". The severity change is appended to the alert's evidence chain
+// as a `severity_changed` event carrying direction=lowered and the caller's
+// reason, so the timeline reads as a history rather than as a number that
+// silently moved.
+//
+// It does NOT notify. Notification fan-out exists to tell somebody something
+// got worse; waking a pager to report an improvement is how a channel gets
+// muted. The change is visible on the alert and in its timeline.
+//
+// Snooze and acknowledgement are irrelevant to it for the same reason: neither
+// is a reason to keep displaying a severity that is no longer true.
+func (s *AlertEngineService) Deescalate(ctx context.Context, ev events.AlertRaiseEvent,
+	reason map[string]interface{}) (DeescalateOutcome, error) {
+	if ev.TenantID == uuid.Nil {
+		return "", fmt.Errorf("alert de-escalation requires tenant_id")
+	}
+	severity := ev.Severity
+	if severityRank(severity) == 0 && severity != "info" {
+		return "", fmt.Errorf("alert de-escalation requires a known severity, got %q", ev.Severity)
+	}
+
+	outcome := DeescalateNoAlert
+	err := shareddatabase.WithTenantTx(ctx, s.db.DB, ev.TenantID, func(tx *sql.Tx) error {
+		var (
+			existingID       uuid.UUID
+			existingSeverity string
+		)
+		row := tx.QueryRowContext(ctx, `
+			SELECT id, severity FROM alerts
+			WHERE tenant_id = $1 AND alert_type = $2
+			  AND COALESCE(subject_id, '00000000-0000-0000-0000-000000000000'::uuid) = COALESCE($3, '00000000-0000-0000-0000-000000000000'::uuid)
+			  AND status <> 'resolved'
+			FOR UPDATE
+		`, ev.TenantID, ev.AlertType, ev.SubjectID)
+		if scanErr := row.Scan(&existingID, &existingSeverity); scanErr == sql.ErrNoRows {
+			return nil // nothing open — Raise is the caller's move, not this
+		} else if scanErr != nil {
+			return fmt.Errorf("lookup open alert: %w", scanErr)
+		}
+		if severityRank(severity) >= severityRank(existingSeverity) {
+			outcome = DeescalateUnchanged
+			return nil
+		}
+		// The title and message are re-stamped alongside the severity: they
+		// were written by the producer to describe the WORST finding, and
+		// leaving "CVSS 9.8" in the message beside a medium badge is the same
+		// stale number in a different place.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE alerts SET severity = $1, title = $2, message = $3,
+			       last_event_at = NOW(), updated_at = NOW()
+			WHERE id = $4
+		`, severity, ev.Title, ev.Message, existingID); err != nil {
+			return fmt.Errorf("de-escalate alert: %w", err)
+		}
+		detail := map[string]interface{}{
+			"from": existingSeverity, "to": severity, "direction": "lowered",
+		}
+		if len(reason) > 0 {
+			detail["reason"] = reason
+		}
+		if err := s.appendEvent(ctx, tx, existingID, ev.TenantID, "severity_changed", "system", nil, detail); err != nil {
+			return err
+		}
+		outcome = DeescalateLowered
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return outcome, nil
+}
+
 // ResolveAuto resolves the open alert for (tenant, type, subject) with the
 // system's observation that the condition cleared. No-op if no open alert.
 func (s *AlertEngineService) ResolveAuto(ctx context.Context, ev events.AlertResolveEvent) error {

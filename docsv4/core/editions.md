@@ -14,7 +14,7 @@ Anything not listed on this page is Core.
 
 *Free and source-available. One team securing its own estate.*
 
-Everything not listed as Enterprise or MSP below. Full discovery, the complete crypto inventory and CMDB, compliance evaluation against the six free frameworks, CBOM generation and CycloneDX export, RBAC, local users and invitations, audit logging, RLS tenant isolation, the mTLS service mesh, and the sensor and agent source.
+Everything not listed as Enterprise or MSP below. Full discovery, the complete crypto inventory and CMDB, compliance evaluation against the free frameworks, CBOM generation and CycloneDX export, RBAC, local users and invitations, audit logging, RLS tenant isolation, the mTLS service mesh, and the sensor and agent source.
 
 ## Enterprise
 
@@ -37,6 +37,7 @@ Enterprise, plus the multi-tenant management plane. Note that tenant isolation i
 | **Self-Service Billing** | Enterprise | Tenant-facing subscription, invoices, plan change and payment portal (admin-service /my-billing). Absent from Core; usage-against-limits is unconditional. | in Enterprise docs |
 | **CBOM Signing & Attestation** | Enterprise | Cryptographic signing of CBOM artifacts with compliance-attestation layers | in Enterprise docs |
 | **CMDB / ITSM Sync** | Enterprise | Sync inventory out to an external CMDB or ITSM (ServiceNow, Device42, SolarWinds) | [Guide](features/cmdb-integrations.md) |
+| **NetBox Connector** | Enterprise | Pull sites, prefixes, VLANs, device types and devices from a NetBox network source of truth, and see the drift between NetBox and discovered inventory. Read-only towards NetBox. | in Enterprise docs |
 | **Custom Branding** | Enterprise | White-label admin and web UI with custom logos and colors | in Enterprise docs |
 | **Custom Compliance Policies** | Enterprise | Tenant may author their own compliance frameworks beyond platform-published ones | in Enterprise docs |
 | **OT Active Probing** | Enterprise | Active TLS/protocol probing of OT/ICS devices (Modbus, DNP3, BACnet, etc.); risk-managed feature | *No self-service UI yet* |
@@ -82,6 +83,12 @@ Core keeps the palette/theme selector (a single org styling itself). Replacing p
 Core keeps the entire internal CMDB (assets, crypto configurations, certificates, keys, every lens). Syncing it OUT to a foreign CMDB/ITSM — ServiceNow, Device42, SolarWinds — is the paid surface.
 
 `cmdb_sync`
+
+**Enterprise: network source of truth**
+
+Core keeps every discovery path that FINDS a device. Reading a customer's NetBox — their statement of what the network is meant to be, and the sites/prefixes/VLANs that give an address its meaning — is the paid surface, alongside the drift view that compares the two. Listed separately from cmdb_sync rather than folded into it: a CMDB sync PUSHES inventory out, this PULLS topology in, and a tenant may well want one without the other.
+
+`connector_netbox`
 
 **Enterprise + MSP: audit forwarding**
 

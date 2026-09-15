@@ -341,3 +341,39 @@ postgres://{{ $user }}:$(POSTGRES_PASSWORD)@postgres:5432/{{ $ctx.Values.datasto
 {{- define "vistaplatform.redisURL" -}}
 redis://:$(REDIS_PASSWORD)@redis:6379/0
 {{- end -}}
+
+{{/*
+Normalised generative-AI provider kind: "" when nothing is configured, so every
+template can branch on one truthiness test. "none" is a real, selectable value
+meaning the same as unset (ai.NewFromEnv treats them identically), and an
+operator who writes it deliberately must get the same silence as one who left
+the field blank.
+*/}}
+{{- define "vistaplatform.aiProvider" -}}
+{{- $kind := trim (default "" .Values.ai.provider) -}}
+{{- if or (eq $kind "") (eq (lower $kind) "none") -}}
+{{- else -}}
+{{- $kind -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Name of the environment variable the provider reads its credential from.
+
+The platform never holds a key in configuration — AI_API_KEY_ENV carries the
+NAME of the variable and cfg.APIKey() resolves it at the moment of use, so a
+rotated key is picked up by the next request and a leaked configuration row is a
+configuration row. An operator who does not name one gets the provider's own
+default, which is what shared/ai/config.go falls back to; spelling it out here
+keeps the Secret's env var and AI_API_KEY_ENV from ever disagreeing.
+*/}}
+{{- define "vistaplatform.aiAPIKeyEnvVar" -}}
+{{- $explicit := trim (default "" .Values.ai.apiKey.envVar) -}}
+{{- if $explicit -}}
+{{- $explicit -}}
+{{- else if eq (include "vistaplatform.aiProvider" .) "openai_compat" -}}
+OPENAI_API_KEY
+{{- else -}}
+ANTHROPIC_API_KEY
+{{- end -}}
+{{- end -}}

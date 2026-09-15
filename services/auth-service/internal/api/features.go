@@ -34,6 +34,7 @@ var knownFeatures = []string{
 	"sso_saml",
 	"custom_branding",
 	"cmdb_sync",
+	"connector_netbox",
 	"siem_export",
 	"billing_portal",
 }

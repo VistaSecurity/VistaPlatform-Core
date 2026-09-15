@@ -368,7 +368,7 @@ func (s *LimitEnforcementService) countSensors(tenantID uuid.UUID) (int, error) 
 
 func (s *LimitEnforcementService) countAssets(tenantID uuid.UUID) (int, error) {
 	return s.countTenantScoped(tenantID, "assets",
-		`SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND deleted_at IS NULL`, tenantID)
+		`SELECT COUNT(*) FROM assets WHERE tenant_id = $1 AND deleted_at IS NULL`, tenantID)
 }
 
 func (s *LimitEnforcementService) countUsers(tenantID uuid.UUID) (int, error) {
@@ -393,7 +393,7 @@ func (s *LimitEnforcementService) countPendingInvitations(tenantID uuid.UUID) (i
 // framework licenses that consume cap — i.e. excluding the auto-licensed
 // platform default and every zero-cost framework (CMP-6). It must stay in step
 // with countChargeableFrameworks: counting a free activation here while the
-// gate lets it through would let six free activations exhaust a paid tenant's
+// gate lets it through would let free activations exhaust a paid tenant's
 // cap.
 func (s *LimitEnforcementService) countActiveFrameworkSubscriptions(tenantID uuid.UUID) (int, error) {
 	return s.countTenantScoped(tenantID, "active framework subscriptions", `

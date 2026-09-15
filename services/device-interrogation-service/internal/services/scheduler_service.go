@@ -398,7 +398,7 @@ func (s *SchedulerService) TriggerSchedule(ctx context.Context, tenantID, schedu
 	switch schedule.TargetType {
 	case "device":
 		jobRequest.JobType = models.JobTypeDeviceInterrogation
-		jobRequest.DeviceID = &schedule.TargetID
+		jobRequest.AssetID = &schedule.TargetID
 	case "cloud_integration":
 		jobRequest.JobType = models.JobTypeCloudDiscovery
 		jobRequest.IntegrationID = &schedule.TargetID

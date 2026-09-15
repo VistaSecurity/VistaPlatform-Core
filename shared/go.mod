@@ -19,6 +19,8 @@ require (
 	github.com/redis/go-redis/v9 v9.7.3
 	github.com/sirupsen/logrus v1.9.3
 	golang.org/x/crypto v0.56.0
+	// spectest reads the OpenAPI documents (shared/api/spectest).
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

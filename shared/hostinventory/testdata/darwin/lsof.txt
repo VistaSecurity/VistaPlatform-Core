@@ -1,0 +1,7 @@
+COMMAND     PID     USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+launchd       1     root   28u  IPv6 0x7f3a1c2d4e5f6a70      0t0  TCP *:22 (LISTEN)
+launchd       1     root   29u  IPv4 0x7f3a1c2d4e5f6b81      0t0  TCP *:22 (LISTEN)
+rapportd    611  example    5u  IPv4 0x7f3a1c2d4e5f6c92      0t0  TCP *:49213 (LISTEN)
+postgres    884  example    7u  IPv4 0x7f3a1c2d4e5f6da3      0t0  TCP 127.0.0.1:5432 (LISTEN)
+nginx      1203     root   10u  IPv4 0x7f3a1c2d4e5f6eb4      0t0  TCP 198.51.100.31:8443 (LISTEN)
+nginx      1203     root   11u  IPv4 0x7f3a1c2d4e5f6eb4      0t0  TCP 198.51.100.31:8443 (LISTEN)

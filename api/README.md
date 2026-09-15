@@ -66,3 +66,55 @@ spec, verify the generated client is in sync, and run the Go contract tests.
 3. Add/extend the Go contract test for that handler so CI proves the live
    response matches the spec.
 4. Run `make api-contract`.
+
+## Marking an operation Enterprise-only (`x-edition`)
+
+An operation that only an Enterprise build serves (its handler lives under a
+service's `ee/` tree, which the public-tree export strips entirely — see the
+root `CLAUDE.md`'s "Open Core" section) gets a sibling `x-edition: enterprise`
+extension next to its `operationId`:
+
+```yaml
+/connectors/netbox/connections:
+  get:
+    operationId: listNetBoxConnections
+    x-edition: enterprise
+    ...
+```
+
+This is what lets `TestContract_SpecRoutesAndEditionTags` stay edition-aware
+instead of false-failing on a Core export: an `x-edition: enterprise` path is
+expected to have **no route** when the service tree has no `ee/` directory (a
+Core checkout), and is still required to have a route when `ee/` is present (a
+full/Enterprise checkout). An operation with no `x-edition` extension is Core and
+must always have a route, in every build.
+
+The check lives in **`shared/api/spectest`** and four services call it —
+inventory-service, admin-service, auth-service, audit-service (one
+`spec_route_contract_test.go` each). It makes three claims, and the tag is what
+the second and third are about:
+
+1. every spec operation resolves to a registered route, edition-aware as above;
+2. every route registered under `ee/` has a spec operation tagged `x-edition:
+   enterprise` — an untagged one is a route the export deletes while leaving its
+   documentation behind, which is the whole hazard;
+3. every operation tagged `x-edition: enterprise` resolves to a handler **under
+   `ee/`** — a tag on a Core handler is worse than no tag, because it exempts the
+   operation from (1) in every Core build, permanently.
+
+Both polarities of each claim are pinned against synthetic trees in
+`shared/api/spectest/spectest_test.go`, because the x-edition exemption can never
+fire in a checkout that HAS `ee/`. A route under `ee/` with no spec operation at
+all is a documentation gap rather than an edition bug; those are listed with their
+reasons in each service's `UndocumentedEERoutes`, so the backlog is countable and
+a NEW one still fails.
+
+Only mark an operation this way when its handler is genuinely absent from a
+Core build. A capability that Core mounts as a 402 stub (see
+inventory-service's `internal/handlers/connector_edition.go`) is still
+`x-edition: enterprise` —
+the tag is about where the *real* handler lives, not about the HTTP status a
+Core build happens to answer with. An operation that is merely
+entitlement-gated (behind a subscription tier, via `RequireFeature`) but whose
+handler ships in every edition is **not** `x-edition: enterprise` — use the
+existing `EditionUnavailable` 402 response instead.

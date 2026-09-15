@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -138,6 +139,7 @@ func (s *SensorService) UpdateSensorHealthWithIP(sensorID string, health *models
 			PacketsCaptured:  getInt64FromMap(health.Metrics, "packets_captured"),
 			DiscoveriesMade:  getInt64FromMap(health.Metrics, "discoveries_made"),
 			ErrorsCount:      getIntFromMap(health.Metrics, "errors_count"),
+			ExtraCounters:    extraHeartbeatCounters(health.Metrics),
 			RecordedAt:       now,
 		}
 
@@ -149,6 +151,99 @@ func (s *SensorService) UpdateSensorHealthWithIP(sensorID string, health *models
 	}
 
 	return nil
+}
+
+// extraHeartbeatCounters picks up the counters that have no column of their own.
+//
+// Every metric the sensor reports used to be read through a FIXED list of
+// getters, so the eight `host_observations_*` counters the passive pipeline
+// sends arrived on every heartbeat and were dropped on the floor. The contract
+// doc documented them; nothing anywhere stored them; an operator asking "is the
+// sensor seeing hosts on this segment, and is it shedding them?" had no way to
+// find out.
+//
+// Nil rather than an empty map when there are none. The distinction is the one
+// the contract insists on for these metrics specifically — they are absent
+// entirely when the feature is off, so that "not running" and "running and
+// seeing nothing" do not look the same — and it survives all the way to the
+// column, which is nullable for the same reason.
+//
+// Non-numeric values are skipped rather than coerced: a counter that arrived as
+// a string is a producer bug, and storing 0 for it would report "nothing
+// happened" about something we could not read.
+//
+// # Why it is capped
+//
+// The heartbeat body is sensor-controlled and the endpoint sets no size limit,
+// so this is the first thing in the service that writes an OPEN set of
+// attacker-shaped keys to a column. A sensor with a broken counter loop — or a
+// compromised one — could send ten thousand `host_observations_<junk>` keys
+// with kilobyte names, every thirty seconds, into a `sensor_health_metrics` row
+// nothing prunes. The fixed column set this replaced was immune by
+// construction; jsonb is not, so the bound has to be explicit.
+//
+// The keys are sorted before truncation rather than taken in map order. Map
+// iteration is randomised, so an unsorted cut would store a DIFFERENT subset on
+// every heartbeat, and the one thing these counters are for — differencing the
+// ends of a window — silently stops working when the two ends hold different
+// keys. A stable subset is wrong in the same way every beat, which is at least
+// diagnosable.
+//
+// The cap is per-heartbeat and not a schema constraint on purpose: the column
+// holds whatever the last beat carried, so bounding what goes in bounds what
+// is stored, and there is no historical row to migrate.
+func extraHeartbeatCounters(m map[string]interface{}) *map[string]int64 {
+	if m == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		if !strings.HasPrefix(k, models.HostObservationCounterPrefix) {
+			continue
+		}
+		if len(k) > models.MaxHeartbeatCounterKeyLen {
+			log.Printf("Warning: heartbeat counter name is %d bytes (limit %d); skipped",
+				len(k), models.MaxHeartbeatCounterKeyLen)
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if len(keys) > models.MaxHeartbeatCounters {
+		log.Printf("Warning: heartbeat reported %d counters (limit %d); storing the first %d by name",
+			len(keys), models.MaxHeartbeatCounters, models.MaxHeartbeatCounters)
+		keys = keys[:models.MaxHeartbeatCounters]
+	}
+
+	out := map[string]int64{}
+	for _, k := range keys {
+		v, ok := asInt64(m[k])
+		if !ok {
+			log.Printf("Warning: heartbeat counter %s is %T, not a number; skipped", k, m[k])
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return &out
+}
+
+// asInt64 reports a JSON-decoded number as an int64, and whether it was one.
+// The second result is what keeps "we could not read this" distinct from zero.
+func asInt64(v interface{}) (int64, bool) {
+	switch t := v.(type) {
+	case int64:
+		return t, true
+	case int:
+		return int64(t), true
+	case float64:
+		return int64(t), true
+	case float32:
+		return int64(t), true
+	}
+	return 0, false
 }
 
 // Helper functions to safely extract values from metrics map
@@ -456,6 +551,18 @@ func (s *SensorService) StoreDiscoveries(batch *models.DiscoveryBatch) error {
 			"raw_metadata":     discovery.RawMetadata,
 			"service_hints":    discovery.ServiceHints,
 		}
+		// discovery_type is written ONLY when the sensor stated one.
+		//
+		// Every other envelope key above is written unconditionally, and
+		// discovery-processor's promotion is outer-wins — so an empty outer
+		// discovery_type would erase a nested one on the way through. That is
+		// exactly the mechanism that put NULL protocol versions on
+		// external_connections rows carrying a full certificate chain. A
+		// conditional write means "the sensor said nothing" stays silent
+		// instead of overwriting what the payload does say.
+		if discovery.DiscoveryType != "" {
+			metadata["discovery_type"] = discovery.DiscoveryType
+		}
 
 		metadataJSON, err := json.Marshal(metadata)
 		if err != nil {
@@ -577,13 +684,19 @@ func (s *SensorService) getDefaultConfig() *models.SensorConfig {
 			Interfaces:       []string{"eth0"},
 			ActiveProbing:    false,
 			NetworkDiscovery: false,
-			MaxConnections:   1000,
-			TimeoutSeconds:   30,
+			// Passive host observation stays nil, not false: this is the
+			// fallback returned when a sensor has no stored config, and a
+			// default that asserted "off" would switch the feature off on a
+			// sensor whose own configuration had it on.
+			HostObservation: nil,
+			MaxConnections:  1000,
+			TimeoutSeconds:  30,
 		},
 		Features: []string{
 			"tls_analysis",
 			"ssh_analysis",
 			"certificate_analysis",
+			"host_observation",
 		},
 	}
 }

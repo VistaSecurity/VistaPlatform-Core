@@ -50,7 +50,7 @@ func TestIntegration_ScopesAreTenantIsolatedWithoutRLS(t *testing.T) {
 	aScope := Scope{
 		TenantID:  tenantA,
 		Name:      "A-only Payments",
-		Predicate: Predicate{Include: &PredicateClause{Environment: []string{"production"}}},
+		Query:     "environment:production",
 		CreatedBy: actor,
 		UpdatedBy: actor,
 	}

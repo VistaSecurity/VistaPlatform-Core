@@ -19,6 +19,9 @@ export interface AgentFleetRow {
   profile?: string | null;
   job_count: number;
   last_job_at?: string | null;
+  last_host_inventory_at?: string | null;
+  host_inventory_packages?: number | null;
+  host_inventory_listeners?: number | null;
 }
 
 export interface AgentFleetAddress {
@@ -107,6 +110,40 @@ export function addressTooltip(a: AgentFleetRow): string {
 export function isPlatformManaged(row: { platform?: string | null; tags?: string[] | null }): boolean {
   if (row.platform === 'platform') return true;
   return (row.tags ?? []).includes('system');
+}
+
+/**
+ * "Last host inventory: 2h ago — 412 packages, 18 listeners".
+ *
+ * A host-inventory collection is the agent describing the machine it is
+ * INSTALLED ON, on its own timer — not work anybody queued — so the jobs column
+ * cannot express it: an agent busy interrogating firewalls that has never
+ * reported its own host reads as healthy on "47 jobs · 2h ago". Turning local
+ * collection on is a single env var (HOST_INVENTORY_ENABLED), and leaving it off
+ * is the kind of silence this product keeps having to learn to make visible.
+ *
+ * `null` when the agent has never reported one, so the caller omits the line
+ * rather than rendering "Last host inventory: never" on every agent that was
+ * never meant to run one.
+ *
+ * The two counts are independently optional and for the usual reason. A
+ * collection whose package step FAILED carries no package count at all — a host
+ * whose dpkg could not be read and a host with no packages are different
+ * answers — so "18 listeners" alone is the honest line, and "0 packages, 18
+ * listeners" would not be.
+ */
+export function hostInventorySummary(a: AgentFleetRow): string | null {
+  if (!a.last_host_inventory_at) return null;
+  const parts = [
+    a.host_inventory_packages != null
+      ? `${a.host_inventory_packages} package${a.host_inventory_packages === 1 ? '' : 's'}`
+      : null,
+    a.host_inventory_listeners != null
+      ? `${a.host_inventory_listeners} listener${a.host_inventory_listeners === 1 ? '' : 's'}`
+      : null,
+  ].filter(Boolean);
+  const when = `Last host inventory: ${relTime(a.last_host_inventory_at)}`;
+  return parts.length ? `${when} — ${parts.join(', ')}` : when;
 }
 
 export function hostSummary(a: AgentFleetRow): { primary: string; extra: string } {

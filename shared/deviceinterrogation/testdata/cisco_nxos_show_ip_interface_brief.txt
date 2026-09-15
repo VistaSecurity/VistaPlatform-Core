@@ -1,0 +1,7 @@
+IP Interface Status for VRF "default"(1)
+Interface            IP Address      Interface Status
+Vlan10               192.0.2.1       protocol-up/link-up/admin-up
+Vlan20               192.0.2.65      protocol-down/link-down/admin-up
+Ethernet1/47         198.51.100.2    protocol-up/link-up/admin-up
+Ethernet1/48         203.0.113.1     protocol-down/link-down/admin-down
+port-channel10       192.0.2.129     protocol-up/link-up/admin-up

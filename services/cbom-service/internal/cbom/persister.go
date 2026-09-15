@@ -71,12 +71,16 @@ func (p *Persister) Persist(ctx context.Context, in PersistInput) (*Artifact, er
 		return nil, fmt.Errorf("cbom persister: empty build output")
 	}
 
+	// The kind rides on the build, not on PersistInput: it is a property of the
+	// bytes that were assembled, and taking it from a separate field would let
+	// a row claim to be a kind its content is not.
 	params := insertParams{
 		TenantID:             in.Scope.TenantID,
 		ScopeID:              in.Scope.ID,
 		ScopeVersion:         in.Scope.Version,
 		ScopeNameSnapshot:    in.Scope.Name,
 		Name:                 in.Name,
+		ArtifactKind:         in.Build.Kind,
 		ContentHash:          in.Build.ContentHash,
 		SizeBytes:            int64(len(in.Build.CanonicalBytes)),
 		ComponentCount:       in.Build.ComponentCount,
@@ -129,7 +133,12 @@ func (p *Persister) Persist(ctx context.Context, in PersistInput) (*Artifact, er
 		// are idempotent at the object-store layer (S3 dedup on key collision).
 		// The artifact_id is the unique handle, but the storage key is
 		// content-addressed for free dedup.
-		filename := fmt.Sprintf("%s.cdx.json", in.Build.ContentHash[:16])
+		//
+		// The kind is in the filename because two kinds of the same scope are
+		// two different documents and an operator browsing the bucket has
+		// nothing else to tell them apart. It cannot break dedup: the hash is
+		// over content that differs by kind anyway.
+		filename := fmt.Sprintf("%s-%s.cdx.json", in.Build.Kind, in.Build.ContentHash[:16])
 		tenant := in.Scope.TenantID
 		uploadRes, err := p.storage.Upload(
 			ctx,

@@ -11,6 +11,35 @@ Device Interrogation complements the existing network traffic analysis sensor by
 
 This provides a more comprehensive view of cryptographic assets, especially for devices that may not generate network traffic or are in isolated networks.
 
+### A device is an asset with management configured
+
+Discovery → **Devices** is a view of your **inventory**, filtered to the assets
+the platform knows how to log in to. There is no separate "device" record any
+more: a firewall you add here is the same asset as the firewall your sensor sees
+on the wire, and everything the platform learns about it — its endpoints, its
+certificates, its findings, its history — accumulates on that one asset.
+
+What that changes, in practice:
+
+- **A device you add may already be in your inventory.** If the hostname,
+  address or serial number you supply matches something already known, the
+  management configuration attaches to that existing asset rather than creating a
+  duplicate. The page will show you an asset that already has discovery history.
+- **Each device has an asset class** — what it *is* (`firewall`,
+  `load_balancer`, `switch`, `object storage`…) — alongside its **device type**,
+  which names the vendor connector used to interrogate it. An F5 BIG-IP is a load
+  balancer interrogated with the F5 connector. The class is what Inventory
+  facets, the CMDB sync and the map all read.
+- **A newly discovered asset waits in Approvals**, exactly like a sensor
+  discovery. It appears on the Devices page immediately and you can interrogate
+  it straight away; its cryptographic findings reach Inventory once the asset is
+  approved (or automatically, if a tenant auto-approval rule covers it).
+- **"Delete" stops managing the device; it does not delete the host.** Removing a
+  device removes its management configuration and its stored credentials, and
+  takes it off this page. The asset stays in Inventory with its endpoints,
+  certificates and history intact — the host did not stop existing because you
+  stopped managing it. To remove the asset itself, use Inventory.
+
 ## Use Cases
 
 ### 1. Load Balancer Configuration Discovery
@@ -115,7 +144,7 @@ Create a job to interrogate a device or discover cloud resources.
 Review discovered cryptographic configurations and assets.
 
 **Results Include (Enriched v2):**
-- Infrastructure assets (hostname, IP, port, asset type classification)
+- Infrastructure assets (hostname, the endpoints found on them — address, port and service — and the class each asset was given)
 - Cryptographic configurations (protocol, cipher suite, key exchange, hash algorithm)
 - Supported cipher list and TLS version enumeration
 - Full certificate chain with PEM, fingerprints, SANs, key usage
@@ -128,23 +157,67 @@ Review discovered cryptographic configurations and assets.
 
 Imported assets appear in the inventory with `discovery_method` set to `device_interrogation` or `cloud_api`.
 
+## What is collected
+
+Interrogation collects **operational facts and cryptographic posture**. It never
+collects key material, and the rule is enforced in two independent places: each
+collector copies only an explicit list of fields from the device's response, and
+everything a collector emits is then scrubbed of anything whose name looks like
+a secret.
+
+**Never collected, from any device:** pre-shared keys, private keys, passwords,
+API keys, community strings, RADIUS or mesh secrets, SNMP v3 user tables,
+command transcripts, or whole configuration files. A device's DHCP option set,
+its routing table and its bridge forwarding table are not collected either —
+they are a map of your network, and nothing in the inventory reads them. A
+firewall's policy objects (addresses, groups, rules), its user and
+administrator accounts, and a load balancer's iRules and health-monitor
+credentials are not collected for the same reason.
+
+The one exception on routing is a **count**: on a FortiGate, where the device
+can answer it as structured data, we record how many distinct next hops the
+routing table forwards through. No prefix and no next-hop address is stored —
+only the number, which is what tells a reader whether a box is an edge with one
+default route or a core router with forty paths.
+
+Per vendor, beyond the cryptographic posture described under Device Types:
+
+| Vendor | Operational facts | Relationships |
+|---|---|---|
+| **Ubiquiti UniFi** | Per managed device: vendor, model, serial, firmware, uptime, interfaces (name, MAC, link and admin state, speed, VLAN). Per site: each LAN and VLAN with its name, prefix, gateway, and whether DHCP is served — never the DHCP range or its options. | Each adopted device to its controller, each device to the switch it uplinks through (with port names on both ends), and each LLDP neighbour. |
+| **Palo Alto Networks** | Hostname, model, serial, PAN-OS version, uptime, management address and MAC, every interface (address, VLAN tag, MAC, link state, speed), and the ARP table. | Each LLDP neighbour, with the local and remote port names. |
+| **Cisco** | Chassis model and serial from `show inventory` (the chassis only — a power supply or transceiver is a part, not an asset), IOS / IOS-XE / NX-OS / ASA version, uptime, every interface (address, MAC, administrative and operational state, bandwidth), the active VLANs, and the ARP table. On **NX-OS** the interface list is the device's layer-3 interfaces only: a Nexus formats the detailed interface command differently from IOS, so the summary form is what is read there, and it reports the interfaces that carry an address. | Each CDP and each LLDP neighbour, with the local and remote port names, and a proposed class for the neighbour taken from the platform it advertises. |
+| **Fortinet FortiGate** | Model, serial, FortiOS version, every interface (address, MAC, administrative status, 802.1Q tag) joined to its live link state and negotiated speed, each tagged VLAN with its prefix and the firewall's own address on it, and the routing next-hop count described above. | None — a FortiGate reports no neighbour table this integration reads. |
+| **F5 BIG-IP** | Chassis serial and platform from `sys/hardware`, TMOS version, every interface (MAC, administrative state, link state, negotiated speed), and each VLAN with its tag, prefix and self IP. | **Each virtual server to the members of the pool it forwards to**, with the pool name, the member port and the monitor's verdict. This is the dependency map a load balancer already holds and nothing else on the network states outright. A pool member is not classified from the pool: a pool states an address, a port and a monitor verdict, not whether the thing behind it is a server, another load balancer or a container ingress. |
+| **Generic SNMP** | Vendor, model, serial and firmware from the chassis entry, uptime, every interface (name, MAC, admin and operational state, speed), the ARP cache, and that the device is managed over SNMP v2c — which carries its credentials in the clear, and is reported as a finding. | Each LLDP neighbour, with the local and remote port names. |
+
+Interfaces, neighbours and VLANs are ordinary inventory data, not secrets. They
+are what makes a device page answer "what is this, where is it plugged in, and
+what is it talking to" without a second tool.
+
 ## Device Types
 
 ### Network Devices
 
 #### F5 BigIP ✅ **IMPLEMENTED**
 - **Method**: iControl REST API
-- **Data Collected**: VIP configurations, SSL profiles (client/server), certificate bindings
+- **Data Collected**: VIP configurations, SSL profiles (client/server), certificate bindings, plus device identity, the operational facts listed under [What is collected](#what-is-collected), and the virtual-server → pool-member dependency map
 - **Multiple Assets**: One F5 device → multiple VIPs
 - **Endpoints**: 
   - `/mgmt/tm/ltm/virtual` - Virtual servers
   - `/mgmt/tm/ltm/profile/client-ssl` - Client SSL profiles
   - `/mgmt/tm/ltm/profile/server-ssl` - Server SSL profiles
+  - `/mgmt/tm/sys/hardware` - chassis serial and platform
+  - `/mgmt/tm/net/interface`, `/mgmt/tm/net/vlan`, `/mgmt/tm/net/self` - interfaces, VLANs and self IPs
+  - `/mgmt/tm/ltm/pool` (members expanded) - pool membership, for the dependency edges
+- **Never read**: `/mgmt/tm/sys/crypto/key` and `/mgmt/tm/sys/file/ssl-key` (the private half of every certificate on the box — only the public half, `sys/crypto/cert`, is read), `/mgmt/tm/auth/user` and `/mgmt/tm/sys/db` (administrator accounts and the authentication configuration, including LDAP and RADIUS bind secrets), `/mgmt/tm/ltm/rule` (iRules — customer-written code, and a place people do put credentials), `/mgmt/tm/ltm/monitor/*` (health monitors carry the password a monitor authenticates to the backend with), and `/mgmt/tm/net/route`.
 
 #### Cisco Routers/Switches/ASAs ✅ **IMPLEMENTED**
 - **Method**: SSH + CLI commands
-- **Data Collected**: Crypto maps, IPSec configurations, ISAKMP/IKE SAs, SSL proxy settings
-- **Commands**: `show crypto map`, `show ipsec sa`, `show crypto isakmp sa`, `show ssl`, `show webvpn`
+- **Data Collected**: Crypto maps, IPSec configurations, ISAKMP/IKE SAs, SSL proxy settings, plus device identity and the operational facts listed under [What is collected](#what-is-collected)
+- **Commands**: `show version`, `show crypto map`, `show crypto ipsec sa`, `show crypto isakmp sa`, `show crypto ikev2 sa`, `show ssl`, `show webvpn`, `show running-config | include ssl cipher`, `show inventory`, `show ip interface brief`, `show interfaces`, `show vlan brief`, `show cdp neighbors detail`, `show lldp neighbors detail`, `show ip arp`. That is the whole list — it is a closed set, and adding to it is a deliberate edit the test suite makes visible.
+- **Never run**: `show running-config` in any form broader than `| include ssl cipher` (the section form returns pre-shared keys, enable secrets, SNMP communities and tunnel-group passwords), `show startup-config`, `show ip route`, `show mac address-table`, `show snmp`, `show crypto key`. Every command output is read up to a size bound, and a reply cut short at that bound is reported as partial rather than presented as a complete table.
+- **Platform differences**: on IOS, IOS-XE and ASA the interface list comes from the detailed interface command. **NX-OS formats that command differently**, so on a Nexus the interface summary is the source instead and the list is the device's layer-3 interfaces — those carrying an address — rather than every physical port.
 - **Supported Types**: `cisco_router`, `cisco_switch`, `cisco_asa`, `cisco`
 
 #### Fortinet FortiGate ✅ **IMPLEMENTED**
@@ -155,19 +228,28 @@ Imported assets appear in the inventory with `discovery_method` set to `device_i
   - Certificate store information
   - Cipher suites, key sizes, hash algorithms extracted from configs
   - TLS versions and protocol details
+  - Device identity and the operational facts listed under [What is collected](#what-is-collected)
 - **Endpoints**: 
   - `/api/v2/cmdb/vpn/ssl/settings` - SSL VPN configurations
   - `/api/v2/cmdb/vpn/ipsec/phase1-interface` - IPSec tunnel configurations
   - `/api/v2/cmdb/certificate/local` - Certificate store
   - `/api/v2/cmdb/system/status` - System information
+  - `/api/v2/cmdb/system/interface` - configured interfaces, addresses and VLAN tags
+  - `/api/v2/monitor/system/interface` - live link state and negotiated speed
+  - `/api/v2/monitor/router/ipv4` - read to count distinct next hops; nothing from it is stored
+- **Never read**: `firewall/address`, `firewall/addrgrp`, `firewall/policy`, anything under `user/`, `system/admin`, `system/api-user`, or the CA and remote certificate stores
 
 #### Palo Alto Networks ✅ **IMPLEMENTED**
 - **Method**: PanOS XML API
-- **Data Collected**: SSL decrypt profiles, security rules with SSL settings, certificate configurations
+- **Data Collected**: SSL decrypt profiles, security rules with SSL settings, certificate configurations, plus device identity and the operational facts listed under [What is collected](#what-is-collected)
 - **Endpoints**: 
   - `/api/?type=keygen` - API key authentication
   - `/api/?type=config&action=get&xpath=/config/devices/entry/network/profiles/ssl-decrypt` - SSL decrypt profiles
   - `/api/?type=config&action=get&xpath=/config/devices/entry/vsys/entry/rulebase/security/rules` - Security rules
+  - `show system info` - hostname, model, serial, PAN-OS version, uptime, management address
+  - `show interface all` - interfaces, addresses, VLAN tags, link state
+  - `show arp all` - layer-3 neighbours
+  - `show lldp neighbors all` - layer-2 neighbours
 
 #### Ubiquiti UniFi ✅ **IMPLEMENTED WITH AUTO-DISCOVERY**
 - **Method**: UniFi Network API (REST over HTTPS)
@@ -184,6 +266,8 @@ Imported assets appear in the inventory with `discovery_method` set to `device_i
   - Site-specific device configurations
   - Gateway/UDM VPN configurations (if available)
   - Certificate information (if accessible)
+  - Per managed device: uptime, interfaces, LLDP neighbours and uplink (see [What is collected](#what-is-collected))
+  - Per site: LAN and VLAN definitions with prefix, gateway and whether DHCP is served
 - **Supported Types**: `unifi`, `ubiquiti`, `unifi_controller`, `udm_pro`
 - **Endpoints**: 
   - `/api/auth/login` - Modern authentication (UDM/UDR)
@@ -205,7 +289,9 @@ Imported assets appear in the inventory with `discovery_method` set to `device_i
 #### Generic SNMP ✅ **IMPLEMENTED**
 - **Method**: SNMP v2c (UDP/161), hand-rolled (no CGO)
 - **Supported Types**: `generic_snmp`
-- **Extracts**: standard system OIDs (sysDescr, sysName, sysObjectID, …) for device identity — a fallback for appliances without a dedicated vendor integration
+- **Extracts**: the standard system OIDs (sysDescr, sysName, sysObjectID, sysUpTime) plus the standard MIBs every network device answers — ENTITY-MIB for the chassis model, serial and firmware; IF-MIB for interfaces; LLDP-MIB for neighbours; IP-MIB for the ARP cache. This is the fallback that inventories an appliance from any vendor without a dedicated integration.
+- **Bounded**: each table walk stops at 500 rows and the whole collection at 30 seconds, so a device with a very large table cannot hold a job open.
+- **Note**: SNMP v2c authenticates with a community string sent in the clear. A device managed this way is recorded as having a plaintext management plane, which raises a finding.
 
 #### Generic HTTP / TLS ✅ **IMPLEMENTED**
 - **Method**: REST certificate endpoint + direct TLS handshake
@@ -259,9 +345,12 @@ Cloud resources are interrogated directly by the platform service using cloud pr
 ## Security Considerations
 
 ### Credential Storage
-- All credentials encrypted at rest in `platform_integrations` table
+- Device credentials are encrypted at rest, and the stored value is tagged so a
+  reader can never mistake ciphertext for plaintext
+- Cloud integration credentials are encrypted at rest in the integrations store
 - Credentials decrypted only when needed for interrogation
-- Agent receives credentials encrypted, decrypts in-memory only
+- Agent receives credentials sealed for that one agent and that one job, and
+  decrypts in memory only
 
 ### Network Security
 - Agent uses outbound-only communication (no inbound ports required)
@@ -278,7 +367,17 @@ Cloud resources are interrogated directly by the platform service using cloud pr
 Device interrogation results integrate with the existing discovery system:
 - Discovered assets appear in discovery job results
 - Can be reviewed and approved like sensor discoveries
-- Imported assets linked to parent device via `device_id` FK
+- Everything a run learns lands on the interrogated **asset**: its measured
+  hardware identity (vendor, model, firmware, serial), the operational facts the
+  connector read (interfaces, neighbours, VLANs, uptime), and the
+  **relationships** it observed — an access point adopted by a controller, an
+  uplink, an LLDP neighbour
+- A neighbour the device tells us about becomes a pending asset of its own, and
+  the relationship to it appears in Approvals alongside it. Approving the asset
+  approves what was observed about it.
+- Values a person typed in are not overwritten by a later scan: a measurement
+  and a declared value are both kept, with the human's answer winning for the
+  fields a person is the authority on
 
 ## Implementation Status
 
@@ -296,7 +395,8 @@ Device interrogation results integrate with the existing discovery system:
 - **Database interrogation (PostgreSQL/MySQL)** - in-transit TLS, at-rest encryption, password hashing, risk score
 - **Generic SNMP and HTTP/TLS probers** - SNMP v2c device identity; REST cert endpoint + direct TLS handshake
 - **Discovery job integration** - Seamless integration with existing discovery workflow
-- **Device-to-asset linking** - Assets linked to parent devices via `device_id`
+- **Devices ARE assets** - a device is an asset with management configured, so
+  there is no linking step and no second record to reconcile
 - **Error handling** - Connection status tracking and error management
 - **Device agent support** - All device types supported in downloadable agent binary
 

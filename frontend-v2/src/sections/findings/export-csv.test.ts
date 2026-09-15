@@ -31,10 +31,13 @@ const cryptoRisk: CryptoRisk = {
 const complianceFinding: ComplianceFinding = {
   id: 'finding-1',
   tenant_id: 't1',
+  producer: 'compliance',
+  kind: 'control_noncompliant',
   control_id: 'control-1',
-  asset_id: 'asset-2',
-  asset_type: 'certificate',
-  severity: 'High',
+  subject_id: 'asset-2',
+  subject_type: 'certificate',
+  severity: 'high',
+  score: 0,
   summary: 'Certificate uses SHA-1 signature',
   evidence: null,
   first_seen: '2026-08-01T00:00:00Z',
@@ -69,12 +72,55 @@ describe('B-31: buildComplianceFindingCsvRows', () => {
   it('produces one row per compliance finding — the control/framework/workflow fields a crypto risk does not have', () => {
     const rows = buildComplianceFindingCsvRows([complianceFinding], controlMeta);
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toEqual(['Use strong cryptography', 'PCI-DSS', 'asset-2', 'High', 'NEW', 'user-1', '2026-08-01T00:00:00Z', '2026-08-10T00:00:00Z', 'Certificate uses SHA-1 signature']);
+    expect(rows[0]).toEqual([
+      'Compliance', 'Control noncompliant', 'Use strong cryptography', 'PCI-DSS', 'asset-2',
+      'High', 0, 'NEW', 'user-1', '2026-08-01T00:00:00Z', '2026-08-10T00:00:00Z',
+      'Certificate uses SHA-1 signature', '',
+    ]);
   });
 
   it('falls back to the raw control_id when no control metadata resolved (e.g. an unactivated/retired control)', () => {
     const rows = buildComplianceFindingCsvRows([complianceFinding], new Map());
-    expect(rows[0][0]).toBe('control-1');
-    expect(rows[0][1]).toBe('');
+    expect(rows[0][2]).toBe('control-1');
+    expect(rows[0][3]).toBe('');
+  });
+
+  // The export follows the page. Once Risk & Compliance → Findings lists every
+  // producer, a CSV that dropped the non-compliance rows — or dressed them up
+  // with a control id they do not have — would describe a page that no longer
+  // exists.
+  it('exports a non-compliance finding with its producer, kind and citation', () => {
+    const eol = {
+      ...complianceFinding,
+      id: 'finding-2',
+      producer: 'eol',
+      kind: 'software_end_of_life',
+      // The nil uuid is what `control_id` carries for every producer but
+      // compliance. It is "no control", not a control nobody can find.
+      control_id: '00000000-0000-0000-0000-000000000000',
+      subject_type: 'software_install',
+      severity: 'medium',
+      score: 50,
+      summary: 'openssl 1.1.1 is end of life (412 days ago)',
+      evidence: { catalogue_source_url: 'https://endoflife.date/openssl' },
+    } as ComplianceFinding;
+    const rows = buildComplianceFindingCsvRows([eol], controlMeta);
+    expect(rows[0][0]).toBe('End of life');
+    expect(rows[0][1]).toBe('Software end of life');
+    expect(rows[0][2]).toBe('');            // no control
+    expect(rows[0][3]).toBe('');            // no framework
+    expect(rows[0][6]).toBe(50);            // the kind's real risk contribution
+    expect(rows[0][12]).toBe('https://endoflife.date/openssl');
+  });
+
+  it('never writes the nil control uuid into the control column', () => {
+    // The regression: exporting `control_id` verbatim puts a well-formed,
+    // entirely meaningless uuid in a column a reader will try to look up.
+    const eol = {
+      ...complianceFinding,
+      producer: 'eol',
+      control_id: '00000000-0000-0000-0000-000000000000',
+    } as ComplianceFinding;
+    expect(buildComplianceFindingCsvRows([eol], new Map())[0][2]).toBe('');
   });
 });

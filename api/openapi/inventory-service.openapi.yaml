@@ -107,6 +107,14 @@ tags:
     recording whether it is encrypted, under which algorithm, and whose key holds
     it. The at-rest sibling of crypto-configurations, which covers in-transit.
     UI consumer: frontend-v2 Inventory → Data Protection lens.'
+- name: ask
+  description: 'The Query seam (ADR-0008 D1): a question in words answered as a
+    query-language predicate you can edit, the rows it selected, and a summary
+    that cites them. ENTERPRISE — the route is mounted in every edition and
+    answers 402 in Core, because the availability question already has one
+    deployment-wide answer at `GET /api/v1/auth-service/tenant/ai` and a 404
+    would be indistinguishable from a broken route. UI consumer: frontend-v2''s
+    command palette (⌘K) in ask mode.'
 paths:
   /operational/locations-summary:
     get:
@@ -1118,16 +1126,63 @@ paths:
       tags:
       - infrastructure-assets
       summary: List infrastructure assets for the current tenant
-      description: 'Returns a paginated page of the tenant''s infrastructure assets. Filters (environment, asset_type, risk_level, status, search, etc.) are accepted as query params; the common pagination params are page / page_size. Important: when no asset_status is given the service defaults the filter to asset_status = ''monitoring'' — pending_approval / denied / archived assets are only returned when requested explicitly (e.g. asset_status=pending_approval for the approval queue).
+      description: >
+        Returns a paginated page of the tenant's infrastructure assets.
 
-        '
+
+        `query` is the supported filter surface. Every per-field parameter below
+        is DEPRECATED and is translated into the same query language
+        server-side, then AND-ed with whatever `query` the caller sent — so the
+        two can never select different things. Each one's description names its
+        query equivalent; prefer writing it directly. There is no `class_key`
+        parameter: the class filter is `query=class:<key>`, and it matches the
+        whole SUBTREE under that key.
+
+
+        Important: when no `asset_status` is given the service defaults the
+        filter to `asset_status = monitoring` — pending_approval, denied and
+        archived assets are only returned when requested explicitly (e.g.
+        `asset_status=pending_approval` for the approval queue).
+
+
+        The response echoes the canonical form of the predicate that actually
+        ran. `discovery_source` is the one honoured filter it cannot carry (it
+        reads pipeline state out of `assets.metadata` rather than a modelled
+        field), so a response that honoured it also names it under
+        `filters_applied`.
       parameters:
       - $ref: '#/components/parameters/Page'
       - $ref: '#/components/parameters/PageSize'
       - $ref: '#/components/parameters/Search'
+      - { name: query, in: query, required: false, description: 'A query-language predicate over the `asset` target (QUERY_LANGUAGE.md). AND-ed with the deprecated per-field filters below, which are translated into the same language server-side. An invalid query is 400 with the structured diagnostics of QueryError — code, message, span and suggestion, one per problem.', schema: { type: string } }
       - { name: asset_status, in: query, required: false, description: 'Repeatable lifecycle-status filter (gin binds form:"asset_status" into a slice): pending_approval | monitoring | denied | archived …. Omitted ⇒ the default ''monitoring''-only view.', schema: { type: string } }
       - { name: last_seen_before, in: query, required: false, description: 'RFC3339 cutoff — keeps only assets whose last_seen_at is strictly older. Assets with no last_seen_at never match. ANDs with the other filters (the time arm of a staleness cut); a non-RFC3339 value is a 400.', schema: { type: string, format: date-time } }
       - { name: unscanned_only, in: query, required: false, description: 'Active Scan coverage cut (issue #866): when true, keeps only assets that have never been actively scanned (last_scanned_at IS NULL). ANDs with the other filters.', schema: { type: boolean } }
+      - { name: asset_ownership, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=ownership in (…)` instead; it is translated into exactly that server-side.', schema: { type: string } }
+      - { name: asset_type, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=class in (…)` instead; it is translated into exactly that server-side. Subtree-or, so a parent key selects its whole branch. Name it `class`, not `class_key`.', schema: { type: string } }
+      - { name: business_unit, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=business_unit in (…)` instead; it is translated into exactly that server-side.', schema: { type: string } }
+      - { name: cert_algorithm, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=cert:(key_algorithm=…)` instead; it is translated into exactly that server-side.', schema: { type: string } }
+      - { name: cert_expiring_within, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=cert:(not_after >= now and not_after < now+Nd)` instead; it is translated into exactly that server-side. The lower bound is deliberate: an ALREADY expired certificate is not ''expiring within 30 days''.', schema: { type: string } }
+      - { name: cert_key_size_min, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=cert:(key_size >= N)` instead; it is translated into exactly that server-side.', schema: { type: string } }
+      - { name: discovery_source, in: query, required: false, description: 'Repeatable filter on the pipeline that produced the asset (assets.metadata->>''discovery_source''). NOT deprecated and NOT expressible in the query language: it is pipeline state rather than a modelled field, so it has no catalogue entry. Consequence a caller must know: the canonical `query` this endpoint echoes back EXCLUDES it, and a response that honoured it names it under `filters_applied` instead.', schema: { type: string } }
+      - { name: environment, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=environment in (…)` instead; it is translated into exactly that server-side.', schema: { type: string } }
+      - { name: has_certificates, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=exists(cert)` instead; it is translated into exactly that server-side.', schema: { type: string } }
+      - { name: hash_algorithm, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=crypto:(hash_algorithm in (…))` instead; it is translated into exactly that server-side.', schema: { type: string } }
+      - { name: key_size_min, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=crypto:(key_size >= N)` instead; it is translated into exactly that server-side.', schema: { type: string } }
+      - { name: location_building, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=tag.building:…` instead; it is translated into exactly that server-side. There is no `building` column; it was only ever a tag.', schema: { type: string } }
+      - { name: location_id, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=location_id in (…)` instead; it is translated into exactly that server-side.', schema: { type: string } }
+      - { name: location_region, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=region in (…)` instead; it is translated into exactly that server-side.', schema: { type: string } }
+      - { name: location_site, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=site in (…)` instead; it is translated into exactly that server-side.', schema: { type: string } }
+      - { name: location_zone, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=zone in (…)` instead; it is translated into exactly that server-side.', schema: { type: string } }
+      - { name: network_segment_id, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=segment_id in (…)` instead; it is translated into exactly that server-side.', schema: { type: string } }
+      - { name: operating_system, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=attr.operating_system in (…)` instead; it is translated into exactly that server-side. It is a class ATTRIBUTE now, not a column.', schema: { type: string } }
+      - { name: owner_email, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=owner_email in (…)` instead; it is translated into exactly that server-side.', schema: { type: string } }
+      - { name: protocol, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=crypto:(protocol in (…))` instead; it is translated into exactly that server-side.', schema: { type: string } }
+      - { name: protocol_version, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=crypto:(protocol_version in (…))` instead; it is translated into exactly that server-side.', schema: { type: string } }
+      - { name: risk_level, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=risk >= high / risk:medium` instead; it is translated into exactly that server-side. `high` means high AND ABOVE, so a Critical asset matches it — the rail''s vocabulary is coarser than the five badge labels.', schema: { type: string } }
+      - { name: sort_by, in: query, required: false, description: 'Sort column. Whitelisted server-side; an unrecognised value falls back to the default rather than erroring. Ties are broken by asset id, so paging is stable.', schema: { type: string } }
+      - { name: sort_order, in: query, required: false, description: 'asc | desc. Anything else is treated as desc.', schema: { type: string } }
+      - { name: uses_deprecated_algorithms, in: query, required: false, deprecated: true, description: 'DEPRECATED. Use `query=crypto:(algorithm.deprecated:true)` instead; it is translated into exactly that server-side.', schema: { type: string } }
       responses:
         '200':
           description: A page of assets with pagination metadata.
@@ -1136,11 +1191,16 @@ paths:
               schema:
                 $ref: '#/components/schemas/AssetListResponse'
         '400':
-          description: Invalid filter/query parameter.
+          description: >
+            Invalid filter parameter, or a `query` that does not parse or
+            validate. A query failure carries the structured diagnostics; a
+            filter failure is the legacy single-message shape.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/LegacyError'
+                oneOf:
+                  - $ref: '#/components/schemas/QueryError'
+                  - $ref: '#/components/schemas/LegacyError'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
         '500':
@@ -1257,9 +1317,36 @@ paths:
       tags:
       - infrastructure-assets
       summary: Update an infrastructure asset
-      description: 'Partially updates an asset. asset_type is required in the body (it has a binding:"required" tag); other fields are optional pointers.
+      description: >
+        Partially updates an asset. Every field is optional — including
+        `class_key`, which is required only on create.
 
-        '
+
+        `identifiers` is HONOURED, and is the only way to change what the asset
+        can be recognised by. Identifiers a person adds are attached through the
+        identification engine, which is the only writer that respects the
+        uniqueness invariant: an identifier value maps to at most one asset in a
+        tenant.
+
+
+        `hostname` and `ip_address` are identifier aliases. Setting either
+        attaches the matching identifier (an `fqdn` when the hostname is dotted,
+        a scoped `hostname` when it is a single label) — it does NOT retire the
+        old one, because the old name was true. Remove it by leaving it out of
+        an `identifiers` array.
+
+
+        REMOVAL happens only when the request actually carries an `identifiers`
+        array, and only for identifiers whose `source_kind` is `declared`.
+        Collector-minted identifiers — `agent_id`, `cloud_resource_id`, and
+        anything a sensor or an import produced — are KEPT, and the response's
+        `identifiers.kept` says which and why. An edit may never leave an asset
+        with no identifiers at all (400): it could never be matched again.
+
+
+        An identifier that already belongs to ANOTHER asset is answered 409 with
+        `merge_proposal_id`; the proposal is committed and waiting in Approvals
+        even though the edit was refused.
       requestBody:
         required: true
         content:
@@ -1268,15 +1355,23 @@ paths:
               $ref: '#/components/schemas/AssetInput'
       responses:
         '200':
-          description: The updated asset.
+          description: The updated asset, and what the update did to its identifiers.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AssetResponse'
+                $ref: '#/components/schemas/AssetUpdateResponse'
         '400':
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '409':
+          description: >
+            An identifier in the request already belongs to another asset. The
+            edit was refused and a merge proposal was opened.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentifierConflict'
       x-quirks:
       - A failed update (including not-found) returns 400 with {"error":"Failed to update asset"}, not 404/500.
     delete:
@@ -2034,6 +2129,7 @@ paths:
   /cmdb/profiles:
     get:
       operationId: listCmdbProfiles
+      x-edition: enterprise
       tags:
       - cmdb-integrations
       summary: List the tenant's CMDB sync profiles
@@ -2050,6 +2146,7 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
     post:
       operationId: createCmdbProfile
+      x-edition: enterprise
       tags:
       - cmdb-integrations
       summary: Create a CMDB sync profile
@@ -2082,6 +2179,7 @@ paths:
         type: string
     get:
       operationId: getCmdbProfile
+      x-edition: enterprise
       tags:
       - cmdb-integrations
       summary: Get a CMDB sync profile by id
@@ -2100,6 +2198,7 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
     put:
       operationId: updateCmdbProfile
+      x-edition: enterprise
       tags:
       - cmdb-integrations
       summary: Update a CMDB sync profile
@@ -2124,6 +2223,7 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
     delete:
       operationId: deleteCmdbProfile
+      x-edition: enterprise
       tags:
       - cmdb-integrations
       summary: Delete a CMDB sync profile (soft delete)
@@ -2148,6 +2248,7 @@ paths:
         type: string
     post:
       operationId: testCmdbConnection
+      x-edition: enterprise
       tags:
       - cmdb-integrations
       summary: Test a profile's CMDB connection
@@ -2176,6 +2277,7 @@ paths:
         type: string
     post:
       operationId: triggerCmdbSync
+      x-edition: enterprise
       tags:
       - cmdb-integrations
       summary: Trigger a manual sync for a profile
@@ -2200,6 +2302,7 @@ paths:
         type: string
     post:
       operationId: pullFromCmdb
+      x-edition: enterprise
       tags:
       - cmdb-integrations
       summary: Pull server CIs from the CMDB into Vista as assets
@@ -2235,6 +2338,7 @@ paths:
         type: string
     get:
       operationId: listCmdbSyncJobs
+      x-edition: enterprise
       tags:
       - cmdb-integrations
       summary: List recent sync jobs for a profile
@@ -2256,6 +2360,305 @@ paths:
           $ref: '#/components/responses/LegacyUnauthorized'
         '500':
           $ref: '#/components/responses/LegacyServerError'
+
+  /connectors:
+    get:
+      operationId: listConnectorCatalogue
+      tags:
+      - connectors
+      summary: The connector catalogue, grouped by kind
+      description: |
+        The registry of external systems the platform integrates with
+        (standards/connectors.yaml), grouped by kind and annotated for THIS
+        tenant. Core: every edition serves it, and it lists every connector
+        including ones this tenant cannot use — the page's job is to show the
+        shape of the product, not only what has been paid for.
+
+        `status` is live / registered / planned and answers "does anything
+        DISPATCH on this key", which is not the same question as whether the
+        database accepts it. `addable` is `status == live && entitled`;
+        `unavailable_reason` says which half failed.
+      responses:
+        '200':
+          description: The connector catalogue.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectorCatalogueResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+
+  /connectors/netbox/connections:
+    get:
+      operationId: listNetBoxConnections
+      x-edition: enterprise
+      tags:
+      - connectors
+      summary: List the tenant's NetBox connections
+      description: |
+        Enterprise (`connector_netbox`). A Core build and an unentitled tenant
+        both answer 402, which is what lets the UI render one upgrade card for
+        either case.
+      responses:
+        '200':
+          description: 'The tenant''s NetBox connections (wrapped under `connections`; always a non-null array).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetBoxConnectionListResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '402':
+          $ref: '#/components/responses/EditionUnavailable'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+    post:
+      operationId: createNetBoxConnection
+      x-edition: enterprise
+      tags:
+      - connectors
+      summary: Create a NetBox connection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NetBoxConnectionInput'
+      responses:
+        '201':
+          description: The created connection. The API token is never returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetBoxConnection'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '402':
+          $ref: '#/components/responses/EditionUnavailable'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /connectors/netbox/connections/{id}:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      description: NetBox connection id.
+      schema:
+        type: string
+    put:
+      operationId: updateNetBoxConnection
+      x-edition: enterprise
+      tags:
+      - connectors
+      summary: Update a NetBox connection
+      description: |
+        An EMPTY `api_token` leaves the stored token alone — an edit form that
+        did not re-send the secret must not wipe it. There is deliberately no
+        way to blank it: a NetBox connection without a token cannot do
+        anything.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NetBoxConnectionInput'
+      responses:
+        '200':
+          description: The updated connection.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetBoxConnection'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '402':
+          $ref: '#/components/responses/EditionUnavailable'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+    delete:
+      operationId: deleteNetBoxConnection
+      x-edition: enterprise
+      tags:
+      - connectors
+      summary: Remove a NetBox connection
+      description: Soft delete — the run history stays, so "what did this import, and when" keeps an answer.
+      responses:
+        '200':
+          description: Acknowledgement.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectorMessageResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '402':
+          $ref: '#/components/responses/EditionUnavailable'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /connectors/netbox/connections/{id}/test:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      description: NetBox connection id.
+      schema:
+        type: string
+    post:
+      operationId: testNetBoxConnection
+      x-edition: enterprise
+      tags:
+      - connectors
+      summary: Check that the NetBox URL and token work
+      description: |
+        Answers 200 with `success: false` when the CHECK fails — the request
+        succeeded, and what failed is the thing it was asked to check. A 4xx
+        here would have the UI render "couldn't run the test" for "your token
+        is wrong".
+      responses:
+        '200':
+          description: The test result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectorTestResult'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '402':
+          $ref: '#/components/responses/EditionUnavailable'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+
+  /connectors/netbox/connections/{id}/run:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      description: NetBox connection id.
+      schema:
+        type: string
+    post:
+      operationId: runNetBoxImport
+      x-edition: enterprise
+      tags:
+      - connectors
+      summary: Pull from NetBox now
+      responses:
+        '200':
+          description: The completed run, with its counts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectorRun'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '402':
+          $ref: '#/components/responses/EditionUnavailable'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '502':
+          description: NetBox could not be read; nothing was imported.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+
+  /connectors/netbox/connections/{id}/runs:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      description: NetBox connection id.
+      schema:
+        type: string
+    get:
+      operationId: listNetBoxRuns
+      x-edition: enterprise
+      tags:
+      - connectors
+      summary: Run history for a NetBox connection
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        description: Max runs to return (default 50, max 200).
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: 'Recent runs (wrapped under `runs`; always a non-null array).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectorRunListResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '402':
+          $ref: '#/components/responses/EditionUnavailable'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /connectors/netbox/connections/{id}/drift:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      description: NetBox connection id.
+      schema:
+        type: string
+    get:
+      operationId: getNetBoxDrift
+      x-edition: enterprise
+      tags:
+      - connectors
+      summary: What NetBox and the inventory disagree about
+      description: |
+        READ-ONLY. The platform never writes to NetBox: the comparison is
+        valuable precisely because the two systems are maintained
+        independently, and it stops being so the moment we start answering it
+        ourselves. Reconciliation happens in NetBox, or in Discovery →
+        Approvals.
+
+        Matching is by serial then primary IPv4 — deliberately not by name, as
+        a NetBox device name is free text.
+      responses:
+        '200':
+          description: The comparison.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetBoxDriftReport'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '402':
+          $ref: '#/components/responses/EditionUnavailable'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '502':
+          description: NetBox could not be read.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
 
   /external-connections:
     get:
@@ -2849,11 +3252,60 @@ paths:
       summary: Get faceted bucket counts for assets
       description: >
         Returns bucket counts for a faceting `level` (e.g. environment,
-        asset_type), honoring the same filter query params as the asset list.
+        class_key), honoring the same filter query params as the asset list.
         Wrapped as `{ level, buckets }`.
       parameters:
-        - { name: level, in: query, required: false, schema: { type: string } }
+        - name: level
+          in: query
+          required: true
+          description: >
+            Which facet to count. An unrecognised level is a 400 listing the
+            ones that work — a facet that cannot be computed must not answer
+            with a number.
+
+
+            `asset_type` is accepted as the old name for the class facet.
+
+
+            `has_findings` counts assets with at least one OPEN finding, from
+            any producer, on the asset OR one of its descendants (its endpoints,
+            the crypto configurations and certificates at those endpoints, its
+            software installs). "Open" means `detection_state = ACTIVE` AND
+            `workflow_status NOT IN (RESOLVED, SUPPRESSED)` — still detected,
+            and nobody has closed it. Both buckets are always returned, so the
+            client can tell "12 with findings, 300 without" from "12 with
+            findings" alone.
+
+
+            The count is produced by compiling the same `finding:(…)` query the
+            facet rail writes, through the same translator the asset list
+            compiles, so clicking the number returns exactly the assets it
+            counted.
+          schema:
+            type: string
+            enum:
+              - class
+              - risk
+              - tag
+              - has_findings
+              - has_endpoints
+              - status
+              - environment
+              - ownership
+              - stale_status
+              - site
+              - region
+              - zone
+              - segment
+              - owner_email
+              - business_unit
+              - support_group
+              - operating_system
+              - source
+              - proposed_by
+              - asset_type
         - { name: limit, in: query, required: false, schema: { type: integer } }
+        - { name: query, in: query, required: false, description: 'The SAME query the list takes, so the counts describe the filtered set. A rail whose numbers do not move when you filter is a rail nobody trusts twice.', schema: { type: string } }
       responses:
         '200':
           description: The facet buckets.
@@ -2863,6 +3315,72 @@ paths:
                 $ref: '#/components/schemas/AssetFacetsResponse'
         '400':
           $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /infrastructure-assets/topology:
+    get:
+      operationId: getAssetTopology
+      tags: [infrastructure-assets]
+      summary: The tenant-wide topology tree
+      description: >
+        The site → segment → class tree with cross-segment connection counts —
+        the map's "where is everything" view (ADR-0006 D4).
+
+
+        Deliberately NOT a graph of every asset. D4 rejects the force-graph
+        shape for this question ("unreadable everywhere it is tried"), so the
+        answer is a hierarchy of COUNTS plus a small set of aggregated edges,
+        and a click on a class node runs the ordinary asset list with a
+        `segment_id:… and class:…` query. The tree is an index into the list,
+        not a second copy of it.
+
+
+        ## Nothing is dropped
+
+
+        An asset with no site appears under the explicit `Unassigned` site and
+        one with no segment under the explicit `Unsegmented` segment. On a fresh
+        inventory that is MOST of them, and a topology that omitted them would
+        draw a tidy picture of the curated minority and read as complete.
+        `total_assets` and `unassigned_assets` are counted independently of the
+        tree, so a client can check that the tree adds up.
+
+
+        ## Edges
+
+
+        Aggregated per DIRECTED segment pair, over ACTIVE `connects_to` and
+        `depends_on` relationships only. Pending edges are excluded: an
+        aggregate count is the one place a single unconfirmed observation is
+        invisible, so drawing it would state it as fact with nothing on screen
+        to qualify it. Containment types (`runs_on`, `hosted_on`, …) are
+        excluded too — a VM and its hypervisor in two segments is one thing
+        described twice, not a connection between those segments.
+
+
+        Same-segment edges are not returned; "cross-segment" is the question.
+
+
+        ## Caps
+
+
+        Bounded at `node_cap` triples and `edge_cap` pairs. Past either, the
+        response sets `truncated` and still reports the real `total_nodes` /
+        `total_edges` — never silently shortened. No paging: paging a hierarchy
+        is how a client renders half a tree without knowing it.
+
+
+        An empty estate is 200 with empty arrays, not 404.
+      responses:
+        '200':
+          description: The topology.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetTopologyResponse'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
         '500':
@@ -2936,6 +3454,1557 @@ paths:
           $ref: '#/components/responses/LegacyUnauthorized'
         '500':
           $ref: '#/components/responses/LegacyServerError'
+
+  /infrastructure-assets/{id}/class-history:
+    parameters:
+      - $ref: '#/components/parameters/AssetId'
+    get:
+      operationId: getAssetClassHistory
+      tags: [infrastructure-assets]
+      summary: Get an asset's class history
+      description: >
+        Every class the asset has held, newest first, wrapped under
+        `class_history`.
+
+
+        One row per TRANSITION, both ends named. `from_class_key` is absent
+        only on the row the asset's creation wrote, because there was no
+        previous class; every other row carries both, so a row is readable on
+        its own rather than needing the one after it.
+
+
+        `source` is the MECHANISM, not the actor: `classifier` (created with a
+        class the intake argued), `proposal` (a reviewer accepted a class
+        proposal in Approvals), `manual` (someone edited the asset), `import`
+        (a connector or spreadsheet stated it). `actor_user_id` is the person
+        when there was one and is ABSENT when a machine did it — absent means
+        "no person", never "person unknown".
+
+
+        Read-only, deliberately. A class is changed through Approvals or the
+        asset edit form; a history you can POST to is not a history.
+      responses:
+        '200':
+          description: The asset's class history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetClassHistoryListResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /infrastructure-assets/{id}/endpoints:
+    parameters:
+      - $ref: '#/components/parameters/AssetId'
+    get:
+      operationId: getAssetEndpoints
+      tags: [infrastructure-assets]
+      summary: List an asset's endpoints
+      description: >
+        Every network face of the asset — an (address|fqdn, port, transport)
+        the platform has observed or been told about (ADR-0002 D1) — most
+        recently seen active first, which is the same order the list row's
+        primary endpoint is picked in.
+
+
+        An EMPTY array is a real answer, not a 404: an at-rest cloud resource
+        has no endpoint at all, which is what retired the old `AT-REST` port
+        sentinel.
+      responses:
+        '200':
+          description: The asset's endpoints.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetEndpointListResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /infrastructure-assets/{id}/software:
+    parameters:
+      - $ref: '#/components/parameters/AssetId'
+    get:
+      operationId: getAssetSoftware
+      tags: [infrastructure-assets]
+      summary: List the software installed on an asset
+      description: >
+        The asset's `software_installs` joined to the tenant
+        `software_products` catalogue (DATA_MODEL §4) — what is on this asset,
+        with the version, purl/CPE and licence the source supplied.
+
+
+        An EMPTY array is a real answer and is not a 404: an asset nobody has
+        enumerated software on has none recorded. "Nothing found" and "never
+        looked" are different, and the `sw.package_count` fact is what tells
+        them apart — this list does not pretend to.
+
+
+        Rows whose `status` is `removed` are INCLUDED by default. A removed
+        install is evidence — it is how "this library was here last month" is
+        answered — and its row keeps its `first_seen_at`. Pass
+        `status=active` to see only what is present now.
+      parameters:
+        - name: q
+          in: query
+          description: Case-insensitive substring over name, vendor, purl and CPE.
+          schema: { type: string }
+        - name: status
+          in: query
+          description: Filter to one install status. Omit for all three.
+          schema:
+            type: string
+            enum: [active, stale, removed]
+        - name: sort
+          in: query
+          description: >
+            Ordering. `version` sorts on the normalised `version_sort` key, never
+            on the raw version string — as text, 1.10 sorts below 1.9
+            (QUERY_LANGUAGE §5.5). Products whose version has no numeric
+            component have a NULL key and sort last.
+          schema:
+            type: string
+            enum: [name, version, vendor, last_seen, first_seen]
+            default: name
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: The asset's software installs.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SoftwareInstallListResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /infrastructure-assets/{id}/sbom:
+    parameters:
+      - $ref: '#/components/parameters/AssetId'
+    post:
+      operationId: uploadAssetSbom
+      tags: [infrastructure-assets]
+      summary: Upload a bill of materials against an asset
+      description: >
+        Ingests a CycloneDX (JSON 1.4–1.7) or SPDX (JSON 2.2, 2.3) document and
+        writes its components into the tenant software catalogue
+        (`software_products`) and this asset's installs (`software_installs`),
+        with `source_kind: imported` — a document is a build system's claim, not
+        something the platform measured.
+
+
+        The FORMAT is detected from the document's own declaration
+        (`bomFormat`/`specVersion`, `spdxVersion`), never from the filename or
+        the Content-Type: both of those are supplied by whoever is uploading and
+        neither is evidence.
+
+
+        AN UPLOAD REPLACES THE IMPORTED SOFTWARE PICTURE FOR THIS ASSET. Installs
+        that the new document does not list are marked `status: removed` — never
+        deleted, so `first_seen_at` survives and a later document that lists them
+        again makes them `active`. Measured installs are untouched. To combine two
+        documents, merge them before uploading: there is no stable document
+        lineage to scope the sweep by, because CycloneDX mints a fresh
+        `serialNumber` on every export.
+
+
+        Component-to-component `dependencies` are NOT stored. They are edges
+        between components, and `asset_relationships` is an asset-to-asset table;
+        there is no home for them in the data model today. They are counted in
+        `dependency_edges_ignored` rather than silently dropped.
+
+
+        A parse with warnings is a SUCCESS. `warnings` names everything skipped
+        (cryptographic components, which belong to the CBOM path; SPDX files;
+        unparseable identifiers), which is what makes "412 of your 480 components
+        were ingested" a sentence the response can support.
+      requestBody:
+        required: true
+        description: >
+          Either a multipart form with a `file` part, or the raw document as the
+          request body. Both are accepted because both are what people have: a
+          browser posts a file input, a build pipeline posts
+          `--data-binary @sbom.json`.
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: The CycloneDX or SPDX document itself.
+      responses:
+        '201':
+          description: The document was ingested. The counts say what it did.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SbomIngestResult'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '413':
+          description: 'The document exceeds the 32 MiB cap. It is REFUSED rather than truncated: a half-ingested bill of materials shows a software list that looks complete.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '422':
+          description: 'The document was read and cannot be ingested — more components than the cap allows, or (on POST /sbom) a subject no asset can be created from. The message names the remedy.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /sbom:
+    post:
+      operationId: uploadSbom
+      tags: [infrastructure-assets]
+      summary: Upload a bill of materials and create an asset from its subject
+      description: >
+        As POST /infrastructure-assets/{id}/sbom, except that the target asset
+        comes from the document's own SUBJECT — CycloneDX `metadata.component`,
+        or the package an SPDX `DESCRIBES` relationship names — resolved through
+        the identification engine, so a second upload of the same artefact
+        MATCHES the asset the first one created instead of minting another.
+
+
+        The asset is identified by a declared `name` identifier whose value is
+        the subject's software identity (purl, else CPE, else `name@version`),
+        scoped by the class key. It carries no host: a document says what an
+        artefact IS and nothing about where it runs, and inventing a parent would
+        be a fabricated identity. The consequence is stated rather than hidden —
+        an application created from a document and the same application later
+        measured on a host are two assets until a person merges them.
+
+
+        Only an `application` subject can become an asset. `name` appears in the
+        identifier precedence of the application and service branches alone
+        (standards/asset-classes.yaml), so any other class would get an
+        identifier it is not allowed to identify by — the first upload would
+        create the asset and every upload after it would open a merge proposal
+        against the asset it already was. A `library` subject is refused as a
+        category error, a `container` subject because the `container` class is a
+        RUNNING container identified by agent, cloud resource id or hostname and
+        an image bill of materials carries none of those. An absent or
+        unrecognised type is treated as `application`. Every refusal is a 422
+        naming the remedy.
+
+
+        THE ASSET LANDS IN `pending_approval`, with `class_source_kind:
+        declared` and a `class_source_ref` of `sbom:<upload id>`. Declared is not
+        approved: an asset a person creates in the UI is approved because a human
+        decided in front of the inventory, and an API upload is a file arriving at
+        an endpoint. It appears in Discovery → Approvals labelled "declared from
+        SBOM upload".
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: The CycloneDX or SPDX document itself.
+      responses:
+        '201':
+          description: The document was ingested against a created or matched asset.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SbomIngestResult'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '413':
+          description: The document exceeds the 32 MiB cap.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '422':
+          description: The document was read and its subject is not something an asset can be created from, or it exceeds the component cap. The message names the remedy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /software/products:
+    get:
+      operationId: listSoftwareProducts
+      tags: [infrastructure-assets]
+      summary: The tenant software catalogue
+      description: >
+        Every `software_products` row for the tenant with how many assets carry
+        it — the Inventory `software` lens.
+
+
+        The catalogue is deduplicated on
+        `coalesce(purl, cpe, name || '@' || coalesce(version, ''))`: a purl names
+        an artefact, a CPE names a product line, and a name is what is left, so a
+        product is keyed on the strongest identifier any document supplied.
+
+
+        `install_count` and `asset_count` count ACTIVE installs only. A product
+        whose every install was marked removed reports 0 and is still listed:
+        "we used to run this" is a question the catalogue should be able to
+        answer.
+      parameters:
+        - name: q
+          in: query
+          description: Case-insensitive substring over name, vendor, purl and CPE.
+          schema: { type: string }
+        - name: sort
+          in: query
+          description: >
+            `eol_checked` orders by when the lifecycle catalogue was last
+            consulted for the product, LEAST RECENTLY FIRST, with products no
+            completed pass has ever recorded an answer for ahead of the rest.
+            Never-checked sorts before long-ago-checked deliberately: both are
+            "we do not know how current this is", and the one nobody has looked
+            at is the more urgent of the two.
+          schema:
+            type: string
+            enum: [name, version, vendor, installs, eol_checked]
+            default: name
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: The tenant software catalogue.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SoftwareProductListResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /infrastructure-assets/{id}/identifiers:
+    parameters:
+      - $ref: '#/components/parameters/AssetId'
+    get:
+      operationId: getAssetIdentifiers
+      tags: [infrastructure-assets]
+      summary: List an asset's identifiers
+      description: >
+        What the asset is known by, with the provenance and confidence of each
+        (ADR-0002 D3), in the default precedence order so the strongest
+        evidence reads first.
+      responses:
+        '200':
+          description: The asset's identifiers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetIdentifierListResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /asset-classes:
+    get:
+      operationId: listAssetClasses
+      tags: [asset-classes]
+      summary: The class taxonomy
+      description: >
+        The platform class hierarchy (ADR-0002 D2) plus this tenant's own leaf
+        subclasses, parents always before children so a client can build the
+        tree in one pass.
+
+
+        The platform half comes from the GENERATED registry rather than the
+        database, so the picker and the identification engine cannot answer
+        differently about what a class is; `is_fixed` says which half a node
+        came from.
+      responses:
+        '200':
+          description: The taxonomy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetClassListResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /ask:
+    post:
+      operationId: askInventory
+      tags: [ask]
+      summary: Ask a question in words; get back a query you can edit and the rows it selected
+      description: >
+        The Query seam (ADR-0008 D1) on the tenant plane. A question becomes ONE
+        line of the query language, that line is parsed and validated against the
+        production catalogue BEFORE anything runs, the validated query selects
+        rows under the caller's own tenant scope, and the rows are summarised
+        with a `[row:<asset id>]` citation on every sentence.
+
+
+        Read the response in order of authority: `query` first, then `rows`,
+        then `text`. That order is the design (ADR-0006 D2 with ADR-0008 D4.4) -
+        the thing between a question and its answer is a checkable artefact the
+        user can edit and save as a view, so a client that renders nothing but
+        `query` and `rows` has the whole answer and `text` is the convenience.
+
+
+        `query` is the CANONICAL predicate that ran, not the string the model
+        wrote: the platform AND-s its own default scope in (normally
+        `status:monitoring`), so the two differ. It is what "Open in Inventory"
+        deep-links to.
+
+
+        ENTERPRISE. The route is mounted in every edition and a Core build
+        answers 402 - the availability question is answered deployment-wide by
+        `GET /api/v1/auth-service/tenant/ai`, and a 404 here would be
+        indistinguishable from a broken route. A Core deployment searches the
+        same inventory with the query language, the facet rail and saved views.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AskRequest'
+      responses:
+        '200':
+          description: The query that ran, the rows it selected, and a cited summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AskResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '402':
+          $ref: '#/components/responses/EditionUnavailable'
+        '403':
+          description: >
+            Four different things answer 403 here - a role without
+            `assets.read`, a scope-narrowed API token, a missing CSRF token, a
+            session that must change its password - and exactly ONE of them,
+            "this organization has turned the AI assistant off in Settings ->
+            AI assistant", is an availability answer a client should stop
+            retrying. That one, and only that one, carries
+            `reason: assistant_disabled` beside its `error`. Branch on the key,
+            never on the sentence: the others are ordinary authorization
+            failures whose wording is not a contract.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '422':
+          description: >
+            A provider answered and what it wrote did not validate, after the
+            repair turn. The validator's diagnostics come back verbatim, in the
+            same shape a hand-typed query's 400 uses - they are the one thing a
+            reader can act on, and collapsing them into "no answer" would show
+            them a shrug.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AskRefusal'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+        '503':
+          description: >
+            This build has the seam but no model provider is reachable.
+            Deliberately not 402 - an operator can fix this one, and the two
+            must not read the same.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+
+  /saved-views:
+    get:
+      operationId: listSavedViews
+      tags: [saved-views]
+      summary: List the saved views visible to the caller
+      description: >
+        The caller's own views plus every view shared with the tenant. Filter
+        to one collection with `target`.
+      parameters:
+        - { name: target, in: query, required: false, description: 'Collection filter — asset, endpoint, certificate, crypto_configuration, finding, software_install, relationship.', schema: { type: string } }
+      responses:
+        '200':
+          description: The visible saved views.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedViewListResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+    post:
+      operationId: createSavedView
+      tags: [saved-views]
+      summary: Save a named query
+      description: >
+        RBAC-gated `assets.update`. The query is VALIDATED here and stored in
+        canonical form, so a view cannot be saved that fails when somebody
+        opens it. An invalid query is 400 with the full diagnostic list.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SavedViewInput'
+      responses:
+        '201':
+          description: The created view.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedViewResponse'
+        '400':
+          description: The query does not validate.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueryError'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '409':
+          description: The caller already has a view with that name.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+
+  /saved-views/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getSavedView
+      tags: [saved-views]
+      summary: Get one saved view
+      responses:
+        '200':
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedViewResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          description: >
+            No such view, or it belongs to somebody else and is not shared. One
+            answer for both, so probing ids cannot tell them apart.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+    put:
+      operationId: updateSavedView
+      tags: [saved-views]
+      summary: Update a saved view
+      description: >
+        RBAC-gated `assets.update`. Only the OWNER may edit: sharing is
+        publishing, not handing over.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SavedViewInput'
+      responses:
+        '200':
+          description: The updated view.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedViewResponse'
+        '400':
+          description: The query does not validate.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueryError'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          description: No such view owned by the caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+    delete:
+      operationId: deleteSavedView
+      tags: [saved-views]
+      summary: Delete a saved view
+      description: RBAC-gated `assets.update`. Only the owner may delete.
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          description: No such view owned by the caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+
+  /approvals/merge-proposals:
+    get:
+      operationId: listMergeProposals
+      tags: [approvals]
+      summary: The pending merge proposals
+      description: >
+        ADR-0002 D3's third outcome: identifiers that resolved to more than one
+        asset. Each proposal carries the observation, the candidates it could
+        be, and the identifiers that matched each one — the evidence, without
+        which a proposal can only be rubber-stamped.
+
+
+        Nothing is ever merged automatically. Even an `auto_accepted` proposal
+        (a matcher scored the top candidate above the tenant's threshold) still
+        leaves the remaining candidates for a human.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: >
+            Page size. Defaults to 50 and is CAPPED at 200; a value outside
+            that range falls back to the default rather than erroring. The
+            response echoes the limit actually applied.
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: offset
+          in: query
+          required: false
+          description: Rows to skip, for paging through `total`.
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: >
+            One page of pending proposals, plus `total` — the number of pending
+            proposals the page was cut from. A caller must read counts off
+            `total`, never off the length of `merge_proposals`, which stops at
+            the page size.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MergeProposalListResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /approvals/merge-proposals/auto-accepted:
+    get:
+      operationId: listAutoAcceptedMerges
+      tags: [approvals]
+      summary: Merges the matcher made without asking
+      description: >
+        What the learned matcher merged on the tenant's behalf in the last 30
+        days, newest first, each with the score and the model's reasons.
+
+
+        It is not a queue: nothing here needs deciding and everything here
+        already happened. It exists because a tenant who sets
+        `auto_accept_threshold` above zero has granted the platform permission
+        to merge two of their assets unasked, and a capability that acts with no
+        human in the loop has to be visible to a human afterwards.
+
+
+        A tenant on the default threshold of zero always gets an empty list,
+        because nothing can have been auto-accepted.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Page size. Defaults to 50, capped at 200.
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: The auto-accepted merges, and the window they were counted over.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AutoAcceptedMergeListResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /settings/identification:
+    get:
+      operationId: getIdentificationSettings
+      tags: [settings]
+      summary: The tenant's identification settings
+      description: >
+        Today, one setting: the learned matcher's auto-accept threshold. A
+        tenant who has never set one gets 0 — never auto-accept — which is
+        ADR-0002 D3's default and the behaviour every install has had until now.
+      responses:
+        '200':
+          description: The settings, with the model that would do the scoring.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentificationSettingsResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+    put:
+      operationId: updateIdentificationSettings
+      tags: [settings]
+      summary: Set the auto-accept threshold
+      description: >
+        Grants — or withdraws — the platform's permission to accept a merge
+        proposal without asking. A value outside 0..1 is REFUSED rather than
+        clamped: "we rounded your number" is not an acceptable answer on the one
+        setting that decides whether two of a tenant's assets may be merged
+        unasked.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IdentificationSettingsUpdateRequest'
+      responses:
+        '200':
+          description: The settings as saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentificationSettingsResponse'
+        '400':
+          description: The threshold is outside 0..1, or was not supplied.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /settings/drift:
+    get:
+      operationId: getDriftSettings
+      tags: [settings]
+      summary: The tenant's drift baseline window
+      description: >
+        How far back the drift producer's baseline reaches. Everything first
+        observed inside the window is a candidate for a drift finding;
+        everything older is the baseline it is compared against. A tenant who
+        has never set one gets 30 days.
+      responses:
+        '200':
+          description: The window, with the bounds it may be set between.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DriftSettingsResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+    put:
+      operationId: updateDriftSettings
+      tags: [settings]
+      summary: Set the drift baseline window
+      description: >
+        RBAC-gated `settings.update`. A value outside the bounds is REFUSED
+        rather than clamped. The bounds are real limits: below a week, a
+        fortnightly scan makes every scan look like drift because the previous
+        sighting of the same thing has already left the baseline; beyond a year
+        the baseline stops describing anything current.
+
+
+        Changing the window changes which findings are open — something that
+        aged out under 30 days is drift again under 90 — so the next pass
+        recomputes the whole picture rather than migrating existing rows.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DriftSettingsUpdateRequest'
+      responses:
+        '200':
+          description: The window as saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DriftSettingsResponse'
+        '400':
+          description: The window is outside its bounds, or was not supplied.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /approvals/merge-proposals/{id}/accept:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      operationId: acceptMergeProposal
+      tags: [approvals]
+      summary: Merge the proposal into a chosen survivor
+      description: >
+        RBAC-gated `assets.update`. `survivor_asset_id` is REQUIRED and must be
+        one of the proposal's own candidates: merging is destructive, so the
+        server never picks.
+
+
+        Endpoints, identifiers, crypto configurations and history move to the
+        survivor; the observation asset is ARCHIVED, not deleted, so a stale
+        reference resolves to a tombstone pointing at the survivor rather than
+        404ing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MergeProposalAcceptRequest'
+      responses:
+        '200':
+          description: The resolved proposal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MergeProposalResponse'
+        '400':
+          description: The survivor is not a candidate of this proposal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          description: No such proposal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '409':
+          description: >
+            The proposal has already been decided, or the chosen survivor has
+            since been archived (most often merged away by an earlier proposal).
+            Merging into a tombstone would bury the observation behind a pointer
+            to somewhere else.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+
+  /approvals/merge-proposals/{id}/keep-separate:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      operationId: keepMergeProposalSeparate
+      tags: [approvals]
+      summary: Record that these are different things
+      description: >
+        RBAC-gated `assets.update`. Resolves the PROPOSAL and nothing else: the
+        observation asset stays pending ordinary approval, because the reviewer
+        answered "this is not that", not "this belongs in inventory".
+      responses:
+        '200':
+          description: The resolved proposal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MergeProposalResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          description: No such proposal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '409':
+          description: The proposal has already been decided.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+
+  /infrastructure-assets/{id}/relationships:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: listAssetRelationships
+      tags: [relationships]
+      summary: The asset's typed relationships, both directions
+      description: >
+        ADR-0003's edges. An edge is stored ONCE in its canonical direction and
+        the reverse label is derived, never stored — so the same row reads
+        `runs_on` from the from-asset and `runs` from the to-asset. `direction`
+        and `label` on each item are therefore relative to the asset in the
+        path, not properties of the row.
+
+
+        An asset with no edges answers `[]` and 200, not 404: most of inventory
+        is a leaf, and "nothing is attached to this" is a real answer.
+
+
+        With no `status` filter, `rejected` edges are excluded — a rejection is
+        a decision somebody recorded, and re-showing it would invite the same
+        reviewer to reject it again on every visit. Ask for `status=rejected`
+        explicitly to see them.
+      parameters:
+        - name: direction
+          in: query
+          required: false
+          description: >
+            `out` selects edges where this asset is the from end, `in` where it
+            is the to end, `both` (the default) selects either.
+          schema: { type: string, enum: [out, in, both], default: both }
+        - name: type
+          in: query
+          required: false
+          description: One of the ten relationship types (ADR-0003 D2).
+          schema:
+            type: string
+            enum: [connects_to, contains, depends_on, hosted_on, impacts, manages, member_of, runs_on, sends_data_to, virtualized_by]
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [pending, active, rejected, stale] }
+        - name: limit
+          in: query
+          required: false
+          description: >
+            Page size. Defaults to 50 and is capped at 200; a value outside that
+            range falls back to the default rather than erroring.
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: >
+            One page of edges plus `total`, the number the page was cut from.
+            Read counts off `total`, never off the array's length.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RelationshipListResponse'
+        '400':
+          description: An unknown direction, type or status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+    post:
+      operationId: createAssetRelationship
+      tags: [relationships]
+      summary: Declare a relationship
+      description: >
+        RBAC-gated `assets.update`. The edge enters with `source_kind:
+        declared`, and is `active` immediately when BOTH ends are `monitoring` —
+        ADR-0003 D3: "A user with `assets.update` asserting an edge is the same
+        as editing an attribute." It enters `pending` when either end is still
+        awaiting approval, and resolves with that asset.
+
+
+        `direction` decides which end the asset in the path is. `out` (the
+        default) makes it the from end; `in` makes it the to end, so a user can
+        declare "that VM is hosted on this hypervisor" from the hypervisor's own
+        page instead of navigating away to say the same thing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RelationshipCreateRequest'
+      responses:
+        '201':
+          description: The edge that was created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RelationshipResponse'
+        '400':
+          description: >
+            An unknown type, a malformed peer id, or a self-edge — meaningless
+            in all ten types and usually a sign one host was matched twice under
+            two identifiers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          description: The peer names no asset of this tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '409':
+          description: >
+            The pair already carries an edge of this type. A pair may carry
+            several types, but only one of each.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+
+  /infrastructure-assets/{id}/relationships/{edgeId}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: edgeId, in: path, required: true, schema: { type: string, format: uuid } }
+    delete:
+      operationId: deleteAssetRelationship
+      tags: [relationships]
+      summary: Delete a declared relationship
+      description: >
+        RBAC-gated `assets.update`. Only `declared` provenance can be deleted.
+
+
+        A measured edge is an OBSERVATION: deleting one asserts that a collector
+        did not see what it says it saw, and the next run would re-create it —
+        so the delete would appear to work and then silently undo itself. Those
+        are retired by their collector ceasing to observe them (they go `stale`
+        and are archived by the lifecycle policy), or rejected as a proposal.
+      responses:
+        '200':
+          description: The edge was deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [message]
+                properties:
+                  message: { type: string }
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          description: No such edge on this asset.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '409':
+          description: >
+            The edge is not `declared`. The body's `detail` names the provenance
+            it actually has.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+
+  /infrastructure-assets/{id}/neighbourhood:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getAssetNeighbourhood
+      tags: [relationships]
+      summary: The asset's neighbourhood as nodes and edges
+      description: >
+        The graph shape the Relationships tab and the map (ADR-0006 D4) draw: a
+        breadth-first walk to `depth` hops, returning the nodes reached and the
+        edges BETWEEN those nodes. Each node carries its shortest depth from the
+        root, so a node reachable by several routes is placed once, at the
+        distance a person would say it is.
+
+
+        Caps are a refusal to guess, not tuning. Past 500 nodes or 2000 edges
+        the response sets `truncated: true` and still reports `total_nodes` /
+        `total_edges` — the real sizes — so a caller can see how much it is NOT
+        being shown. A map that quietly drops the node somebody was looking for
+        is worse than one that says it could not draw everything.
+
+
+        Active edges only by default. A pending edge is something nobody has
+        agreed is true, and drawing it like the rest states it as fact.
+      parameters:
+        - name: depth
+          in: query
+          required: false
+          description: >
+            Hops from the root, 1 to 3. Out of range is REFUSED with 400 rather
+            than clamped, at BOTH ends: a caller given three hops when it asked
+            for five would draw a map missing two layers and present it as
+            complete, and a caller given the default two when it asked for zero
+            would be handed a graph it never asked for.
+          schema: { type: integer, minimum: 1, maximum: 3, default: 2 }
+        - name: include_pending
+          in: query
+          required: false
+          description: Include `pending` edges and the nodes only they reach.
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: The neighbourhood graph.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NeighbourhoodResponse'
+        '400':
+          description: Depth out of range.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /infrastructure-assets/{id}/impact:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getAssetImpact
+      tags: [relationships]
+      summary: What breaks if this asset changes
+      description: >
+        ADR-0003 D5's depth-capped closure, cycle-safe, over the NINE
+        impact-bearing types. `connects_to` is the one exclusion: an observed
+        flow is not a dependency, and it is by far the highest-volume measured
+        type, so including it would make the closure of almost any node the
+        whole tenant, which is the same as no answer.
+
+
+        The vocabulary actually walked is echoed as `types`, because "what
+        depends on this" over nine types and over ten are different questions
+        and a consumer that cannot see which was asked will quote one as the
+        other.
+
+
+        DIRECTION IS PER TYPE (D5 as amended 2026-09-12), because the vocabulary
+        is not uniformly oriented. Six types point from the dependent to the
+        thing it rests on — `runs_on`, `hosted_on`, `virtualized_by`,
+        `depends_on`, `member_of`, `sends_data_to` — and `downstream` follows
+        those BACKWARDS: an application `runs_on` a server, so "what breaks if
+        the SERVER dies" walks that edge from its to-end to its from-end. Two
+        types point the other way — `contains` (network to subnet) and `manages`
+        (controller to access point) — and `downstream` follows those FORWARDS.
+        A single uniform reverse walk inverted them, so asking what breaks when
+        a controller or a virtual network dies returned nothing. `upstream` is
+        the exact mirror of whichever direction each type is walked in.
+
+
+        `impacts` is walked too, as the LAST hop of a downstream answer: a user
+        may declare that an asset impacts a business service, and that assertion
+        belongs in the blast radius. It is crossed once and not continued
+        through, because a business service is where the sentence ends.
+        Upstream, the mirror of "last hop" is "first hop", so `upstream` from a
+        business service reaches the assets that impact it and then carries on
+        through what THEY rest on.
+
+
+        Active edges only: a belief nobody has agreed to must not appear in a
+        blast-radius answer somebody plans a change around. The root is excluded
+        from its own closure, which also stops a cycle reporting it as a
+        consequence of itself.
+      parameters:
+        - name: direction
+          in: query
+          required: false
+          schema: { type: string, enum: [downstream, upstream], default: downstream }
+        - name: depth
+          in: query
+          required: false
+          description: >
+            Hops, 1 to 10. Defaults to 6 (ADR-0003 D5). Out of range is refused
+            with 400 at both ends rather than clamped.
+          schema: { type: integer, minimum: 1, maximum: 10, default: 6 }
+      responses:
+        '200':
+          description: The impact closure with a per-depth breakdown.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImpactResponse'
+        '400':
+          description: An unknown direction, or a depth out of range.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /approvals/relationships:
+    get:
+      operationId: listRelationshipProposals
+      tags: [approvals, relationships]
+      summary: The pending relationship proposals
+      description: >
+        ADR-0006 D6's third row kind, on the same queue as merge proposals — "no
+        second queue anywhere".
+
+
+        The predicate is "pending, and BOTH ends are monitored", which is not
+        the same as "pending". A pending edge with a pending END is not a
+        relationship question: it is waiting on that asset's approval, and
+        accepting the asset activates it. Listing it here would ask a reviewer
+        the same question twice and let them answer it two ways. A pending edge
+        whose ends are both monitored is stuck — nothing will ever promote it —
+        and is either an `inferred` edge, which ADR-0003 D3 says enters as a
+        proposal by design, or one that arrived pending from an import.
+
+
+        Both ends are decorated, unlike the per-asset list: the reviewer is on
+        Approvals with no asset page around them, and "something depends on
+        something" is not a reviewable sentence.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: >
+            Only `pending` is served. Decided relationships are on the asset's
+            Relationships tab and in its History; answering 200 with pending
+            rows for any other value would be the API agreeing to a question it
+            did not answer.
+          schema: { type: string, enum: [pending] }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: >
+            One page of proposals plus `total` — the count to display. The array
+            stops at the page size.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RelationshipProposalListResponse'
+        '400':
+          description: A status other than `pending`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /approvals/relationships/{edgeId}/accept:
+    parameters:
+      - { name: edgeId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      operationId: acceptRelationshipProposal
+      tags: [approvals, relationships]
+      summary: Accept a relationship proposal
+      description: >
+        RBAC-gated `assets.update`, the same permission approving an asset
+        takes. The edge becomes `active`, `approved_by` and `approved_at` are
+        stamped, and an `edge_accepted` entry is written to the FROM asset's
+        history — the edge is stored once in the canonical direction, so that is
+        the end the decision is unambiguously attributable to.
+
+
+        BOTH ends must be `monitoring`. ADR-0003 D1: "an edge whose either
+        endpoint is pending is itself pending", so accepting one against an
+        unapproved asset would confirm a relationship to something nobody has
+        admitted — which the impact closure would then walk. The proposal queue
+        never lists such an edge, but the asset page's Relationships tab shows
+        it from the pending asset's own side; that case answers 409 with the
+        asset to approve named in `detail`.
+      responses:
+        '200':
+          description: The decided edge.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RelationshipResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          description: No such relationship.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '409':
+          description: >
+            Either already decided — somebody else answered this proposal since
+            the page was loaded — or an end of the relationship is still
+            awaiting its own approval, in which case `detail` names the asset to
+            approve.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+
+  /approvals/relationships/{edgeId}/reject:
+    parameters:
+      - { name: edgeId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      operationId: rejectRelationshipProposal
+      tags: [approvals, relationships]
+      summary: Reject a relationship proposal
+      description: >
+        RBAC-gated `assets.update`. The edge becomes `rejected` and the ROW
+        SURVIVES: a rejection is a decision somebody made, and deleting it would
+        let the same inference be proposed again tomorrow with nothing recording
+        that it was already answered. An `edge_rejected` entry is written to the
+        from asset's history.
+
+
+        Unlike accept, this does not require both ends to be approved. "This
+        claim is wrong" is answerable whatever the endpoints are doing, and
+        refusing it would leave the edge with no way out of the queue.
+      responses:
+        '200':
+          description: The decided edge.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RelationshipResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          description: No such relationship.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '409':
+          description: Already decided.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+
+  /approvals/classes:
+    get:
+      operationId: listClassProposals
+      tags: [approvals]
+      summary: The pending class proposals
+      description: >
+        ADR-0006 D6's fourth row kind, on the same queue as merge and
+        relationship proposals — "no second queue anywhere".
+
+
+        A class proposal is raised when the curated classification rules
+        (ADR-0004 D6) argue a class for an asset that ALREADY has one, or when
+        two rules contradict each other. It is never raised for a newly
+        discovered asset: that asset is created WITH the rule-derived class,
+        `class_source_kind: rule` and a `class_source_ref` naming the rule row,
+        and it lands in `pending_approval` like any other discovery — approving
+        the asset approves the class with it. Raising a proposal as well would
+        ask one question twice and let a reviewer answer it two ways.
+
+
+        A class whose `class_source_kind` is `declared` is never proposed
+        against. A person said what that asset is, and a rule does not reopen it
+        at any confidence.
+
+
+        The rows are `asset_history` entries with `action = 'class_proposed'`,
+        not a table of their own: the proposal, the decision and the class
+        change it caused belong in one timeline.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: >
+            Only `pending` is served. Decided class proposals are in the asset's
+            History; answering 200 with pending rows for any other value would
+            be the API agreeing to a question it did not answer.
+          schema: { type: string, enum: [pending] }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: >
+            One page of proposals plus `total` — the count to display. The array
+            stops at the page size.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassProposalListResponse'
+        '400':
+          description: A status other than `pending`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /approvals/classes/{id}/accept:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      operationId: acceptClassProposal
+      tags: [approvals]
+      summary: Accept a class proposal
+      description: >
+        RBAC-gated `assets.update`, the same permission approving an asset
+        takes. The asset's `class_key` and `class_path` move to the accepted
+        class, `class_source_kind` becomes `rule` and `class_source_ref` names
+        the rule that argued it, and a `class_accepted` entry is written to the
+        asset's history with the reviewer as actor.
+
+
+        The RULE decided what the class is; a person decided to take it. The two
+        are recorded separately on purpose — collapsing them would lose which
+        rule to go and fix if the class turns out wrong.
+
+
+        `class_key` in the body is REQUIRED when the proposal has no single
+        proposed class (the rules conflicted and it offers a choice) and
+        optional otherwise. When given it must be one the proposal offers:
+        accepting an arbitrary class would let the approval path reclassify an
+        asset as something no rule argued for, which is the fabricated fact the
+        rule table exists to prevent arriving through a different door.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClassProposalDecisionRequest'
+      responses:
+        '200':
+          description: The decided proposal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassProposalResponse'
+        '400':
+          description: >
+            No class was named for a proposal that offers a choice, or the named
+            class is not one it offers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          description: No such class proposal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '409':
+          description: >
+            Already decided — somebody else answered this proposal since the
+            page was loaded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+
+  /approvals/classes/{id}/reject:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      operationId: rejectClassProposal
+      tags: [approvals]
+      summary: Reject a class proposal
+      description: >
+        RBAC-gated `assets.update`. The asset is left exactly as it was and a
+        `class_rejected` entry is written to its history.
+
+
+        That entry is load-bearing rather than decorative: intake reads it before
+        proposing the same class for the same asset again. Without it a printer
+        that advertises `_ipp._tcp` on every coalescing window would refill the
+        queue with a question already answered.
+      responses:
+        '200':
+          description: The decided proposal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassProposalResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          description: No such class proposal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '409':
+          description: Already decided.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
 
   /discovery/capabilities:
     get:
@@ -3057,6 +5126,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/LegacyError'
+  /discovery/jobs/{id}/rerun:
     post:
       operationId: rerunDiscoveryJob
       tags:
@@ -3201,6 +5271,17 @@ components:
         type: string
         format: uuid
   responses:
+    EditionUnavailable:
+      description: |
+        The capability is not in this build or this subscription. A Core build
+        answers this from a stub at the same path, and an Enterprise build
+        answers it from RequireFeature — so a client handles both with one
+        branch instead of telling 404-the-route-is-absent apart from
+        402-you-have-not-bought-it.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
     LegacyBadRequest:
       description: Invalid request.
       content:
@@ -3238,6 +5319,65 @@ components:
           schema:
             $ref: '#/components/schemas/LegacyError'
   schemas:
+    # The asset class taxonomy (ADR-0002 D2). Declared here as a reusable
+    # schema so the Asset shape can reference it in phase 1; nothing references
+    # it yet, deliberately — workstream 0.1 ships the registry, not the model
+    # change.
+    # BEGIN GENERATED: asset class keys — from standards/asset-classes.yaml (make generate)
+    AssetClassKey:
+      type: string
+      description: 'Asset class key from the fixed platform taxonomy (ADR-0002 D2, standards/asset-classes.yaml). Tenant leaf subclasses are runtime rows and are NOT members of this enum.'
+      enum:
+      - hardware
+      - computer
+      - server
+      - workstation
+      - laptop
+      - mobile
+      - network_device
+      - switch
+      - router
+      - firewall
+      - load_balancer
+      - wireless_controller
+      - access_point
+      - vpn_gateway
+      - storage_device
+      - printer
+      - ot_device
+      - plc
+      - rtu
+      - hmi
+      - ied
+      - iot_device
+      - bmc
+      - virtual
+      - virtual_machine
+      - container
+      - cluster
+      - hypervisor
+      - cloud_resource
+      - compute_instance
+      - managed_database
+      - object_storage
+      - key_store
+      - cloud_load_balancer
+      - api_gateway
+      - cdn_distribution
+      - serverless_function
+      - virtual_network
+      - subnet
+      - application
+      - web_application
+      - database_instance
+      - service_daemon
+      - middleware
+      - service
+      - business_service
+      - technical_service
+      - external
+      - unknown_host
+    # END GENERATED: asset class keys
     LocationFindingSummaryRow:
       type: object
       additionalProperties: false
@@ -4396,8 +6536,11 @@ components:
           type: string
         asset_port:
           type: integer
-        asset_type:
+        asset_class_key:
           type: string
+          description: 'The owning asset''s class. Renamed with the VALUE: an asset the retired enum called "appliance" is now `hardware`, `switch` or `firewall`, so a consumer still reading `asset_type` would have gone on matching four strings that no longer appear.
+
+            '
         protocol:
           type: string
         protocol_version:
@@ -4566,6 +6709,143 @@ components:
           type: integer
         total_pages:
           type: integer
+    AssetIdentifier:
+      type: object
+      additionalProperties: false
+      description: 'One identifier observed for an asset (ADR-0002 D3). An identifier value maps to at most one asset per tenant; a collision is what opens a merge proposal in Approvals.
+
+        '
+      required:
+      - kind
+      - value
+      - source_kind
+      - confidence
+      - first_seen_at
+      - last_seen_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        asset_id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum:
+          - agent_id
+          - cloud_resource_id
+          - serial_number
+          - cmdb_sys_id
+          - ssh_host_key_fingerprint
+          - mac_address
+          - fqdn
+          - hostname
+          - ip_address
+          - name
+        value:
+          type: string
+        scope:
+          type: string
+          description: 'The segment for `hostname` and `ip_address`, the class key for `name`, the sync profile for `cmdb_sys_id`. Absent for the six globally unique kinds — a scope on one of those splits the uniqueness key. A `hostname` or `ip_address` in no configured segment carries the literal `tenant`, the tenant-wide default scope: there is always an answer, because an identifier with no scope could never decide a match.
+
+            '
+        source_kind:
+          type: string
+          enum:
+          - measured
+          - declared
+          - imported
+          - inferred
+        source_ref:
+          type: string
+        confidence:
+          type: number
+        first_seen_at:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: string
+          format: date-time
+    AssetEndpoint:
+      type: object
+      additionalProperties: false
+      description: 'One network face of an asset: an (address|fqdn, port, transport) it was observed exposing. `port` is absent for an at-rest or declared endpoint — the "AT-REST" port sentinel the port-as-asset model needed is retired.
+
+        '
+      required:
+      - id
+      - tenant_id
+      - asset_id
+      - transport
+      - source_kind
+      - status
+      - first_seen_at
+      - last_seen_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        asset_id:
+          type: string
+          format: uuid
+        address:
+          type: string
+        fqdn:
+          type: string
+        port:
+          type: integer
+        transport:
+          type: string
+          enum:
+          - tcp
+          - udp
+          - none
+        protocol:
+          type: string
+        service_name:
+          type: string
+        service_version:
+          type: string
+        service_confidence:
+          type: string
+        service_identification_method:
+          type: string
+        bound_local:
+          type: boolean
+          description: |
+            Whether the socket is reachable only from the host itself.
+
+            THREE-VALUED, and ABSENT is the third value: absent means nobody
+            established it, which is every endpoint a network scan found — a
+            scan cannot establish this even in principle, it only ever sees what
+            answers. Only a host's own view of its sockets (the agent's host
+            inventory) reports either boolean, and `false` is then a measurement
+            that the service IS exposed to the network, not merely "not known to
+            be loopback". Do not render an absent value as false.
+        source_kind:
+          type: string
+        source_ref:
+          type: string
+        status:
+          type: string
+          enum:
+          - active
+          - stale
+          - closed
+        first_seen_at:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: string
+          format: date-time
+        last_scanned_at:
+          type: string
+          format: date-time
+        last_scan_status:
+          type: string
     Asset:
       type: object
       additionalProperties: false
@@ -4575,11 +6855,11 @@ components:
       required:
       - id
       - tenant_id
+      - class_key
+      - class_path
+      - class_source_kind
       - hostname
-      - ip_address
-      - port
-      - asset_type
-      - operating_system
+      - attributes
       - environment
       - business_unit
       - owner_email
@@ -4594,6 +6874,7 @@ components:
       - updated_at
       - deleted_at
       - risk_score
+      - risk_assessed_by
       - risk_level
       properties:
         id:
@@ -4602,24 +6883,53 @@ components:
         tenant_id:
           type: string
           format: uuid
+        class_key:
+          type: string
+          description: 'The asset''s class, from the registry generated out of standards/asset-classes.yaml (ADR-0002 D2). It replaces the retired four-value `asset_type`: the values do not overlap, so a client matching on the old four gets nothing rather than something wrong.
+
+            '
+        class_path:
+          type: string
+          description: 'Materialised ancestry of the class, e.g. `hardware.computer.server`. Prefix-matching it selects a whole branch, which is what the class facet does.
+
+            '
+        class_source_kind:
+          type: string
+          enum:
+          - measured
+          - declared
+          - imported
+          - inferred
+          description: How the class was decided.
+        class_source_ref:
+          type: string
+          description: 'Who decided the class (`classifier:<model>`, `user:<id>`, `cmdb:<profile>`). A class proposal that cannot name its producer is not reviewable.
+
+            '
+        class_confidence:
+          type: number
+          description: '0..1. ABSENT means nothing classified it — not "classified with low confidence".
+
+            '
+        display_name:
+          type: string
         hostname:
           type:
           - string
           - 'null'
-        ip_address:
-          type:
-          - string
-          - 'null'
-        port:
-          type:
-          - integer
-          - 'null'
-        asset_type:
+        primary_address:
           type: string
-        operating_system:
-          type:
-          - string
-          - 'null'
+          description: 'Convenience for lists. The AUTHORITATIVE addresses are the endpoints; this is the one to show when there is room for one.
+
+            '
+        attributes:
+          type: object
+          additionalProperties: true
+          description: 'Class-specific typed attributes, validated against the class''s schema (`operating_system`, `vendor`, `model`, `firmware_version`, …). Always present (defaults to {}).
+
+            '
+        support_group:
+          type: string
         environment:
           type:
           - string
@@ -4636,22 +6946,6 @@ components:
           type:
           - string
           - 'null'
-        fqdns:
-          type: array
-          items:
-            type: string
-        mac_addresses:
-          type: array
-          items:
-            type: string
-        serial_number:
-          type: string
-        cloud_provider:
-          type: string
-        cloud_account_id:
-          type: string
-        cloud_instance_id:
-          type: string
         site:
           type: string
         region:
@@ -4665,14 +6959,6 @@ components:
           type: string
           format: uuid
         network_segment_name:
-          type: string
-        service_name:
-          type: string
-        service_version:
-          type: string
-        service_confidence:
-          type: string
-        service_identification_method:
           type: string
         discovery_method:
           type: string
@@ -4692,6 +6978,22 @@ components:
           type: string
         stale_status:
           type: string
+        merged_into:
+          type: string
+          format: uuid
+          description: >
+            The asset this one was merged into — the tombstone pointer. Present
+            ONLY on an asset a merge archived; absent on every other asset.
+
+            Accepting a merge archives the observation rather than deleting it,
+            so its id keeps resolving: `GET /assets/{merged-away-id}` answers
+            200 with `asset_status: archived` and this field naming the
+            survivor, rather than a 404 that tells a stale bookmark, ticket or
+            dashboard tile nothing. A client holding an id that comes back with
+            `merged_into` set should follow it and, where it stores ids, replace
+            the one it held — the `inventory.lifecycle.asset.merged` event
+            carries the same pair for clients that would rather be told than
+            discover it on the next read.
         first_discovered_at:
           type: string
           format: date-time
@@ -4711,8 +7013,34 @@ components:
           format: date-time
         risk_score:
           type: integer
+          description: 'Recomputed as the MAX over the asset''s scored crypto configurations (ADR-0005 D4). 0 with an EMPTY `risk_assessed_by` is NOT ASSESSED; 0 with a non-empty one is assessed clean.
+
+            '
+        risk_assessed_by:
+          type: array
+          items:
+            type: string
+          description: 'The producers that have evaluated this asset. Empty means nothing has, which is not the same as "nothing found".
+
+            '
         risk_level:
           type: string
+        identifiers:
+          type: array
+          description: 'Every identifier observed for the asset (ADR-0002 D3), strongest first. Present on the single-asset read; omitted from list rows.
+
+            '
+          items:
+            $ref: '#/components/schemas/AssetIdentifier'
+        endpoints:
+          type: array
+          description: 'The asset''s network faces. An asset may have none — an at-rest cloud resource genuinely has nothing to connect to.
+
+            '
+          items:
+            $ref: '#/components/schemas/AssetEndpoint'
+        primary_endpoint:
+          $ref: '#/components/schemas/AssetEndpoint'
         crypto_implementations:
           type: array
           items:
@@ -4791,6 +7119,9 @@ components:
             $ref: '#/components/schemas/Asset'
         pagination:
           $ref: '#/components/schemas/PaginationMeta'
+        query:
+          type: string
+          description: 'The predicate that actually selected these rows, in CANONICAL form — the caller''s `query` AND any deprecated per-field filters translated into the same language. Absent when the predicate was empty. Show this, not the string you sent: they differ whenever a legacy filter was in play or the spelling was non-canonical (ADR-0008 D4.4).'
         hints:
           type: object
           additionalProperties: true
@@ -4806,13 +7137,130 @@ components:
       properties:
         asset:
           $ref: '#/components/schemas/Asset'
+    AssetUpdateResponse:
+      type: object
+      additionalProperties: false
+      description: >
+        PUT /infrastructure-assets/{id}. The asset, plus what the update did to
+        its identifiers — attached, retired, and KEPT BACK. The third list is
+        the one that matters: a collector-minted identifier a person tried to
+        delete is still there, and a client that reported the deletion as
+        successful would be lying on the next read.
+      required:
+      - asset
+      properties:
+        asset:
+          $ref: '#/components/schemas/Asset'
+        identifiers:
+          $ref: '#/components/schemas/IdentifierUpdateReport'
+    IdentifierUpdateReport:
+      type: object
+      additionalProperties: false
+      required: [attached, removed, kept]
+      properties:
+        attached:
+          type: array
+          items: { $ref: '#/components/schemas/IdentifierChange' }
+        removed:
+          type: array
+          items: { $ref: '#/components/schemas/IdentifierChange' }
+        kept:
+          type: array
+          description: >
+            Identifiers the request asked to remove and the server did not.
+            `reason` says why — they were not a person's to retire.
+          items: { $ref: '#/components/schemas/IdentifierChange' }
+    IdentifierChange:
+      type: object
+      additionalProperties: false
+      required: [kind, value]
+      properties:
+        kind: { type: string }
+        value: { type: string }
+        scope: { type: string }
+        source_kind: { type: string }
+        reason:
+          type: string
+          description: Why this identifier was kept. Set only on `kept`.
+    IdentifierConflict:
+      type: object
+      additionalProperties: false
+      required: [error, merge_proposal_id]
+      properties:
+        error: { type: string }
+        message: { type: string }
+        kind: { type: string }
+        value: { type: string }
+        conflicting_asset_id:
+          type: string
+          format: uuid
+          description: The asset that already carries this identifier.
+        merge_proposal_id:
+          type: string
+          format: uuid
+          description: >
+            The proposal opened so a reviewer can say whether these are the same
+            thing. It is committed independently of the refused edit.
     AssetInput:
       type: object
       additionalProperties: false
-      description: Update/create body (models.AssetInput). asset_type is required.
-      required:
-      - asset_type
+      description: 'Update/create body (models.AssetInput). `class_key` is required on CREATE and optional on UPDATE, so it is not marked required here — one schema serves both, and requiring it on update would force every owner-email edit to restate the class. There is no `port`: a port is an endpoint.
+
+        '
       properties:
+        class_key:
+          type: string
+          description: The asset's class, from the registry (ADR-0002 D2). Required on create.
+        display_name:
+          type: string
+          description: 'What a person calls this thing. Cosmetic for most classes — the engine derives one from the identifiers — but IDENTITY for the `service` branch, where it is required on create: a service identifies by (tenant, class, name) and has no address or serial to be known by (ADR-0002 D3).
+
+            '
+        identifiers:
+          type: array
+          description: >
+            Declared identifiers. A serial typed into the UI or a sys_id from a
+            CMDB is as much identity as a measured one; what differs is the
+            source, which the identification engine reconciles on.
+
+
+            On UPDATE this array is the DESIRED set of the asset's declared
+            identifiers: one that is present is attached, one that is absent is
+            retired — but only if a person declared it. Omit the field entirely
+            to leave identifiers alone. `scope` defaults to the network segment
+            for `hostname` and `ip_address`, and to the CLASS KEY for `name`
+            (two services may share a name only if they are different kinds of
+            thing).
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - kind
+            - value
+            properties:
+              kind:
+                type: string
+              value:
+                type: string
+              scope:
+                type: string
+        endpoints:
+          type: array
+          description: Declared endpoints. A manually created asset usually has none.
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              address:
+                type: string
+              fqdn:
+                type: string
+              port:
+                type: integer
+              transport:
+                type: string
+              protocol:
+                type: string
         hostname:
           type:
           - string
@@ -4821,13 +7269,11 @@ components:
           type:
           - string
           - 'null'
-        port:
-          type:
-          - integer
-          - 'null'
-        asset_type:
-          type: string
-        operating_system:
+        attributes:
+          type: object
+          additionalProperties: true
+          description: Class-specific typed attributes, validated against the class's schema.
+        support_group:
           type:
           - string
           - 'null'
@@ -4861,6 +7307,14 @@ components:
           type:
           - string
           - 'null'
+          description: >
+            REFUSED on both create and update. A new asset's status is evaluated
+            server-side from the tenant's network segments, and an update that
+            carried it answers 400: approving promotes pending relationships and
+            materialises deferred findings, and denying records a suppression —
+            so writing the column alone would leave a monitored asset with an
+            empty Relationships tab and no findings. Use
+            POST /infrastructure-assets/approve, /deny, or /stale/archive.
     AssetIdsRequest:
       type: object
       additionalProperties: false
@@ -5313,16 +7767,1092 @@ components:
           type: integer
         showing:
           type: integer
+    AskRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        One question, and nothing else. No filters, no scope, no row limit:
+        anything a caller could add here is something the query language already
+        says, and a second way of saying it is how a client learns the wrong one
+        (the same reasoning that deleted the per-field filter arguments from the
+        MCP tools, ADR-0007 D2.4).
+      required: [question]
+      properties:
+        question:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: >
+            A question about this tenant's inventory, in words. Longer than the
+            cap is REFUSED with a 400 naming it, rather than truncated - half a
+            question translated confidently is worse than no answer, because
+            nothing downstream can tell it was half. The length is measured
+            after trimming surrounding whitespace, and a blank question is the
+            same 400.
+    AskResponse:
+      type: object
+      additionalProperties: false
+      required: [query, rows, text, citations, tools, provenance]
+      properties:
+        query:
+          type: string
+          description: >
+            The canonical predicate that ACTUALLY ran, including the default
+            scope the platform AND-ed in. Show this, not the question. It is
+            valid query-language text, so it can be pasted into the query editor,
+            saved as a view, or put in an `/inventory?query=` link unchanged.
+            Empty only when the tool result could not be read, which a client
+            renders as "a summary with no evidence" rather than as an empty
+            inventory.
+        rows:
+          type: array
+          description: >
+            The assets the query selected, in the list endpoint's own row shape,
+            so a client renders them with the code it already has. The rows are
+            the answer; the prose is a reading of them.
+          items:
+            $ref: '#/components/schemas/Asset'
+        text:
+          type: string
+          description: >
+            The summary, with `[row:<asset id>]` markers left IN. They are the
+            checkable part - a sentence stripped of its citation is a sentence
+            nobody can audit - and a client resolves each marker against `rows`
+            to link it. Every sentence that did not cite a returned row was
+            dropped before this was written, so a short summary over many rows is
+            a real outcome, not a truncation. When nothing matched, this is a
+            fixed sentence the platform writes itself rather than a model's
+            description of an absence it was not shown.
+        citations:
+          type: array
+          description: >
+            Derived FROM `text` rather than accumulated beside it, so the prose
+            cannot cite a row the list omits or list one it never mentions.
+          items:
+            $ref: '#/components/schemas/AskCitation'
+        tools:
+          type: array
+          description: >
+            Every read the answer was composed from, in order. The first is
+            always the asset query; the rest are follow-ups the model asked for
+            from a fixed allowlist. Results are not echoed - the rows are the
+            evidence and they are already here in full.
+          items:
+            $ref: '#/components/schemas/AskToolCall'
+        provenance:
+          $ref: '#/components/schemas/AskProvenance'
+    AskCitation:
+      type: object
+      additionalProperties: false
+      required: [kind, ref]
+      properties:
+        kind:
+          type: string
+          description: Always `row` here; the ref names a row in `rows`.
+        ref:
+          type: string
+          description: The asset id the citing sentence rests on.
+        text:
+          type: string
+          description: >
+            Absent for row citations: the caller already holds the row. Present
+            only where a citation points into something the caller supplied.
+    AskToolCall:
+      type: object
+      additionalProperties: false
+      required: [tool]
+      properties:
+        tool:
+          type: string
+          description: >
+            The tool name, spelled as the MCP server declares it -
+            `vistaplatform_query_assets`, `vistaplatform_get_asset`,
+            `vistaplatform_list_asset_classes`, `vistaplatform_asset_facets`.
+        args:
+          type: object
+          additionalProperties: true
+          description: >
+            The arguments it ran with, AFTER the seam's per-tool allowlist. A
+            dropped argument is reported under `_dropped_arguments` rather than
+            removed silently, because a dropped argument changes what the result
+            means.
+    AskProvenance:
+      type: object
+      additionalProperties: false
+      description: >
+        ADR-0008 D4.1 on the wire: a generated answer says so, and says what
+        produced it. `confidence` is 0 by design - we do not ask a model to score
+        itself and it has no calibrated way to answer if we did, so any number
+        here would be invented. The citations are the evidence instead.
+      required: [source_kind, source_ref, confidence]
+      properties:
+        source_kind:
+          type: string
+          description: Always `inferred`. A seam cannot produce a measured fact.
+        source_ref:
+          type: string
+          description: Names the producer, e.g. `query:model`.
+        confidence:
+          type: number
+        model_id:
+          type: string
+          description: >
+            What produced the answer. Never empty on a 200 - an answer that could
+            not be attributed is refused rather than returned unattributed.
+    AskRefusal:
+      type: object
+      additionalProperties: false
+      description: >
+        A provider answered and what it wrote did not validate. Deliberately NOT
+        the same shape as "no model available": a provider DID answer, twice, and
+        the validator said exactly why.
+      required: [error, errors, attempts]
+      properties:
+        error:
+          type: string
+        query:
+          type: string
+          description: >
+            The model's last attempt, absent when it produced none. NOT the
+            canonical query - it never reached the formatter - so treat it as a
+            starting point for the editor rather than as something that ran.
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/QueryDiagnostic'
+        attempts:
+          type: integer
+          description: >
+            Translation turns spent, so "failed twice" is distinguishable from
+            "refused before asking".
+    QueryError:
+      type: object
+      additionalProperties: false
+      description: >
+        The structured diagnostics of QUERY_LANGUAGE.md §10, returned with 400
+        whenever a query does not parse or validate.
+
+
+        One entry PER problem, each with a byte span into the submitted text, so
+        an editor can underline the offending characters rather than saying
+        "invalid query". The caller is a person with a caret in a text box;
+        flattening these into one string is what "invalid query" looks like from
+        the inside.
+      required: [error, query, errors]
+      properties:
+        error:
+          type: string
+        query:
+          type: string
+          description: The text the spans index into, echoed back.
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/QueryDiagnostic'
+    QueryDiagnostic:
+      type: object
+      additionalProperties: false
+      required: [code, message, span]
+      properties:
+        code:
+          type: string
+          description: >
+            Stable, machine-readable: syntax_error, unknown_field,
+            operator_not_allowed, type_mismatch, unknown_value, depth_exceeded,
+            regex_invalid, query_too_long, too_many_clauses, untranslatable.
+        message:
+          type: string
+        span:
+          type: object
+          additionalProperties: false
+          description: >
+            Offsets into the submitted query text, in UTF-8 BYTES — not
+            characters and not UTF-16 code units. A query containing any
+            non-ASCII character (an IDN hostname, a tag value in another script)
+            therefore has spans that do NOT index a JavaScript string directly:
+            decode the query to bytes, slice, and decode back, or convert the
+            offsets once before rendering a caret.
+          required: [start, end]
+          properties:
+            start: { type: integer }
+            end: { type: integer }
+        suggestion:
+          type: string
+          description: The fix, when there is an obvious one ("did you mean hostname?").
+    AssetEndpointListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /infrastructure-assets/{id}/endpoints — `{ "endpoints": [...] }`. An empty array is a real answer.'
+      required: [endpoints]
+      properties:
+        endpoints:
+          type: array
+          items:
+            $ref: '#/components/schemas/AssetEndpoint'
+    AssetIdentifierListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /infrastructure-assets/{id}/identifiers — `{ "identifiers": [...] }`.'
+      required: [identifiers]
+      properties:
+        identifiers:
+          type: array
+          items:
+            $ref: '#/components/schemas/AssetIdentifier'
+    AssetClass:
+      type: object
+      additionalProperties: false
+      description: One node of the class taxonomy (ADR-0002 D2).
+      required: [key, path, label, identifier_precedence, is_fixed]
+      properties:
+        key:
+          type: string
+        parent:
+          type: string
+          description: Empty for a top-level class.
+        path:
+          type: string
+          description: >
+            The materialised dot-separated ancestry ending in `key`. This is
+            what `class:` matches a prefix of, so it is the value a facet bucket
+            carries.
+        label:
+          type: string
+        description:
+          type: string
+        icon:
+          type: string
+        cmdb_ci_type:
+          type: string
+        cyclonedx_type:
+          type: string
+        identifier_precedence:
+          type: array
+          items: { type: string }
+          description: >
+            The ordered identifier kinds the identification engine may match
+            this class on. EMPTY means the class has no independent identity and
+            is matched by dependent identity instead — not that anything goes.
+        attribute_schema:
+          type: object
+          additionalProperties: true
+          description: JSON Schema for the class's `attributes` object.
+        is_fixed:
+          type: boolean
+          description: >
+            True for a platform class (from the generated registry, not
+            editable), false for a tenant leaf subclass.
+    AssetClassListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /asset-classes — `{ "classes": [...] }`, parents before children.'
+      required: [classes]
+      properties:
+        classes:
+          type: array
+          items:
+            $ref: '#/components/schemas/AssetClass'
+    SavedView:
+      type: object
+      additionalProperties: false
+      description: A named query string (ADR-0006 D2).
+      required: [id, tenant_id, name, target, query, owner_user_id, is_shared, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        target:
+          type: string
+          description: The collection the query is a predicate over, carried out of band.
+        query:
+          type: string
+          description: The query in CANONICAL form — two spellings of one predicate would be two rows a diff cannot match.
+        owner_user_id: { type: string, format: uuid }
+        owner_name:
+          type: string
+          description: >
+            Who to credit in the list — the owner's name, or their email when
+            they have no name. Empty when the user row is gone; a shared view
+            still lists, without a fabricated owner. The one question a person
+            asks about a shared view they did not make is whose it is.
+        is_shared:
+          type: boolean
+          description: >
+            Visible to the whole tenant, and still editable only by its owner.
+
+
+            A shared view's name is unique tenant-wide (case-insensitively): it
+            is a name everyone reads off one list, and two "Production"s from
+            two owners are indistinguishable there. A PRIVATE view's name is
+            unique only to its owner — two people may each keep one called
+            "Mine".
+        created_at: { type: string }
+        updated_at: { type: string }
+    SavedViewInput:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 255 }
+        description: { type: [string, "null"] }
+        target:
+          type: string
+          description: Defaults to `asset`. The table-less targets (`observation`, `measurement`) are refused — they name no rows a view could open.
+        query:
+          type: string
+          description: Empty matches everything the tenant may see.
+        is_shared: { type: [boolean, "null"] }
+    SavedViewResponse:
+      type: object
+      additionalProperties: false
+      required: [saved_view]
+      properties:
+        saved_view:
+          $ref: '#/components/schemas/SavedView'
+    SavedViewListResponse:
+      type: object
+      additionalProperties: false
+      required: [saved_views]
+      properties:
+        saved_views:
+          type: array
+          items:
+            $ref: '#/components/schemas/SavedView'
+    MergeCandidate:
+      type: object
+      additionalProperties: false
+      description: One asset a proposal could merge into, with the evidence for it.
+      required: [asset_id, deleted, matched_identifiers, score]
+      properties:
+        asset_id: { type: string, format: uuid }
+        display_name: { type: string }
+        hostname: { type: [string, "null"] }
+        class_key: { type: string }
+        class_label: { type: string }
+        asset_status: { type: string }
+        deleted:
+          type: boolean
+          description: >
+            The candidate can no longer be merged into — soft-deleted, or merged
+            away by an earlier proposal. Shown rather than dropped: a proposal
+            that silently loses a candidate reads as if it only ever had one.
+        matched_identifiers:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+          description: The observation's identifiers that resolved to this asset.
+        score:
+          type: number
+          description: The matcher's score, 0..1. ZERO means unscored, not "certainly wrong".
+        reason: { type: string }
+        explanation:
+          type: array
+          description: >
+            The score's working — the signals that moved it, largest absolute
+            contribution first. Absent when the candidate is unscored, or when
+            the configured matcher cannot explain itself.
+
+
+            A factor names a COMPARISON, never a value: "a one-per-asset
+            identifier matches" is the evidence, and the identifier itself is on
+            `matched_identifiers`, where the reviewer is already looking at it.
+          items:
+            $ref: '#/components/schemas/MergeScoreFactor'
+    MergeScoreFactor:
+      type: object
+      additionalProperties: false
+      description: One signal behind a candidate's score.
+      required: [feature, label, value, weight, contribution]
+      properties:
+        feature:
+          type: string
+          description: The matcher's stable name for the signal.
+        label:
+          type: string
+          description: The phrase to show a reviewer.
+        value:
+          type: number
+          description: What was measured, 0..1.
+        weight:
+          type: number
+          description: The model's signed weight for the signal.
+        contribution:
+          type: number
+          description: >
+            value x weight — how much this signal moved THIS score, which is not
+            how much the model cares about the signal in general. A large weight
+            on a signal that measured zero contributed nothing.
+    MergeProposal:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, status, source, proposed_at, candidates]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [pending, merged, kept_separate]
+        reason: { type: string }
+        source: { type: string }
+        source_kind: { type: string }
+        proposed_at: { type: string, format: date-time }
+        observation_asset_id: { type: string, format: uuid }
+        observation:
+          $ref: '#/components/schemas/MergeCandidate'
+        candidates:
+          type: array
+          items:
+            $ref: '#/components/schemas/MergeCandidate'
+        auto_accepted:
+          type: boolean
+          description: >
+            A matcher scored the top candidate above the tenant's threshold and
+            the engine wrote the observation into it. The proposal is still
+            opened — the remaining candidates are still a human's decision.
+        accepted_asset_id: { type: string, format: uuid }
+        accepted_score: { type: number }
+        accepted_model_id: { type: string }
+        accepted_source_ref: { type: string }
+        model_id:
+          type: string
+          description: >
+            The matcher that RANKED the candidates, whether or not it accepted
+            anything. Absent when nothing scored them. Distinct from
+            `accepted_model_id`, which records the matcher behind an auto-accept
+            specifically: "a model ordered these for you" and "a model decided
+            this" are different claims.
+        source_ref:
+          type: string
+          description: The seam and implementation that produced the scores.
+        resolved_at:
+          type: string
+          format: date-time
+          description: >
+            When a person decided the proposal. Absent while it is pending —
+            including on an auto-accepted proposal whose remaining candidates
+            nobody has settled yet.
+        resolved_by:
+          type: string
+          format: uuid
+          description: The user who decided it.
+    AutoAcceptedMergeListResponse:
+      type: object
+      additionalProperties: false
+      required: [merges, window_days]
+      properties:
+        merges:
+          type: array
+          items:
+            $ref: '#/components/schemas/MergeProposal'
+        window_days:
+          type: integer
+          description: >
+            How many days back the list covers, echoed so the heading and the
+            query cannot disagree.
+    IdentificationSettings:
+      type: object
+      additionalProperties: false
+      required: [auto_accept_threshold]
+      properties:
+        auto_accept_threshold:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: >
+            The matcher score at or above which the platform may accept a merge
+            proposal on the tenant's behalf. ZERO — the default — means NEVER,
+            and is not a low bar: no score bypasses it.
+
+
+            Auto-accepted merges are not reversible from the UI today, and a
+            singleton identifier that disagrees (serial, cloud id, agent id,
+            CMDB sys_id) is never auto-accepted whatever the score.
+        matcher_model_id:
+          type: string
+          description: >
+            The model that does the scoring. Absent when no matcher is
+            configured, in which case nothing is ever scored and the threshold
+            cannot fire whatever it is set to.
+        version:
+          type: integer
+          description: The settings row's version after a write.
+    IdentificationSettingsResponse:
+      type: object
+      additionalProperties: false
+      required: [identification]
+      properties:
+        identification:
+          $ref: '#/components/schemas/IdentificationSettings'
+    IdentificationSettingsUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [auto_accept_threshold]
+      properties:
+        auto_accept_threshold:
+          type: number
+          minimum: 0
+          maximum: 1
+    DriftSettings:
+      type: object
+      additionalProperties: false
+      required: [baseline_days, min_days, max_days]
+      properties:
+        baseline_days:
+          type: integer
+          description: >
+            How many days of history the drift baseline covers. Read fresh on
+            every pass, so a change takes effect on the next one.
+        min_days:
+          type: integer
+          description: The smallest window the server accepts.
+        max_days:
+          type: integer
+          description: The largest window the server accepts.
+    DriftSettingsResponse:
+      type: object
+      additionalProperties: false
+      required: [drift]
+      properties:
+        drift:
+          $ref: '#/components/schemas/DriftSettings'
+    DriftSettingsUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [baseline_days]
+      properties:
+        baseline_days:
+          type: integer
+          minimum: 7
+          maximum: 365
+    MergeProposalListResponse:
+      type: object
+      additionalProperties: false
+      required: [merge_proposals, total, limit, offset]
+      properties:
+        merge_proposals:
+          type: array
+          items:
+            $ref: '#/components/schemas/MergeProposal'
+        total:
+          type: integer
+          description: >
+            How many pending merge proposals this tenant has in total, counted
+            over the same predicate in the same transaction as the page. This
+            is the count to display; `merge_proposals.length` is the page.
+        limit:
+          type: integer
+          description: The page size actually applied (the request's, clamped).
+        offset:
+          type: integer
+          description: The offset actually applied.
+    MergeProposalResponse:
+      type: object
+      additionalProperties: false
+      required: [merge_proposal]
+      properties:
+        merge_proposal:
+          $ref: '#/components/schemas/MergeProposal'
+    MergeProposalAcceptRequest:
+      type: object
+      additionalProperties: false
+      required: [survivor_asset_id]
+      properties:
+        survivor_asset_id:
+          type: string
+          format: uuid
+          description: Must be one of the proposal's candidates.
+    RelationshipPeer:
+      type: object
+      additionalProperties: false
+      description: >
+        One end of an edge, decorated enough to render a row and follow a link
+        without a second read.
+      required: [asset_id, deleted]
+      properties:
+        asset_id: { type: string, format: uuid }
+        display_name:
+          type: string
+          description: >
+            The asset's display name, falling back to its hostname. A peer
+            rendered as a bare uuid is a peer nobody can decide anything about.
+        class_key: { type: string }
+        asset_status: { type: string }
+        primary_identifier:
+          type: string
+          description: >
+            The strongest identifier the peer carries, as `kind:value` — what a
+            reviewer recognises when `display_name` is empty, which it is for
+            most freshly discovered assets.
+        risk_score: { type: integer }
+        deleted:
+          type: boolean
+          description: >
+            The peer was soft-deleted or merged away. Reported rather than
+            dropped: an edge whose peer silently vanishes reads as a corrupt
+            row, and "that thing is gone" is the actual answer.
+    Relationship:
+      type: object
+      additionalProperties: false
+      description: One typed, directional edge (ADR-0003 D1).
+      required:
+        - id
+        - tenant_id
+        - from_asset_id
+        - to_asset_id
+        - type
+        - source_kind
+        - confidence
+        - status
+        - first_seen_at
+        - last_seen_at
+        - observation_count
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        from_asset_id: { type: string, format: uuid }
+        to_asset_id: { type: string, format: uuid }
+        type:
+          type: string
+          enum: [connects_to, contains, depends_on, hosted_on, impacts, manages, member_of, runs_on, sends_data_to, virtualized_by]
+        direction:
+          type: string
+          enum: [out, in]
+          description: >
+            Relative to the asset the read was about — `out` when that asset is
+            the from end. NOT a property of the row: the same row is `out` from
+            one side and `in` from the other. Absent on the neighbourhood's
+            edges, where no end is privileged.
+        label:
+          type: string
+          description: >
+            How the edge reads from the asset's own side: the type itself
+            outbound, the vocabulary's reverse label inbound (`runs_on` /
+            `runs`). Derived from the type, never stored.
+        source_kind:
+          type: string
+          enum: [measured, declared, imported, inferred]
+          description: >
+            Provenance, and what decides trust (ADR-0003 D3). `inferred` is the
+            one that always needs a human.
+        source_ref:
+          type: string
+          description: The producer — `sensor:<id>`, `user:<id>`, `cloud:<integration>`, `matcher`.
+        confidence: { type: number }
+        status:
+          type: string
+          enum: [pending, active, rejected, stale]
+        attributes:
+          type: object
+          additionalProperties: true
+          description: >
+            Type-specific detail: protocol and ports for `connects_to`, the
+            local and remote port names for an LLDP `member_of`, the process or
+            container id for `runs_on`.
+        first_seen_at: { type: string, format: date-time }
+        last_seen_at: { type: string, format: date-time }
+        observation_count: { type: integer }
+        created_by: { type: string, format: uuid }
+        approved_by: { type: string, format: uuid }
+        approved_at: { type: string, format: date-time }
+        peer:
+          $ref: '#/components/schemas/RelationshipPeer'
+        from:
+          $ref: '#/components/schemas/RelationshipPeer'
+        to:
+          $ref: '#/components/schemas/RelationshipPeer'
+    RelationshipListResponse:
+      type: object
+      additionalProperties: false
+      required: [relationships, total, limit, offset]
+      properties:
+        relationships:
+          type: array
+          items:
+            $ref: '#/components/schemas/Relationship'
+        total:
+          type: integer
+          description: >
+            Every edge matching the filter, counted over the same predicate in
+            the same transaction as the page. This is the count to display;
+            `relationships.length` is the page.
+        limit: { type: integer }
+        offset: { type: integer }
+    RelationshipResponse:
+      type: object
+      additionalProperties: false
+      required: [relationship]
+      properties:
+        relationship:
+          $ref: '#/components/schemas/Relationship'
+    RelationshipProposalListResponse:
+      type: object
+      additionalProperties: false
+      required: [relationship_proposals, total, limit, offset]
+      properties:
+        relationship_proposals:
+          type: array
+          items:
+            $ref: '#/components/schemas/Relationship'
+        total:
+          type: integer
+          description: Every pending proposal in the tenant, not the page length.
+        limit: { type: integer }
+        offset: { type: integer }
+    ClassProposalListResponse:
+      type: object
+      additionalProperties: false
+      required: [class_proposals, total, limit, offset]
+      properties:
+        class_proposals:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClassProposal'
+        total:
+          type: integer
+          description: Every pending proposal in the tenant, not the page length.
+        limit: { type: integer }
+        offset: { type: integer }
+    ClassProposalResponse:
+      type: object
+      additionalProperties: false
+      required: [class_proposal]
+      properties:
+        class_proposal:
+          $ref: '#/components/schemas/ClassProposal'
+    ClassProposalDecisionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        class_key:
+          type: string
+          description: >
+            Which class to take. Required when the proposal has no single
+            proposed class — the rules conflicted — and optional otherwise. Must
+            be one the proposal offers.
+    ClassProposal:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, asset_id, status, source, proposed_class_key, proposed_at]
+      description: >
+        One class the curated rules argued for an asset that already has a
+        different one, with the whole argument attached.
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        asset_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [pending, accepted, rejected]
+        source:
+          type: string
+          description: What raised it. `classifier:rules` for the rule engine.
+        proposed_class_key:
+          type: string
+          description: >
+            The class the rules decided, or EMPTY when they contradicted each
+            other. Empty is a complete answer, not a missing value: it means the
+            reviewer is being shown a disagreement and asked to settle it, and
+            `conflicting_classes` names the candidates.
+        proposed_class_label: { type: string }
+        current_class_key:
+          type: string
+          description: What the asset is classed as now. A proposal is a comparison.
+        current_class_label: { type: string }
+        current_class_source_kind:
+          type: string
+          enum: [measured, declared, imported, inferred, rule]
+          description: >
+            How the CURRENT class was decided. `rule` is the fifth value and it
+            is not a synonym for any of the other four — a class argued from a
+            curated rule is not measured (the MAC was; the mapping was not) and
+            not inferred (that is a model's proposal).
+        conflicting_classes:
+          type: array
+          description: >
+            The classes that tied. Two rules disagreeing about one device is a
+            curation bug, and this is what names it so it can be fixed rather
+            than guessed at.
+          items:
+            $ref: '#/components/schemas/ClassOption'
+        matched_rules:
+          type: array
+          description: >
+            The argument: every rule that matched, highest confidence first, as
+            it stood when the proposal was raised. A proposal a reviewer cannot
+            audit is one they can only rubber-stamp.
+          items:
+            $ref: '#/components/schemas/ClassificationRuleRef'
+        rule_ids:
+          type: array
+          items: { type: string }
+        confidence:
+          type: number
+          description: >
+            What the proposal asserts. For a rule-derived class that is the
+            winning rule's own 0.50–0.95 assertion; for a model-derived one it
+            is `model_probability`. Absent for a conflict the rules could not
+            settle.
+        proposed_class_source_kind:
+          type: string
+          enum: [measured, declared, imported, inferred, rule]
+          description: >
+            The provenance ACCEPTING this proposal will stamp onto the asset.
+            `rule` for a class the curated table argued; `inferred` for one the
+            learned classifier proposed. The two are not interchangeable —
+            ADR-0008 D4.2 defines `inferred` as "something a model proposed" —
+            and this is the field that says which kind of claim the row is.
+            Absent on rows raised before the learned classifier shipped, which
+            are all rule-derived.
+        model_id:
+          type: string
+          description: >
+            The weights that proposed this class, when a MODEL did — the
+            learned classifier speaks only where the rules decided nothing or
+            decided two. Empty for a rule-derived proposal.
+        model_probability:
+          type: number
+          description: >
+            The model's calibrated probability for the proposed class, 0–1. A
+            proposal is only raised at or above the model's floor (0.80);
+            below it nothing is proposed and the asset stays `unknown_host`.
+        model_reasons:
+          type: array
+          description: >
+            The model's argument: its top feature contributions, largest first.
+            Each names a FEATURE and the evidence that set it — a vendor, an
+            open port, a banner token, an advertised service. Never a hostname
+            or an address: the classifier's whole input carries neither.
+          items:
+            $ref: '#/components/schemas/ClassModelReason'
+        proposed_at: { type: string, format: date-time }
+        asset_display_name: { type: string }
+        asset_hostname: { type: string }
+        asset_primary_address: { type: string }
+        asset_status: { type: string }
+        accepted_class_key:
+          type: string
+          description: >
+            Which class a reviewer took, which is not always
+            `proposed_class_key`: a conflict proposal offers a choice.
+    ClassOption:
+      type: object
+      additionalProperties: false
+      required: [key]
+      properties:
+        key: { type: string }
+        label: { type: string }
+    ClassModelReason:
+      type: object
+      additionalProperties: false
+      required: [feature, label, contribution]
+      description: >
+        One feature's signed contribution to a learned class proposal. The score
+        IS the sum of these through a softmax, so the list is the model's actual
+        arithmetic rather than a post-hoc guess at its reasoning.
+      properties:
+        feature:
+          type: string
+          description: The stable machine name of the feature — `port/9100`, `oui/214`.
+        label:
+          type: string
+          description: >
+            The phrase a reviewer reads, built from this input's own evidence:
+            "port 9100 is open", "the MAC prefix is registered to Brother".
+        contribution:
+          type: number
+          description: >
+            Value × weight, in log-odds. Signed: a negative contribution is
+            evidence AGAINST the proposed class that the rest outweighed.
+    ClassificationRuleRef:
+      type: object
+      additionalProperties: false
+      required: [kind, pattern, confidence]
+      description: >
+        One classification rule that matched, copied into the proposal rather
+        than referenced: somebody asking "why does this say switch" six months
+        later needs the pattern and the citation that were in force at the time,
+        not whatever the rule says now.
+      properties:
+        id: { type: string }
+        kind:
+          type: string
+          enum: [oui, sysobjectid, enip, cloud_type, banner, port_profile, model, platform, cdp_capabilities, lldp_capability, mdns_service]
+        pattern: { type: string }
+        class: { type: string }
+        vendor: { type: string }
+        model: { type: string }
+        confidence: { type: number }
+        source_url: { type: string }
+    RelationshipCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [type, peer_asset_id]
+      properties:
+        type:
+          type: string
+          enum: [connects_to, contains, depends_on, hosted_on, impacts, manages, member_of, runs_on, sends_data_to, virtualized_by]
+        peer_asset_id:
+          type: string
+          format: uuid
+          description: The other end. Must be an asset of this tenant, and not the asset in the path.
+        direction:
+          type: string
+          enum: [out, in]
+          default: out
+          description: >
+            Which end the asset in the path is. `out` makes it the from end.
+            There is no `both`: an edge has one canonical direction, and a
+            declaration that will not say which way it points is not one.
+        attributes:
+          type: object
+          additionalProperties: true
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+    GraphNode:
+      type: object
+      additionalProperties: false
+      description: One asset as a node of the neighbourhood or the impact closure.
+      required: [asset_id, depth]
+      properties:
+        asset_id: { type: string, format: uuid }
+        display_name: { type: string }
+        class_key: { type: string }
+        asset_status: { type: string }
+        risk_score: { type: integer }
+        depth:
+          type: integer
+          description: >
+            The SHORTEST hop count from the root, so a node reachable by several
+            routes is placed once, at the distance a person would say it is.
+        is_root:
+          type: boolean
+          description: Present on the neighbourhood; the impact closure excludes its own root.
+    Neighbourhood:
+      type: object
+      additionalProperties: false
+      required:
+        - root_asset_id
+        - depth
+        - include_pending
+        - nodes
+        - edges
+        - truncated
+        - total_nodes
+        - total_edges
+        - node_cap
+        - edge_cap
+      properties:
+        root_asset_id: { type: string, format: uuid }
+        depth: { type: integer }
+        include_pending: { type: boolean }
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/GraphNode'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/Relationship'
+          description: >
+            Only edges with BOTH ends in `nodes`. An edge to a node the cap
+            removed would draw as a line into empty space.
+        truncated:
+          type: boolean
+          description: >
+            A cap bit. The graph is a PREFIX of the real one and must be
+            labelled as such wherever it is drawn.
+        total_nodes:
+          type: integer
+          description: What the traversal actually found, which is what `nodes` would be without the cap.
+        total_edges: { type: integer }
+        node_cap: { type: integer }
+        edge_cap: { type: integer }
+    NeighbourhoodResponse:
+      type: object
+      additionalProperties: false
+      required: [neighbourhood]
+      properties:
+        neighbourhood:
+          $ref: '#/components/schemas/Neighbourhood'
+    ImpactDepthCount:
+      type: object
+      additionalProperties: false
+      required: [depth, count]
+      properties:
+        depth: { type: integer }
+        count: { type: integer }
+    Impact:
+      type: object
+      additionalProperties: false
+      required:
+        - root_asset_id
+        - direction
+        - depth
+        - types
+        - nodes
+        - counts_by_depth
+        - total
+        - truncated
+        - node_cap
+      properties:
+        root_asset_id: { type: string, format: uuid }
+        direction:
+          type: string
+          enum: [downstream, upstream]
+        depth:
+          type: integer
+          description: The cap actually applied.
+        types:
+          type: array
+          items: { type: string }
+          description: >
+            The impact-bearing vocabulary the closure walked, echoed so a
+            consumer can see which question was answered.
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/GraphNode'
+        counts_by_depth:
+          type: array
+          items:
+            $ref: '#/components/schemas/ImpactDepthCount'
+          description: >
+            Counts over the RETURNED nodes. When `truncated` is true they are a
+            floor, which is what the flag is there to say.
+        total: { type: integer }
+        truncated: { type: boolean }
+        node_cap: { type: integer }
+    ImpactResponse:
+      type: object
+      additionalProperties: false
+      required: [impact]
+      properties:
+        impact:
+          $ref: '#/components/schemas/Impact'
     AssetFacetBucket:
       type: object
       additionalProperties: false
-      description: One facet bucket (models.AssetFacetBucket — the key is serialized under `value`).
+      description: >
+        One facet bucket (models.AssetFacetBucket — the key is serialized under
+        `value`).
+
+
+        `value` is what a QUERY TERM matches on, which for the class facet is
+        the class PATH, since that is what `class:` compares a prefix of.
+        `label` is what the rail shows a person, and is omitted when the two are
+        the same.
       required: [value, count]
       properties:
         value:
           type: string
         count:
           type: integer
+        label:
+          type: string
     AssetFacetsResponse:
       type: object
       additionalProperties: false
@@ -5335,6 +8865,108 @@ components:
           type: [array, "null"]
           items:
             $ref: '#/components/schemas/AssetFacetBucket'
+        query:
+          type: string
+          description: The canonical predicate these counts were taken over — the same echo the list envelope carries, so a rail can prove its numbers describe the list beside it. Absent when the predicate was empty.
+    AssetTopologyClass:
+      type: object
+      additionalProperties: false
+      description: One class node — a leaf of the topology tree.
+      required: [class_key, class_path, asset_count]
+      properties:
+        class_key:
+          type: string
+          description: 'The class. This is what the drill-through query uses: `class:` matches a SUBTREE, so the key names this node exactly.'
+        class_path:
+          type: string
+          description: 'The materialised ancestry (`hardware.computer.server`), for labelling and for showing where the node sits.'
+        asset_count: { type: integer }
+    AssetTopologySegment:
+      type: object
+      additionalProperties: false
+      description: One segment node, with the classes present in it.
+      required: [segment_name, asset_count, classes]
+      properties:
+        segment_id:
+          type: [string, "null"]
+          format: uuid
+          description: >
+            NULL for the `Unsegmented` bucket. Branch on THIS, never on the
+            name: a tenant may legitimately name a segment "Unsegmented", and
+            the drill-through differs — `segment_id:<id>` for a real segment,
+            `not exists(segment_id)` for the bucket (the query language has no
+            null literal; absence is spelled with `exists`).
+        segment_name: { type: string }
+        asset_count: { type: integer }
+        classes:
+          type: [array, "null"]
+          items:
+            $ref: '#/components/schemas/AssetTopologyClass'
+    AssetTopologySite:
+      type: object
+      additionalProperties: false
+      description: One site node, with its segments.
+      required: [site, asset_count, segments]
+      properties:
+        site:
+          type: string
+          description: '`Unassigned` when the asset records no site. Read from the `site` column, falling back to `tags.location.site` and `tags.site` — the same expression the `site` facet uses, so the tree and the rail cannot name a site differently.'
+        asset_count: { type: integer }
+        segments:
+          type: [array, "null"]
+          items:
+            $ref: '#/components/schemas/AssetTopologySegment'
+    AssetTopologyEdge:
+      type: object
+      additionalProperties: false
+      description: >
+        Every ACTIVE `connects_to` / `depends_on` relationship crossing from one
+        segment into another, aggregated. Directed: `depends_on` is not
+        symmetric, and folding the directions together would lose which side is
+        the dependant.
+      required: [from_segment_name, to_segment_name, count, by_type]
+      properties:
+        from_segment_id: { type: [string, "null"], format: uuid }
+        from_segment_name: { type: string }
+        to_segment_id: { type: [string, "null"], format: uuid }
+        to_segment_name: { type: string }
+        count: { type: integer, description: Every counted edge between the pair. }
+        by_type:
+          type: object
+          additionalProperties: { type: integer }
+          description: 'Per relationship type. `connects_to` is observed traffic and `depends_on` is a declared dependency — different claims, so one number would hide which a line represents.'
+    AssetTopology:
+      type: object
+      additionalProperties: false
+      required: [sites, edges, total_assets, unassigned_assets, total_nodes, total_edges, truncated, node_cap, edge_cap]
+      properties:
+        sites:
+          type: [array, "null"]
+          items:
+            $ref: '#/components/schemas/AssetTopologySite'
+        edges:
+          type: [array, "null"]
+          items:
+            $ref: '#/components/schemas/AssetTopologyEdge'
+        total_assets:
+          type: integer
+          description: Counted INDEPENDENTLY of the tree, so a client can assert the tree adds up to it. A tree that silently lost a branch is what this number makes visible.
+        unassigned_assets:
+          type: integer
+          description: How many have no site — the number that says whether the diagram is the estate or a curated corner of it.
+        total_nodes: { type: integer, description: '(site, segment, class) triples before the cap.' }
+        total_edges: { type: integer, description: Segment pairs before the cap. }
+        truncated: { type: boolean, description: True when either cap was reached. The totals above stay real. }
+        node_cap: { type: integer }
+        edge_cap: { type: integer }
+    AssetTopologyResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /infrastructure-assets/topology — `{ topology }`.'
+      required: [topology]
+      properties:
+        topology:
+          $ref: '#/components/schemas/AssetTopology'
     AssetStats:
       type: object
       additionalProperties: false
@@ -5372,6 +9004,328 @@ components:
           type: [array, "null"]
           items:
             $ref: '#/components/schemas/AssetHistory'
+    AssetClassChange:
+      type: object
+      additionalProperties: false
+      description: One `asset_class_history` row — a class transition and its argument.
+      required: [id, asset_id, tenant_id, to_class_key, source, evidence, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        asset_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        from_class_key:
+          type: string
+          description: 'The class the asset held. ABSENT on the row its creation wrote — there was none.'
+        from_class_label: { type: string, description: Display label for from_class_key. }
+        to_class_key: { type: string, description: The class it moved to. }
+        to_class_label: { type: string, description: Display label for to_class_key. }
+        source:
+          type: string
+          enum: [proposal, manual, import, classifier]
+          description: 'The mechanism that moved it. A closed set; consumers branch on it.'
+        actor_user_id:
+          type: string
+          format: uuid
+          description: 'The person who caused it. Absent when a machine did — absent means no person, not unknown.'
+        evidence:
+          type: [object, "null"]
+          additionalProperties: true
+          description: >
+            The argument as IDENTIFIERS — rule ids, a model id and its
+            probability, the proposal id, the recorded class provenance. Never a
+            hostname, an address, key material or a command transcript.
+        created_at: { type: string, format: date-time }
+    AssetClassHistoryListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /infrastructure-assets/{id}/class-history — `{ "class_history": [...] }`.'
+      required: [class_history]
+      properties:
+        class_history:
+          type: array
+          items:
+            $ref: '#/components/schemas/AssetClassChange'
+    SoftwareInstall:
+      type: object
+      additionalProperties: false
+      description: >
+        One `software_installs` row joined to its `software_products` catalogue
+        entry: a product present on an asset, with the provenance of the claim.
+      required: [install_id, product_id, name, source_kind, status, first_seen_at, last_seen_at, eol_state, vulnerability_state, vulnerability_count]
+      properties:
+        install_id: { type: string, format: uuid }
+        product_id: { type: string, format: uuid }
+        name: { type: string, description: 'Product name. NOT NULL — a component with no name cannot be written and is dropped by the parser with a warning.' }
+        vendor: { type: [string, "null"], description: 'The publishing organisation, where the source named one. NULL, never "", when it did not.' }
+        version: { type: [string, "null"], description: The version exactly as the source wrote it, kept raw for display. Never used for ordering. }
+        version_sort:
+          type: [string, "null"]
+          description: >
+            The normalised component-wise sort key (QUERY_LANGUAGE §5.5). NULL
+            when the version carries no numeric component, which makes every
+            version comparison against this product evaluate UNKNOWN — the
+            intended behaviour, not a gap: a lexical fallback puts 1.10 below 1.9.
+        purl: { type: [string, "null"], description: 'Package URL in canonical form. The strongest of the three identity forms.' }
+        cpe: { type: [string, "null"], description: 'CPE 2.3 formatted string, stored lowercase (CPE 2.3 §5.3.2 makes attribute values case-insensitive and NVD publishes lowercase).' }
+        license_id:
+          type: [string, "null"]
+          description: >
+            An SPDX licence identifier, or an SPDX licence EXPRESSION verbatim
+            ("MIT OR Apache-2.0") when the document gave one. A consumer that
+            needs a single id must be ready for an expression: collapsing one to
+            "the first id" would assert a choice the document never made.
+        install_path: { type: [string, "null"], description: 'Filesystem location, where the source knows one. An SBOM component has none.' }
+        source_kind:
+          type: string
+          enum: [measured, declared, imported, inferred]
+          description: 'ADR-0005 provenance. An SBOM upload is `imported`: the document is a build system''s claim, not something the platform measured.'
+        source_ref: { type: [string, "null"], description: 'What produced this observation — `sbom:<upload id>` for an upload.' }
+        status:
+          type: string
+          enum: [active, stale, removed]
+          description: >
+            `removed` means a later document for this asset did not list the
+            product. The row is kept rather than deleted, so `first_seen_at`
+            survives and a document that lists it again makes it `active`.
+        first_seen_at: { type: string, format: date-time, description: Never updated. That is the point of having it beside last_seen_at. }
+        last_seen_at: { type: string, format: date-time }
+        updated_at: { type: [string, "null"], format: date-time }
+        eol_state:
+          type: string
+          enum: [end_of_life, supported, no_date, not_in_catalogue, not_assessed]
+          description: >
+            Read off the `eol` producer's open `software_end_of_life` finding
+            for this install and, when there is none, off the producer's own
+            per-install record of what the lifecycle catalogue resolved. It
+            rides on the list so a fifty-row Software tab is one request rather
+            than fifty. Nothing re-runs the resolution.
+
+
+            `end_of_life` — an open finding: the date is inside the warning
+            window or past. `supported` — the catalogue resolved this version
+            to a cycle whose end-of-life date is beyond the warning window;
+            `eol_date` carries it. `no_date` — the catalogue has the version
+            and publishes no date, so neither "supported" nor "end of life"
+            can be claimed. `not_in_catalogue` — the catalogue has no entry for
+            the product; the gap is recorded for its curators.
+            `not_assessed` — no completed pass has recorded an answer for this
+            install: the check has not run since it was seen, the install is
+            not `active` and was skipped, or its finding was closed by a
+            person. `not_assessed` is NOT "supported", and a client must not
+            render it as one.
+        eol_date:
+          type: [string, "null"]
+          description: 'The catalogue''s end-of-life date for the matched cycle (`YYYY-MM-DD`): the finding''s evidence when `eol_state` is `end_of_life`, the producer''s record when it is `supported`. Absent in every other state.'
+        eol_days_remaining:
+          type: [integer, "null"]
+          description: Negative once the date has passed. Null when the producer wrote none.
+        eol_severity:
+          type: [string, "null"]
+          enum: [low, medium, high, null]
+          description: 'The finding''s ladder rung — `low` approaching, `medium` past, `high` past by more than a year.'
+        eol_finding_id:
+          type: [string, "null"]
+          format: uuid
+          description: The finding behind the state, for a link straight to it.
+        eol_assessed_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the `eol` producer last recorded this install's lifecycle answer. Absent when no completed pass has.
+        vulnerability_state:
+          type: string
+          enum: [vulnerable, none_known, not_assessed]
+          description: >
+            Read off the `vulnerability` producer's open `known_vulnerability`
+            finding for this install.
+
+
+            `none_known` and `not_assessed` are deliberately distinct, and a
+            client that renders both as "0" undoes the distinction. The producer
+            matches on CPE and PURL only: a product carrying NEITHER is skipped
+            and counted as unidentifiable, so "no known vulnerabilities" and
+            "could not be checked" are different answers and only one is
+            reassuring.
+        vulnerability_count:
+          type: integer
+          description: >
+            How many CVEs the finding carries. The producer writes ONE finding
+            per install with every match in its evidence, because the unit of
+            remediation is "upgrade this package". 0 in every state but
+            `vulnerable`.
+        worst_cvss:
+          type: [number, "null"]
+          description: >
+            The worst matching CVE's CVSS base score, 0–10. NULL — never 0.0 —
+            when the catalogue scored none of them: the producer states that
+            with `worst_cvss_scored: false`, and 0.0 reads as harmless for
+            something nobody has graded.
+        vulnerability_severity:
+          type: [string, "null"]
+          enum: [info, low, medium, high, critical, null]
+        vulnerability_finding_id:
+          type: [string, "null"]
+          format: uuid
+    SoftwareInstallListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /infrastructure-assets/{id}/software. An empty `software` array is a real answer.'
+      required: [software, total, limit, offset]
+      properties:
+        software:
+          type: [array, "null"]
+          items:
+            $ref: '#/components/schemas/SoftwareInstall'
+        total: { type: integer, description: Rows matching the filter, before paging. }
+        limit: { type: integer }
+        offset: { type: integer }
+    SoftwareProduct:
+      type: object
+      additionalProperties: false
+      description: One `software_products` row — a tenant catalogue entry — with how many assets carry it.
+      required: [product_id, name, source_kind, install_count, asset_count, eol_state, eol_install_count, vulnerability_state, vulnerable_install_count, vulnerability_count]
+      properties:
+        product_id: { type: string, format: uuid }
+        name: { type: string }
+        vendor: { type: [string, "null"] }
+        version: { type: [string, "null"] }
+        version_sort: { type: [string, "null"] }
+        purl: { type: [string, "null"] }
+        cpe: { type: [string, "null"] }
+        license_id: { type: [string, "null"] }
+        source_kind:
+          type: string
+          enum: [measured, declared, imported, inferred]
+        install_count:
+          type: integer
+          description: 'ACTIVE installs only. 0 with the product still listed means every install of it was marked removed — "we used to run this".'
+        asset_count: { type: integer, description: Distinct assets with an active install. }
+        eol_state:
+          type: string
+          enum: [end_of_life, supported, no_date, not_in_catalogue, not_assessed]
+          description: >
+            The product's lifecycle state, derived over its ACTIVE installs
+            worst-then-most-informative: an open end-of-life finding on any of
+            them, else any install the producer recorded as `supported`, else
+            `no_date`, else `not_in_catalogue`, else `not_assessed`. A catalogue
+            row is an identity — name, version, purl/cpe — so every install of
+            it resolves identically; `eol_install_count` is what makes the
+            end-of-life claim checkable rather than asserted, and a mixed set
+            only arises across pass boundaries.
+
+
+            `not_assessed` carries the same warning as on an install: it is not
+            "supported".
+        eol_install_count: { type: integer, description: Active installs of this product with an open end-of-life finding. }
+        eol_date: { type: [string, "null"], description: 'The catalogue''s end-of-life date (`YYYY-MM-DD`): from the findings when `eol_state` is `end_of_life`, the soonest recorded date across supported installs when it is `supported`. Absent otherwise.' }
+        eol_severity:
+          type: [string, "null"]
+          enum: [low, medium, high, null]
+        eol_assessed_at:
+          type: [string, "null"]
+          format: date-time
+          description: The most recent lifecycle record across the product's active installs. Absent when none has one.
+        vulnerability_state:
+          type: string
+          enum: [vulnerable, none_known, not_assessed]
+          description: >
+            The product's vulnerability state. `not_assessed` means the product
+            carries neither a PURL nor a CPE, so the producer had nothing to
+            match on and skipped every install of it — which is not the same
+            answer as `none_known`.
+        vulnerable_install_count: { type: integer, description: Active installs with an open vulnerability finding. }
+        vulnerability_count: { type: integer, description: 'CVEs on the worst such finding. 0 in every state but `vulnerable`.' }
+        worst_cvss: { type: [number, "null"], description: 'Worst matching CVE''s CVSS base score. NULL, never 0.0, when the catalogue scored none.' }
+        vulnerability_severity:
+          type: [string, "null"]
+          enum: [info, low, medium, high, critical, null]
+    SoftwareProductListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /software/products.'
+      required: [products, total, limit, offset]
+      properties:
+        products:
+          type: [array, "null"]
+          items:
+            $ref: '#/components/schemas/SoftwareProduct'
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+    SbomIngestResult:
+      type: object
+      additionalProperties: false
+      description: >
+        What one upload did, in numbers a person can reconcile with their own
+        document. Every count is reported separately rather than rolled into a
+        single "ingested N": "480 components, 412 products, 12 excluded, 3
+        dependency edges ignored" is a sentence a user can check, and "412
+        ingested" is not.
+      required:
+        - upload_id
+        - format
+        - spec_version
+        - asset_id
+        - asset_created
+        - asset_status
+        - component_count
+        - products_created
+        - products_matched
+        - installs_created
+        - installs_updated
+        - installs_removed
+        - components_excluded
+        - dependency_edges_ignored
+      properties:
+        upload_id:
+          type: string
+          format: uuid
+          description: 'This upload. Written to every `software_installs.source_ref` it touches, which is how the absent-install sweep knows which rows the document did not list.'
+        filename: { type: string }
+        format:
+          type: string
+          enum: [cyclonedx, spdx]
+          description: Detected from the document's own declaration, never from the filename or Content-Type.
+        spec_version: { type: string, description: 'The version the document declared, verbatim: "1.6", "SPDX-2.3".' }
+        document_serial:
+          type: string
+          description: >
+            CycloneDX `serialNumber` or SPDX `documentNamespace`. Reported so a
+            support question has an answer. NOT used for deduplication:
+            CycloneDX mints a fresh serialNumber on every export, so two builds
+            of one artefact carry two serials.
+        asset_id: { type: string, format: uuid }
+        asset_name: { type: string }
+        asset_created: { type: boolean, description: 'True when POST /sbom created the asset; false when it matched one that already existed.' }
+        asset_status:
+          type: string
+          description: 'An asset created from a document lands in `pending_approval`. Declared is not approved.'
+        component_count: { type: integer, description: Components the parser returned, nested ones included. }
+        products_created: { type: integer }
+        products_matched: { type: integer, description: Products that were already in the catalogue. }
+        installs_created: { type: integer }
+        installs_updated: { type: integer }
+        installs_removed:
+          type: integer
+          description: 'Installs this asset had that the new document does not list, marked `removed`. Not deleted.'
+        components_excluded:
+          type: integer
+          description: 'Components the document marked `scope: excluded`, which says they are NOT in the artefact. Ingesting one as an install would be a false positive.'
+        dependency_edges_ignored:
+          type: integer
+          description: >
+            `dependsOn` / `DEPENDS_ON` edges the document carried and this ingest
+            did not store. They are component-to-component edges and
+            `asset_relationships` is asset-to-asset; there is no home for them in
+            the data model today. Counted rather than silent, because a user who
+            exported a dependency graph deserves to be told it was not kept.
+        warnings:
+          type: [array, "null"]
+          items: { type: string }
+          description: >
+            Everything the parse skipped, dropped or assumed. A document that
+            parsed with warnings is a SUCCESSFUL parse; the warnings are what let
+            the page say "412 of your 480 components were ingested" instead of
+            saying nothing.
     AssetCryptoResponse:
       type: object
       additionalProperties: false
@@ -5540,14 +9494,28 @@ components:
     RiskSummary:
       type: object
       additionalProperties: false
-      description: Aggregate asset-risk counts (models.RiskSummary).
-      required: [total_assets, high_risk, medium_risk, low_risk, unknown_risk, total_crypto, critical_findings]
+      description: >
+        Aggregate asset-risk counts (models.RiskSummary), over `monitoring`
+        assets.
+
+
+        `informational` and `unknown_risk` are DIFFERENT answers and the bands
+        are mutually exclusive: informational is score 0 with a producer in
+        `risk_assessed_by` (somebody looked and found nothing), unknown_risk is
+        score 0 with none (NOBODY HAS LOOKED). They used to be one number, so a
+        tenant that had never been scanned read as clean.
+      required: [total_assets, high_risk, medium_risk, low_risk, informational, unknown_risk, total_crypto, critical_findings]
       properties:
         total_assets: { type: integer }
         high_risk: { type: integer }
         medium_risk: { type: integer }
         low_risk: { type: integer }
-        unknown_risk: { type: integer }
+        informational:
+          type: integer
+          description: Scored 0 by at least one producer — assessed, and clean.
+        unknown_risk:
+          type: integer
+          description: NOT ASSESSED — no producer has scored this asset at all.
         total_crypto: { type: integer }
         critical_findings: { type: integer }
     RiskSummaryResponse:
@@ -6153,24 +10121,11 @@ components:
           type: array
           items:
             type: string
-        device_id:
-          type: string
-          format: uuid
-        device_type:
-          type: string
-        device_vendor:
-          type: string
-        device_model:
-          type: string
-        device_hostname:
-          type: string
-        device_ip_address:
-          type: string
         asset_hostname:
           type: string
         asset_ip_address:
           type: string
-        asset_type:
+        asset_class_key:
           type: string
         asset_environment:
           type: string
@@ -6604,6 +10559,433 @@ components:
           type: boolean
         message:
           type: string
+    ConnectorCatalogueEntry:
+      type: object
+      additionalProperties: false
+      description: |
+        One connector from standards/connectors.yaml, annotated for the calling
+        tenant. `status` says whether anything DISPATCHES on the key;
+        `entitled` says whether this tenant may use it; `addable` is the
+        conjunction, computed server-side so a page cannot check one half and
+        forget the other.
+      required:
+      - key
+      - label
+      - kind
+      - direction
+      - status
+      - description
+      - edition
+      - entitled
+      - addable
+      properties:
+        key:
+          type: string
+        label:
+          type: string
+        kind:
+          type: string
+          enum: [cloud, cmdb, network_source_of_truth, itsm, siem, notification, edr_mdm, sbom_source, secrets_store]
+        direction:
+          type: string
+          enum: [pull, push, both]
+        status:
+          type: string
+          enum: [live, registered, planned]
+          description: |
+            live — an implementation dispatches on this key.
+            registered — the schema accepts the key but nothing implements it.
+            planned — declared in the registry only.
+        produces_classes:
+          type: array
+          items:
+            type: string
+        description:
+          type: string
+        feature:
+          type: string
+          description: Entitlement key gating this connector; absent for a Core connector.
+        edition:
+          type: string
+          enum: [core, enterprise, msp]
+          description: Minimum edition that may grant this connector.
+        entitled:
+          type: boolean
+        addable:
+          type: boolean
+        unavailable_reason:
+          type: string
+          enum: [upgrade, unavailable]
+          description: |
+            Why `addable` is false. `upgrade` — your plan or edition does not
+            include it. `unavailable` — nobody can use it yet; we have not
+            built it. Different sentences, and offering an upgrade for
+            something nobody can buy is the worse mistake.
+    ConnectorCatalogueGroup:
+      type: object
+      additionalProperties: false
+      required:
+      - kind
+      - connectors
+      properties:
+        kind:
+          type: string
+        connectors:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConnectorCatalogueEntry'
+    ConnectorCatalogueResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /connectors — the registry grouped by kind, in registry order.'
+      required:
+      - kinds
+      - groups
+      properties:
+        kinds:
+          type: array
+          items:
+            type: string
+        groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConnectorCatalogueGroup'
+    NetBoxConnectionOptions:
+      type: object
+      additionalProperties: false
+      description: Non-secret per-connection knobs.
+      properties:
+        default_environment:
+          type: string
+          description: |
+            Stamped on segments imported from prefixes that do not say which
+            environment they are. NetBox has no environment concept, so this is
+            the tenant DECLARING one rather than the platform inferring it; a
+            prefix tagged with an environment name overrides it.
+        role_class_overrides:
+          type: object
+          additionalProperties:
+            type: string
+          description: NetBox device-role slug to asset class key, extending the shipped mapping.
+    NetBoxConnection:
+      type: object
+      additionalProperties: false
+      description: |
+        A configured NetBox connection. The API token is NEVER returned —
+        `has_token` is what an edit form actually needs to know.
+      required:
+      - id
+      - tenant_id
+      - connector_key
+      - name
+      - base_url
+      - has_token
+      - options
+      - allow_private_endpoint
+      - is_enabled
+      - schedule
+      - created_at
+      - updated_at
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        connector_key:
+          type: string
+        name:
+          type: string
+        base_url:
+          type: string
+        has_token:
+          type: boolean
+        options:
+          $ref: '#/components/schemas/NetBoxConnectionOptions'
+        allow_private_endpoint:
+          type: boolean
+          description: |
+            Whether this connection may target an RFC1918/ULA address. Defaults
+            true for this connector kind because a network source of truth is
+            on-premises by construction; loopback, link-local and cloud
+            metadata stay refused whatever it says.
+        is_enabled:
+          type: boolean
+        schedule:
+          type: string
+          enum: [manual, hourly, daily, weekly]
+        last_run_at:
+          type: [string, 'null']
+          format: date-time
+        last_run_status:
+          type: string
+        last_error:
+          type: string
+        last_tested_at:
+          type: [string, 'null']
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    NetBoxConnectionInput:
+      type: object
+      additionalProperties: false
+      description: Body for POST/PUT /connectors/netbox/connections.
+      required:
+      - name
+      - base_url
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        base_url:
+          type: string
+          description: The NetBox root. HTTPS is required — the API token is a bearer credential.
+        api_token:
+          type: string
+          description: |
+            Write-only. Required on create. On update an empty value leaves the
+            stored token alone.
+        default_environment:
+          type: string
+        role_class_overrides:
+          type: object
+          additionalProperties:
+            type: string
+        allow_private_endpoint:
+          type: boolean
+        is_enabled:
+          type: boolean
+        schedule:
+          type: string
+          enum: [manual, hourly, daily, weekly]
+    NetBoxConnectionListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /connectors/netbox/connections — { "connections": [...] }. Always a non-null array.'
+      required:
+      - connections
+      properties:
+        connections:
+          type: array
+          items:
+            $ref: '#/components/schemas/NetBoxConnection'
+    ConnectorRunSummary:
+      type: object
+      additionalProperties: false
+      description: |
+        The counts one pull produced. Every field is present, zeros included:
+        "0 devices" is an answer, and omitting it makes a run that imported
+        nothing indistinguishable from one that was never asked to.
+      required:
+      - sites
+      - prefixes
+      - vlans
+      - device_types
+      - devices
+      - segments_created
+      - segments_matched
+      - assets_created
+      - assets_matched
+      - assets_proposed
+      - assets_skipped
+      - unmapped_roles
+      - vlans_without_prefix
+      - errors
+      properties:
+        sites:
+          type: integer
+        prefixes:
+          type: integer
+        vlans:
+          type: integer
+        device_types:
+          type: integer
+        devices:
+          type: integer
+        segments_created:
+          type: integer
+        segments_matched:
+          type: integer
+        assets_created:
+          type: integer
+        assets_matched:
+          type: integer
+        assets_proposed:
+          type: integer
+          description: Devices whose identifiers matched more than one existing asset; each left a merge proposal in Approvals.
+        assets_skipped:
+          type: integer
+          description: Devices carrying no identifier at all, which could never be recognised again.
+        unmapped_roles:
+          type: integer
+          description: Devices whose NetBox role mapped to no asset class; each became unknown_host rather than a guess.
+        vlans_without_prefix:
+          type: integer
+          description: VLANs carrying no prefix. They scope no address, so they create no segment.
+        errors:
+          type: integer
+    ConnectorRun:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - connection_id
+      - status
+      - trigger_type
+      - summary
+      - errors
+      properties:
+        id:
+          type: string
+        connection_id:
+          type: string
+        status:
+          type: string
+          enum: [in_progress, success, partial, failed]
+        trigger_type:
+          type: string
+          enum: [manual, scheduled, test]
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: [string, 'null']
+          format: date-time
+        summary:
+          $ref: '#/components/schemas/ConnectorRunSummary'
+        errors:
+          type: array
+          items:
+            type: string
+    ConnectorRunListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /connectors/netbox/connections/{id}/runs — { "runs": [...] }. Always a non-null array.'
+      required:
+      - runs
+      properties:
+        runs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConnectorRun'
+    ConnectorMessageResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - message
+      properties:
+        message:
+          type: string
+    ConnectorTestResult:
+      type: object
+      additionalProperties: false
+      description: 'Result of POST .../test. success:false is a 200 — the request worked, the thing it checked did not.'
+      required:
+      - success
+      - message
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+    NetBoxDriftDevice:
+      type: object
+      additionalProperties: false
+      description: A NetBox device the inventory has no asset for.
+      required:
+      - netbox_id
+      - name
+      - url
+      properties:
+        netbox_id:
+          type: integer
+        name:
+          type: string
+        serial:
+          type: string
+        ip_address:
+          type: string
+        role:
+          type: string
+        site:
+          type: string
+        status:
+          type: string
+        url:
+          type: string
+          description: Opens the record in the customer's own NetBox, because the action this view suggests is taken there.
+    NetBoxDriftAsset:
+      type: object
+      additionalProperties: false
+      description: An asset the platform holds that NetBox does not list.
+      required:
+      - asset_id
+      - class_key
+      - asset_status
+      properties:
+        asset_id:
+          type: string
+        display_name:
+          type: string
+        hostname:
+          type: string
+        ip_address:
+          type: string
+        serial:
+          type: string
+        class_key:
+          type: string
+        asset_status:
+          type: string
+        site:
+          type: string
+    NetBoxDriftReport:
+      type: object
+      additionalProperties: false
+      description: |
+        What NetBox and the inventory disagree about. Read-only: the platform
+        never writes to NetBox.
+      required:
+      - netbox_device_count
+      - inventory_asset_count
+      - missing_in_inventory
+      - missing_in_netbox
+      - missing_in_inventory_count
+      - missing_in_netbox_count
+      - truncated
+      - note
+      properties:
+        generated_at:
+          type: string
+        netbox_device_count:
+          type: integer
+        inventory_asset_count:
+          type: integer
+        missing_in_inventory:
+          type: array
+          items:
+            $ref: '#/components/schemas/NetBoxDriftDevice'
+        missing_in_netbox:
+          type: array
+          items:
+            $ref: '#/components/schemas/NetBoxDriftAsset'
+        missing_in_inventory_count:
+          type: integer
+        missing_in_netbox_count:
+          type: integer
+        truncated:
+          type: boolean
+          description: |
+            The lists are capped. `truncated` says so outright rather than
+            letting a capped list read as a complete one — an inventory that
+            silently under-reports is the failure this initiative is about.
+        note:
+          type: string
+          description: Shown verbatim in the UI. The read-only promise is part of the product surface, not only the docs.
     CreateDiscoveryJobRequest:
       type: object
       additionalProperties: false
@@ -6728,7 +11110,7 @@ components:
           type:
           - integer
           - 'null'
-        asset_type:
+        class_key:
           type: string
         protocol:
           type: string
@@ -6753,10 +11135,6 @@ components:
           - string
           - 'null'
         source_sensor_id:
-          type:
-          - string
-          - 'null'
-        device_id:
           type:
           - string
           - 'null'

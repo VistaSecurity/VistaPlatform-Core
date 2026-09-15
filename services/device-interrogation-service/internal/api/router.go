@@ -124,6 +124,16 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 	agentOutbound := deviceInterrogationGroup.Group("/agents")
 	agentOutbound.Use(middleware.AgentAuth(db, bypassDB, cfg.AgentMTLSRequired))
 	{
+		// Local host-inventory intake (asset-inventory workstream 2.11a). No
+		// `:id` segment because a local collection is not about a job or a
+		// device — AgentAuth reads the identity from X-Agent-ID instead, and
+		// under agent mTLS it must still equal the certificate CN.
+		//
+		// Registered on the SAME group as the rest of the outbound surface, so
+		// it cannot be added ungated by mistake, and BEFORE the `/:id/...`
+		// routes so the static segment is matched as a static segment.
+		agentOutbound.POST("/host-inventory", handlers.NewHostInventoryHandler(db, bypassDB).Submit)
+
 		agentOutbound.GET("/:id/jobs", getAgentJobsHandler(db, bypassDB, redis))
 		agentOutbound.POST("/:id/results", submitAgentResultsHandler(db, bypassDB, redis))
 		agentOutbound.POST("/:id/heartbeat", agentHeartbeatHandler(db, bypassDB, redis))
@@ -710,14 +720,18 @@ func discoverCloudResourcesHandler(db, bypassDB *sql.DB, discoveryIntegrationSer
 				cloudProvider = detectedProvider
 			}
 
+			// One entry point for a cloud JOB: the crypto/at-rest collectors the
+			// request asked for, plus compute/network enumeration when the
+			// integration has it on (BUILD_PLAN 2.4).
 			var devices []models.Device
+			var discovery *services.CloudDiscoveryResult
 			switch cloudProvider {
-			case "aws":
-				devices, err = cloudService.DiscoverAWSResources(ctx, tenantID, req.IntegrationID, req.ResourceTypes, req.Regions)
-			case "azure":
-				devices, err = cloudService.DiscoverAzureResources(ctx, tenantID, req.IntegrationID, req.ResourceTypes, req.ResourceGroups)
-			case "gcp":
-				devices, err = cloudService.DiscoverGCPResources(ctx, tenantID, req.IntegrationID, req.ResourceTypes)
+			case "aws", "azure", "gcp":
+				discovery, err = cloudService.DiscoverResources(ctx, tenantID, req.IntegrationID,
+					cloudProvider, req.ResourceTypes, req.Regions, req.ResourceGroups)
+				if discovery != nil {
+					devices = discovery.Devices
+				}
 			default:
 				errMsg := fmt.Sprintf("Unknown cloud provider: %s", cloudProvider)
 				if updateErr := discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", stringPtr(errMsg)); updateErr != nil {
@@ -821,6 +835,13 @@ func discoverCloudResourcesHandler(db, bypassDB *sql.DB, discoveryIntegrationSer
 					// discovery-counts derive from), so a resource discovered with no
 					// crypto config still counts as "found" instead of reading as 0.
 					assetsCount := inserted
+					// Enumerated resources write NO sensor_discoveries — they
+					// are inventory, not crypto findings — so `inserted` does
+					// not see them. Without this an account whose run found 200
+					// instances and no TLS listener would report "0 found".
+					if discovery != nil {
+						assetsCount += discovery.Enumeration.Total()
+					}
 					if assetsCount == 0 {
 						// Fall back to the crypto-config-derived count on the (unexpected)
 						// chance more configs were extracted than sensor_discoveries rows
@@ -833,14 +854,26 @@ func discoverCloudResourcesHandler(db, bypassDB *sql.DB, discoveryIntegrationSer
 							}
 						}
 					}
+					metadata := map[string]interface{}{
+						"devices_count": len(devices),
+						"assets_count":  assetsCount,
+					}
+					if discovery != nil {
+						// Only when enumeration actually ran: four zeros on a
+						// run that was switched off would read as "found
+						// nothing", which is a different statement.
+						if !discovery.Enumeration.Empty() {
+							metadata["enumeration"] = discovery.Enumeration
+						}
+						if discovery.EnumerationSkipped != "" {
+							metadata["enumeration_skipped"] = discovery.EnumerationSkipped
+						}
+					}
 					result := &models.JobResult{
 						JobID:       deviceJob.ID,
 						Success:     true,
 						CompletedAt: time.Now(),
-						Metadata: map[string]interface{}{
-							"devices_count": len(devices),
-							"assets_count":  assetsCount,
-						},
+						Metadata:    metadata,
 					}
 					// Store result so UI can show "X asset(s) discovered"
 					if updateErr := jobQueue.UpdateJobStatus(ctx, deviceJob.ID, models.JobStatusCompleted, result, nil); updateErr != nil {

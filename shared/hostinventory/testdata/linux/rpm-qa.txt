@@ -1,0 +1,7 @@
+basesystem	11-13.el9	noarch	Red Hat, Inc.
+openssl	3.0.7-27.el9	x86_64	Red Hat, Inc.
+openssl-libs	3.0.7-27.el9	x86_64	Red Hat, Inc.
+openssh-server	8.7p1-38.el9	x86_64	Red Hat, Inc.
+ca-certificates	2023.2.60_v7.0.306-90.1.el9	noarch	Red Hat, Inc.
+kernel	5.14.0-427.13.1.el9_4	x86_64	Red Hat, Inc.
+local-tooling	1.4.0-1	x86_64	(none)

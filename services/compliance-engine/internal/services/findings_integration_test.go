@@ -35,15 +35,17 @@ func newFindingsServiceIT(t *testing.T) (*FindingsService, *sqlx.DB, uuid.UUID) 
 	return &FindingsService{db: db}, db, tenant // metricsService nil is a safe no-op
 }
 
-// activeViolation builds a representative ACTIVE finding for (control, asset).
-func activeViolation(control, asset uuid.UUID) *models.ComplianceFinding {
+// activeViolation builds a representative ACTIVE finding for (control, subject).
+func activeViolation(control, subject uuid.UUID) *models.ComplianceFinding {
 	return &models.ComplianceFinding{
-		ID:        uuid.New(),
-		ControlID: control,
-		AssetID:   asset,
-		AssetType: "certificate",
-		Severity:  "High",
-		Summary:   "quantum-vulnerable",
+		ID:          uuid.New(),
+		Producer:    "compliance",
+		Kind:        "control_noncompliant",
+		ControlID:   control,
+		SubjectID:   subject,
+		SubjectType: "certificate",
+		Severity:    "high",
+		Summary:     "quantum-vulnerable",
 	}
 }
 
@@ -82,7 +84,7 @@ func TestIntegration_FindingFlip_WritesOneHistoryRowPerTransition(t *testing.T) 
 	var state, wf string
 	var occ int
 	if err := db.QueryRow(
-		`SELECT detection_state, workflow_status, occurrence_count FROM compliance_findings WHERE id = $1`, f.ID,
+		`SELECT detection_state, workflow_status, occurrence_count FROM findings WHERE id = $1`, f.ID,
 	).Scan(&state, &wf, &occ); err != nil {
 		t.Fatalf("load finding: %v", err)
 	}
@@ -96,7 +98,7 @@ func TestIntegration_FindingFlip_WritesOneHistoryRowPerTransition(t *testing.T) 
 	// pass -> INACTIVE (exactly one more history row, recording ACTIVE->INACTIVE)
 	mustInactivate(t, svc, tenant, control, asset)
 
-	if err := db.QueryRow(`SELECT detection_state FROM compliance_findings WHERE id = $1`, f.ID).Scan(&state); err != nil {
+	if err := db.QueryRow(`SELECT detection_state FROM findings WHERE id = $1`, f.ID).Scan(&state); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
 	if state != "INACTIVE" {
@@ -129,7 +131,7 @@ func TestIntegration_Resurface_PreservesWorkflowState(t *testing.T) {
 	cS, aS := uuid.New(), uuid.New()
 	fS := activeViolation(cS, aS)
 	mustUpsert(t, svc, tenant, cS, aS, fS, "ACTIVE")
-	if _, err := db.Exec(`UPDATE compliance_findings SET workflow_status = 'SUPPRESSED' WHERE id = $1`, fS.ID); err != nil {
+	if _, err := db.Exec(`UPDATE findings SET workflow_status = 'SUPPRESSED' WHERE id = $1`, fS.ID); err != nil {
 		t.Fatalf("suppress: %v", err)
 	}
 	mustInactivate(t, svc, tenant, cS, aS)
@@ -139,7 +141,7 @@ func TestIntegration_Resurface_PreservesWorkflowState(t *testing.T) {
 	var resurfaced *time.Time
 	var occ int
 	if err := db.QueryRow(
-		`SELECT workflow_status, detection_state, resurfaced_at, occurrence_count FROM compliance_findings WHERE id = $1`, fS.ID,
+		`SELECT workflow_status, detection_state, resurfaced_at, occurrence_count FROM findings WHERE id = $1`, fS.ID,
 	).Scan(&wf, &state, &resurfaced, &occ); err != nil {
 		t.Fatalf("load suppressed: %v", err)
 	}
@@ -154,13 +156,13 @@ func TestIntegration_Resurface_PreservesWorkflowState(t *testing.T) {
 	cN, aN := uuid.New(), uuid.New()
 	fN := activeViolation(cN, aN)
 	mustUpsert(t, svc, tenant, cN, aN, fN, "ACTIVE")
-	if _, err := db.Exec(`UPDATE compliance_findings SET workflow_status = 'RESOLVED' WHERE id = $1`, fN.ID); err != nil {
+	if _, err := db.Exec(`UPDATE findings SET workflow_status = 'RESOLVED' WHERE id = $1`, fN.ID); err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 	mustInactivate(t, svc, tenant, cN, aN)
 	mustUpsert(t, svc, tenant, cN, aN, fN, "ACTIVE") // resurface
 
-	if err := db.QueryRow(`SELECT workflow_status FROM compliance_findings WHERE id = $1`, fN.ID).Scan(&wf); err != nil {
+	if err := db.QueryRow(`SELECT workflow_status FROM findings WHERE id = $1`, fN.ID).Scan(&wf); err != nil {
 		t.Fatalf("load non-suppressed: %v", err)
 	}
 	if wf != "NEW" {
@@ -180,7 +182,7 @@ func TestIntegration_RepeatedReconcile_ConvergesNoDuplicates(t *testing.T) {
 	mustUpsert(t, svc, tenant, control, asset, f, "ACTIVE")
 
 	var firstUpdatedAt time.Time
-	if err := db.QueryRow(`SELECT updated_at FROM compliance_findings WHERE id = $1`, f.ID).Scan(&firstUpdatedAt); err != nil {
+	if err := db.QueryRow(`SELECT updated_at FROM findings WHERE id = $1`, f.ID).Scan(&firstUpdatedAt); err != nil {
 		t.Fatalf("load updated_at: %v", err)
 	}
 
@@ -190,7 +192,7 @@ func TestIntegration_RepeatedReconcile_ConvergesNoDuplicates(t *testing.T) {
 
 	var n int
 	if err := db.Get(&n,
-		`SELECT count(*) FROM compliance_findings WHERE tenant_id = $1 AND control_id = $2 AND asset_id = $3`,
+		`SELECT count(*) FROM findings WHERE tenant_id = $1 AND control_id = $2 AND subject_id = $3`,
 		tenant, control, asset); err != nil {
 		t.Fatalf("count findings: %v", err)
 	}
@@ -201,7 +203,7 @@ func TestIntegration_RepeatedReconcile_ConvergesNoDuplicates(t *testing.T) {
 	var state string
 	var occ int
 	var updatedAt time.Time
-	if err := db.QueryRow(`SELECT detection_state, occurrence_count, updated_at FROM compliance_findings WHERE id = $1`, f.ID).
+	if err := db.QueryRow(`SELECT detection_state, occurrence_count, updated_at FROM findings WHERE id = $1`, f.ID).
 		Scan(&state, &occ, &updatedAt); err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -232,7 +234,7 @@ func TestIntegration_UpsertFinding_SkipsNoOpsButWritesRealChanges(t *testing.T) 
 	reload := func(id uuid.UUID) (severity, summary string, occ int, evidence string) {
 		t.Helper()
 		if err := db.QueryRow(
-			`SELECT severity, summary, occurrence_count, evidence::text FROM compliance_findings WHERE id = $1`, id,
+			`SELECT severity, summary, occurrence_count, evidence::text FROM findings WHERE id = $1`, id,
 		).Scan(&severity, &summary, &occ, &evidence); err != nil {
 			t.Fatalf("reload: %v", err)
 		}
@@ -245,10 +247,14 @@ func TestIntegration_UpsertFinding_SkipsNoOpsButWritesRealChanges(t *testing.T) 
 	mustUpsert(t, svc, tenant, c, a, f, "ACTIVE")
 
 	raised := *f
+	// Authored in the control vocabulary; stored on the registry ladder. Both
+	// halves matter: the write must happen (it is a material change) AND the
+	// value must land normalized, or a reader filtering on `critical` would
+	// silently miss it.
 	raised.Severity = "Critical"
 	mustUpsert(t, svc, tenant, c, a, &raised, "ACTIVE")
-	if sev, _, occ, _ := reload(f.ID); sev != "Critical" || occ != 2 {
-		t.Fatalf("severity change: severity=%s occ=%d, want Critical/2 (a material change must write)", sev, occ)
+	if sev, _, occ, _ := reload(f.ID); sev != "critical" || occ != 2 {
+		t.Fatalf("severity change: severity=%s occ=%d, want critical/2 (a material change must write)", sev, occ)
 	}
 
 	// (b) summary change is material → written.
@@ -283,7 +289,7 @@ func TestIntegration_UpsertFinding_SkipsNoOpsButWritesRealChanges(t *testing.T) 
 	// (d) last_seen aged past the refresh interval → refreshed even with nothing else
 	// changed, so the freshness indicator stays coarse-but-honest.
 	if _, err := db.Exec(
-		`UPDATE compliance_findings SET last_seen = now() - interval '2 hours', updated_at = now() - interval '2 hours' WHERE id = $1`,
+		`UPDATE findings SET last_seen = now() - interval '2 hours', updated_at = now() - interval '2 hours' WHERE id = $1`,
 		f.ID); err != nil {
 		t.Fatalf("age last_seen: %v", err)
 	}
@@ -311,7 +317,7 @@ func TestIntegration_UpsertFindings_BatchWritesAndCounts(t *testing.T) {
 		c, a := uuid.New(), uuid.New()
 		items = append(items, findingUpsert{
 			ControlID:      c,
-			AssetID:        a,
+			SubjectID:      a,
 			Finding:        activeViolation(c, a),
 			DetectionState: "ACTIVE",
 		})
@@ -331,7 +337,7 @@ func TestIntegration_UpsertFindings_BatchWritesAndCounts(t *testing.T) {
 	}
 
 	var rows int
-	if err := db.Get(&rows, `SELECT count(*) FROM compliance_findings WHERE tenant_id = $1`, tenant); err != nil {
+	if err := db.Get(&rows, `SELECT count(*) FROM findings WHERE tenant_id = $1`, tenant); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if rows != n {
@@ -339,7 +345,7 @@ func TestIntegration_UpsertFindings_BatchWritesAndCounts(t *testing.T) {
 	}
 
 	// A pair that genuinely flips is written even in a batch that is otherwise a no-op.
-	items[0].Finding.Severity = "Critical"
+	items[0].Finding.Severity = "critical"
 	third := svc.upsertFindings(context.Background(), tenant, items)
 	if third.Updated != 1 || third.Skipped != n-1 {
 		t.Fatalf("mixed pass = %+v, want 1 updated / %d skipped", third, n-1)
@@ -347,10 +353,16 @@ func TestIntegration_UpsertFindings_BatchWritesAndCounts(t *testing.T) {
 }
 
 //  6. (W2-13) upsertFinding's ON CONFLICT arbiter must actually infer the partial unique
-//     index idx_findings_identity — the batch path depends on a duplicate raising no
+//     index findings_open_subject_uniq — the batch path depends on a duplicate raising no
 //     error (a unique violation would abort the whole chunk's transaction, not just the
 //     one pair). Insert the identity twice with DIFFERENT finding ids: the second must
 //     converge onto the first row rather than erroring or duplicating.
+//
+//     The arbiter names six columns now (tenant, producer, kind, subject_type,
+//     subject_id, control_id) with NULLS NOT DISTINCT, so this is also the test
+//     that fails if the index and the INSERT's conflict target drift apart —
+//     Postgres refuses to infer an index it cannot match and the error surfaces
+//     here rather than at a customer's first reconcile.
 func TestIntegration_UpsertFinding_DuplicateIdentityConvergesViaOnConflict(t *testing.T) {
 	svc, db, tenant := newFindingsServiceIT(t)
 	c, a := uuid.New(), uuid.New()
@@ -361,16 +373,16 @@ func TestIntegration_UpsertFinding_DuplicateIdentityConvergesViaOnConflict(t *te
 	// A second writer that never saw the first row (distinct id) — the race the partial
 	// unique index backstops.
 	racer := activeViolation(c, a)
-	racer.Severity = "Critical"
+	racer.Severity = "critical"
 	if err := svc.upsertFindingChunk(context.Background(), tenant, []findingUpsert{{
-		ControlID: c, AssetID: a, Finding: racer, DetectionState: "ACTIVE",
+		ControlID: c, SubjectID: a, Finding: racer, DetectionState: "ACTIVE",
 	}}); err != nil {
 		t.Fatalf("duplicate-identity upsert must not error (ON CONFLICT should absorb it): %v", err)
 	}
 
 	var rows int
 	if err := db.Get(&rows,
-		`SELECT count(*) FROM compliance_findings WHERE tenant_id = $1 AND control_id = $2 AND asset_id = $3`,
+		`SELECT count(*) FROM findings WHERE tenant_id = $1 AND control_id = $2 AND subject_id = $3`,
 		tenant, c, a); err != nil {
 		t.Fatalf("count: %v", err)
 	}
@@ -378,11 +390,11 @@ func TestIntegration_UpsertFinding_DuplicateIdentityConvergesViaOnConflict(t *te
 		t.Fatalf("duplicate identity produced %d rows, want 1", rows)
 	}
 	var sev string
-	if err := db.QueryRow(`SELECT severity FROM compliance_findings WHERE id = $1`, first.ID).Scan(&sev); err != nil {
+	if err := db.QueryRow(`SELECT severity FROM findings WHERE id = $1`, first.ID).Scan(&sev); err != nil {
 		t.Fatalf("reload original row: %v", err)
 	}
-	if sev != "Critical" {
-		t.Fatalf("conflicting write did not converge onto the existing row: severity=%s, want Critical", sev)
+	if sev != "critical" {
+		t.Fatalf("conflicting write did not converge onto the existing row: severity=%s, want critical", sev)
 	}
 }
 
@@ -461,7 +473,7 @@ func TestIntegration_AssetsForCertificate_ResolvesBothLinkPaths(t *testing.T) {
 }
 
 // GetFindingStatistics.SeverityCounts must tally ACTIVE findings by severity,
-// tenant-wide, off the same compliance_findings table the Findings page reads —
+// tenant-wide, off the same findings the Findings page reads —
 // this is the H-2 fix: the dashboard's "critical findings" number used to come
 // from an unrelated inventory-service crypto-implementation-risk-score count
 // and could disagree with what the Findings page showed for the same tenant.
@@ -481,6 +493,9 @@ func TestIntegration_GetFindingStatistics_SeverityCounts(t *testing.T) {
 		mustUpsert(t, svc, tenant, c, a, f, "ACTIVE")
 		return f
 	}
+	// The spellings a control author uses ("Critical", "Med") are normalized
+	// onto the registry ladder by the writer, which is what the counters below
+	// read back — one vocabulary in the database, whatever the author typed.
 	withSeverity("Critical")
 	withSeverity("Critical")
 	withSeverity("High")
@@ -505,8 +520,9 @@ func TestIntegration_GetFindingStatistics_SeverityCounts(t *testing.T) {
 	if stats.SeverityCounts.High != 1 {
 		t.Fatalf("High = %d, want 1", stats.SeverityCounts.High)
 	}
-	if stats.SeverityCounts.Med != 1 {
-		t.Fatalf("Med = %d, want 1", stats.SeverityCounts.Med)
+	if stats.SeverityCounts.Medium != 1 {
+		t.Fatalf("Medium = %d, want 1 — the control author's \"Med\" is stored as `medium`",
+			stats.SeverityCounts.Medium)
 	}
 	if stats.SeverityCounts.Low != 1 {
 		t.Fatalf("Low = %d, want 1", stats.SeverityCounts.Low)

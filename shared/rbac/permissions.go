@@ -24,6 +24,14 @@ const (
 	// crypto-assessment source of truth) — create, edit, and deprecate
 	// algorithm definitions. Granted to super_admin (auto) + platform_admin.
 	PermissionAlgorithmsManage = "algorithms.manage"
+
+	// PermissionCatalogsManage gates the non-crypto platform catalogues —
+	// eol_catalogue and vulnerability_catalogue — plus their mirror-feed
+	// controls (status, manual sync, offline bundle import). Granted to
+	// super_admin (auto) + platform_admin, same as algorithms.manage; kept
+	// separate because curating crypto ratings and re-pointing the platform at
+	// a vulnerability source are different trust decisions.
+	PermissionCatalogsManage = "catalogs.manage"
 )
 
 // Tenant-level permission constants primarily enforced by admin-service RBAC middleware.

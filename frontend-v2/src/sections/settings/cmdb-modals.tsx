@@ -92,7 +92,7 @@ export function CmdbProfileModal({ profile, open, onClose }: { profile: CMDBProf
   const [sync, setSync] = useState<SyncForm>({
     schedule: str(sync0.schedule) || 'manual',
     conflict_resolution: str(sync0.conflict_resolution) || 'source_wins',
-    batch_size: typeof sync0.batch_size === 'number' ? (sync0.batch_size as number) : 100,
+    batch_size: typeof sync0.batch_size === 'number' ? sync0.batch_size : 100,
     include_crypto_summary: Boolean(sync0.include_crypto_summary),
   });
 
@@ -125,12 +125,12 @@ export function CmdbProfileModal({ profile, open, onClose }: { profile: CMDBProf
         sync_config: { schedule: sync.schedule, conflict_resolution: sync.conflict_resolution, batch_size: Number(sync.batch_size) || 100, include_crypto_summary: sync.include_crypto_summary },
       };
       const res = isEdit
-        ? await clients.inventory.PUT('/cmdb/profiles/{id}', { params: { path: { id: profile!.id } }, body })
+        ? await clients.inventory.PUT('/cmdb/profiles/{id}', { params: { path: { id: profile.id } }, body })
         : await clients.inventory.POST('/cmdb/profiles', { body });
       if (res.error || !res.response.ok) throw new Error('Failed to save the CMDB profile');
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['settings', 'cmdb-profiles'] });
+      void qc.invalidateQueries({ queryKey: ['settings', 'cmdb-profiles'] });
       toast.success(isEdit ? 'CMDB profile updated' : 'CMDB profile created');
       onClose();
     },
@@ -146,11 +146,11 @@ export function CmdbProfileModal({ profile, open, onClose }: { profile: CMDBProf
       tone="accent"
       icon="plug"
       eyebrow="Settings · Integrations · CMDB"
-      title={isEdit ? `Edit ${profile!.name}` : 'New CMDB sync'}
+      title={isEdit ? `Edit ${profile.name}` : 'New CMDB sync'}
       description="Connect a CMDB/ITSM platform. After saving, use Test to verify the connection and Sync to push your inventory."
       primary={<button className="ui-btn accent" disabled={!valid || save.isPending} onClick={() => save.mutate()}>{save.isPending ? 'Saving…' : isEdit ? 'Save changes' : 'Create'}</button>}
       secondary={<button className="ui-btn" onClick={onClose} disabled={save.isPending}>Cancel</button>}
-      footerNote={save.isError ? <span style={{ color: 'var(--danger-text)' }}>{(save.error as Error).message}</span> : (isEdit ? <span style={{ color: 'var(--app-t3)' }}>Re-enter credentials if you change auth — they overwrite the stored config.</span> : undefined)}
+      footerNote={save.isError ? <span style={{ color: 'var(--danger-text)' }}>{save.error.message}</span> : (isEdit ? <span style={{ color: 'var(--app-t3)' }}>Re-enter credentials if you change auth — they overwrite the stored config.</span> : undefined)}
     >
       <ModalField label="Name">
         <ModalInput data-autofocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Production ServiceNow" />
@@ -226,7 +226,7 @@ export function CmdbDeleteModal({ profile, open, onClose }: { profile: CMDBProfi
       if (error || !response.ok) throw new Error('Failed to delete the profile');
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['settings', 'cmdb-profiles'] });
+      void qc.invalidateQueries({ queryKey: ['settings', 'cmdb-profiles'] });
       toast.success('CMDB profile deleted');
       onClose();
     },

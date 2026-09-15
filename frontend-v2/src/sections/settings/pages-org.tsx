@@ -218,7 +218,7 @@ export function OrgBrandingPage({ meta }: { meta: SettingsNavItem }) {
     onSuccess: () => {
       setName(null);
       setColors({});
-      queryClient.invalidateQueries({ queryKey: ['settings', 'branding'] });
+      void queryClient.invalidateQueries({ queryKey: ['settings', 'branding'] });
     },
   });
 

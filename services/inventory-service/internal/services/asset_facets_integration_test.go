@@ -4,9 +4,14 @@ package services
 // over MAX(ci.risk_score) computed across the WHOLE facet bucket, because the
 // query grouped straight by the facet key. One asset scoring 75 therefore
 // reported every asset in its business unit as matching risk_level=high, and
-// buckets vanished entirely for `unknown`. The asset list next to it does the
-// right thing (buildAssetListWhereAndHaving returns the same predicate as
-// havingConditions over a GROUP BY a.id).
+// buckets vanished entirely for `unknown`.
+//
+// The aggregate is gone entirely now: the facet reads the PERSISTED per-asset
+// rollup (`assets.risk_score`) that recomputeAssetRisk writes, which is the
+// same number the badge and the risk summary read — so the class of bug B-44b
+// belongs to is not "fixed in the facet query", it is unrepresentable. The
+// assertions below still hold, and the fixture now seeds the rollup because
+// that is what the read consults.
 //
 // The same query also lacked the asset_status='monitoring' default the asset
 // list applies, so facet counts described a different population than the list
@@ -34,14 +39,24 @@ func TestIntegration_AssetFacets_RiskLevelIsPerAsset(t *testing.T) {
 	svc := &AssetService{db: db}
 
 	// riskScore < 0 means "no crypto configuration at all".
+	//
+	// The asset's rollup is seeded alongside the implementation, which is what
+	// recomputeAssetRisk does on ingest: the facet reads `assets.risk_score`,
+	// not a live MAX over the configurations.
 	newAsset := func(hostname, bu, status string, riskScore int) uuid.UUID {
 		t.Helper()
 		id := uuid.New()
+		rollup := riskScore
+		if rollup < 0 {
+			rollup = 0
+		}
 		if _, err := db.Exec(`
-			INSERT INTO network_assets (id, tenant_id, hostname, business_unit, asset_type, asset_status,
-			                            last_seen_at, first_discovered_at, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,'server',$5,NOW(),NOW(),NOW(),NOW())`,
-			id, tenant, hostname, bu, status); err != nil {
+			INSERT INTO assets (id, tenant_id, hostname, business_unit, class_key, class_path, asset_status,
+			                    risk_score, risk_assessed_by,
+			                    last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 'server', 'hardware.computer.server', $5,
+			        $6, ARRAY['crypto']::text[], NOW(), NOW(), NOW(), NOW())`,
+			id, tenant, hostname, bu, status, rollup); err != nil {
 			t.Fatalf("insert asset %s: %v", hostname, err)
 		}
 		if riskScore >= 0 {
@@ -116,9 +131,8 @@ func TestIntegration_AssetFacets_DefaultsToMonitoringScope(t *testing.T) {
 		{"waiting.example.test", "pending_approval"},
 	} {
 		if _, err := db.Exec(`
-			INSERT INTO network_assets (id, tenant_id, hostname, business_unit, asset_type, asset_status,
-			                            last_seen_at, first_discovered_at, created_at, updated_at)
-			VALUES ($1,$2,$3,'ops','server',$4,NOW(),NOW(),NOW(),NOW())`,
+			INSERT INTO assets (id, tenant_id, hostname, business_unit, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, 'ops', 'server', 'hardware.computer.server', $4, NOW(), NOW(), NOW(), NOW())`,
 			uuid.New(), tenant, spec.hostname, spec.status); err != nil {
 			t.Fatalf("insert %s: %v", spec.hostname, err)
 		}

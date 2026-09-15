@@ -16,7 +16,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
@@ -70,7 +72,7 @@ func TestIntegration_DemoCorpSeed_ShowcasesEveryFeature(t *testing.T) {
 		min  int
 	}
 	checks := []check{
-		{"assets", count(`SELECT count(*) FROM network_assets WHERE tenant_id=$1 AND deleted_at IS NULL`, tenant), 100},
+		{"assets", count(`SELECT count(*) FROM assets WHERE tenant_id=$1 AND deleted_at IS NULL`, tenant), 100},
 		{"crypto configurations", count(`SELECT count(*) FROM crypto_implementations WHERE tenant_id=$1 AND deleted_at IS NULL`, tenant), 100},
 		{"certificates", count(`SELECT count(*) FROM certificates WHERE tenant_id=$1`, tenant), 50},
 		{"cryptographic keys (Keys lens)", count(`SELECT count(*) FROM keys WHERE tenant_id=$1`, tenant), 20},
@@ -111,7 +113,7 @@ func TestIntegration_DemoCorpSeed_ShowcasesEveryFeature(t *testing.T) {
 	rows, err := db.Query(`
 		SELECT `+models.RiskLevelCaseSQL("s")+` AS lvl, count(*)
 		FROM (SELECT COALESCE(MAX(ci.risk_score),0) s
-		      FROM network_assets a
+		      FROM assets a
 		      LEFT JOIN crypto_implementations ci ON ci.asset_id=a.id AND ci.deleted_at IS NULL
 		      WHERE a.tenant_id=$1 AND a.deleted_at IS NULL GROUP BY a.id) t
 		GROUP BY lvl`, tenant)
@@ -150,5 +152,76 @@ func TestIntegration_DemoCorpSeed_ShowcasesEveryFeature(t *testing.T) {
 	}
 	if c.ReadyPercent() > 100 {
 		t.Errorf("PQC readiness %.1f%% exceeds 100", c.ReadyPercent())
+	}
+
+	assertExpiryRunway(t, db, tenant)
+}
+
+// expiryWindowDays is the "expiring soon" window the dataset must always have a
+// certificate inside — the same 60 days the checks table above counts.
+const expiryWindowDays = 60
+
+// minExpiryRunwayDays is how much warning we insist on. The dataset is a
+// SNAPSHOT of real X.509 certificates, so its dates cannot be shifted at load
+// time and it necessarily decays; the only question is whether we hear about it
+// before or after it stops demonstrating the feature.
+//
+// We heard after, for three weeks: the committed findings stopped having any
+// certificate inside the 60-day window on, and the first signal was
+// this test going red in the nightly with nothing to say about how to fix it.
+const minExpiryRunwayDays = 30
+
+// assertExpiryRunway fails while there is still time to act, rather than on the
+// day the dataset stops showing expiring certificates.
+//
+// Runway is how long the "at least one certificate expires within 60 days"
+// property will keep holding as the clock advances: walk the future expiries in
+// order, and the property survives exactly as far as the rungs stay within 60
+// days of each other. See the certDays ladder in democorp-seed/generator/main.go
+// — this is the assertion that ladder exists to satisfy.
+func assertExpiryRunway(t *testing.T, db *database.DB, tenant uuid.UUID) {
+	t.Helper()
+	rows, err := db.Query(`
+		SELECT not_after FROM certificates
+		WHERE tenant_id = $1 AND not_after >= NOW() ORDER BY not_after`, tenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var future []time.Time
+	for rows.Next() {
+		var ts time.Time
+		if err := rows.Scan(&ts); err != nil {
+			t.Fatal(err)
+		}
+		future = append(future, ts)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	window := time.Duration(expiryWindowDays) * 24 * time.Hour
+	now := time.Now()
+	reach := now // the property holds for every instant up to `reach`
+	for _, e := range future {
+		if e.Sub(reach) > window {
+			break // gap wider than the window: the story lapses before this rung
+		}
+		if e.After(reach) {
+			reach = e
+		}
+	}
+	runway := reach.Sub(now)
+
+	t.Logf("%-38s = %d days (%d future certificates)",
+		"expiring-soon runway", int(runway.Hours()/24), len(future))
+
+	if runway < time.Duration(minExpiryRunwayDays)*24*time.Hour {
+		t.Errorf("the dataset stops showing certificates expiring within %dd in %d days "+
+			"(want at least %d days of runway) — regenerate it:\n"+
+			"    cd democorp-seed/generator && go run . -out ../data/findings\n"+
+			"If regenerating does not restore the runway, the certDays ladder in that "+
+			"file has developed a gap wider than %dd; see the comment above `profiles`.",
+			expiryWindowDays, int(runway.Hours()/24), minExpiryRunwayDays, expiryWindowDays)
 	}
 }

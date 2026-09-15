@@ -7,8 +7,9 @@ import { useNavigate } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { useFeature } from '@vistasecurity/primitives/features';
 import { Icon } from '../../components/ui';
-import { fmtBytes, fmtDateTime, hashVerdict, relTime, Pill } from './kit';
-import { artifactName, downloadArtifact, useArtifact, useDeleteArtifact, useVerify, type CBOMArtifact, type Layer, type VerifyResponse } from './queries';
+import { fmtBytes, fmtDateTime, hashVerdict, kindMeta, relTime, Pill } from './kit';
+import { DownloadControl } from './download-control';
+import { artifactName, useArtifact, useDeleteArtifact, useVerify, type CBOMArtifact, type Layer, type VerifyResponse } from './queries';
 
 function Row({ label, children, mono }: { label: string; children: React.ReactNode; mono?: boolean }) {
   return (
@@ -74,7 +75,6 @@ export function ArtifactDrawer({ seed, onClose, onDeleted }: {
   const del = useDeleteArtifact();
   const [verifyRes, setVerifyRes] = useState<VerifyResponse | null>(null);
   const [confirmDel, setConfirmDel] = useState(false);
-  const [downloadErr, setDownloadErr] = useState<string | null>(null);
   // Comparison is Enterprise-only (cbom-service/ee/diff). Download and verify
   // are Core; verify simply reports "signature not asserted" on an unsigned
   // (Core-generated) artifact, which is accurate, not a failure.
@@ -83,11 +83,6 @@ export function ArtifactDrawer({ seed, onClose, onDeleted }: {
   const a = detailQ.data ?? seed;
   const layers = a.layers ?? [];
   const signed = !!a.signature_hmac;
-
-  const onDownload = async () => {
-    setDownloadErr(null);
-    try { await downloadArtifact(a); } catch (e) { setDownloadErr(e instanceof Error ? e.message : 'Download failed'); }
-  };
 
   const onVerify = async () => {
     try { setVerifyRes(await verify.mutateAsync(a.id)); } catch { /* surfaced via verify.isError below */ }
@@ -108,7 +103,7 @@ export function ArtifactDrawer({ seed, onClose, onDeleted }: {
               <Icon name="file-badge" size={19} />
             </span>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 10.5, color: 'var(--app-t3)', textTransform: 'uppercase', letterSpacing: '.08em' }}>CBOM Artifact</div>
+              <div style={{ fontSize: 10.5, color: 'var(--app-t3)', textTransform: 'uppercase', letterSpacing: '.08em' }}>{kindMeta(a.artifact_kind).label}</div>
               <div style={{ fontSize: 15.5, fontWeight: 700, fontFamily: 'var(--font-head)', color: 'var(--app-t1)', lineHeight: 1.25 }}>{artifactName(a)}</div>
             </div>
             <button onClick={onClose} title="Close" style={{ flex: 'none', width: 28, height: 28, borderRadius: 8, border: '1px solid var(--app-border)', background: 'var(--app-panel2)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--app-t2)' }}><Icon name="x" size={15} /></button>
@@ -123,7 +118,7 @@ export function ArtifactDrawer({ seed, onClose, onDeleted }: {
 
         {/* actions */}
         <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--app-border)', display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-          <button className="ui-btn sm accent" onClick={onDownload}><Icon name="download" size={13} />CycloneDX</button>
+          <DownloadControl artifact={a} />
           <button className="ui-btn sm" onClick={onVerify} disabled={verify.isPending}><Icon name="badge-check" size={13} />{verify.isPending ? 'Verifying…' : 'Verify'}</button>
           {evidenceEntitled && (
             <button className="ui-btn sm" onClick={() => nav(`/risk-compliance/cbom/compare?head=${a.id}`)}><Icon name="scale" size={13} />Compare</button>
@@ -134,14 +129,20 @@ export function ArtifactDrawer({ seed, onClose, onDeleted }: {
         </div>
 
         <div style={{ padding: '6px 18px 18px' }}>
-          {downloadErr && <div style={{ fontSize: 11.5, color: 'var(--danger-text)', padding: '9px 0' }}>{downloadErr}</div>}
           {verify.isError && <div style={{ fontSize: 11.5, color: 'var(--danger-text)', padding: '9px 0' }}>Verification request failed.</div>}
           {verifyRes && <VerifyResult v={verifyRes} />}
 
-          {/* SPDX / PDF — wire shape stable, adapters not yet wired server-side. */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, fontSize: 11, color: 'var(--app-t3)' }}>
-            <Icon name="clock" size={12} />
-            <span>SPDX 2.3 and PDF downloads are coming in a follow-up — CycloneDX 1.6 is the canonical format today.</span>
+          {/* Which formats this artifact's kind offers, and why. The note said
+              "SPDX and PDF are coming in a follow-up" long after they shipped
+              behind the Enterprise renderer, and named CycloneDX 1.6 after the
+              emitter moved to 1.7 — a stale promise in an evidence surface. */}
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 12, fontSize: 11, color: 'var(--app-t3)', lineHeight: 1.5 }}>
+            <Icon name="info" size={12} style={{ flex: 'none', marginTop: 2 }} />
+            <span>
+              CycloneDX {a.cyclonedx_spec_version} is the canonical form — the bytes the content hash and any signature cover.
+              {a.artifact_kind === 'inventory' && ' OCSF 1.9 projects the same snapshot as a SIEM event stream.'}
+              {a.artifact_kind === 'cbom' && ' SPDX and PDF exports of a CBOM require an Enterprise subscription.'}
+            </span>
           </div>
 
           <div style={{ marginTop: 16 }}>

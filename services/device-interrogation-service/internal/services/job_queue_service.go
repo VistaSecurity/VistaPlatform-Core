@@ -82,26 +82,26 @@ func (s *JobQueueService) CreateJob(ctx context.Context, req models.CreateDevice
 
 	query := `
 		INSERT INTO device_jobs (
-			id, tenant_id, job_type, device_id, integration_id, agent_id, status,
+			id, tenant_id, job_type, asset_id, integration_id, agent_id, status,
 			credentials, parameters, created_at, expires_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-		RETURNING id, tenant_id, job_type, device_id, agent_id, status,
+		RETURNING id, tenant_id, job_type, asset_id, agent_id, status,
 			credentials, parameters, results, error_message,
 			created_at, assigned_at, started_at, completed_at, expires_at, deleted_at
 	`
 
 	job := &models.DeviceJob{}
 	var credentialsJSONB, parametersJSONB, resultsJSONB []byte
-	var deviceID, agentID sql.NullString
+	var assetID, agentID sql.NullString
 
 	// RLS-scoped write on `device_jobs`: req.TenantID is an input, so set
 	// app.tenant_id to it for the INSERT (satisfies WITH CHECK).
 	err := shareddatabase.WithTenantTx(ctx, s.db, req.TenantID, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, query,
-			jobID, req.TenantID, string(req.JobType), req.DeviceID, req.IntegrationID, req.AgentID,
+			jobID, req.TenantID, string(req.JobType), req.AssetID, req.IntegrationID, req.AgentID,
 			string(models.JobStatusPending), credentialsJSON, parametersJSON, now, expiresAt,
 		).Scan(
-			&job.ID, &job.TenantID, &job.JobType, &deviceID, &agentID, &job.Status,
+			&job.ID, &job.TenantID, &job.JobType, &assetID, &agentID, &job.Status,
 			&credentialsJSONB, &parametersJSONB, &resultsJSONB, &job.ErrorMessage,
 			&job.CreatedAt, &job.AssignedAt, &job.StartedAt, &job.CompletedAt, &job.ExpiresAt, &job.DeletedAt,
 		)
@@ -112,9 +112,9 @@ func (s *JobQueueService) CreateJob(ctx context.Context, req models.CreateDevice
 	}
 
 	// Parse JSONB fields
-	if deviceID.Valid {
-		id, _ := uuid.Parse(deviceID.String)
-		job.DeviceID = &id
+	if assetID.Valid {
+		id, _ := uuid.Parse(assetID.String)
+		job.AssetID = &id
 	}
 	if agentID.Valid {
 		id, _ := uuid.Parse(agentID.String)
@@ -225,7 +225,7 @@ func (s *JobQueueService) GetNextJobForAgent(ctx context.Context, agentID uuid.U
 		SET agent_id = $1, status = 'assigned', assigned_at = $3, updated_at = $3
 		FROM candidate
 		WHERE dj.id = candidate.id
-		RETURNING dj.id, dj.tenant_id, dj.job_type, dj.device_id, dj.agent_id, dj.status,
+		RETURNING dj.id, dj.tenant_id, dj.job_type, dj.asset_id, dj.agent_id, dj.status,
 			credentials, parameters, results, error_message,
 			created_at, assigned_at, started_at, completed_at, expires_at, deleted_at
 	`
@@ -233,10 +233,10 @@ func (s *JobQueueService) GetNextJobForAgent(ctx context.Context, agentID uuid.U
 	// RLS: agent-outbound — keyed by agent id, tenant is the OUTPUT → bypass role.
 	job := &models.DeviceJob{}
 	var credentialsJSONB, parametersJSONB, resultsJSONB []byte
-	var deviceID, agentIDStr sql.NullString
+	var assetID, agentIDStr sql.NullString
 
 	err = s.bypassDB.QueryRowContext(ctx, query, agentID, agentTenant, now).Scan(
-		&job.ID, &job.TenantID, &job.JobType, &deviceID, &agentIDStr, &job.Status,
+		&job.ID, &job.TenantID, &job.JobType, &assetID, &agentIDStr, &job.Status,
 		&credentialsJSONB, &parametersJSONB, &resultsJSONB, &job.ErrorMessage,
 		&job.CreatedAt, &job.AssignedAt, &job.StartedAt, &job.CompletedAt, &job.ExpiresAt, &job.DeletedAt,
 	)
@@ -249,9 +249,9 @@ func (s *JobQueueService) GetNextJobForAgent(ctx context.Context, agentID uuid.U
 	}
 
 	// Parse JSONB fields
-	if deviceID.Valid {
-		id, _ := uuid.Parse(deviceID.String)
-		job.DeviceID = &id
+	if assetID.Valid {
+		id, _ := uuid.Parse(assetID.String)
+		job.AssetID = &id
 	}
 	if agentIDStr.Valid {
 		id, _ := uuid.Parse(agentIDStr.String)
@@ -310,7 +310,7 @@ func (s *JobQueueService) GetNextJobForPlatform(ctx context.Context) (*models.De
 		SET status = 'assigned', assigned_at = $1, updated_at = $1
 		FROM candidate
 		WHERE dj.id = candidate.id
-		RETURNING dj.id, dj.tenant_id, dj.job_type, dj.device_id, dj.agent_id, dj.integration_id, dj.status,
+		RETURNING dj.id, dj.tenant_id, dj.job_type, dj.asset_id, dj.agent_id, dj.integration_id, dj.status,
 			credentials, parameters, results, error_message,
 			created_at, assigned_at, started_at, completed_at, expires_at, deleted_at
 	`
@@ -318,10 +318,10 @@ func (s *JobQueueService) GetNextJobForPlatform(ctx context.Context) (*models.De
 	// RLS: cross-tenant background sweep (no single tenant) → bypass role.
 	job := &models.DeviceJob{}
 	var credentialsJSONB, parametersJSONB, resultsJSONB []byte
-	var deviceID, agentIDStr, integrationIDStr sql.NullString
+	var assetID, agentIDStr, integrationIDStr sql.NullString
 
 	err = s.bypassDB.QueryRowContext(ctx, query, now).Scan(
-		&job.ID, &job.TenantID, &job.JobType, &deviceID, &agentIDStr, &integrationIDStr, &job.Status,
+		&job.ID, &job.TenantID, &job.JobType, &assetID, &agentIDStr, &integrationIDStr, &job.Status,
 		&credentialsJSONB, &parametersJSONB, &resultsJSONB, &job.ErrorMessage,
 		&job.CreatedAt, &job.AssignedAt, &job.StartedAt, &job.CompletedAt, &job.ExpiresAt, &job.DeletedAt,
 	)
@@ -334,9 +334,9 @@ func (s *JobQueueService) GetNextJobForPlatform(ctx context.Context) (*models.De
 	}
 
 	// Parse JSONB fields and UUIDs
-	if deviceID.Valid {
-		id, _ := uuid.Parse(deviceID.String)
-		job.DeviceID = &id
+	if assetID.Valid {
+		id, _ := uuid.Parse(assetID.String)
+		job.AssetID = &id
 	}
 	if agentIDStr.Valid {
 		id, _ := uuid.Parse(agentIDStr.String)
@@ -512,7 +512,7 @@ func (s *JobQueueService) RecordDiscoveryJob(ctx context.Context, jobID, discove
 // bypass role.
 func (s *JobQueueService) GetJobByID(ctx context.Context, jobID uuid.UUID) (*models.DeviceJob, error) {
 	query := `
-		SELECT id, tenant_id, job_type, device_id, agent_id, integration_id, status,
+		SELECT id, tenant_id, job_type, asset_id, agent_id, integration_id, status,
 			credentials, parameters, results, error_message,
 			created_at, assigned_at, started_at, completed_at, expires_at, deleted_at
 		FROM device_jobs
@@ -521,10 +521,10 @@ func (s *JobQueueService) GetJobByID(ctx context.Context, jobID uuid.UUID) (*mod
 
 	job := &models.DeviceJob{}
 	var credentialsJSONB, parametersJSONB, resultsJSONB []byte
-	var deviceID, agentIDStr, integrationIDStr sql.NullString
+	var assetID, agentIDStr, integrationIDStr sql.NullString
 
 	err := s.bypassDB.QueryRowContext(ctx, query, jobID).Scan(
-		&job.ID, &job.TenantID, &job.JobType, &deviceID, &agentIDStr, &integrationIDStr, &job.Status,
+		&job.ID, &job.TenantID, &job.JobType, &assetID, &agentIDStr, &integrationIDStr, &job.Status,
 		&credentialsJSONB, &parametersJSONB, &resultsJSONB, &job.ErrorMessage,
 		&job.CreatedAt, &job.AssignedAt, &job.StartedAt, &job.CompletedAt, &job.ExpiresAt, &job.DeletedAt,
 	)
@@ -537,9 +537,9 @@ func (s *JobQueueService) GetJobByID(ctx context.Context, jobID uuid.UUID) (*mod
 	}
 
 	// Parse JSONB fields
-	if deviceID.Valid {
-		id, _ := uuid.Parse(deviceID.String)
-		job.DeviceID = &id
+	if assetID.Valid {
+		id, _ := uuid.Parse(assetID.String)
+		job.AssetID = &id
 	}
 	if agentIDStr.Valid {
 		id, _ := uuid.Parse(agentIDStr.String)

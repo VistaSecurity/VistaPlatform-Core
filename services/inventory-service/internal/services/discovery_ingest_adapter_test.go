@@ -105,3 +105,73 @@ func TestToIngestFinding_EmptyResolvedIPFallsThrough(t *testing.T) {
 		t.Errorf("empty resolved_ip should leave ip_address unset; got %v", out.IPAddress)
 	}
 }
+
+// The KIND survives the bind — the one line the whole host-observation hold
+// existed because it was missing.
+//
+// discovery-processor stamps `kind` on the finding it POSTs; the ingest handler
+// unmarshals each finding into ClusterSensorFinding and calls ToIngestFinding.
+// The struct had no `kind` field, so the marker crossed the wire and was
+// dropped HERE, and inventory-service then acted on a passive host observation
+// as if it were a cryptographic one: classified `third_party` for having no
+// RFC-1918 address and written into external_connections (a table that records
+// connections, with none to record), or DNS-resolved on a name that exists only
+// on the customer's LAN, or turned into another nameless asset typed `server`.
+// Holding the rows back at discovery-processor's boundary for a whole release
+// was the workaround.
+//
+// Everything downstream keys off IngestFinding.Kind — IngestFindings' branch,
+// routeToExternalConnection's refusal, the builder — so all of it is unreachable
+// if this one assignment goes. Nothing else in this service's suite notices: its
+// host-observation tests construct IngestFinding directly, which is one step
+// PAST the bind. Mutation check: delete `Kind: f.Kind,` from ToIngestFinding and
+// only this test fails.
+func TestToIngestFinding_CarriesTheKindAcrossTheBind(t *testing.T) {
+	// The wire shape discovery-processor's converter emits for a passive host
+	// observation: `kind` at the top level, the payload under `raw_data`, and
+	// the documented dest_ip of 0.0.0.0 because the column is NOT NULL and this
+	// device was never seen with an address.
+	raw := `{
+		"kind": "host_observation",
+		"hostname": "hp-printer",
+		"ip_address": "0.0.0.0",
+		"protocol": "HOST",
+		"raw_data": {
+			"discovery_type": "host_observation",
+			"host_observation": {"mac": "28:cf:da:11:22:33", "source": "arp"}
+		}
+	}`
+
+	var csf ClusterSensorFinding
+	if err := json.Unmarshal([]byte(raw), &csf); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if csf.Kind != KindHostObservation {
+		t.Fatalf("ClusterSensorFinding.Kind = %q after unmarshal; the field must read `kind` off the wire", csf.Kind)
+	}
+
+	out := csf.ToIngestFinding()
+	if out.Kind != KindHostObservation {
+		t.Errorf("IngestFinding.Kind = %q, want %q — the marker was dropped in the bind", out.Kind, KindHostObservation)
+	}
+	// And the predicate every downstream branch actually calls agrees, so this
+	// cannot pass on a kind that reaches the struct but not the routing.
+	if !isHostObservation(out) {
+		t.Error("a bound host observation is not recognised as one; the ingest would route it down the crypto path")
+	}
+
+	// The legacy shape is UNCHANGED: cluster-sensor-service emits no `kind`,
+	// and absent must stay absent rather than acquiring a default that makes a
+	// crypto finding look like something else.
+	var legacy ClusterSensorFinding
+	if err := json.Unmarshal([]byte(`{"hostname":"tls.example","port":443}`), &legacy); err != nil {
+		t.Fatalf("unmarshal legacy: %v", err)
+	}
+	got := legacy.ToIngestFinding()
+	if got.Kind != "" {
+		t.Errorf("Kind = %q on a finding that carried none, want empty (the legacy crypto shape)", got.Kind)
+	}
+	if isHostObservation(got) {
+		t.Error("a crypto finding was recognised as a host observation")
+	}
+}

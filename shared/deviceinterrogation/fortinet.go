@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -84,6 +83,10 @@ func (c *fortinetClient) interrogate(ctx context.Context) (*InterrogateResult, e
 	result.DeviceInfo = sysInfo
 	result.DeviceIdentity = fortinetIdentity(sysInfo)
 
+	// Ops facts (ADR-0004 D1 item 5) — see fortinet_ops.go. Non-fatal: a
+	// restricted API profile answers some endpoints and 403s the rest.
+	c.fortinetCollectOps(ctx, result, sysInfo)
+
 	if sslVPNs, err := c.getResults(ctx, "/api/v2/cmdb/vpn.ssl/settings"); err != nil {
 		fmt.Printf("Warning: failed to get SSL VPN configs: %v\n", err)
 	} else {
@@ -117,6 +120,16 @@ func (c *fortinetClient) getSystemInfo(ctx context.Context) (map[string]interfac
 	info := make(map[string]interface{})
 	if len(resp.Results) > 0 {
 		info = projectFortinet(resp.Results[0], fortinetSystemStatusFields)
+	}
+	// FortiOS repeats the serial and the firmware version in the response
+	// ENVELOPE, on every call, whatever the endpoint. Several releases put them
+	// only there — so a collector that reads the results array alone reports no
+	// serial for those devices, and hw.serial is the usual join key to a CMDB.
+	if _, ok := info["serial"]; !ok && resp.Serial != "" {
+		info["serial"] = resp.Serial
+	}
+	if _, ok := info["version"]; !ok && resp.Version != "" {
+		info["version"] = resp.Version
 	}
 	return info, nil
 }
@@ -165,13 +178,13 @@ func (c *fortinetClient) apiRequest(ctx context.Context, method, url string) (*f
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var apiResp fortinetAPIResponse
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+	if err := decodeBoundedJSON(resp.Body, "FortiOS "+url, &apiResp); err != nil {
+		return nil, err
 	}
 	if apiResp.Status != "success" && apiResp.Error != 0 {
 		return nil, fmt.Errorf("API error: %s (code %d)", apiResp.ErrorMessage, apiResp.Error)
@@ -180,15 +193,15 @@ func (c *fortinetClient) apiRequest(ctx context.Context, method, url string) (*f
 }
 
 func fortinetIdentity(sysInfo map[string]interface{}) *DeviceIdentity {
-	id := &DeviceIdentity{Vendor: "Fortinet"}
+	id := &DeviceIdentity{Vendor: fortinetVendor, ClassHint: fortinetClassHint()}
 	if v, ok := sysInfo["version"].(string); ok {
 		id.FirmwareVersion = v
-		id.OSVersion = v
+		id.OSVersion = strings.TrimSpace(fortinetOSName + " " + v)
 	}
 	if v, ok := sysInfo["serial"].(string); ok {
 		id.SerialNumber = v
 	}
-	if v, ok := sysInfo["model"].(string); ok {
+	if v := fortinetString(sysInfo, "model_name", "model"); v != "" {
 		id.Model = v
 	}
 	return id

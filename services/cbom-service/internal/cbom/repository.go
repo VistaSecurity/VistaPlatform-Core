@@ -49,8 +49,14 @@ type insertParams struct {
 	ScopeVersion      int
 	ScopeNameSnapshot string
 	Name              string
-	StorageKey        string // either StorageKey or InlineContent (exclusive)
-	InlineContent     []byte
+	// ArtifactKind is which bill of materials these bytes are. Empty is
+	// rejected rather than defaulted here: the default belongs at the edge
+	// (the handler, where an omitted request field means `cbom`), and a
+	// silently-defaulting repository would let a future caller write a row
+	// whose kind nobody chose.
+	ArtifactKind  ArtifactKind
+	StorageKey    string // either StorageKey or InlineContent (exclusive)
+	InlineContent []byte
 	// InternalContent is the private CBOMData view of the same snapshot, kept
 	// so the Enterprise diff can read fields CycloneDX has no home for. Never
 	// served, never hashed, and not subject to the storage/inline CHECK.
@@ -104,6 +110,13 @@ func (r *Repository) Create(ctx context.Context, p insertParams) (*Artifact, err
 	// same whether or not the deployment has S3 configured.
 	internalContent := p.InternalContent
 
+	// A kind the build does not recognise never reaches the database. The CHECK
+	// constraint would reject it anyway, but as an opaque 23514 with the caller
+	// long gone from the stack; failing here names the value.
+	if !p.ArtifactKind.IsValid() {
+		return nil, fmt.Errorf("cbom: artifact_kind %q is not one of cbom/sbom/hbom/inventory", p.ArtifactKind)
+	}
+
 	var a Artifact
 	a.Provenance = p.Provenance
 	a.Layers = layers
@@ -113,20 +126,23 @@ func (r *Repository) Create(ctx context.Context, p insertParams) (*Artifact, err
 		return tx.QueryRowContext(ctx, `
 			INSERT INTO public.cbom_artifacts
 				(tenant_id, scope_id, scope_version, scope_name_snapshot, name,
+				 artifact_kind,
 				 storage_key, inline_content, internal_content,
 				 content_hash, size_bytes, component_count,
 				 cyclonedx_spec_version, input_data_freshness_at,
 				 generated_by, provenance, layers,
 				 signature_hmac, signature_kid)
 			VALUES ($1, $2, $3, $4, $5,
-				$6, $7, $8,
-				$9, $10, $11,
-				$12, $13,
-				$14, $15, $16,
-				$17, $18)
+				$6,
+				$7, $8, $9,
+				$10, $11, $12,
+				$13, $14,
+				$15, $16, $17,
+				$18, $19)
 			RETURNING id, generated_at, created_at
 		`,
 			p.TenantID, p.ScopeID, p.ScopeVersion, p.ScopeNameSnapshot, nullableString(p.Name),
+			string(p.ArtifactKind),
 			storageKey, inlineContent, internalContent,
 			p.ContentHash, p.SizeBytes, p.ComponentCount,
 			p.CycloneDXSpecVersion, p.InputDataFreshnessAt,
@@ -143,6 +159,7 @@ func (r *Repository) Create(ctx context.Context, p insertParams) (*Artifact, err
 	a.ScopeVersion = p.ScopeVersion
 	a.ScopeNameSnapshot = p.ScopeNameSnapshot
 	a.Name = p.Name
+	a.ArtifactKind = p.ArtifactKind
 	a.StorageKey = p.StorageKey
 	a.HasInlineContent = inlineContent != nil
 	a.ContentHash = p.ContentHash
@@ -158,7 +175,11 @@ func (r *Repository) Create(ctx context.Context, p insertParams) (*Artifact, err
 
 // List returns non-deleted artifacts for the tenant ordered by generated_at DESC.
 // Pagination is intentional follow-up — Phase 2 expects tens, not thousands.
-func (r *Repository) List(ctx context.Context, tenantID uuid.UUID, scopeID *uuid.UUID, limit int) ([]Artifact, error) {
+//
+// kind is an optional filter. An empty kind means every kind, NOT `cbom`: the
+// list page is one list of artifacts and defaulting it here would hide the
+// SBOMs a tenant just generated behind a filter they never set.
+func (r *Repository) List(ctx context.Context, tenantID uuid.UUID, scopeID *uuid.UUID, kind ArtifactKind, limit int) ([]Artifact, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -168,6 +189,7 @@ func (r *Repository) List(ctx context.Context, tenantID uuid.UUID, scopeID *uuid
 		query := `
 			SELECT id, tenant_id, scope_id, scope_version, scope_name_snapshot,
 			       COALESCE(name, ''), COALESCE(storage_key, ''),
+			       COALESCE(artifact_kind, 'cbom'),
 			       (inline_content IS NOT NULL),
 			       content_hash, size_bytes, component_count,
 			       cyclonedx_spec_version, input_data_freshness_at,
@@ -179,8 +201,12 @@ func (r *Repository) List(ctx context.Context, tenantID uuid.UUID, scopeID *uuid
 		`
 		args := []interface{}{tenantID}
 		if scopeID != nil {
-			query += " AND scope_id = $2"
 			args = append(args, *scopeID)
+			query += fmt.Sprintf(" AND scope_id = $%d", len(args))
+		}
+		if kind != "" {
+			args = append(args, string(kind))
+			query += fmt.Sprintf(" AND artifact_kind = $%d", len(args))
 		}
 		query += fmt.Sprintf(" ORDER BY generated_at DESC LIMIT %d", limit)
 
@@ -212,6 +238,7 @@ func (r *Repository) Get(ctx context.Context, tenantID, artifactID uuid.UUID) (*
 		row := tx.QueryRowContext(ctx, `
 			SELECT id, tenant_id, scope_id, scope_version, scope_name_snapshot,
 			       COALESCE(name, ''), COALESCE(storage_key, ''),
+			       COALESCE(artifact_kind, 'cbom'),
 			       (inline_content IS NOT NULL),
 			       content_hash, size_bytes, component_count,
 			       cyclonedx_spec_version, input_data_freshness_at,
@@ -333,6 +360,7 @@ func scanArtifact(r interface{ Scan(...interface{}) error }) (Artifact, error) {
 	err := r.Scan(
 		&a.ID, &a.TenantID, &a.ScopeID, &a.ScopeVersion, &a.ScopeNameSnapshot,
 		&a.Name, &a.StorageKey,
+		&a.ArtifactKind,
 		&a.HasInlineContent,
 		&a.ContentHash, &a.SizeBytes, &a.ComponentCount,
 		&a.CycloneDXSpecVersion, &a.InputDataFreshnessAt,

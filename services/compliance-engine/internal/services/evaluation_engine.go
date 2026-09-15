@@ -41,10 +41,15 @@ import (
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
-// controlAsset is a (control, asset) pair — the unit of reconciliation.
-type controlAsset struct {
+// controlSubject is a (control, subject) pair — the unit of reconciliation.
+//
+// The subject is whatever the measurement was taken on: an asset or a
+// certificate (workstream 3.1 / ADR-0005 D3). It was called controlAsset while
+// the row it wrote was called compliance_findings.asset_id, and on a live
+// tenant about three in four of those ids were a certificate's.
+type controlSubject struct {
 	ControlID uuid.UUID
-	AssetID   uuid.UUID
+	SubjectID uuid.UUID
 }
 
 // EvaluationSummary reports what a tenant reconcile did (for logging and tests).
@@ -62,7 +67,7 @@ type EvaluationSummary struct {
 // the same plan (convergence); a pair that both violates now and is already active is
 // still "activated" (upsert is idempotent), and a previously-active pair that no longer
 // violates is inactivated exactly once.
-func reconcilePlan(storedActive, newViolations map[controlAsset]bool) (toActivate, toInactivate []controlAsset) {
+func reconcilePlan(storedActive, newViolations map[controlSubject]bool) (toActivate, toInactivate []controlSubject) {
 	for ca := range newViolations {
 		toActivate = append(toActivate, ca)
 	}
@@ -81,21 +86,24 @@ func reconcilePlan(storedActive, newViolations map[controlAsset]bool) (toActivat
 // new logic (ADR-0015). The asset filter is defensive: EvaluateControlsBatchForAsset
 // already scopes extraction to the asset, but a stray cross-asset finding must never
 // leak into another asset's reconcile.
-func buildAssetViolations(results map[uuid.UUID]*EvaluationResult, assetID uuid.UUID) (map[controlAsset]bool, map[controlAsset]models.ComplianceFinding) {
-	newViolations := map[controlAsset]bool{}
-	findingByPair := map[controlAsset]models.ComplianceFinding{}
+func buildAssetViolations(results map[uuid.UUID]*EvaluationResult, assetID uuid.UUID) (map[controlSubject]bool, map[controlSubject]models.ComplianceFinding) {
+	newViolations := map[controlSubject]bool{}
+	findingByPair := map[controlSubject]models.ComplianceFinding{}
 	for controlID, res := range results {
 		if res == nil {
 			continue
 		}
 		for _, f := range res.Findings {
-			if f.AssetID != assetID {
+			if f.SubjectID != assetID {
 				continue
 			}
-			ca := controlAsset{ControlID: controlID, AssetID: assetID}
+			ca := controlSubject{ControlID: controlID, SubjectID: assetID}
 			newViolations[ca] = true
-			if _, seen := findingByPair[ca]; !seen {
+			if prior, seen := findingByPair[ca]; !seen {
 				findingByPair[ca] = f
+			} else {
+				mergeSubjectEvidence(&prior, &f)
+				findingByPair[ca] = prior
 			}
 		}
 	}
@@ -104,13 +112,13 @@ func buildAssetViolations(results map[uuid.UUID]*EvaluationResult, assetID uuid.
 
 // activationBatch turns a reconcile plan's activation list into the batched-write input,
 // carrying each pair's representative finding (severity / summary / evidence).
-func activationBatch(toActivate []controlAsset, findingByPair map[controlAsset]models.ComplianceFinding) []findingUpsert {
+func activationBatch(toActivate []controlSubject, findingByPair map[controlSubject]models.ComplianceFinding) []findingUpsert {
 	items := make([]findingUpsert, 0, len(toActivate))
 	for _, ca := range toActivate {
 		f := findingByPair[ca]
 		items = append(items, findingUpsert{
 			ControlID:      ca.ControlID,
-			AssetID:        ca.AssetID,
+			SubjectID:      ca.SubjectID,
 			Finding:        &f,
 			DetectionState: "ACTIVE",
 		})
@@ -178,8 +186,8 @@ func (s *FindingsService) EvaluateTenantFrameworks(ctx context.Context, tenantID
 
 	// New violation set across ALL published frameworks (ADR-0015: persist for all).
 	// Keep one representative finding per pair to carry severity/evidence on upsert.
-	newViolations := map[controlAsset]bool{}
-	findingByPair := map[controlAsset]models.ComplianceFinding{}
+	newViolations := map[controlSubject]bool{}
+	findingByPair := map[controlSubject]models.ComplianceFinding{}
 	for _, controls := range controlsByFramework {
 		for _, control := range controls {
 			res := results[control.ID]
@@ -187,26 +195,31 @@ func (s *FindingsService) EvaluateTenantFrameworks(ctx context.Context, tenantID
 				continue
 			}
 			for _, f := range res.Findings {
-				ca := controlAsset{ControlID: control.ID, AssetID: f.AssetID}
+				ca := controlSubject{ControlID: control.ID, SubjectID: f.SubjectID}
 				newViolations[ca] = true
-				if _, seen := findingByPair[ca]; !seen {
+				if prior, seen := findingByPair[ca]; !seen {
 					findingByPair[ca] = f
+				} else {
+					mergeSubjectEvidence(&prior, &f)
+					findingByPair[ca] = prior
 				}
 			}
 		}
 	}
 
 	// Currently-stored ACTIVE findings for this tenant.
-	storedActive := map[controlAsset]bool{}
+	storedActive := map[controlSubject]bool{}
 	if err := shareddatabase.WithTenantTx(ctx, s.db.DB, tenantID, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `SELECT control_id, asset_id FROM compliance_findings WHERE tenant_id = $1 AND detection_state = 'ACTIVE'`, tenantID)
+		rows, err := tx.QueryContext(ctx, `SELECT control_id, subject_id FROM findings
+		  WHERE tenant_id = $1 AND detection_state = 'ACTIVE'
+		    AND `+complianceProducerScope("findings"), tenantID)
 		if err != nil {
 			return fmt.Errorf("failed to load active findings: %w", err)
 		}
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
-			var ca controlAsset
-			if err := rows.Scan(&ca.ControlID, &ca.AssetID); err == nil {
+			var ca controlSubject
+			if err := rows.Scan(&ca.ControlID, &ca.SubjectID); err == nil {
 				storedActive[ca] = true
 			}
 		}
@@ -219,8 +232,8 @@ func (s *FindingsService) EvaluateTenantFrameworks(ctx context.Context, tenantID
 	stats := s.upsertFindings(ctx, tenantID, activationBatch(toActivate, findingByPair))
 	summary.FindingsActivated = stats.Processed()
 	for _, ca := range toInactivate {
-		if err := s.markFindingInactive(ctx, tenantID, ca.ControlID, ca.AssetID); err != nil {
-			log.Printf("[EvalEngine] mark inactive failed (control=%s asset=%s): %v", ca.ControlID, ca.AssetID, err)
+		if err := s.markFindingInactive(ctx, tenantID, ca.ControlID, ca.SubjectID); err != nil {
+			log.Printf("[EvalEngine] mark inactive failed (control=%s subject=%s): %v", ca.ControlID, ca.SubjectID, err)
 			continue
 		}
 		summary.FindingsInactivated++
@@ -292,30 +305,34 @@ func (s *FindingsService) EvaluateTenantFrameworkScoped(ctx context.Context, ten
 
 	// New violation set across this framework's controls; keep one representative
 	// finding per pair to carry severity/evidence on upsert.
-	newViolations := map[controlAsset]bool{}
-	findingByPair := map[controlAsset]models.ComplianceFinding{}
+	newViolations := map[controlSubject]bool{}
+	findingByPair := map[controlSubject]models.ComplianceFinding{}
 	for _, control := range controls {
 		res := results[control.ID]
 		if res == nil {
 			continue
 		}
 		for _, f := range res.Findings {
-			ca := controlAsset{ControlID: control.ID, AssetID: f.AssetID}
+			ca := controlSubject{ControlID: control.ID, SubjectID: f.SubjectID}
 			newViolations[ca] = true
-			if _, seen := findingByPair[ca]; !seen {
+			if prior, seen := findingByPair[ca]; !seen {
 				findingByPair[ca] = f
+			} else {
+				mergeSubjectEvidence(&prior, &f)
+				findingByPair[ca] = prior
 			}
 		}
 	}
 
 	// Currently-stored ACTIVE findings RESTRICTED to this framework's controls, so the
-	// reconcile never inactivates another framework's findings. compliance_findings.
-	// control_id == platform_framework_controls.id, so the subquery scopes precisely.
-	storedActive := map[controlAsset]bool{}
+	// reconcile never inactivates another framework's findings. findings.control_id
+	// == platform_framework_controls.id, so the subquery scopes precisely.
+	storedActive := map[controlSubject]bool{}
 	if err := shareddatabase.WithTenantTx(ctx, s.db.DB, tenantID, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx,
-			`SELECT control_id, asset_id FROM compliance_findings
+			`SELECT control_id, subject_id FROM findings
 		  WHERE tenant_id = $1 AND detection_state = 'ACTIVE'
+		    AND `+complianceProducerScope("findings")+`
 		    AND control_id IN (SELECT id FROM platform_framework_controls WHERE framework_id = $2)`,
 			tenantID, frameworkID)
 		if err != nil {
@@ -323,8 +340,8 @@ func (s *FindingsService) EvaluateTenantFrameworkScoped(ctx context.Context, ten
 		}
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
-			var ca controlAsset
-			if err := rows.Scan(&ca.ControlID, &ca.AssetID); err == nil {
+			var ca controlSubject
+			if err := rows.Scan(&ca.ControlID, &ca.SubjectID); err == nil {
 				storedActive[ca] = true
 			}
 		}
@@ -337,8 +354,8 @@ func (s *FindingsService) EvaluateTenantFrameworkScoped(ctx context.Context, ten
 	stats := s.upsertFindings(ctx, tenantID, activationBatch(toActivate, findingByPair))
 	summary.FindingsActivated = stats.Processed()
 	for _, ca := range toInactivate {
-		if err := s.markFindingInactive(ctx, tenantID, ca.ControlID, ca.AssetID); err != nil {
-			log.Printf("[EvalEngine] mark inactive failed (control=%s asset=%s): %v", ca.ControlID, ca.AssetID, err)
+		if err := s.markFindingInactive(ctx, tenantID, ca.ControlID, ca.SubjectID); err != nil {
+			log.Printf("[EvalEngine] mark inactive failed (control=%s subject=%s): %v", ca.ControlID, ca.SubjectID, err)
 			continue
 		}
 		summary.FindingsInactivated++
@@ -428,15 +445,17 @@ func (s *FindingsService) EvaluateAsset(ctx context.Context, tenantID, assetID u
 	newViolations, findingByPair := buildAssetViolations(results, assetID)
 
 	// Currently-stored ACTIVE findings for THIS asset only.
-	storedActive := map[controlAsset]bool{}
+	storedActive := map[controlSubject]bool{}
 	if err := shareddatabase.WithTenantTx(ctx, s.db.DB, tenantID, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `SELECT control_id FROM compliance_findings WHERE tenant_id = $1 AND asset_id = $2 AND detection_state = 'ACTIVE'`, tenantID, assetID)
+		rows, err := tx.QueryContext(ctx, `SELECT control_id FROM findings
+		  WHERE tenant_id = $1 AND subject_id = $2 AND detection_state = 'ACTIVE'
+		    AND `+complianceProducerScope("findings"), tenantID, assetID)
 		if err != nil {
 			return fmt.Errorf("failed to load active findings for asset: %w", err)
 		}
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
-			ca := controlAsset{AssetID: assetID}
+			ca := controlSubject{SubjectID: assetID}
 			if err := rows.Scan(&ca.ControlID); err == nil {
 				storedActive[ca] = true
 			}
@@ -450,8 +469,8 @@ func (s *FindingsService) EvaluateAsset(ctx context.Context, tenantID, assetID u
 	stats := s.upsertFindings(ctx, tenantID, activationBatch(toActivate, findingByPair))
 	summary.FindingsActivated = stats.Processed()
 	for _, ca := range toInactivate {
-		if err := s.markFindingInactive(ctx, tenantID, ca.ControlID, ca.AssetID); err != nil {
-			log.Printf("[EvalEngine] mark inactive failed (control=%s asset=%s): %v", ca.ControlID, ca.AssetID, err)
+		if err := s.markFindingInactive(ctx, tenantID, ca.ControlID, ca.SubjectID); err != nil {
+			log.Printf("[EvalEngine] mark inactive failed (control=%s subject=%s): %v", ca.ControlID, ca.SubjectID, err)
 			continue
 		}
 		summary.FindingsInactivated++
@@ -472,8 +491,8 @@ func (s *FindingsService) EvaluateAsset(ctx context.Context, tenantID, assetID u
 }
 
 // recomputeFrameworkScore rebuilds the per-(tenant, framework) rollup from the
-// materialized findings. A bounded DB fold over compliance_findings (one grouped
-// query over the affected framework's controls), not a re-evaluation of inventory.
+// materialized findings. A bounded DB fold over `findings` (one grouped query
+// over the affected framework's controls), not a re-evaluation of inventory.
 //
 // The arithmetic is frameworkScore's — the same severity-weighted model the live
 // evaluation uses — so the rollup and the summary page can no longer report two

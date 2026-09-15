@@ -134,6 +134,21 @@ func clampPage(page, pageSize int) (string, string) {
 	return strconv.Itoa(page), strconv.Itoa(pageSize)
 }
 
+// clampLimit normalizes a single "how many" argument: anything below 1 (including
+// the zero value of an omitted argument) becomes def, anything above max becomes
+// max. Clamping rather than rejecting, because a model guessing 1000 should get
+// the largest page the platform will serve, not an error it has to recover from.
+func clampLimit(limit, def, max int) int {
+	switch {
+	case limit < 1:
+		return def
+	case limit > max:
+		return max
+	default:
+		return limit
+	}
+}
+
 // requireUUID validates path-bound identifiers so tool input can never
 // shape a request path.
 func requireUUID(field, v string) (string, error) {

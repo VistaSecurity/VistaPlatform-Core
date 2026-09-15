@@ -57,3 +57,37 @@ data:
   # to see when diagnosing "did the upgrade take?".
   CHART_VERSION: {{ .Chart.Version | quote }}
   CHART_APP_VERSION: {{ .Chart.AppVersion | quote }}
+  {{- $aiProvider := include "vistaplatform.aiProvider" . }}
+  {{- if $aiProvider }}
+  # Generative AI provider (ADR-0008 D2). Rendered ONLY when ai.provider names
+  # one, so a deployment that leaves it off — which is the default and is a
+  # fully functional product — carries a ConfigMap byte-identical to the one it
+  # had before this block existed. That matters beyond tidiness: the backend pod
+  # template hashes this ConfigMap into a checksum/config annotation, so any key
+  # appearing here rolls all sixteen backends on the next upgrade.
+  #
+  # This is the "one place" shared/ai's own documentation relies on. Every
+  # backend reads the same values from the same ConfigMap, which is what lets
+  # `GET /tenant/ai` — served by auth-service, which owns no seam — answer
+  # honestly for capabilities that live in four other services. Set these
+  # per-service through backends.<svc>.extraEnv and that assumption stops
+  # holding, and the settings page starts disagreeing with the endpoints.
+  #
+  # The credential is NOT here. AI_API_KEY_ENV names the variable that holds it;
+  # the variable itself is injected from a Secret in the backend pod template.
+  AI_PROVIDER: {{ $aiProvider | quote }}
+  AI_ALLOW_PRIVATE_ENDPOINTS: {{ .Values.ai.allowPrivateEndpoints | quote }}
+  AI_API_KEY_ENV: {{ include "vistaplatform.aiAPIKeyEnvVar" . | quote }}
+  {{- with .Values.ai.baseUrl }}
+  AI_BASE_URL: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.ai.model }}
+  AI_MODEL: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.ai.maxTokens }}
+  AI_MAX_TOKENS: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.ai.timeout }}
+  AI_TIMEOUT: {{ . | quote }}
+  {{- end }}
+  {{- end }}

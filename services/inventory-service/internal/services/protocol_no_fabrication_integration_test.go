@@ -44,8 +44,8 @@ func newProtocolTestAsset(t *testing.T, raw *sql.DB, tenant uuid.UUID, hostname 
 	t.Helper()
 	id := uuid.New()
 	mustExec(t, raw, `
-		INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,$3,'service','monitoring',NOW(),NOW(),NOW(),NOW())`, id, tenant, hostname)
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+		VALUES ($1,$2,$3,'application','application','monitoring',NOW(),NOW(),NOW(),NOW())`, id, tenant, hostname)
 	return id
 }
 

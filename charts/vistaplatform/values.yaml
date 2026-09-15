@@ -333,6 +333,70 @@ appConfig:
   redisPoolSize: "50"
   redisMinIdleConns: "10"
 
+# Generative AI provider (ADR-0008 — "AI-native, never AI-dependent").
+#
+# OFF by default, and the product is COMPLETE with it off. Every AI capability
+# sits behind a seam whose rule-based default answers on its own: the CBOM
+# comparison summary is written from the rows, a finding carries the remediation
+# guidance for its kind, inventory is searched with the query language, controls
+# are authored by hand, and the end-of-life catalogue is looked up directly.
+# Settings → AI assistant states that default per capability, so a deployment
+# that leaves this empty sees what it has rather than what it is missing. The
+# classical seams (asset classification, merge-candidate ranking) run in-process
+# and are unaffected by anything here — they consult no provider and open no
+# socket.
+#
+# Only the Enterprise image line carries the provider clients. A Core install
+# that sets `provider` gets a logged warning and no change in behaviour, and the
+# settings page reports the edition as the reason rather than blaming the
+# configuration.
+#
+# When `provider` is empty (the default) this block renders NOTHING into the app
+# ConfigMap, so an existing release's ConfigMap is byte-identical across an
+# upgrade — which matters because the backend pod template carries a
+# checksum/config annotation and any change to it rolls every backend.
+ai:
+  # -- One of: "" / none · anthropic · openai_compat. The openai_compat shape
+  # covers hosted OpenAI, vLLM, Ollama, LM Studio, llama.cpp and most gateways.
+  provider: ""
+  # -- Endpoint. Optional for anthropic, REQUIRED for openai_compat. Write it as
+  # far as the server's own docs do (".../v1", or the full path); the client
+  # appends the rest.
+  baseUrl: ""
+  # -- Model id. Optional for anthropic, REQUIRED for openai_compat.
+  model: ""
+  # -- Permit a loopback or RFC1918 endpoint. Set true when baseUrl is your own
+  # self-hosted model beside the platform — that is the legitimate case here, and
+  # it is the one place the platform's outbound SSRF guard has to be an explicit
+  # operator decision rather than a rule.
+  allowPrivateEndpoints: false
+  # -- Response cap. Empty means the platform default (16000).
+  maxTokens: ""
+  # -- Per-ATTEMPT HTTP timeout, e.g. "120s". Empty means the platform default.
+  # A call may be retried up to three times, so a whole call can take longer.
+  timeout: ""
+  apiKey:
+    # -- Name of the environment variable the provider reads the credential from.
+    # The platform never holds a key in configuration — it holds the NAME of the
+    # variable and resolves it at the moment of use, so a rotated key is picked
+    # up by the next request and a leaked config row is a config row. Empty
+    # defaults to ANTHROPIC_API_KEY / OPENAI_API_KEY for the two providers.
+    envVar: ""
+    # -- Existing Secret in the release namespace holding the credential. Leave
+    # empty for an endpoint that needs none, which is most self-hosted ones
+    # (openai_compat treats the credential as optional; anthropic requires it).
+    #
+    # It is injected on EVERY backend, from this one place, and that is
+    # deliberate rather than incidental: `GET /tenant/ai` — the single
+    # availability answer every AI surface in both UIs reads before rendering
+    # anything — is served by auth-service, which owns no seam and must still be
+    # able to construct the provider to answer honestly. A key given only to the
+    # seam-owning services would leave every AI button hidden while the
+    # capability underneath it worked.
+    existingSecret: ""
+    # -- Key inside that Secret.
+    existingSecretKey: api-key
+
 # Backend services. Each entry produces a Deployment + Service + PDB. The same
 # map drives NetworkPolicy egress rules — needs.{postgres,redis,nats} are the
 # single source of truth for which datastores each service may reach.
@@ -361,6 +425,18 @@ backends:
     resources:
       requests: {cpu: 150m, memory: 256Mi}
       limits: {cpu: 500m, memory: 512Mi}
+    extraEnv:
+      # The LEARNED half of the asset classifier (workstream 4.2). Default on;
+      # set to "false" to run the curated classification RULES alone — they go
+      # on proposing exactly as before, and nothing is proposed where they
+      # cannot decide. Not the same control as the seam's `classifier: none`,
+      # which turns off class proposals altogether.
+      #
+      # Present here because the code reads it with os.Getenv and a backend's
+      # env comes from the shared ConfigMap plus this list: without an entry the
+      # variable simply does not exist in the pod, os.Getenv returns "", and an
+      # unset value means ON. The switch would be documented and unreachable.
+      - {name: CLASSIFIER_MODEL_ENABLED, value: "true"}
     image:
       digest: ""
 
@@ -507,6 +583,14 @@ backends:
     resources:
       requests: {cpu: 100m, memory: 128Mi}
       limits: {cpu: 300m, memory: 256Mi}
+    extraEnv:
+      # The same switch as inventory-service's, because this service also runs
+      # the classifier seam (applyPeerClassRules). It has no class-proposal
+      # writer, so a model answer here applies NOTHING either way — but an
+      # operator who turns the model off expects it off everywhere, and a switch
+      # that is honoured in one of the two services that read it is worse than
+      # one that is honoured in neither.
+      - {name: CLASSIFIER_MODEL_ENABLED, value: "true"}
     image:
       digest: ""
 

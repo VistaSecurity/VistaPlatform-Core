@@ -1,11 +1,9 @@
 package audit
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -101,14 +99,32 @@ func (m *Middleware) LogRequest() gin.HandlerFunc {
 
 		startTime := time.Now()
 
-		// Capture request body if needed
-		var requestBody []byte
-		if c.Request.Body != nil {
-			requestBody, _ = io.ReadAll(c.Request.Body)
-			c.Request.Body = io.NopCloser(bytes.NewBuffer(requestBody))
-		}
-
-		// Process request
+		// The request body is deliberately NOT read here.
+		//
+		// This middleware used to io.ReadAll it and hand the handler a
+		// NopCloser over the buffer, "to capture the request body if needed" —
+		// and then never looked at the bytes. Nothing below reads them; the
+		// record is built from the method, the path, the status, the query
+		// string and the caller's identity. So the read bought nothing and cost
+		// two things, both of which matter.
+		//
+		// It DEFEATED EVERY UPLOAD CAP IN THE CODEBASE. This runs as a global
+		// r.Use() ahead of every handler, so by the time
+		// sbom_handlers.go or device-interrogation's host-inventory intake gets
+		// to wrap c.Request.Body in an http.MaxBytesReader, the whole body is
+		// already resident. Those caps are derived, argued for and documented
+		// (32 MiB, sized off the collector's own ceilings) and an attacker
+		// paying no attention to them could still make the process hold
+		// whatever the edge allows — 100 MiB, per concurrent request — before a
+		// single handler line ran.
+		//
+		// And it made every request allocate its own size in heap whether or
+		// not anything downstream wanted the body at all.
+		//
+		// No handler can depend on the buffering, because it only happened when
+		// audit logging was enabled: the Enabled check above returns early, so a
+		// deployment with AUDIT_LOGGING_ENABLED=false already had the original
+		// body. A handler that needs to re-read its own body buffers it itself.
 		c.Next()
 
 		// Extract user context
@@ -258,6 +274,27 @@ func (m *Middleware) LogActivity(ctx context.Context, logEntry *ActivityLogReque
 		return nil
 	}
 
+	// An unstorable category is refused HERE, loudly, rather than three hops
+	// away inside a batch flush nobody is watching.
+	//
+	// `event_category` has a CHECK in schema.sql, so a category outside the set
+	// is rejected by Postgres with SQLSTATE 23514 — and every caller of this
+	// method discards the returned error, so the whole failure was one line in
+	// audit-service's log. Three of the asset-inventory build's own audit
+	// events were written that way and never landed: the auto-accepted merge
+	// ("data_modification") and both tenant settings handlers
+	// ("configuration"). Each looked audited, and each wrote nothing.
+	//
+	// The log line is the point. Returning the error alone would change
+	// nothing, because nobody reads it; LogConsumerEvent made the same check
+	// and for the same stated reason.
+	if !ValidEventCategory(logEntry.EventCategory) {
+		err := fmt.Errorf("audit: event_category %q is not one of %v — audit.activity_logs would reject it",
+			logEntry.EventCategory, EventCategories())
+		log.Printf("[AuditMiddleware] DISCARDING %s: %v", logEntry.EventType, err)
+		return err
+	}
+
 	// Set occurred_at if not set
 	if logEntry.OccurredAt.IsZero() {
 		logEntry.OccurredAt = time.Now()
@@ -268,7 +305,11 @@ func (m *Middleware) LogActivity(ctx context.Context, logEntry *ActivityLogReque
 	return nil
 }
 
-// determineEventType determines event type, category, and action from HTTP method and path
+// determineEventType derives the event type, category and action LogRequest
+// records for a request. A custom EventTypeMap entry wins; otherwise the action
+// comes from the method and the category from the service segment of the path
+// (request_category.go), with the event type naming the resource —
+// asset.assets.create — so a row says what it was about without its metadata.
 func (m *Middleware) determineEventType(method, path string) (eventType, eventCategory, action string) {
 	// Check custom mapping first
 	key := method + ":" + path
@@ -296,45 +337,14 @@ func (m *Middleware) determineEventType(method, path string) (eventType, eventCa
 		action = "unknown"
 	}
 
-	// Determine category from path
-	pathParts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(pathParts) >= 2 {
-		serviceName := pathParts[1] // e.g., "inventory-service", "compliance-engine"
-		resourceName := ""
-		if len(pathParts) >= 3 {
-			resourceName = pathParts[2] // e.g., "assets", "frameworks"
-		}
-
-		// Map service names to categories
-		switch {
-		case strings.Contains(serviceName, "inventory") || strings.Contains(serviceName, "asset"):
-			eventCategory = "asset"
-			if resourceName == "certificates" {
-				eventCategory = "certificate"
-			}
-		case strings.Contains(serviceName, "discovery"):
-			eventCategory = "discovery"
-		case strings.Contains(serviceName, "compliance"):
-			eventCategory = "compliance"
-		case strings.Contains(serviceName, "report"):
-			eventCategory = "report"
-		case strings.Contains(serviceName, "auth") || strings.Contains(serviceName, "user"):
-			eventCategory = "user"
-		case strings.Contains(serviceName, "tenant"):
-			eventCategory = "tenant"
-		default:
-			eventCategory = "system"
-		}
-
-		// Build event type
-		if resourceName != "" {
-			eventType = fmt.Sprintf("%s.%s.%s", eventCategory, resourceName, action)
-		} else {
-			eventType = fmt.Sprintf("%s.%s", eventCategory, action)
-		}
+	// Category from the path: decided by the service segment, with the resource
+	// overrides in request_category.go. The event type names the resource.
+	service, resource := splitServicePath(path)
+	eventCategory = categoryForRequest(service, resource)
+	if resource != "" {
+		eventType = fmt.Sprintf("%s.%s.%s", eventCategory, resource, action)
 	} else {
-		eventCategory = "system"
-		eventType = fmt.Sprintf("system.%s", action)
+		eventType = fmt.Sprintf("%s.%s", eventCategory, action)
 	}
 
 	return eventType, eventCategory, action

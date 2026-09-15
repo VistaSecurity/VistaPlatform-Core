@@ -60,11 +60,16 @@ func (*PaloAltoInterrogator) Interrogate(ctx context.Context, device DeviceInfo,
 		return nil, err
 	}
 
-	// Attach the structured device identity shared across every asset (carried
-	// over from the device-agent wrapper).
-	result.DeviceIdentity = &DeviceIdentity{
-		Vendor:    "Palo Alto Networks",
-		OSVersion: "PAN-OS",
+	// The structured identity is built from `show system info` inside
+	// interrogate(). This is the fallback for a device that answered keygen but
+	// not the op command: vendor and OS are known from the fact that the PAN-OS
+	// API answered at all, and nothing else is.
+	if result.DeviceIdentity == nil {
+		result.DeviceIdentity = &DeviceIdentity{
+			Vendor:    panVendor,
+			OSVersion: "PAN-OS",
+			ClassHint: panClassHint(),
+		}
 	}
 	return result, nil
 }
@@ -210,11 +215,56 @@ func (c *panClient) interrogate(ctx context.Context) (*InterrogateResult, error)
 		return nil, fmt.Errorf("failed to get API key: %w", err)
 	}
 
-	// System information (non-fatal).
-	if sysInfo, err := c.getSystemInfo(ctx); err != nil {
+	// System information (non-fatal). Identity, hardware facts and the
+	// management interface all come from this one response.
+	var systemInfo panSystemInfo
+	if projected, info, err := c.getSystemInfo(ctx); err != nil {
 		fmt.Printf("Warning: failed to get system info: %v\n", err)
 	} else {
-		result.DeviceInfo = sysInfo
+		result.DeviceInfo = projected
+		systemInfo = info
+		result.DeviceIdentity = panIdentity(info)
+		panEmitSystemFacts(result, info)
+	}
+
+	// Interfaces (non-fatal). The management interface is folded in from system
+	// info, so this still produces a fact when the op command is unavailable.
+	if body, err := c.getInterfaces(ctx); err != nil {
+		fmt.Printf("Warning: failed to get interfaces: %v\n", err)
+		if interfaces, ifErr := panInterfaces("", systemInfo); ifErr == nil && len(interfaces) > 0 {
+			result.addFact(factNetInterfaces, interfaces, ConfidenceReported)
+		}
+	} else if interfaces, err := panInterfaces(body, systemInfo); err != nil {
+		fmt.Printf("Warning: failed to parse interfaces: %v\n", err)
+	} else if len(interfaces) > 0 {
+		result.addFact(factNetInterfaces, interfaces, ConfidenceReported)
+	}
+
+	// Neighbours: ARP (layer 3) and LLDP (layer 2). Both are facts; only LLDP
+	// also produces edges — an ARP entry is an address the firewall has spoken
+	// to, which is not the same claim as "these two are cabled together".
+	var neighbors []map[string]interface{}
+	if body, err := c.getARPTable(ctx); err != nil {
+		fmt.Printf("Warning: failed to get ARP table: %v\n", err)
+	} else if arp, err := panARPNeighbors(body); err != nil {
+		fmt.Printf("Warning: failed to parse ARP table: %v\n", err)
+	} else {
+		neighbors = append(neighbors, arp...)
+	}
+
+	if body, err := c.getLLDPNeighbors(ctx); err != nil {
+		fmt.Printf("Warning: failed to get LLDP neighbours: %v\n", err)
+	} else if lldp, edges, err := panLLDPObservations(body); err != nil {
+		fmt.Printf("Warning: failed to parse LLDP neighbours: %v\n", err)
+	} else {
+		neighbors = append(neighbors, lldp...)
+		for _, edge := range edges {
+			result.addRelationship(edge)
+		}
+	}
+
+	if len(neighbors) > 0 {
+		result.addFact(factNetNeighbors, neighbors, ConfidenceReported)
 	}
 
 	// SSL decrypt profiles (non-fatal).
@@ -279,25 +329,58 @@ func (c *panClient) getAPIKey(ctx context.Context) error {
 	return nil
 }
 
-// getSystemInfo retrieves system information.
+// getSystemInfo retrieves and parses `show system info`.
 //
-// NOTE: this is an intentional stub — it issues the show-system-info op command
-// but does not yet parse the XML response, returning only a marker. Faithfully
-// ported from both source copies; full system-info parsing is tracked as issue
-// item 4.
-func (c *panClient) getSystemInfo(ctx context.Context) (map[string]interface{}, error) {
-	apiURL := fmt.Sprintf("%s/api/?type=op&cmd=<show><system><info></info></system></show>&key=%s", c.baseURL, c.apiKey)
-
-	_, err := c.apiRequest(ctx, "GET", apiURL)
+// It was a stub: the op command was issued, the body discarded, and
+// `{"api_key_obtained": true}` returned in its place — so every PAN-OS
+// interrogation fetched the firewall's hostname, model, serial, software
+// version, uptime, management address and MAC, and threw all of it away
+// (ADR-0004's "already fetched, discarded" column). The response is now
+// projected onto panSystemInfo, an explicit allowlist.
+//
+// The returned map is the flattened projection for DeviceInfo; the typed value
+// is returned alongside it because the facts, the identity and the management
+// interface are all built from it.
+func (c *panClient) getSystemInfo(ctx context.Context) (map[string]interface{}, panSystemInfo, error) {
+	body, err := c.panOpCommand(ctx, "<show><system><info></info></system></show>")
 	if err != nil {
-		return nil, err
+		return nil, panSystemInfo{}, err
 	}
 
-	info := make(map[string]interface{})
-	// Parse XML response and extract system info.
-	// For now, return basic info.
-	info["api_key_obtained"] = true
-	return info, nil
+	info, err := panParseSystemInfo(body)
+	if err != nil {
+		return nil, panSystemInfo{}, err
+	}
+
+	projected := panSystemInfoMap(info)
+	// Retained from the stub: a successful response proves the API key works,
+	// and a caller that only wants to know whether the session is live should
+	// not have to infer it from which fields happen to be populated.
+	//
+	// Renamed from `api_key_obtained`, which contained the fragment `api_key`
+	// and so was REDACTED by the backstop on its way out — the marker reached
+	// every consumer as the string "[redacted]" rather than as a boolean. The
+	// backstop was right to be suspicious of the name; the fix is to call the
+	// field what it means. Nothing read the old key.
+	projected["session_authenticated"] = true
+	return projected, info, nil
+}
+
+// getInterfaces retrieves `show interface all` — the layer-3 and physical views
+// of every interface, merged into the net.interfaces fact.
+func (c *panClient) getInterfaces(ctx context.Context) (string, error) {
+	return c.panOpCommand(ctx, "<show><interface>all</interface></show>")
+}
+
+// getARPTable retrieves `show arp all` — the layer-3 neighbours.
+func (c *panClient) getARPTable(ctx context.Context) (string, error) {
+	return c.panOpCommand(ctx, "<show><arp><entry name='all'/></arp></show>")
+}
+
+// getLLDPNeighbors retrieves `show lldp neighbors all` — the layer-2
+// neighbours, and the connects_to edges built from them.
+func (c *panClient) getLLDPNeighbors(ctx context.Context) (string, error) {
+	return c.panOpCommand(ctx, "<show><lldp><neighbors>all</neighbors></lldp></show>")
 }
 
 // getSSLDecryptProfiles retrieves SSL-decrypt profiles.

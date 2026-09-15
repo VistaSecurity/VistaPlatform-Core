@@ -175,9 +175,27 @@ func TestResolveMany_ScopesTenantEntitlementLookup(t *testing.T) {
 // possible — and the tests that tried to broke the nightly for a month.
 // A private tier keeps this test about the resolver instead of about the seed,
 // and cannot leak into other tests the way mutating `pro` would.
+//
+// It DID leak, for as long as the harness happened to clean up after it. The tier
+// is `is_active`, and TestResolve_EditionGatedCapabilitiesNeverGrantedByTier
+// iterates every active tier — so this one, which exists precisely to grant an
+// edition-gated boolean, failed that invariant. It passed anyway because that test
+// called ApplySchemaAndSeed, and seed.sql's edition-gate correction UPDATE forced
+// every boolean item back to `{"enabled": false}` on EVERY tier, this one
+// included. Once the harness stopped re-applying the seed on an already-seeded
+// database, the leak surfaced. Hence the explicit cleanup: residue that only
+// another test's side effect removes is residue.
 func makeTierGrantingBoolean(t *testing.T, db *sql.DB, key string) uuid.UUID {
 	t.Helper()
 	tierName := "test-tier-" + uuid.New().String()[:8]
+	t.Cleanup(func() {
+		// Tenants first — they reference the tier.
+		_, _ = db.Exec(`DELETE FROM tenants WHERE subscription_tier_id =
+			(SELECT id FROM subscription_tiers WHERE name = $1)`, tierName)
+		_, _ = db.Exec(`DELETE FROM tier_entitlements WHERE tier_id =
+			(SELECT id FROM subscription_tiers WHERE name = $1)`, tierName)
+		_, _ = db.Exec(`DELETE FROM subscription_tiers WHERE name = $1`, tierName)
+	})
 	_, err := db.Exec(`
 		INSERT INTO subscription_tiers (name, display_name, is_active)
 		VALUES ($1, $1, true)
@@ -237,7 +255,7 @@ func TestResolve_EditionGatedCapabilitiesNeverGrantedByTier(t *testing.T) {
 		"custom_policies", "threshold_overrides",
 		"ot_active_probing", "ot_primary_lens",
 		"cbom_signing", "sso_saml", "custom_branding",
-		"cmdb_sync", "siem_export", "billing_portal",
+		"cmdb_sync", "connector_netbox", "siem_export", "billing_portal",
 	}
 
 	rows, err := db.Query(`SELECT name FROM subscription_tiers WHERE is_active`)

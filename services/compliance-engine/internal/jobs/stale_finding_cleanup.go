@@ -64,13 +64,13 @@ func (j *StaleFindingCleanupJob) Run(ctx context.Context) error {
 		// WithTenantTx because it is intentionally tenant-agnostic.
 		// Get batch of stale findings
 		query := `
-			UPDATE compliance_findings
+			UPDATE findings
 			SET detection_state = 'ARCHIVED',
 			    updated_at = NOW()
 			WHERE detection_state = 'INACTIVE'
 			  AND last_seen < $1
 			  AND id IN (
-			      SELECT id FROM compliance_findings
+			      SELECT id FROM findings
 			      WHERE detection_state = 'INACTIVE'
 			        AND last_seen < $1
 			      LIMIT $2

@@ -88,6 +88,22 @@ export const SETTINGS_NAV: SettingsNavSection[] = [
   ] },
   { section: 'Integrations', items: [
     { key: 'integrations', label: 'Integrations', icon: 'plug', built: true, permission: TENANT_PERMISSIONS.settings.read, job: 'Connect the platform to any 3rd-party system — SIEM, CMDB/ITSM, messaging channels, storage — and monitor those connections in one hub.' },
+    // Deliberately NO `feature`. The page is Core and it EXPLAINS the edition:
+    // a Core tenant opening it sees every generative capability marked
+    // Enterprise beside the rule-based behaviour that answers instead, plus the
+    // two switches they own in every edition. An upgrade card here would hide
+    // the settings a Core tenant genuinely has (ADR-0008 — AI-native, never
+    // AI-dependent).
+    //
+    // settings.update, not settings.read, and for the reason the Security & SSO
+    // entry gives: the page exists to change two switches, and PUT /tenant/ai
+    // requires settings.update — a settings.read-only role (security_admin,
+    // billing_admin) reaching it would get a page whose only controls fail.
+    //
+    // GET /tenant/ai is deliberately looser (authentication only), so that any
+    // OTHER surface can explain why a generative capability is absent without
+    // needing an administrator. That is the endpoint's gating, not this entry's.
+    { key: 'ai-assistant', label: 'AI assistant', icon: 'sparkles', built: true, permission: TENANT_PERMISSIONS.settings.update, job: 'See which AI capabilities this deployment has turned on, what answers without them, and control whether your organization uses them at all.' },
   ] },
   { section: 'Notifications & Alerts', items: [
     { key: 'routing', label: 'Routing Rules', icon: 'route', built: true, permission: TENANT_PERMISSIONS.settings.read, job: 'Match events to configured delivery channels, with severity/category filters and digest frequency.' },
@@ -105,6 +121,13 @@ export const SETTINGS_NAV: SettingsNavSection[] = [
         title: 'An Enterprise feature',
         message: 'Custom policies let you author your own compliance frameworks — controls and measurement rules evaluated against your inventory, alongside the platform frameworks. Upgrade to Enterprise to enable them.',
       },
+      // NOTE: the boolean half of this interim lives in Go, as
+      // `authoringDisabledInterim` in
+      // services/auth-service/internal/api/ai_settings.go, because Settings →
+      // AI assistant reports it too. The COPY below is the single source for
+      // both pages. When is fixed, flip that constant and delete this
+      // entry — either one alone leaves the product saying two different things.
+      //
       // Interim mitigation for audit finding B-05, NOT the fix:
       // custom policies (`tenant_frameworks`) are never evaluated today — no
       // finding, no score, for any tenant, regardless of this entitlement.
@@ -121,7 +144,7 @@ export const SETTINGS_NAV: SettingsNavSection[] = [
       },
     },
     { key: 'ratings', label: 'Severity Ratings', icon: 'gauge', job: 'The source-of-truth registry that rates every cryptographic value consistently over time.' },
-    { key: 'asset-lifecycle', label: 'Asset Lifecycle', icon: 'recycle', built: true, permission: TENANT_PERMISSIONS.settings.read, job: 'Set staleness thresholds and auto-archive behavior for assets.' },
+    { key: 'asset-lifecycle', label: 'Asset Lifecycle', icon: 'recycle', built: true, permission: TENANT_PERMISSIONS.settings.read, job: 'Set staleness thresholds, auto-archive behavior, and the drift baseline window assets are compared against.' },
     // Stays settings.read: the page's only load call, GET /retention-policies,
     // is ungated in audit-service, so the entry is not weaker than its route
     // and nobody reaches an error banner. Its WRITE affordances are gated on
@@ -129,6 +152,13 @@ export const SETTINGS_NAV: SettingsNavSection[] = [
     // requirement.
     { key: 'retention', label: 'Retention Policies', icon: 'archive', built: true, permission: TENANT_PERMISSIONS.settings.read, job: 'Define data-retention schedules for audit and event logs.' },
     { key: 'scopes', label: 'Scopes', icon: 'crop', built: true, job: 'Define named, versioned asset boundaries used by CBOM.' },
+    // ADR-0006 D7. Both read the GENERATED class registry, not an endpoint —
+    // the taxonomy is fixed and the client already ships it. `assets.read`
+    // rather than `settings.read`: these pages explain how the inventory is
+    // decided, so anyone who can see the inventory should be able to see the
+    // rules behind it, and neither page calls a settings route.
+    { key: 'classes', label: 'Classes', icon: 'shapes', built: true, permission: TENANT_PERMISSIONS.assets.read, job: 'Browse the asset class taxonomy and the attributes each class carries.' },
+    { key: 'identification-rules', label: 'Identification rules', icon: 'fingerprint', built: true, permission: TENANT_PERMISSIONS.assets.read, job: 'See how a discovered thing is matched to an existing asset, and decide whether a high enough match may be accepted without you.' },
   ] },
   { section: 'Audit', items: [
     // audit.read, not settings.read: the audit trail is its own permission

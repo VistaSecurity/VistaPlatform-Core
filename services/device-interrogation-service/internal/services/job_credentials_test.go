@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/vistasecurity/vistaplatform/shared/agentcreds"
+	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
 )
 
@@ -231,5 +232,84 @@ func TestSealCredentialsForAgent_BindsToTheClaimingAgent(t *testing.T) {
 	}
 	if _, err := agentcreds.Open(sealed, "00000000-0000-0000-0000-000000000000", "agent-A-registration-key"); err == nil {
 		t.Fatal("the envelope replayed onto another job id, want failure")
+	}
+}
+
+// TestNormalizeJobCredentials_OpensBothCiphertextSpellings pins the one thing
+// the phase-1 credential move could have broken silently.
+//
+// asset_credentials.password_enc is written by the shared credentials helper
+// and carries its `enc:v1:` tag. `devices.password` never did — it held bare
+// encryption.Service output — and a device_jobs row frozen before the upgrade
+// still carries that shape in its credential map. Both must open, and the
+// branch is on the TAG rather than on "try one and fall back", because a
+// fallback is exactly the guess the tag exists to remove.
+func TestNormalizeJobCredentials_OpensBothCiphertextSpellings(t *testing.T) {
+	const plaintext = "p@ssw0rd-from-the-device-row"
+
+	cipher, err := credentials.NewCipher("test", testMasterKey, credentials.Policy{Fields: sensitiveCredentialFields})
+	if err != nil {
+		t.Fatalf("NewCipher: %v", err)
+	}
+	tagged, err := cipher.EncryptValue(plaintext)
+	if err != nil {
+		t.Fatalf("EncryptValue: %v", err)
+	}
+	if !strings.HasPrefix(tagged, credentials.Prefix) {
+		t.Fatalf("EncryptValue produced %q with no %q tag", tagged, credentials.Prefix)
+	}
+
+	for name, stored := range map[string]string{
+		"tagged (asset_credentials.password_enc)": tagged,
+		"untagged (a job queued before phase 1)":  mustEncrypt(t, testMasterKey, plaintext),
+	} {
+		t.Run(name, func(t *testing.T) {
+			out, err := NormalizeJobCredentials(map[string]interface{}{
+				"username":          "admin",
+				"password":          stored,
+				masterEncryptedFlag: true,
+			}, testMasterKey)
+			if err != nil {
+				t.Fatalf("NormalizeJobCredentials = %v, want nil", err)
+			}
+			if out["password"] != plaintext {
+				t.Errorf("password = %v, want the decrypted %q", out["password"], plaintext)
+			}
+			if _, still := out[masterEncryptedFlag]; still {
+				t.Error("the encrypted flag survived normalisation; the fields are plaintext now")
+			}
+		})
+	}
+}
+
+// TestNormalizeJobCredentials_TaggedCiphertextThatWillNotOpenIsAnError is the
+// negative polarity, and it is the whole point of the tag.
+//
+// A field FLAGGED as encrypted that will not decrypt is a real failure. Shipping
+// the ciphertext on is — the agent logs in with a fragment of a ciphertext
+// and the operator sees an unexplained authentication failure against the
+// device.
+func TestNormalizeJobCredentials_TaggedCiphertextThatWillNotOpenIsAnError(t *testing.T) {
+	otherKey := strings.Repeat("ab", 32)
+	cipher, err := credentials.NewCipher("test", otherKey, credentials.Policy{Fields: sensitiveCredentialFields})
+	if err != nil {
+		t.Fatalf("NewCipher: %v", err)
+	}
+	wrongKeyCiphertext, err := cipher.EncryptValue("secret")
+	if err != nil {
+		t.Fatalf("EncryptValue: %v", err)
+	}
+
+	_, err = NormalizeJobCredentials(map[string]interface{}{
+		"username":          "admin",
+		"password":          wrongKeyCiphertext,
+		masterEncryptedFlag: true,
+	}, testMasterKey)
+	if err == nil {
+		t.Fatal("NormalizeJobCredentials accepted ciphertext it could not decrypt; " +
+			"the agent would have received the ciphertext as the password")
+	}
+	if !strings.Contains(err.Error(), "password") {
+		t.Errorf("error = %v, want it to name the field", err)
 	}
 }

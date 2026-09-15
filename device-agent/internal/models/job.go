@@ -5,18 +5,43 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 )
 
 // Job represents a device interrogation job from the platform
 type Job struct {
-	ID          uuid.UUID              `json:"id"`
-	Type        string                 `json:"type"` // "device_interrogation", "cloud_discovery"
+	ID   uuid.UUID `json:"id"`
+	Type string    `json:"type"` // "device_interrogation", "cloud_discovery"
+	// AssetID is the asset the job targets. The platform merged `devices` into
+	// `assets` in phase 1 (ADR-0002 D5) and emits BOTH this and the legacy
+	// `device_id`, carrying the same value, for one release.
+	AssetID *uuid.UUID `json:"asset_id,omitempty"`
+	// DeviceID is the legacy spelling of AssetID. Read as a fallback so this
+	// agent still works against a control plane older than phase 1.
+	//
+	// Deprecated: use Target().
 	DeviceID    *uuid.UUID             `json:"device_id,omitempty"`
 	DeviceType  string                 `json:"device_type"` // "f5", "cisco_router", "aws_alb", etc.
 	Credentials map[string]interface{} `json:"credentials"` // Encrypted credentials (decrypted by agent)
 	Parameters  map[string]interface{} `json:"parameters"`
 	CreatedAt   time.Time              `json:"created_at"`
 	ExpiresAt   *time.Time             `json:"expires_at,omitempty"`
+}
+
+// Target returns the id of the thing the job is about, preferring the phase-1
+// `asset_id` and falling back to the legacy `device_id`.
+//
+// The fallback is not decoration: an agent is shipped separately and is
+// routinely a release behind or ahead of the control plane it talks to, so
+// BOTH directions have to work. Reading only one of the two fields is how an
+// agent ends up reporting an unexplained device failure for a job whose target
+// it simply could not see.
+func (j *Job) Target() *uuid.UUID {
+	if j.AssetID != nil {
+		return j.AssetID
+	}
+	return j.DeviceID
 }
 
 // JobResult represents the result of a job execution
@@ -27,6 +52,15 @@ type JobResult struct {
 	Assets      []DiscoveredAsset      `json:"assets,omitempty"`
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
 	CompletedAt time.Time              `json:"completed_at"`
+
+	// Facts and Relationships are the ops observations the shared collectors
+	// emit alongside the crypto assets — interfaces, neighbours, VLANs,
+	// hardware identity, and the adoption/uplink/LLDP edges between them
+	// (ADR-0004 D1, ADR-0003). They are carried verbatim from the shared core's
+	// InterrogateResult and land in asset_facts / asset_relationships on the
+	// platform; an older control plane ignores them.
+	Facts         []di.FactObservation         `json:"facts,omitempty"`
+	Relationships []di.RelationshipObservation `json:"relationships,omitempty"`
 }
 
 // DiscoveredAsset represents an infrastructure asset discovered during interrogation.

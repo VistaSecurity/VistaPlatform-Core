@@ -45,7 +45,13 @@ never take it away.
 ### Working an alert
 
 Each row shows the alert's severity, what it's about, its status, and how
-long ago it last changed. Filter by status (Active / Acknowledged / Snoozed
+long ago it last changed. Where the thing the alert is about has a page of
+its own, the **Subject** is a link straight to it — an asset opens its
+asset page, a package or a configuration opens the findings about that
+exact subject, a control opens the control, a certificate opens the
+certificate lens. Subjects with nowhere to go yet (a sensor, a discovery
+job) stay as plain text rather than sending you to a page that cannot show
+you the thing. Filter by status (Active / Acknowledged / Snoozed
 / Resolved / All) or by severity. Click a row to open the detail drawer,
 which shows the full **evidence timeline** — every state change, timestamped
 and attributed, from when the alert first opened through every escalation,
@@ -67,6 +73,17 @@ From the drawer (or the row), you can:
   comment from then on. The ticket carries a **View alert** link back to the
   live evidence drawer at all times.
 
+An alert's severity follows the condition in **both directions**. If things get
+worse — a tighter certificate deadline, a worse advisory — the alert escalates
+and tells you. If things get better without the condition going away — a
+partial fix drops the worst CVSS on a package, or the worst of several
+end-of-life deadlines on an asset is dealt with and a milder one remains — the
+alert is **lowered** to match what is actually still open, and the change is
+recorded in its evidence timeline like any other. A lowered severity does not
+notify anybody: the alert stays where it is, re-graded, so the list you triage
+top-down by severity is telling you the truth about today rather than the worst
+thing that was ever true.
+
 Some alerts resolve themselves: when the underlying condition is observed to
 have cleared — for example, a certificate gets renewed — the alert closes
 automatically and records what was observed (the new expiry date, when it
@@ -78,6 +95,71 @@ closed can't accidentally mask a certificate that's still expiring.
 > Acting on an alert (acknowledge, snooze, resolve, create ticket) requires
 > permission to manage alerts. If you only see the Alerts list with no
 > action buttons, your role is read-only here.
+
+### Alerts raised from your inventory
+
+Four alert types come straight from what Vista Platform finds in your
+estate. All four are on by default and can be switched off (or routed
+separately) under **Settings → Notifications & Alerts → Alert Rules**.
+
+**Vulnerable software.** When an installed package matches a published
+security advisory, you get **one alert for that installation**, not one per
+CVE — because the fix is the same either way: upgrade the package. Its
+severity follows the worst advisory that matched, on the standard CVSS
+severity bands: Medium from CVSS 4.0, High from 7.0, Critical from 9.0. If a
+worse advisory turns up later, the same alert escalates rather than a second
+one appearing. It closes itself on the next inventory pass that no longer
+sees the vulnerable version.
+
+> Advisories below CVSS 4.0, and advisories the feed has not scored at all,
+> are still recorded and still shown on the asset under **Findings** — they
+> just don't open an alert. An advisory nobody has graded is never reported
+> as harmless; it is reported as ungraded.
+
+**End of life.** When something on an asset passes — or approaches — the date
+its vendor stops shipping fixes, you get **one alert for that asset**, even if
+both its operating system and its hardware are affected; the alert is graded
+by whichever is worse and names both. The ladder is the deadline:
+
+| How long you have | Severity |
+|---|---|
+| 180 days or less | Low |
+| 90 days or less | Medium |
+| Past the date | High |
+| Past the date by more than a year | Critical |
+
+How early the first alert appears depends on what it is about:
+Vista Platform starts reporting hardware 180 days ahead (a refresh needs a
+purchase order and a rack visit) and an operating system or a package 90 days
+ahead. The alert closes itself when the next inventory pass sees an upgraded
+version — or when the subject leaves your inventory.
+
+> The severity on the alert answers "how urgent is this?", which is not the
+> same question as the risk score on the finding behind it. An end-of-life
+> package and an end-of-life operating system share a deadline but not a blast
+> radius, so the finding grades them differently while the alert grades the
+> clock. The finding is the one that moves the asset's risk score.
+
+**Changed since baseline.** When something about an asset stops matching its
+own recent history, you get **one alert for that asset** naming what changed: a
+class of device never before seen on its network segment, a protocol it has not
+spoken before, a different set of listening ports, or a certificate from an
+issuer it has not presented. Its severity is the severity of the change itself
+— a changed port profile is Low, a new issuer or an unexpected protocol is
+Medium — and an asset with several changes open is graded by the worst.
+
+> Drift is not automatically bad. Most of these are planned changes, and the
+> right response to a planned one is to resolve the finding behind it: that
+> tells the baseline the new behaviour is expected, and the alert closes with
+> it. The alert also closes on its own once the asset is back in line with its
+> baseline.
+
+**Inventory hygiene score drop.** If your Inventory Hygiene score falls by more
+than 10 points in 24 hours, you get a Medium alert naming the before and after
+figures. It resolves itself when the score recovers. This is the same detector
+that watches your compliance frameworks, split out as its own type because
+hygiene is data quality rather than security posture — so you can route it to a
+different channel, or silence it, without touching compliance alerting.
 
 ---
 

@@ -4,9 +4,9 @@ package services
 // resurrect on the next whole-tenant reconcile.
 //
 // Asset deletion is a soft delete — inventory-service's DeleteAsset stamps
-// network_assets.deleted_at and deliberately leaves crypto_implementations alone
+// assets.deleted_at and deliberately leaves crypto_implementations alone
 // — and FindingsService.OnAssetDeleted then flips that asset's findings to
-// INACTIVE. But none of the ten `JOIN network_assets na` sites in
+// INACTIVE. But none of the ten `JOIN assets na` sites in
 // measurement_extractor.go filtered on deleted_at, so the next whole-tenant
 // reconcile re-extracted the deleted asset, recomputed the same violation, and
 // upsertFindings flipped the row straight back to ACTIVE with workflow_status
@@ -105,8 +105,8 @@ func newDeletionFixture(t *testing.T) *deletionFixture {
 	// RFC 5737 documentation address — never a real or lab network.
 	assetID, implID := uuid.New(), uuid.New()
 	if _, err := db.Exec(`
-		INSERT INTO network_assets_partitioned (id, tenant_id, hostname, ip_address, port, asset_type)
-		VALUES ($1, $2, 'tls10.example.test', '192.0.2.10', 443, 'server')`,
+		INSERT INTO assets (id, tenant_id, hostname, primary_address, class_key, class_path)
+		VALUES ($1, $2, 'tls10.example.test', '192.0.2.10'::inet, 'server', 'hardware.computer.server')`,
 		assetID, tenant); err != nil {
 		t.Fatalf("seed asset: %v", err)
 	}
@@ -133,8 +133,8 @@ func (f *deletionFixture) detectionState(t *testing.T) string {
 	t.Helper()
 	var states []string
 	if err := f.db.Select(&states, `
-		SELECT detection_state FROM compliance_findings
-		WHERE tenant_id = $1 AND control_id = $2 AND asset_id = $3`,
+		SELECT detection_state FROM findings
+		WHERE tenant_id = $1 AND control_id = $2 AND subject_id = $3`,
 		f.tenant, f.controlID, f.assetID); err != nil {
 		t.Fatalf("read finding: %v", err)
 	}
@@ -166,16 +166,16 @@ func TestIntegration_Reconcile_DeletedAssetFindingsStayInactive(t *testing.T) {
 	}
 
 	// 2. The tenant deletes the asset. Exactly what inventory-service does:
-	//    a soft delete on network_assets only (crypto_implementations untouched),
+	//    a soft delete on assets only (crypto_implementations untouched),
 	//    followed by OnAssetDeleted flipping the findings INACTIVE.
 	if _, err := f.db.Exec(
-		`UPDATE network_assets SET deleted_at = NOW() WHERE tenant_id = $1 AND id = $2`,
+		`UPDATE assets SET deleted_at = NOW() WHERE tenant_id = $1 AND id = $2`,
 		f.tenant, f.assetID); err != nil {
 		t.Fatalf("soft-delete asset: %v", err)
 	}
 	if _, err := f.db.Exec(`
-		UPDATE compliance_findings SET detection_state = 'INACTIVE', updated_at = NOW()
-		WHERE tenant_id = $1 AND asset_id = $2 AND detection_state = 'ACTIVE'`,
+		UPDATE findings SET detection_state = 'INACTIVE', updated_at = NOW()
+		WHERE tenant_id = $1 AND subject_id = $2 AND detection_state = 'ACTIVE'`,
 		f.tenant, f.assetID); err != nil {
 		t.Fatalf("inactivate findings: %v", err)
 	}
@@ -215,8 +215,8 @@ func TestIntegration_Reconcile_DeletedAssetFindingsStayInactive(t *testing.T) {
 	// history on an unrelated re-evaluate.
 	var resurfacedAt *string
 	if err := f.db.QueryRow(`
-		SELECT resurfaced_at::text FROM compliance_findings
-		WHERE tenant_id = $1 AND asset_id = $2`, f.tenant, f.assetID).Scan(&resurfacedAt); err != nil {
+		SELECT resurfaced_at::text FROM findings
+		WHERE tenant_id = $1 AND subject_id = $2`, f.tenant, f.assetID).Scan(&resurfacedAt); err != nil {
 		t.Fatalf("read resurfaced_at: %v", err)
 	}
 	if resurfacedAt != nil {
@@ -281,7 +281,7 @@ func TestIntegration_Extractor_SkipsDeletedInventory(t *testing.T) {
 	}
 
 	if _, err := f.db.Exec(
-		`UPDATE network_assets SET deleted_at = NOW() WHERE tenant_id = $1 AND id = $2`,
+		`UPDATE assets SET deleted_at = NOW() WHERE tenant_id = $1 AND id = $2`,
 		f.tenant, f.assetID); err != nil {
 		t.Fatalf("soft-delete asset: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestIntegration_Extractor_SkipsDeletedInventory(t *testing.T) {
 
 	// Restore the asset, delete the configuration instead: the other predicate.
 	if _, err := f.db.Exec(
-		`UPDATE network_assets SET deleted_at = NULL WHERE tenant_id = $1 AND id = $2`,
+		`UPDATE assets SET deleted_at = NULL WHERE tenant_id = $1 AND id = $2`,
 		f.tenant, f.assetID); err != nil {
 		t.Fatalf("restore asset: %v", err)
 	}

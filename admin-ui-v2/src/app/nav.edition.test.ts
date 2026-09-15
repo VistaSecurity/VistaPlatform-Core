@@ -51,7 +51,10 @@ describe('the sections a Core build must still offer', () => {
   );
 
   it('keeps every Core sub-view of Catalog and Settings', () => {
-    expect(childIds(core, 'catalog')).toEqual(['ratings', 'frameworks']);
+    // The end-of-life and vulnerability catalogues are Core too (ADR-0005 D3):
+    // free reference data in every edition, with no entitlement to check — so
+    // they must survive the Core filter alongside Algorithms and Frameworks.
+    expect(childIds(core, 'catalog')).toEqual(['ratings', 'frameworks', 'eol', 'vulnerabilities', 'classification-rules']);
     expect(childIds(core, 'settings')).toContain('legal'); // authoring is Core
   });
 });

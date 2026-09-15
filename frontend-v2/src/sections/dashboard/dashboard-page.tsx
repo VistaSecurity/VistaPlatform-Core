@@ -3,8 +3,16 @@ import { useNavigate } from 'react-router';
 import { clients } from '../../lib/clients';
 import { Icon, LevelBar, LevelDot, MiniBar, RiskGauge, levelFromScore, riskColor, LEVEL_MIN } from '../../components/ui';
 import { PostureTrendChart } from '../../components/posture-trend-chart';
-import { DASHBOARD_COMPLIANCE_FINDINGS_ROUTE, getDashboardPqcMetric, getDiscoveryFleetMetric } from './dashboard-metrics';
+import {
+  DASHBOARD_COMPLIANCE_FINDINGS_ROUTE, DASHBOARD_HIGH_RISK_ASSETS_ROUTE, DASHBOARD_UNSCORED_ASSETS_ROUTE,
+  getDashboardPqcMetric, getDiscoveryFleetMetric,
+} from './dashboard-metrics';
 import { fetchDashboardSensors, fetchDashboardDeviceAgents, fetchDashboardTicketStats } from './dashboard-queries';
+// The Inventory health hero (ADR-0006 D5, workstream 3.8) — the ops half of
+// this page, beside the cryptographic-posture hero above it. Its own component
+// because it holds its own queries and its own three-valued arithmetic; this
+// page's job is to say where on the page it goes.
+import { InventoryHealthHero } from './inventory-health-hero';
 
 // Dashboard — the command center, ported to the mock's four layers (Dashboard.jsx):
 // cinematic hero, "needs attention" triage strip, lifecycle pipeline, supporting
@@ -158,9 +166,9 @@ export function DashboardPage() {
   // that is really an unthrown fetch failure wearing a zero.
   const attention = [
     { id: 'crit', count: crit, label: 'Critical findings', sub: 'across all assets', icon: 'circle-alert', tone: RED, route: DASHBOARD_COMPLIANCE_FINDINGS_ROUTE, error: findingsSeverity.isError },
-    { id: 'high', count: high, label: 'High-risk assets', sub: `risk score ≥ ${LEVEL_MIN.High}`, icon: 'server', tone: 'var(--danger-soft)', route: '/inventory?lens=infrastructure', error: false },
+    { id: 'high', count: high, label: 'High-risk assets', sub: `risk score ≥ ${LEVEL_MIN.High}`, icon: 'server', tone: 'var(--danger-soft)', route: DASHBOARD_HIGH_RISK_ASSETS_ROUTE, error: false },
     { id: 'exp', count: expSoon, label: 'Certs expiring', sub: 'within 30 days', icon: 'file-badge', tone: ORANGE, route: '/inventory?lens=certificate', error: expiring.isError },
-    { id: 'unk', count: unknown, label: 'Unscored assets', sub: 'no risk signal yet', icon: 'search', tone: 'var(--warn)', route: '/inventory?lens=infrastructure', error: false },
+    { id: 'unk', count: unknown, label: 'Unscored assets', sub: 'no risk signal yet', icon: 'search', tone: 'var(--warn)', route: DASHBOARD_UNSCORED_ASSETS_ROUTE, error: false },
     { id: 'pqc', count: pqcNeedsMigration, label: 'Not PQC-ready', sub: 'configs on classical crypto', icon: 'key-round', tone: BLUE, route: '/inventory?lens=configuration', error: pqc.isError },
     { id: 'pqc-unclassified', count: pqcUnclassified, label: 'Not yet assessed', sub: 'no algorithm data', icon: 'help-circle', tone: 'var(--app-t3)', route: '/inventory?lens=configuration', error: pqc.isError },
     { id: 'tick', count: tkOverdue, label: 'Overdue tickets', sub: 'past SLA', icon: 'wrench', tone: ORANGE, route: '/remediation/plans', error: tickets.isError },
@@ -262,6 +270,12 @@ export function DashboardPage() {
           </div>
         </div>
       </div>
+
+      {/* ---------- INVENTORY HEALTH hero (ADR-0006 D5) ---------- */}
+      {/* Directly under the cryptographic-posture hero, NOT on a page of its
+          own: D5's whole point is that the ops and compliance personas read
+          two halves of ONE dashboard. */}
+      <InventoryHealthHero />
 
       {/* ---------- NEEDS ATTENTION strip ---------- */}
       <div className="fade-up" style={{ marginBottom: 18, animationDelay: '.05s' }}>

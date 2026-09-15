@@ -264,13 +264,13 @@ func (s *LocationService) Update(tenantID, id uuid.UUID, input models.LocationIn
 	return s.GetByID(tenantID, id)
 }
 
-// Delete removes a location. Fails if any network_segments or network_assets reference it.
+// Delete removes a location. Fails if any network_segments or assets reference it.
 func (s *LocationService) Delete(tenantID, id uuid.UUID) error {
 	var segCount, assetCount int
-	// RLS-scoped reads + delete over network_segments / network_assets / locations.
+	// RLS-scoped reads + delete over network_segments / assets / locations.
 	return database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		_ = tx.QueryRow(`SELECT COUNT(*) FROM network_segments WHERE location_id = $1`, id).Scan(&segCount)
-		_ = tx.QueryRow(`SELECT COUNT(*) FROM network_assets WHERE location_id = $1 AND deleted_at IS NULL`, id).Scan(&assetCount)
+		_ = tx.QueryRow(`SELECT COUNT(*) FROM assets WHERE location_id = $1 AND deleted_at IS NULL`, id).Scan(&assetCount)
 		if segCount > 0 || assetCount > 0 {
 			return fmt.Errorf("cannot delete location: referenced by %d network segment(s) and %d asset(s)", segCount, assetCount)
 		}
@@ -282,23 +282,23 @@ func (s *LocationService) Delete(tenantID, id uuid.UUID) error {
 // GetLocationAssets returns assets for a location (for summary). Uses explicit columns and tags/metadata as text so JSONB scans correctly.
 func (s *LocationService) GetLocationAssets(tenantID, locationID uuid.UUID) ([]models.Asset, int, error) {
 	query := `
-		SELECT a.id, a.tenant_id, a.hostname, a.ip_address, a.port, a.asset_type,
-			a.operating_system, a.environment, a.business_unit, a.owner_email,
+		SELECT a.id, a.tenant_id, a.hostname, host(a.primary_address), ep.port, a.class_key,
+			` + assetOperatingSystemSQL + `, a.environment, a.business_unit, a.owner_email,
 			a.description, a.tags::text, a.metadata::text, a.asset_ownership, a.asset_status,
 			a.first_discovered_at, a.last_seen_at, a.created_at, a.updated_at, a.deleted_at,
 			a.location_id, a.network_segment_id, ns.name AS network_segment_name,
-			a.service_name, a.service_version, a.service_confidence, a.service_identification_method,
+			ep.service_name, ep.service_version, ep.service_confidence, ep.service_identification_method,
 			a.risk_score, ` + models.RiskLevelCaseSQL("COALESCE(a.risk_score, 0)") + ` AS risk_level
-		FROM network_assets a
-		LEFT JOIN network_segments ns ON ns.id = a.network_segment_id
+		FROM assets a
+		LEFT JOIN network_segments ns ON ns.id = a.network_segment_id` + primaryEndpointJoin + `
 		WHERE a.tenant_id = $1 AND a.location_id = $2 AND a.deleted_at IS NULL
 		ORDER BY a.last_seen_at DESC LIMIT 100
 	`
 	var total int
 	var assets []models.Asset
-	// RLS-scoped reads over network_assets / network_segments — count + page in one tenant tx.
+	// RLS-scoped reads over assets / network_segments — count + page in one tenant tx.
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		if e := tx.QueryRow(`SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND location_id = $2 AND deleted_at IS NULL`, tenantID, locationID).Scan(&total); e != nil {
+		if e := tx.QueryRow(`SELECT COUNT(*) FROM assets WHERE tenant_id = $1 AND location_id = $2 AND deleted_at IS NULL`, tenantID, locationID).Scan(&total); e != nil {
 			return e
 		}
 		rows, e := tx.Queryx(query, tenantID, locationID)
@@ -310,17 +310,22 @@ func (s *LocationService) GetLocationAssets(tenantID, locationID uuid.UUID) ([]m
 		for rows.Next() {
 			var asset models.Asset
 			var tagsText, metadataText string
+			var operatingSystem *string
+			var ep models.Endpoint
 			if e := rows.Scan(
-				&asset.ID, &asset.TenantID, &asset.Hostname, &asset.IPAddress, &asset.Port,
-				&asset.AssetType, &asset.OperatingSystem, &asset.Environment, &asset.BusinessUnit,
+				&asset.ID, &asset.TenantID, &asset.Hostname, &asset.PrimaryAddress, &ep.Port,
+				&asset.ClassKey, &operatingSystem, &asset.Environment, &asset.BusinessUnit,
 				&asset.OwnerEmail, &asset.Description, &tagsText, &metadataText, &asset.AssetOwnership, &asset.AssetStatus,
 				&asset.FirstDiscoveredAt, &asset.LastSeenAt, &asset.CreatedAt, &asset.UpdatedAt,
-				&asset.DeletedAt, &asset.LocationID, &asset.NetworkSegmentID, &asset.NetworkSegmentName, &asset.ServiceName, &asset.ServiceVersion,
-				&asset.ServiceConfidence, &asset.ServiceIdentificationMethod,
+				&asset.DeletedAt, &asset.LocationID, &asset.NetworkSegmentID, &asset.NetworkSegmentName, &ep.ServiceName, &ep.ServiceVersion,
+				&ep.ServiceConfidence, &ep.ServiceIdentificationMethod,
 				&asset.RiskScore, &asset.RiskLevel,
 			); e != nil {
 				return e
 			}
+			setAssetOperatingSystem(&asset, operatingSystem)
+			attachPrimaryEndpoint(&asset, ep)
+			normalizeAssetCollections(&asset)
 			if tagsText != "" {
 				_ = json.Unmarshal([]byte(tagsText), &asset.Tags)
 			}
@@ -350,26 +355,26 @@ func (s *LocationService) GetLocationSummary(tenantID, locationID uuid.UUID) (*m
 		return nil, err
 	}
 	sum := &models.LocationSummary{Location: *loc}
-	// RLS-scoped reads over network_assets / crypto_implementations / certificates — all in one tenant tx.
+	// RLS-scoped reads over assets / crypto_implementations / certificates — all in one tenant tx.
 	_ = database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		_ = tx.QueryRow(`SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND location_id = $2 AND deleted_at IS NULL`, tenantID, locationID).Scan(&sum.AssetCount)
-		_ = tx.QueryRow(`SELECT COUNT(*) FROM crypto_implementations ci JOIN network_assets na ON ci.asset_id = na.id WHERE na.tenant_id = $1 AND na.location_id = $2 AND na.deleted_at IS NULL AND ci.deleted_at IS NULL`, tenantID, locationID).Scan(&sum.CryptoConfigCount)
-		_ = tx.QueryRow(`SELECT COUNT(DISTINCT c.id) FROM certificates c JOIN crypto_implementation_certificates cic ON cic.certificate_id = c.id JOIN crypto_implementations ci ON ci.id = cic.crypto_implementation_id JOIN network_assets na ON na.id = ci.asset_id WHERE na.tenant_id = $1 AND na.location_id = $2 AND na.deleted_at IS NULL`, tenantID, locationID).Scan(&sum.CertificateCount)
+		_ = tx.QueryRow(`SELECT COUNT(*) FROM assets WHERE tenant_id = $1 AND location_id = $2 AND deleted_at IS NULL`, tenantID, locationID).Scan(&sum.AssetCount)
+		_ = tx.QueryRow(`SELECT COUNT(*) FROM crypto_implementations ci JOIN assets na ON ci.asset_id = na.id WHERE na.tenant_id = $1 AND na.location_id = $2 AND na.deleted_at IS NULL AND ci.deleted_at IS NULL`, tenantID, locationID).Scan(&sum.CryptoConfigCount)
+		_ = tx.QueryRow(`SELECT COUNT(DISTINCT c.id) FROM certificates c JOIN crypto_implementation_certificates cic ON cic.certificate_id = c.id JOIN crypto_implementations ci ON ci.id = cic.crypto_implementation_id JOIN assets na ON na.id = ci.asset_id WHERE na.tenant_id = $1 AND na.location_id = $2 AND na.deleted_at IS NULL`, tenantID, locationID).Scan(&sum.CertificateCount)
 		// Band the stored risk_score rather than reading the risk_level column:
 		// nothing has ever written that column, so it sits at its schema DEFAULT
 		// 'Informational' on every row and these three counters were structurally
 		// always 0. models.RiskBands is the single banding source (CLAUDE.md).
-		// network_assets.risk_score is already the per-asset roll-up (GREATEST
+		// assets.risk_score is already the per-asset roll-up (recomputed MAX
 		// over its implementations), so banding it here bands once, per asset.
 		countByBand := func(band string, dest *int) {
-			_ = tx.QueryRow(`SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND location_id = $2 AND deleted_at IS NULL AND `+
+			_ = tx.QueryRow(`SELECT COUNT(*) FROM assets WHERE tenant_id = $1 AND location_id = $2 AND deleted_at IS NULL AND `+
 				models.MustRiskBandSQL("COALESCE(risk_score, 0)", band), tenantID, locationID).Scan(dest)
 		}
 		countByBand("Critical", &sum.CriticalFindings)
 		countByBand("High", &sum.HighFindings)
 		countByBand("Medium", &sum.MediumFindings)
-		_ = tx.QueryRow(`SELECT COUNT(*) FROM certificates c JOIN crypto_implementation_certificates cic ON cic.certificate_id = c.id JOIN crypto_implementations ci ON ci.id = cic.crypto_implementation_id JOIN network_assets na ON na.id = ci.asset_id WHERE na.tenant_id = $1 AND na.location_id = $2 AND na.deleted_at IS NULL AND c.not_after > NOW() AND c.not_after <= NOW() + INTERVAL '30 days'`, tenantID, locationID).Scan(&sum.ExpiringCerts30D)
-		_ = tx.QueryRow(`SELECT COUNT(*) FROM certificates c JOIN crypto_implementation_certificates cic ON cic.certificate_id = c.id JOIN crypto_implementations ci ON ci.id = cic.crypto_implementation_id JOIN network_assets na ON na.id = ci.asset_id WHERE na.tenant_id = $1 AND na.location_id = $2 AND na.deleted_at IS NULL AND c.not_after < NOW()`, tenantID, locationID).Scan(&sum.ExpiredCerts)
+		_ = tx.QueryRow(`SELECT COUNT(*) FROM certificates c JOIN crypto_implementation_certificates cic ON cic.certificate_id = c.id JOIN crypto_implementations ci ON ci.id = cic.crypto_implementation_id JOIN assets na ON na.id = ci.asset_id WHERE na.tenant_id = $1 AND na.location_id = $2 AND na.deleted_at IS NULL AND c.not_after > NOW() AND c.not_after <= NOW() + INTERVAL '30 days'`, tenantID, locationID).Scan(&sum.ExpiringCerts30D)
+		_ = tx.QueryRow(`SELECT COUNT(*) FROM certificates c JOIN crypto_implementation_certificates cic ON cic.certificate_id = c.id JOIN crypto_implementations ci ON ci.id = cic.crypto_implementation_id JOIN assets na ON na.id = ci.asset_id WHERE na.tenant_id = $1 AND na.location_id = $2 AND na.deleted_at IS NULL AND c.not_after < NOW()`, tenantID, locationID).Scan(&sum.ExpiredCerts)
 		return nil
 	})
 	return sum, nil

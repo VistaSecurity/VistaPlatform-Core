@@ -40,8 +40,8 @@ func frameworkIDByCode(t *testing.T, db *sql.DB, code string) uuid.UUID {
 }
 
 // A Core tenant sits on the community tier, whose compliance_frameworks_max is
-// 0. All six free frameworks must nonetheless be activatable — they cost
-// nothing, Core ships them, and five of the six were unreachable because the
+// 0. Every free framework must nonetheless be activatable — they cost
+// nothing, Core ships them, and all but one were unreachable because the
 // only exemption was `is_platform_default`, which a UNIQUE index restricts to
 // one framework.
 func TestIntegration_FreeFrameworksActivateAtCapZero(t *testing.T) {
@@ -60,8 +60,9 @@ func TestIntegration_FreeFrameworksActivateAtCapZero(t *testing.T) {
 		t.Fatalf("community compliance_frameworks_max = %v, want 0 — this test asserts the carve-out, not the cap", limit)
 	}
 
-	// Activate all six, one at a time, checking the gate before each and
-	// writing the license so the next check sees the accumulated usage.
+	// Activate every free framework, one at a time, checking the gate before
+	// each and writing the license so the next check sees the accumulated
+	// usage.
 	for _, code := range FreeFrameworkCodes {
 		frameworkID := frameworkIDByCode(t, db, code)
 
@@ -82,17 +83,17 @@ func TestIntegration_FreeFrameworksActivateAtCapZero(t *testing.T) {
 		}
 	}
 
-	// Six free activations later, GetComplianceFrameworkUsage's `current` is
+	// Every free activation later, GetComplianceFrameworkUsage's `current` is
 	// tenant-truth (every active license, free or paid — see its doc comment),
-	// so it reports all 6. The cap itself is untouched: cap enforcement runs
-	// through countActiveFrameworkSubscriptions/CheckComplianceFrameworkLimit,
+	// so it reports all of them. The cap itself is untouched: cap enforcement
+	// runs through countActiveFrameworkSubscriptions/CheckComplianceFrameworkLimit,
 	// asserted below, which still excludes free frameworks (CMP-6).
 	current, _, err := svc.GetComplianceFrameworkUsage(tenantID)
 	if err != nil {
 		t.Fatalf("GetComplianceFrameworkUsage after activations: %v", err)
 	}
 	if current != len(FreeFrameworkCodes) {
-		t.Errorf("active framework licenses after 6 free activations = %d, want %d", current, len(FreeFrameworkCodes))
+		t.Errorf("active framework licenses after %d free activations = %d, want %d", len(FreeFrameworkCodes), current, len(FreeFrameworkCodes))
 	}
 
 	// The cap still means something: a paid/regulated catalog entry is blocked.

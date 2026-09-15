@@ -12,6 +12,53 @@ import (
 	"github.com/google/uuid"
 )
 
+// ArtifactKind names which bill of materials an artifact is (ADR-0005 D6).
+//
+// One pipeline, four products. A CBOM is the CRYPTO subset of a general
+// inventory snapshot, and CycloneDX 1.7 already models the rest — `device`,
+// `operating-system`, `platform`, `application`, `library`, `data` component
+// types plus `dependencies` for edges — so the kinds share a format, a content
+// hash, a signature and a comparison rather than each inventing its own.
+//
+// The vocabulary is closed and mirrored by the `cbom_artifacts_artifact_kind_check`
+// CHECK. Adding a kind is two edits: here and the CHECK.
+type ArtifactKind string
+
+const (
+	// KindCBOM is the cryptographic bill of materials: certificates,
+	// algorithms, protocols, keys and crypto libraries. The original and the
+	// default — an omitted `kind` means this, so every pre-existing client
+	// keeps the behaviour it had.
+	KindCBOM ArtifactKind = "cbom"
+	// KindSBOM is the software bill of materials: one component per distinct
+	// software product installed on the scope's assets.
+	KindSBOM ArtifactKind = "sbom"
+	// KindHBOM is the hardware bill of materials: one `device` component per
+	// hardware-class asset in scope, carrying its hardware facts.
+	KindHBOM ArtifactKind = "hbom"
+	// KindInventory is the whole-inventory snapshot: every asset in scope as a
+	// component typed by its class, its endpoints as services, its
+	// relationships as the dependency graph, and its open vulnerability
+	// findings as CycloneDX vulnerabilities.
+	KindInventory ArtifactKind = "inventory"
+)
+
+// AllArtifactKinds is the closed vocabulary, in the order the UI lists it.
+var AllArtifactKinds = []ArtifactKind{KindCBOM, KindSBOM, KindHBOM, KindInventory}
+
+// IsValid reports whether the kind is one this build recognises.
+func (k ArtifactKind) IsValid() bool {
+	for _, known := range AllArtifactKinds {
+		if k == known {
+			return true
+		}
+	}
+	return false
+}
+
+// String makes ArtifactKind printable without a conversion at every call site.
+func (k ArtifactKind) String() string { return string(k) }
+
 // Artifact is the persisted row in `cbom_artifacts`. It captures enough
 // provenance to reproduce the snapshot against the inventory state at the
 // moment of generation, and to detect tamper (via content_hash, with Phase 4
@@ -23,7 +70,10 @@ type Artifact struct {
 	ScopeVersion      int       `json:"scope_version" db:"scope_version"`
 	ScopeNameSnapshot string    `json:"scope_name_snapshot" db:"scope_name_snapshot"`
 	Name              string    `json:"name,omitempty" db:"name"`
-	StorageKey        string    `json:"storage_key,omitempty" db:"storage_key"`
+	// ArtifactKind is which bill of materials this row is. Never empty on a
+	// row read back from the database — the column is NOT NULL DEFAULT 'cbom'.
+	ArtifactKind ArtifactKind `json:"artifact_kind" db:"artifact_kind"`
+	StorageKey   string       `json:"storage_key,omitempty" db:"storage_key"`
 	// InlineContent is only populated when shared/storage is not configured
 	// (typical dev). Production / customer installs use storage_key.
 	HasInlineContent     bool       `json:"has_inline_content" db:"-"`
@@ -77,6 +127,10 @@ type Layer struct {
 // GenerateRequest is the JSON body for POST /cbom/generate.
 type GenerateRequest struct {
 	ScopeID uuid.UUID `json:"scope_id" binding:"required"`
+	// Kind selects which bill of materials to assemble. Empty means "cbom",
+	// which is exactly what this endpoint produced before kinds existed, so an
+	// older client's request is unchanged in meaning as well as in shape.
+	Kind ArtifactKind `json:"kind,omitempty"`
 	// Optional human-meaningful name. Falls back to "<scope> — <date>" when
 	// not provided.
 	Name string `json:"name,omitempty"`
@@ -152,6 +206,18 @@ const (
 	// refer to the CycloneDX canonical form. Enterprise-only — the renderer
 	// lives in ee/cbomformats.
 	FormatPDF DownloadFormat = "pdf"
+	// FormatOCSF is the OCSF 1.9.0 event stream (JSON Lines) projected from an
+	// `inventory` artifact's canonical bytes: one Device Inventory Info (5001)
+	// per asset, one Vulnerability Finding (2002) per vulnerability the
+	// artifact records. Core — a SIEM is where an ops team already looks, and
+	// gating the one export that reaches them would make the free edition
+	// unusable in the place it has to work.
+	//
+	// Defined only for the `inventory` kind: it is a projection of assets, and
+	// a CBOM has none to project. The download handler answers 400 for any
+	// other kind rather than emitting an empty stream, because an empty stream
+	// reads as "no assets" rather than "wrong artifact".
+	FormatOCSF DownloadFormat = "ocsf"
 )
 
 // IsValid reports whether the requested format is a format the API recognises.
@@ -162,15 +228,22 @@ const (
 // collapse "wrong edition" (402) into "unknown format" (400).
 func (f DownloadFormat) IsValid() bool {
 	switch f {
-	case FormatCycloneDX, FormatSPDX, FormatPDF:
+	case FormatCycloneDX, FormatSPDX, FormatPDF, FormatOCSF:
 		return true
 	}
 	return false
 }
 
 // IsCore reports whether this build can serve the format without the Enterprise
-// renderer. Only the canonical CycloneDX form qualifies.
-func (f DownloadFormat) IsCore() bool { return f == FormatCycloneDX }
+// renderer: the canonical CycloneDX form and the OCSF event stream.
+func (f DownloadFormat) IsCore() bool { return f == FormatCycloneDX || f == FormatOCSF }
+
+// ServesCanonicalBytes reports whether the format IS the stored bytes, verbatim.
+//
+// Only CycloneDX is, and the distinction is not cosmetic: that path may answer
+// with a presigned redirect and never touch the bytes, while every projection —
+// OCSF included, Core though it is — has to load them server-side first.
+func (f DownloadFormat) ServesCanonicalBytes() bool { return f == FormatCycloneDX }
 
 // FilenameSuffix is the extension used in the download's Content-Disposition.
 func (f DownloadFormat) FilenameSuffix() string {
@@ -179,6 +252,8 @@ func (f DownloadFormat) FilenameSuffix() string {
 		return "spdx.json"
 	case FormatPDF:
 		return "pdf"
+	case FormatOCSF:
+		return "ocsf.ndjson"
 	default:
 		return "cdx.json"
 	}

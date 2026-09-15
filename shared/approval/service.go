@@ -3,8 +3,8 @@ package approval
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
+	"log"
 
 	"github.com/google/uuid"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
@@ -26,8 +26,10 @@ func NewService(db *sql.DB) *Service {
 
 // GetActiveRulesForTenant retrieves all active auto-approval rules for a tenant
 func (s *Service) GetActiveRulesForTenant(tenantID uuid.UUID) ([]*Rule, error) {
-	query := `
-		SELECT id, tenant_id, name, description, conditions, is_active, created_by, created_at, updated_at
+	q := `
+		SELECT id, tenant_id, name, COALESCE(description, ''), query, is_active,
+		       COALESCE(created_by, '00000000-0000-0000-0000-000000000000'::uuid),
+		       created_at, updated_at
 		FROM discovery_auto_approval_rules
 		WHERE tenant_id = $1 AND is_active = true
 		ORDER BY created_at DESC
@@ -41,7 +43,7 @@ func (s *Service) GetActiveRulesForTenant(tenantID uuid.UUID) ([]*Rule, error) {
 	ctx := context.Background()
 	var rules []*Rule
 	err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		rows, qErr := tx.QueryContext(ctx, query, tenantID)
+		rows, qErr := tx.QueryContext(ctx, q, tenantID)
 		if qErr != nil {
 			return fmt.Errorf("failed to query auto-approval rules: %w", qErr)
 		}
@@ -49,14 +51,12 @@ func (s *Service) GetActiveRulesForTenant(tenantID uuid.UUID) ([]*Rule, error) {
 
 		for rows.Next() {
 			var rule Rule
-			var conditionsJSON []byte
-
 			if scanErr := rows.Scan(
 				&rule.ID,
 				&rule.TenantID,
 				&rule.Name,
 				&rule.Description,
-				&conditionsJSON,
+				&rule.Query,
 				&rule.IsActive,
 				&rule.CreatedBy,
 				&rule.CreatedAt,
@@ -64,12 +64,6 @@ func (s *Service) GetActiveRulesForTenant(tenantID uuid.UUID) ([]*Rule, error) {
 			); scanErr != nil {
 				return fmt.Errorf("failed to scan rule: %w", scanErr)
 			}
-
-			// Parse JSONB conditions
-			if uErr := json.Unmarshal(conditionsJSON, &rule.Conditions); uErr != nil {
-				return fmt.Errorf("failed to parse rule conditions: %w", uErr)
-			}
-
 			rules = append(rules, &rule)
 		}
 
@@ -121,11 +115,18 @@ func (s *Service) EvaluateAutoApprovalWithRules(
 		return false, nil, nil
 	}
 
-	// Evaluate each rule
+	// Evaluate each rule. A rule that cannot be evaluated — a query that no
+	// longer validates, because a field was renamed, say — is SKIPPED and
+	// LOGGED. Skipping is the fail-closed direction (a rule that cannot be read
+	// cannot approve anything), but skipping SILENTLY is how a tenant's
+	// auto-approval quietly stops working with nothing anywhere saying so, and
+	// that is what the bare `continue` here used to do.
 	for _, rule := range rules {
 		matches, err := s.ruleEvaluator.EvaluateRule(rule, discovery, classification)
 		if err != nil {
-			continue // Skip rules with evaluation errors
+			log.Printf("[approval] skipping rule %s (%q) for tenant %s: %v",
+				rule.ID, rule.Name, rule.TenantID, err)
+			continue
 		}
 
 		if matches {

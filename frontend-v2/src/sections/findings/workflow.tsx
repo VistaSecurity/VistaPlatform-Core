@@ -3,7 +3,8 @@
 //
 // Capability split by finding kind (backend FKs):
 //   crypto risk        → ticket (links crypto_implementation_id + asset_id)
-//   compliance finding → everything: ticket (finding_id/control_id/asset_id),
+//   compliance finding → everything: ticket (finding_id/control_id + the link
+//                        that matches the finding's subject),
 //                        plan item (finding_id), control override, workflow
 //                        status (NEW/NOTIFIED/RESOLVED/SUPPRESSED), assignee
 //                        (POST/DELETE /findings/{id}/assign).
@@ -22,6 +23,7 @@ import {
   catOf, issueLabel, sevLevel, wfOf, WF_COLOR, WF_LABEL, WF_STATUSES,
   type ComplianceFinding, type ControlRef, type CryptoRisk,
 } from './model';
+import { producerLabel } from './producer-evidence';
 import { useTenantUsers } from './queries';
 
 export type TicketTarget =
@@ -45,18 +47,104 @@ function ticketBody(t: TicketTarget) {
   }
   const f = t.finding;
   const sev = sevLevel(f.severity).toLowerCase();
+  // The ticket CATEGORY follows the producer. A ticket queue filtered to
+  // `compliance` that also held every end-of-life and CVE ticket would make the
+  // filter meaningless; `vulnerability` and `remediation` are existing
+  // categories on the unified tickets table and are what these are.
+  const category = f.producer === 'vulnerability'
+    ? 'vulnerability'
+    : f.producer === 'compliance' ? 'compliance' : 'remediation';
+  // The context line. For a compliance finding it is the framework and control;
+  // for anything else naming a framework would be a claim about a finding that
+  // has none.
+  const context = f.producer === 'compliance'
+    ? `Framework: ${t.fw}${t.control ? `\nControl: ${t.control.name}` : ''}`
+    : `Producer: ${producerLabel(f.producer)}`;
   return {
-    category: 'compliance',
+    category,
     title: `${f.summary} — ${t.host}`.slice(0, 200),
-    description: `Framework: ${t.fw}${t.control ? `\nControl: ${t.control.name}` : ''}\n\n${f.summary}`,
+    description: `${context}\n\n${f.summary}`,
     priority: sev === 'informational' ? 'low' : sev,
     severity: sev,
-    asset_id: f.asset_id,
+    // The subject decides WHICH link the ticket carries. This used to be an
+    // unconditional `asset_id: f.asset_id`, and on live data three findings in
+    // four are about a certificate or a crypto configuration — so a certificate
+    // id was being written into the ticket's asset link, where it resolved to
+    // nothing and made the ticket look like it was about a host that does not
+    // exist.
+    ...subjectLink(f),
     finding_id: f.id,
-    control_id: f.control_id,
+    // Only a compliance finding has one. The nil uuid every other producer
+    // carries would be a ticket claiming to be about a control that does not
+    // exist.
+    ...(f.producer === 'compliance' && f.control_id && f.control_id !== NIL_UUID
+      ? { control_id: f.control_id }
+      : {}),
     source: 'manual',
-    tags: ['findings', 'compliance'],
+    tags: ['findings', f.producer || 'compliance'],
   };
+}
+
+/** The all-zero uuid `control_id` carries for every non-compliance producer. */
+const NIL_UUID = '00000000-0000-0000-0000-000000000000';
+
+/**
+ * The inventory link a finding's subject maps onto, in the ticket's own
+ * columns. A subject kind with no matching column contributes NO link rather
+ * than a wrong one — a ticket that points at the wrong object is worse than a
+ * ticket that points at nothing, because only one of the two is visibly empty.
+ *
+ * The compliance producer emits two subject kinds. An `asset` subject covers
+ * configuration measurements too: their value is a statement about the asset,
+ * and the configurations it was read from travel in
+ * `evidence.crypto_implementation_ids`. Where that list names EXACTLY ONE
+ * configuration the ticket also carries it, so "which configuration?" is
+ * answered when there is a single answer — and left unanswered when there is
+ * not, because picking the first of four would be a guess wearing the clothes
+ * of a fact.
+ *
+ * A `software_install` subject — what the `eol` and `vulnerability` producers
+ * write — links to the HOST. There is no `software_install_id` column on
+ * `tickets`, and "upgrade openssl" is work somebody does ON a machine; a ticket
+ * with no link at all would be one nobody could route. The id comes from
+ * `evidence.asset_id`, which both producers write beside the subject, and a
+ * finding that somehow lacks it contributes no link rather than a wrong one.
+ *
+ * Exported for `workflow.test.ts`. The bug it closes is invisible from the UI —
+ * a certificate id in `tickets.asset_id` renders as an empty asset link, not as
+ * an error — so the mapping needs a test that goes red if the unconditional
+ * `asset_id: f.subject_id` comes back.
+ */
+export function subjectLink(f: ComplianceFinding): Record<string, string> {
+  switch (f.subject_type) {
+    case 'asset':
+      return { asset_id: f.subject_id, ...soleConfiguration(f) };
+    case 'certificate':
+      return { certificate_id: f.subject_id };
+    case 'software_install': {
+      const assetID = (f.evidence as Record<string, unknown> | null | undefined)?.asset_id;
+      return typeof assetID === 'string' && assetID !== '' ? { asset_id: assetID } : {};
+    }
+    default:
+      // Including `crypto_configuration`, which the configuration producer
+      // (workstream 3.5) will emit with a real crypto_implementations id in
+      // subject_id. NO link is the right answer for a kind this mapping has no
+      // column for — a ticket that points at the wrong object is worse than one
+      // that points at nothing, because only one of the two is visibly empty.
+      return {};
+  }
+}
+
+/**
+ * `crypto_implementation_id`, but only when the finding's evidence names one
+ * configuration and no more. Anything else — absent, empty, several, or a
+ * non-string — contributes nothing.
+ */
+function soleConfiguration(f: ComplianceFinding): Record<string, string> {
+  const raw = (f.evidence as Record<string, unknown> | null | undefined)?.crypto_implementation_ids;
+  if (!Array.isArray(raw) || raw.length !== 1) return {};
+  const id = raw[0];
+  return typeof id === 'string' && id !== '' ? { crypto_implementation_id: id } : {};
 }
 
 function SmallBtn({ icon, label, accent, busy, done, onClick }: {

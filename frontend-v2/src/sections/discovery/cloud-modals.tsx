@@ -71,6 +71,33 @@ const AWS_FIELDS: Record<AwsAuthMode, CredField[]> = {
   ],
 };
 
+/**
+ * `config.enumerate_compute` — the per-integration switch for compute /
+ * network enumeration (BUILD_PLAN 2.4).
+ *
+ * ABSENT means ON. Every integration written before the setting existed
+ * carries no value, and the backend reads a missing key as `true`
+ * (cloud_integration_auth.go). Reading it as off here would show a switch in
+ * the opposite position to the behaviour.
+ */
+export const ENUMERATE_COMPUTE_KEY = 'enumerate_compute';
+
+/** Reads the toggle out of an integration's config map, defaulting to ON. */
+export function readEnumerateCompute(config: unknown): boolean {
+  if (!config || typeof config !== 'object') return true;
+  const v = (config as Record<string, unknown>)[ENUMERATE_COMPUTE_KEY];
+  if (typeof v === 'boolean') return v;
+  // The AWS credential decrypt path stringifies non-string config values, so a
+  // stored `false` can come back as the STRING "false". Reading only the
+  // boolean would treat that as "not set" and silently show the switch on.
+  if (typeof v === 'string') {
+    const s = v.trim().toLowerCase();
+    if (s === 'false' || s === '0') return false;
+    if (s === 'true' || s === '1') return true;
+  }
+  return true;
+}
+
 const PROVIDER_FIELDS: Record<ProviderType, CredField[]> = {
   aws: AWS_FIELDS.access_key,
   azure: [
@@ -105,6 +132,12 @@ export function CloudIntegrationFormModal({ open, integration, onClose, onSaved 
   const [description, setDescription] = useState('');
   const [isEnabled, setIsEnabled] = useState(true);
   const [cred, setCred] = useState<Record<string, string>>({});
+  // `config.enumerate_compute` — whether a discovery run for this integration
+  // also inventories compute instances, networks and subnets. ABSENT means ON:
+  // every integration written before the setting existed carries no value, and
+  // the capability is the default. See ENUMERATE_COMPUTE_KEY below.
+  const [enumerateCompute, setEnumerateCompute] = useState(true);
+  const [storedEnumerateCompute, setStoredEnumerateCompute] = useState(true);
   const [authMode, setAuthMode] = useState<AwsAuthMode>('access_key');
   // The mode the integration was stored with, so an edit that ONLY flips the
   // mode still sends a config (there are no new credential values to trigger it).
@@ -133,6 +166,9 @@ export function CloudIntegrationFormModal({ open, integration, onClose, onSaved 
     const mode: AwsAuthMode = str('auth_mode') === 'assume_role' ? 'assume_role' : 'access_key';
     setAuthMode(mode);
     setStoredAuthMode(mode);
+    const enumerate = readEnumerateCompute(cfg);
+    setEnumerateCompute(enumerate);
+    setStoredEnumerateCompute(enumerate);
     setCred({
       ...(str('assume_role_arn') ? { assume_role_arn: str('assume_role_arn') } : {}),
       ...(str('role_session_name') ? { role_session_name: str('role_session_name') } : {}),
@@ -155,6 +191,7 @@ export function CloudIntegrationFormModal({ open, integration, onClose, onSaved 
     (f) => f.required && !(cred[f.key] ?? '').trim() && !(isEdit && isMasked(f)),
   );
   const modeChanged = isAws && isEdit && authMode !== storedAuthMode;
+  const enumerateChanged = isEdit && enumerateCompute !== storedEnumerateCompute;
   const valid = !!name.trim()
     && missingRequired.length === 0
     && (isEdit || isAws || credEntries.length > 0);
@@ -166,6 +203,11 @@ export function CloudIntegrationFormModal({ open, integration, onClose, onSaved 
       // auth_mode rides with any AWS config write so the backend never has to
       // infer which credential shape it was handed.
       if (isAws) config.auth_mode = authMode;
+      // Always sent, on create and on any edit that includes a config: the
+      // backend MERGES config, so omitting the key leaves the stored value,
+      // and sending it explicitly is what makes the switch's position and the
+      // stored value the same thing.
+      config[ENUMERATE_COMPUTE_KEY] = enumerateCompute;
 
       if (isEdit) {
         const body: deviceInterrogationComponents['schemas']['UpdateIntegrationRequest'] = {
@@ -175,10 +217,11 @@ export function CloudIntegrationFormModal({ open, integration, onClose, onSaved 
           environment: environment.trim() || undefined,
           description: description.trim() || undefined,
           is_enabled: isEnabled,
-          // Only send config when the user actually entered new credentials or
-          // switched auth mode — the backend merges it into the existing
-          // decrypted config, so an omitted config leaves the secrets alone.
-          ...(credEntries.length || modeChanged ? { config } : {}),
+          // Only send config when the user actually entered new credentials,
+          // switched auth mode, or flipped the enumeration switch — the backend
+          // merges it into the existing decrypted config, so an omitted config
+          // leaves the secrets alone.
+          ...(credEntries.length || modeChanged || enumerateChanged ? { config } : {}),
         };
         const { error } = await clients.devices.PUT('/integrations/{id}', {
           params: { path: { id: integration!.id } }, body,
@@ -299,9 +342,45 @@ export function CloudIntegrationFormModal({ open, integration, onClose, onSaved 
         <input type="checkbox" checked={isEnabled} onChange={(e) => setIsEnabled(e.target.checked)} />
         Enabled — include this integration in cloud discovery syncs.
       </label>
+
+      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 9, marginTop: 10, cursor: 'pointer', fontSize: 12.5, color: 'var(--app-t1)' }}>
+        <input
+          type="checkbox"
+          checked={enumerateCompute}
+          onChange={(e) => setEnumerateCompute(e.target.checked)}
+          style={{ marginTop: 2 }}
+        />
+        <span>
+          Inventory compute, networks and subnets
+          <span style={{ display: 'block', fontSize: 11, color: 'var(--app-t3)', marginTop: 2 }}>
+            {ENUMERATION_COST_NOTE[providerType]}
+          </span>
+        </span>
+      </label>
     </Modal>
   );
 }
+
+/**
+ * What turning enumeration on actually costs, per provider, in the provider's
+ * own terms. Stated because the switch is ON by default and a large account
+ * pays for every call — an operator deciding whether to leave it on needs the
+ * number, not a reassurance.
+ */
+const ENUMERATION_COST_NOTE: Record<ProviderType, string> = {
+  aws:
+    'Four extra read-only API calls per selected region per run '
+    + '(DescribeInstances, DescribeVpcs, DescribeSubnets, DescribeSecurityGroups), '
+    + 'each paginated. Needs ec2:Describe* — covered by AmazonEC2ReadOnlyAccess.',
+  azure:
+    'Four extra subscription-wide read-only calls per run (virtual machines, '
+    + 'virtual networks with their subnets, network security groups, network '
+    + 'interfaces), each paginated. Covered by the built-in Reader role.',
+  gcp:
+    'Four extra project-wide read-only calls per run (instances and subnetworks '
+    + 'aggregated across all zones and regions, networks, firewalls), each '
+    + 'paginated. Covered by roles/compute.viewer.',
+};
 
 // ---- Delete (danger confirm) ----------------------------------------------
 
@@ -445,6 +524,7 @@ export function CloudIntegrationDiscoverModal({ open, integration, onClose, onSt
 
   const needsRegions = selectionNeedsRegions(provider, selected);
   const hasGlobal = selectionHasGlobal(provider, selected);
+  const enumerates = readEnumerateCompute(integration?.config);
 
   // Reset when the target integration changes.
   useEffect(() => {
@@ -548,6 +628,16 @@ export function CloudIntegrationDiscoverModal({ open, integration, onClose, onSt
         {selected.size === 0 && (
           <div style={{ fontSize: 11, color: 'var(--danger-text)', marginTop: 6 }}>Select at least one resource type.</div>
         )}
+
+        {/* Enumeration is not one of the resource types: it is a per-integration
+            setting, and the run carries it whatever is ticked above. Saying so
+            here is what stops "I deselected everything and it still inventoried
+            my instances" reading as a bug. */}
+        <div style={{ fontSize: 11, color: 'var(--app-t3)', marginTop: 10, lineHeight: 1.5 }}>
+          {enumerates
+            ? 'This run also inventories compute instances, virtual networks and subnets, with their containment. Turn it off in Edit integration.'
+            : 'Compute, network and subnet inventory is off for this integration. Turn it on in Edit integration.'}
+        </div>
       </div>
 
       {/* Region selection — AWS only, and only meaningful for the regional types.

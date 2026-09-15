@@ -112,7 +112,7 @@ The platform uses a **5-section primary navigation** organized around the lifecy
 | **Dashboard** | Priority-based health overview — assets, compliance status, and recent activity | — |
 | **Discovery** | Find assets — sensors, scanning, device interrogation, and cloud/PCAP sources | Command Center; Sensors & Agents, Discovery Jobs, Devices, Scheduled Scans; Approvals; Job Logs; Cloud, PCAP Upload |
 | **Inventory** | One unified inventory, viewed through switchable **lenses** | Lenses (Infrastructure, Certificates, Keys, and more) plus By-Protocol lenses — see [Inventory & Lenses](../features/inventory-and-lenses.md) |
-| **Risk & Compliance** | Where you stand and what's failing | Posture, Findings, CBOM |
+| **Risk & Compliance** | Where you stand and what's failing | Posture, Findings, Bills of Materials |
 | **Remediation** | Fixing what was found, end to end | Alerts, Queue, Plans |
 
 **Settings** and **My Profile** are *not* in the primary rail — they live in the **profile dropdown** at the bottom of the rail (see below).
@@ -330,7 +330,7 @@ The unified filter panel supports comprehensive filtering:
 - **Environment**: Filter by environment (production, staging, development, test)
 
 #### Asset Filters
-- **Asset Type**: Filter by asset type (server, endpoint, service, appliance)
+- **Class**: Filter by class — the kind of thing an asset is (Server, Switch, Firewall, Virtual Machine, S3 Bucket, Business Service, …). Classes form a tree, and picking a parent includes everything beneath it: choosing **Hardware** matches every server, switch and firewall in one go.
 - **Business Unit**: Filter by business unit
 - **Operating System**: Filter by operating system
 - **Owner Email**: Filter by asset owner
@@ -577,7 +577,7 @@ The Asset Management page (Assets view mode) provides comprehensive filtering or
 
 #### Asset Properties
 - **Environment**: Production, staging, development, test
-- **Asset Type**: Server, endpoint, service, appliance
+- **Class**: The kind of thing this is — Server, Switch, Firewall, Virtual Machine, S3 Bucket, Business Service, and so on. The classes form a tree and the filter is hierarchical: picking **Hardware** matches everything under it, picking **Server** narrows to servers. The columns in the list change with the class you pick, because different kinds of thing are described by different attributes.
 - **Risk Level**: Critical, High, Medium, Low, Informational
 - **Business Unit**: Filter by business unit
 - **Operating System**: Filter by operating system
@@ -586,7 +586,7 @@ The Asset Management page (Assets view mode) provides comprehensive filtering or
 - **Asset Status**: Monitoring, pending approval, denied, archived
 
 #### Certificate Relationships
-- **Has Certificates**: Check this box to show only assets that have associated certificates. This is the correct way to find assets with certificates - certificates are not asset types.
+- **Has Certificates**: Check this box to show only assets that have associated certificates. This is the correct way to find assets with certificates — a certificate is not a class of asset, it is something an asset presents.
 
 #### Cryptographic Properties
 - **Protocol Version**: Filter by TLS/SSL version (TLSv1.3, TLSv1.2, TLSv1.1, TLSv1.0, SSLv3)
@@ -598,7 +598,7 @@ The Asset Management page (Assets view mode) provides comprehensive filtering or
 
 **Help Panel:** Click the "Understanding Assets vs Certificates" help panel at the top of the page for detailed information about the relationship between assets and certificates.
 
-**Error Handling:** If you accidentally try to filter by "certificates" as an asset type, the system will display a helpful error message with suggestions to use the "Has Certificates" filter or navigate to the Crypto Inventory page.
+**Error Handling:** "Certificates" is not one of the classes, because a certificate is not a kind of asset. If you look for it in the class tree and cannot find it, use the **Has Certificates** filter to see the assets that present one, or open the **Certificates** lens to see every certificate in the tenant.
 
 ### Asset Details
 
@@ -630,14 +630,10 @@ View asset change history:
 #### Manual Entry
 
 1. Navigate to **Assets** (Overview) → **New Asset** (Quick Actions) or **Assets** → **Full Asset Management** → **New Asset**
-2. Enter asset information:
-   - **Name**: Asset name
-   - **Type**: Asset type
-   - **IP Address**: IP address
-   - **Port**: Port number
-   - **Environment**: Environment type
-3. Add cryptographic configurations
-4. Click **Save**
+2. Pick the **Class** first. It decides the rest of the form: a server asks for an operating system, an S3 bucket asks for a region and a bucket name, a business service asks for neither.
+3. Give it at least one **identifier** — an FQDN, hostname, IP address, MAC address or serial number. Identifiers are how the platform recognises this thing again: a serial you type in counts as much as one a scanner read, so a machine you record by hand is not duplicated the first time discovery finds it. (A business service is the exception — it is identified by its name, so a name is what it asks for.)
+4. Fill in whatever context you know — **Display name**, **Environment**, **Business unit**, **Support group**, **Owner email**, **Description** — and any attributes the class declares.
+5. Click **Save**. Endpoints (an address, a port and the service on it) are added by discovery as they are observed; you do not enter them by hand.
 
 #### Import from Discovery
 
@@ -1364,7 +1360,7 @@ A **CBOM Artifact** is an immutable, content-hashed, dated snapshot of every cry
 
 #### Generating a CBOM
 
-1. Navigate to **Risk & Compliance → CBOM** (or go directly to `/risk-compliance/cbom`).
+1. Navigate to **Risk & Compliance → Bills of Materials** (or go directly to `/risk-compliance/cbom`).
 2. Click **Generate CBOM**.
 3. Select a **Scope** — the named boundary that defines which assets the CBOM will include. Use *All* for a complete snapshot or *Production* for a scoped one. See [Scopes](../features/scopes.md).
 4. Optionally give it a meaningful name (e.g., "Q2 2026 PCI Submission").
@@ -1859,7 +1855,7 @@ Select from various event types:
 
 Refine when notifications are sent:
 - Event severity (critical, high, medium, low)
-- Specific asset types
+- Specific asset classes
 - Compliance frameworks
 - User roles
 - Time of day

@@ -108,11 +108,11 @@ export function LocationModal({ open, location, onClose }: { open: boolean; loca
         cloud_region: isCloud ? cloudRegion.trim() || undefined : undefined,
       };
       const res = isEdit
-        ? await clients.inventory.PUT('/locations/{id}', { params: { path: { id: location!.id } }, body })
+        ? await clients.inventory.PUT('/locations/{id}', { params: { path: { id: location.id } }, body })
         : await clients.inventory.POST('/locations', { body });
       if (!res.response.ok || res.error) throw new Error('Failed to save location');
     },
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['settings', 'locations'] }); onClose(); },
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['settings', 'locations'] }); onClose(); },
   });
 
   // Parent options exclude self (a location can't be its own parent).
@@ -122,11 +122,11 @@ export function LocationModal({ open, location, onClose }: { open: boolean; loca
     <Modal
       open={open} onClose={save.isPending ? undefined : onClose} dismissible={!save.isPending}
       size="md" tone="accent" icon="map-pin" eyebrow="Settings · Locations"
-      title={isEdit ? `Edit ${location!.name}` : 'New location'}
+      title={isEdit ? `Edit ${location.name}` : 'New location'}
       description="Locations form the physical / cloud hierarchy that Inventory and Discovery organize assets by."
       primary={<button className="ui-btn accent" disabled={!valid || save.isPending} onClick={() => save.mutate()}>{save.isPending ? 'Saving…' : isEdit ? 'Save changes' : 'Create location'}</button>}
       secondary={<button className="ui-btn" onClick={onClose} disabled={save.isPending}>Cancel</button>}
-      footerNote={save.isError ? <span style={{ color: 'var(--danger-text)' }}>{(save.error as Error).message}</span> : undefined}
+      footerNote={save.isError ? <span style={{ color: 'var(--danger-text)' }}>{save.error.message}</span> : undefined}
     >
       <div style={{ display: 'flex', gap: 14 }}>
         <div style={{ flex: 1.4 }}><ModalField label="Name"><ModalInput data-autofocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. US-East DC1" /></ModalField></div>
@@ -244,11 +244,11 @@ export function NetworkSegmentModal({ open, segment, onClose }: { open: boolean;
         ],
       };
       const res = isEdit
-        ? await clients.inventory.PUT('/network-segments/{id}', { params: { path: { id: segment!.id } }, body })
+        ? await clients.inventory.PUT('/network-segments/{id}', { params: { path: { id: segment.id } }, body })
         : await clients.inventory.POST('/network-segments', { body });
       if (!res.response.ok || res.error) throw new Error('Failed to save network segment');
     },
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['settings', 'network-segments'] }); onClose(); },
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['settings', 'network-segments'] }); onClose(); },
   });
 
   const Toggle = ({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) => (
@@ -261,11 +261,11 @@ export function NetworkSegmentModal({ open, segment, onClose }: { open: boolean;
     <Modal
       open={open} onClose={save.isPending ? undefined : onClose} dismissible={!save.isPending}
       size="lg" tone="accent" icon="network" eyebrow="Settings · Network Segments"
-      title={isEdit ? `Edit ${segment!.name}` : 'New network segment'}
+      title={isEdit ? `Edit ${segment.name}` : 'New network segment'}
       description="Network boundaries Discovery scopes its scans against, by CIDR, IP range, domain, or cloud VPC."
       primary={<button className="ui-btn accent" disabled={!valid || save.isPending} onClick={() => save.mutate()}>{save.isPending ? 'Saving…' : isEdit ? 'Save changes' : 'Create segment'}</button>}
       secondary={<button className="ui-btn" onClick={onClose} disabled={save.isPending}>Cancel</button>}
-      footerNote={save.isError ? <span style={{ color: 'var(--danger-text)' }}>{(save.error as Error).message}</span> : undefined}
+      footerNote={save.isError ? <span style={{ color: 'var(--danger-text)' }}>{save.error.message}</span> : undefined}
     >
       <div style={{ display: 'flex', gap: 14 }}>
         <div style={{ flex: 1.4 }}><ModalField label="Name"><ModalInput data-autofocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Prod DMZ" /></ModalField></div>
@@ -366,7 +366,7 @@ export function DeleteInfraModal({ open, kind, id, name, onClose }: {
       if (!res.response.ok || res.error) throw new Error('Delete failed');
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['settings', kind === 'location' ? 'locations' : 'network-segments'] });
+      void qc.invalidateQueries({ queryKey: ['settings', kind === 'location' ? 'locations' : 'network-segments'] });
       onClose();
     },
   });
@@ -379,7 +379,7 @@ export function DeleteInfraModal({ open, kind, id, name, onClose }: {
       description={`“${name}” will be removed.${kind === 'location' ? ' Child locations and assigned assets may be affected.' : ''}`}
       primary={<button className="ui-btn" style={{ background: 'var(--danger)', color: '#fff', borderColor: 'var(--danger)' }} disabled={del.isPending} onClick={() => del.mutate()}>{del.isPending ? 'Deleting…' : 'Delete'}</button>}
       secondary={<button className="ui-btn" onClick={onClose} disabled={del.isPending}>Cancel</button>}
-      footerNote={del.isError ? <span style={{ color: 'var(--danger-text)' }}>{(del.error as Error).message}</span> : undefined}
+      footerNote={del.isError ? <span style={{ color: 'var(--danger-text)' }}>{del.error.message}</span> : undefined}
     />
   );
 }

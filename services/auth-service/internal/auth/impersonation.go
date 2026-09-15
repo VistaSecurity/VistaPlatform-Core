@@ -86,7 +86,7 @@ func (a *AuthService) RecordImpersonationStart(ctx context.Context, p Impersonat
 // service. It previously wrote "revoked:jti:<jti>", which no reader checked, so
 // the revocation was silently inert.
 func (a *AuthService) RevokeJTI(ctx context.Context, jti string, ttl time.Duration) error {
-	return a.Redis().SetEx(ctx, sharedmw.RevokedTokenKey(jti), "1", ttl).Err()
+	return a.Redis().Set(ctx, sharedmw.RevokedTokenKey(jti), "1", ttl).Err()
 }
 
 // RevokeUserAccess rejects every still-valid access token for userID. Use this

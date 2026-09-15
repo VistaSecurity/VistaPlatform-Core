@@ -291,7 +291,7 @@ export function ProfileNotificationsPage({ meta }: { meta: SettingsNavItem }) {
     queryFn: async () => {
       const { data, error, response } = await clients.auth.GET('/auth/me/preferences/notifications', {});
       if (error || !response.ok || !data) throw new Error('Failed to load notification preferences');
-      return (data.preferences ?? {}) as PrefMap;
+      return data.preferences ?? {};
     },
   });
 
@@ -315,7 +315,7 @@ export function ProfileNotificationsPage({ meta }: { meta: SettingsNavItem }) {
     },
     onSuccess: () => {
       setEdits(null);
-      queryClient.invalidateQueries({ queryKey: ['profile', 'notification-prefs'] });
+      void queryClient.invalidateQueries({ queryKey: ['profile', 'notification-prefs'] });
     },
   });
 
@@ -347,7 +347,7 @@ export function ProfileNotificationsPage({ meta }: { meta: SettingsNavItem }) {
           {PREF_CATEGORIES.map((c, i) => (
             <SRow key={c.key} label={c.label} last={i === PREF_CATEGORIES.length - 1}>
               <SToggle
-                key={`${c.key}-${boolAt(view as PrefMap, 'categories', c.key)}`}
+                key={`${c.key}-${boolAt(view, 'categories', c.key)}`}
                 on={boolAt(view, 'categories', c.key)}
                 onChange={(v) => setGroupKey('categories', c.key, v)}
               />

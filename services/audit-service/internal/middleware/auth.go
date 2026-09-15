@@ -166,6 +166,9 @@ func RequireAuth(cfg *config.Config) gin.HandlerFunc {
 		c.Set("role", role)
 		c.Set("userType", userType)
 		c.Set("tokenType", tokenType)
+		if scopes := tokenScopesFromClaims(claims); len(scopes) > 0 {
+			c.Set(sharedmw.CtxKeyTokenScopes, scopes)
+		}
 
 		// Only set tenantID for tenant users
 		if userType == UserTypeTenant {
@@ -183,6 +186,39 @@ func RequireAuth(cfg *config.Config) gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+func tokenScopesFromClaims(claims jwt.MapClaims) []string {
+	raw, exists := claims["scopes"]
+	if !exists {
+		return nil
+	}
+
+	switch v := raw.(type) {
+	case []string:
+		return nonEmptyScopes(v)
+	case []interface{}:
+		scopes := make([]string, 0, len(v))
+		for _, item := range v {
+			scope, ok := item.(string)
+			if ok && scope != "" {
+				scopes = append(scopes, scope)
+			}
+		}
+		return scopes
+	default:
+		return nil
+	}
+}
+
+func nonEmptyScopes(in []string) []string {
+	scopes := make([]string, 0, len(in))
+	for _, scope := range in {
+		if scope != "" {
+			scopes = append(scopes, scope)
+		}
+	}
+	return scopes
 }
 
 // RequirePermission gates a route on a permission.

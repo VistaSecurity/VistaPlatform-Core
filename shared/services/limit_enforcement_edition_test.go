@@ -1,6 +1,7 @@
 package services_test
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 
@@ -128,20 +129,69 @@ func TestIntegration_EditionGate_AdminEditedTierGrantsNothing(t *testing.T) {
 	tenant := testdb.NewTenant(t, db)
 	svc := services.NewLimitEnforcementService(db)
 
+	// A tier of this test's OWN, not the seeded `enterprise` row.
+	//
+	// The mechanism under test is a tier_entitlements row that grants the
+	// capability, which a private tier reproduces exactly. Writing it onto the
+	// SEEDED enterprise row instead is seed-row pollution across suites: nothing
+	// puts the shipped value back, and
+	// shared/entitlements.TestResolve_EditionGatedCapabilitiesNeverGrantedByTier
+	// — a different package binary, running in parallel against the same database
+	// — asserts that no ACTIVE tier grants an edition-gated capability, and reads
+	// whatever is in the table. That test used to be shielded by the ~200
+	// re-applies of seed.sql per run, whose edition-gate corrective UPDATE reset
+	// every boolean on every tier; since schema/seed are applied once per database
+	// the reset never happens, and the two tests became a coin flip on
+	// which binary reaches the row first (deterministic failure on the second run
+	// against one database).
+	//
+	// is_active = false for the same reason: it is not a shipped tier, so the
+	// shipped-tier invariant must not see it. The resolver filters
+	// billable_items.is_active, never subscription_tiers.is_active, so the grant
+	// path being tested here is unchanged.
+	tierName := "it-editiongate-" + uuid.NewString()[:8]
+	t.Cleanup(func() {
+		_, _ = db.Exec(`UPDATE tenants SET subscription_tier_id = NULL WHERE subscription_tier_id =
+			(SELECT id FROM subscription_tiers WHERE name = $1)`, tierName)
+		_, _ = db.Exec(`DELETE FROM tier_entitlements WHERE tier_id =
+			(SELECT id FROM subscription_tiers WHERE name = $1)`, tierName)
+		_, _ = db.Exec(`DELETE FROM subscription_tiers WHERE name = $1`, tierName)
+	})
+	if _, err := db.Exec(`
+		INSERT INTO subscription_tiers (name, display_name, is_active) VALUES ($1, $1, false)`,
+		tierName); err != nil {
+		t.Fatalf("create the test's own tier: %v", err)
+	}
+
 	// Exactly what the tier editor writes when an admin ticks the box.
 	if _, err := db.Exec(`
 		INSERT INTO tier_entitlements (tier_id, item_id, included_value)
 		SELECT st.id, bi.id, '{"enabled": true}'::jsonb
 		FROM subscription_tiers st, billable_items bi
-		WHERE st.name = 'enterprise' AND bi.key = 'custom_policies'
-		ON CONFLICT (tier_id, item_id) DO UPDATE SET included_value = EXCLUDED.included_value`); err != nil {
+		WHERE st.name = $1 AND bi.key = 'custom_policies'
+		ON CONFLICT (tier_id, item_id) DO UPDATE SET included_value = EXCLUDED.included_value`,
+		tierName); err != nil {
 		t.Fatalf("simulate tier editor write: %v", err)
 	}
 	if _, err := db.Exec(`
 		UPDATE tenants
-		SET subscription_tier_id = (SELECT id FROM subscription_tiers WHERE name = 'enterprise')
-		WHERE id = $1`, tenant); err != nil {
-		t.Fatalf("assign enterprise tier: %v", err)
+		SET subscription_tier_id = (SELECT id FROM subscription_tiers WHERE name = $1)
+		WHERE id = $2`, tierName, tenant); err != nil {
+		t.Fatalf("assign the test's own tier: %v", err)
+	}
+
+	// The PREMISE, asserted rather than assumed: the tier row really does grant
+	// the capability at the entitlement layer. Without this the test passes just
+	// as happily when the tier write silently did nothing — a tier the tenant was
+	// never assigned, a renamed billable item — and would then be proving that
+	// the gate denies a capability nobody granted.
+	ent, err := entitlements.NewPostgresResolver(db).Resolve(context.Background(), tenant, "custom_policies")
+	if err != nil {
+		t.Fatalf("Resolve(custom_policies): %v", err)
+	}
+	if granted, _ := ent.BooleanValue(); !granted || ent.Source != entitlements.SourceTier {
+		t.Fatalf("premise failed: the tier row does not grant custom_policies (granted=%v source=%q) — "+
+			"this test would pass vacuously", granted, ent.Source)
 	}
 
 	allowed, err := svc.CheckFeatureAccess(tenant, "custom_policies")

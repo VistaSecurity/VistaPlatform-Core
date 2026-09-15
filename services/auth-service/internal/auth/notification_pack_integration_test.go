@@ -2,8 +2,6 @@ package auth
 
 import (
 	"database/sql"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/google/uuid"
@@ -142,24 +140,22 @@ func TestIntegration_SchemaBackfill_DefaultNotificationPackInfoSeverity(t *testi
 	insertNotificationRule(t, db, customTenant, customChannel, "Default activity feed", []string{"low"})
 	insertNotificationRule(t, db, renamedTenant, renamedChannel, "My activity feed", []string{"medium", "low"})
 
-	applySchemaOnly(t, db)
-	applySchemaOnly(t, db) // idempotency: the repaired row must not keep changing.
+	// testdb.ForceApplySchema, not a bare Exec of the file: this package runs
+	// concurrently with internal/api under `go test ./...`, and an applier that
+	// skips the schema advisory lock races the blanket GRANT block at the end of
+	// schema.sql. That is what made this test fail intermittently with `deadlock
+	// detected` / `tuple concurrently updated`.
+	//
+	// FORCE because the re-apply IS the assertion. The plain helper is now a
+	// no-op against a database that already carries this schema (the harness
+	// records a per-file content hash), which would leave the planted legacy row
+	// un-repaired and this guard asserting nothing.
+	testdb.ForceApplySchema(t, db)
+	testdb.ForceApplySchema(t, db) // idempotency: the repaired row must not keep changing.
 
 	assertRuleSeverities(t, db, legacyTenant, "Default activity feed", []string{"medium", "low", "info"})
 	assertRuleSeverities(t, db, customTenant, "Default activity feed", []string{"low"})
 	assertRuleSeverities(t, db, renamedTenant, "My activity feed", []string{"medium", "low"})
-}
-
-func applySchemaOnly(t *testing.T, db *sql.DB) {
-	t.Helper()
-	schemaPath := filepath.Join(testdb.RepoRoot(t), "scripts", "database", "schema.sql")
-	body, err := os.ReadFile(schemaPath)
-	if err != nil {
-		t.Fatalf("read schema.sql: %v", err)
-	}
-	if _, err := db.Exec(string(body)); err != nil {
-		t.Fatalf("schema.sql failed to re-apply over tenant_notification_rules data: %v", err)
-	}
 }
 
 func insertInAppChannel(t *testing.T, db *sql.DB, tenantID uuid.UUID, name string) uuid.UUID {

@@ -96,9 +96,15 @@ type stubArtifactStore struct {
 	inlineContent    []byte
 	inlineContentErr error
 	softDeleteErr    error
+
+	// lastKindFilter records the ?kind= value the handler passed through, so a
+	// test can assert the filter reached the store rather than only that the
+	// request was accepted.
+	lastKindFilter ArtifactKind
 }
 
-func (s *stubArtifactStore) List(_ context.Context, _ uuid.UUID, _ *uuid.UUID, _ int) ([]Artifact, error) {
+func (s *stubArtifactStore) List(_ context.Context, _ uuid.UUID, _ *uuid.UUID, kind ArtifactKind, _ int) ([]Artifact, error) {
+	s.lastKindFilter = kind
 	return s.list, nil
 }
 func (s *stubArtifactStore) Get(_ context.Context, _, _ uuid.UUID) (*Artifact, error) {
@@ -123,9 +129,17 @@ func (s *stubScopeGetter) Get(_ context.Context, _, _ uuid.UUID) (*scopes.Scope,
 type stubBuilder struct {
 	out *BuildOutput
 	err error
+
+	// lastKind records the kind the handler resolved, so a test can assert
+	// that an omitted `kind` reaches the builder as `cbom` rather than as "".
+	lastKind ArtifactKind
 }
 
-func (s *stubBuilder) Build(_ context.Context, _ *scopes.Scope, _ string) (*BuildOutput, error) {
+func (s *stubBuilder) Build(_ context.Context, kind ArtifactKind, _ *scopes.Scope, _ string) (*BuildOutput, error) {
+	s.lastKind = kind
+	if s.out != nil {
+		s.out.Kind = kind
+	}
 	return s.out, s.err
 }
 
@@ -197,12 +211,17 @@ func do(engine *gin.Engine, method, path string, body io.Reader) *httptest.Respo
 func sampleArtifact() Artifact {
 	now := time.Now().UTC()
 	return Artifact{
-		ID:                   uuid.New(),
-		TenantID:             uuid.New(),
-		ScopeID:              uuid.New(),
-		ScopeVersion:         1,
-		ScopeNameSnapshot:    "Production",
-		Name:                 "Production — 2026-05-28",
+		ID:                uuid.New(),
+		TenantID:          uuid.New(),
+		ScopeID:           uuid.New(),
+		ScopeVersion:      1,
+		ScopeNameSnapshot: "Production",
+		Name:              "Production — 2026-05-28",
+		// Never empty on a row read back from the database (NOT NULL DEFAULT
+		// 'cbom', COALESCEd in the repository), so the fixture must not be
+		// either — the schema's enum would otherwise pass a value production
+		// cannot produce.
+		ArtifactKind:         KindCBOM,
 		HasInlineContent:     true,
 		ContentHash:          "deadbeef",
 		SizeBytes:            1024,

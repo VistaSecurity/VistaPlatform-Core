@@ -1,6 +1,7 @@
 // Live queries for the Risk & Compliance section. Both Findings and Posture
 // share these (same queryKeys → one fetch per screenful).
 import { useQuery } from '@tanstack/react-query';
+import type { complianceEnginePaths } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import type { ComplianceFinding, CryptoRisk } from './model';
 
@@ -14,8 +15,8 @@ export function useCryptoRisks() {
     queryFn: async () => {
       const all: CryptoRisk[] = [];
       let page = 1;
-      let totalPages = 1;
-      let total = 0;
+      let totalPages: number;
+      let total: number;
       do {
         const { data, error } = await clients.inventory.GET('/crypto-risks', {
           params: { query: { page, page_size: RISK_PAGE_SIZE } },
@@ -27,6 +28,32 @@ export function useCryptoRisks() {
         page++;
       } while (page <= totalPages && page <= RISK_PAGE_CAP);
       return { risks: all, total };
+    },
+    staleTime: 60_000,
+  });
+}
+
+/**
+ * The OPEN findings on one asset, from EVERY producer.
+ *
+ * The route resolves the asset AND its descendants — the certificates and
+ * crypto configurations at its endpoints, its software installs — because most
+ * findings are about one of those rather than about the host. Every producer,
+ * not only `compliance`: `eol` and `vulnerability` write findings on an asset's
+ * software installs (workstreams 3.3/3.4 part 2). The caller reads `producer`
+ * on each row rather than assuming, so the tab tells the truth about who has
+ * actually looked.
+ */
+export function useAssetFindings(assetId: string, enabled = true) {
+  return useQuery({
+    queryKey: ['findings', 'by-asset', assetId],
+    enabled: enabled && !!assetId,
+    queryFn: async (): Promise<ComplianceFinding[]> => {
+      const { data, error } = await clients.compliance.GET('/assets/{assetId}/findings', {
+        params: { path: { assetId } },
+      });
+      if (error || !data) throw new Error('Failed to load findings for this asset');
+      return data.findings ?? [];
     },
     staleTime: 60_000,
   });
@@ -113,8 +140,8 @@ export function usePostureTrend(days = 30) {
 /**
  * Top exposures — active findings grouped by framework control, ranked
  * worst-severity → count → affected-assets, server-side (ADR-0007 item 4).
- * Reads the materialized compliance_findings table, so it agrees with the
- * Findings page rather than re-evaluating frameworks live.
+ * Reads the materialized findings, so it agrees with the Findings page rather
+ * than re-evaluating frameworks live.
  */
 export function usePostureByControl(limit = 5) {
   return useQuery({
@@ -134,27 +161,88 @@ const FINDINGS_PAGE_SIZE = 200; // contract max
 const FINDINGS_PAGE_CAP = 5; // up to 1000 findings client-side
 
 /**
- * Tenant-wide compliance findings (GET /findings) — persisted
- * workflow state (status, assignee) + the joined asset, paginated through.
+ * Tenant-wide findings (GET /findings) — persisted workflow state
+ * (status, assignee) + the joined subject object, paginated through.
+ *
+ * EVERY producer, not only `compliance`. The endpoint carried a
+ * compliance-only scope until the `eol` and `vulnerability` producers shipped
+ * (workstreams 3.3/3.4 part 2); this page would otherwise have been the one
+ * surface in the product that silently omitted them.
+ *
+ * `producerCounts` is the tally the producer facets render. It comes from the
+ * SERVER, computed under the same filters as the list minus the producer one,
+ * rather than being counted off `findings` here — the list is capped at
+ * FINDINGS_PAGE_CAP pages, so a client-side tally would quietly under-report a
+ * big tenant, which is the exact shape of the `has_findings` divergence that
+ * cost the facet its first outing.
  */
-export function useFindingsList(enabled = true) {
+/**
+ * A subject filter: findings about ONE thing.
+ *
+ * Both halves or neither — the endpoint refuses either alone, because a lone id
+ * can collide across subject vocabularies and a lone type is the producer
+ * filter under a worse name. This is what a "3 vulnerabilities" cell on the
+ * software surfaces links through, so the page it opens has to be exactly the
+ * rows the number counted.
+ */
+export interface FindingSubjectFilter {
+  /** Derived from the contract, so a subject type the endpoint does not accept
+   *  is a TypeScript error here rather than a 400 and an empty page. */
+  subjectType: NonNullable<
+    NonNullable<complianceEnginePaths['/findings']['get']['parameters']['query']>['subject_type']
+  >;
+  subjectId: string;
+}
+
+export function useFindingsList(
+  enabled = true,
+  producer?: string,
+  subject?: FindingSubjectFilter,
+  /**
+   * The free-text term, sent to the SERVER.
+   *
+   * It used to narrow `findings` in the browser after this hook returned, and
+   * this hook stops at FINDINGS_PAGE_CAP pages — so on a tenant with more than
+   * a thousand findings the box searched a PREFIX of the stream, and a
+   * `?q=<product>` link into the 1,200th finding rendered "no findings match".
+   * Which is the same failure as the subject filter above, in the same place,
+   * for the same reason: a page-capped list cannot be filtered client-side and
+   * still be believed.
+   *
+   * The cap stays for the UNSEARCHED stream — it is what keeps opening the page
+   * from paging a whole estate — and a search narrows server-side first, so the
+   * cap is reached far less often and never silently.
+   */
+  search?: string,
+) {
+  const q = (search ?? '').trim();
   return useQuery({
-    queryKey: ['findings', 'list'],
+    queryKey: ['findings', 'list', producer ?? 'all', subject ? `${subject.subjectType}:${subject.subjectId}` : 'all-subjects', q || 'all-text'],
     enabled,
     queryFn: async () => {
       const all: ComplianceFinding[] = [];
       let page = 1;
-      let total = 0;
+      let total: number;
+      let producerCounts: Record<string, number> = {};
       do {
         const { data, error } = await clients.compliance.GET('/findings', {
-          params: { query: { page, page_size: FINDINGS_PAGE_SIZE } },
+          params: { query: {
+            page, page_size: FINDINGS_PAGE_SIZE,
+            ...(producer ? { producer } : {}),
+            // Sent SERVER-side, not filtered here: this list is capped at
+            // FINDINGS_PAGE_CAP pages, so a subject past the cap would render
+            // an empty page under a link that promised N findings.
+            ...(subject ? { subject_type: subject.subjectType, subject_id: subject.subjectId } : {}),
+            ...(q ? { q } : {}),
+          } },
         });
         if (error || !data) throw new Error('Failed to load findings');
         all.push(...(data.findings ?? []));
         total = data.total;
+        producerCounts = data.producer_counts ?? {};
         page++;
       } while (all.length < total && page <= FINDINGS_PAGE_CAP);
-      return { findings: all, total };
+      return { findings: all, total, producerCounts };
     },
     staleTime: 30_000,
   });
@@ -193,7 +281,7 @@ export function useAssetFacts(enabled = true) {
     queryFn: async () => {
       const map = new Map<string, AssetFacts>();
       let page = 1;
-      let totalPages = 1;
+      let totalPages: number;
       do {
         const { data, error } = await clients.inventory.GET('/infrastructure-assets', {
           params: { query: { page, page_size: 100 } },

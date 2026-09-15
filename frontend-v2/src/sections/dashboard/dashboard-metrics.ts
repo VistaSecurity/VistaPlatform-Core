@@ -32,6 +32,27 @@ export type DashboardPqcMetric = {
 // explicit so click-through lands in the same finding universe it counted.
 export const DASHBOARD_COMPLIANCE_FINDINGS_ROUTE = '/risk-compliance/findings?lens=framework';
 
+// A tile that counts a subset must link to that subset. Both of these used to
+// link at `/inventory?lens=infrastructure` — a retired lens key that redirects
+// to the unfiltered list — so clicking "High-risk assets: 12" landed on every
+// asset in the tenant with nothing saying which twelve were meant.
+//
+// The predicate is the query LANGUAGE, in the canonical form the facet rail
+// writes, so the destination opens with the matching facets already ticked and
+// the user can widen it from there. `high_risk` is the ≥ High band, which
+// includes Critical; `unknown_risk` is the absence of a score, which the
+// language spells `not_assessed` (never "low").
+export const DASHBOARD_HIGH_RISK_QUERY = 'risk:(critical or high)';
+export const DASHBOARD_UNSCORED_QUERY = 'risk:not_assessed';
+
+/** `/inventory?lens=assets` with a query, URL-encoded once, in one place. */
+export function inventoryQueryRoute(query: string): string {
+  return `/inventory?lens=assets&query=${encodeURIComponent(query)}`;
+}
+
+export const DASHBOARD_HIGH_RISK_ASSETS_ROUTE = inventoryQueryRoute(DASHBOARD_HIGH_RISK_QUERY);
+export const DASHBOARD_UNSCORED_ASSETS_ROUTE = inventoryQueryRoute(DASHBOARD_UNSCORED_QUERY);
+
 export function getDashboardPqcMetric(progress: PqcProgressRollup | null | undefined): DashboardPqcMetric {
   const adoptionPercent = progress?.pqc_percentage ?? 0;
   const pqcReadyOnly = progress?.pqc_ready ?? 0;

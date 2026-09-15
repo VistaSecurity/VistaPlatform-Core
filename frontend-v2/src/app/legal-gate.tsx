@@ -78,7 +78,7 @@ export function LegalGate({ children }: { children: React.ReactNode }) {
                   We've updated the <LegalLinks docs={pending} />. Please review and accept to continue using Vista.
                 </p>
                 {accept.isError && (
-                  <div style={{ fontSize: 12.5, color: 'var(--danger-soft)', marginBottom: 12 }}>{(accept.error as Error).message}</div>
+                  <div style={{ fontSize: 12.5, color: 'var(--danger-soft)', marginBottom: 12 }}>{accept.error.message}</div>
                 )}
                 <button type="button" onClick={() => accept.mutate()} disabled={accept.isPending} style={acceptBtn}>
                   {accept.isPending ? 'Recording…' : 'I agree and accept'}

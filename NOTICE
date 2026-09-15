@@ -23,8 +23,8 @@ The Go and npm dependency trees were audited before publication and contain no
 strong or network copyleft components: no GPL, AGPL, LGPL, SSPL, CDDL, EPL, BUSL
 or Elastic-licensed code is present. The Go dependencies are MIT, Apache-2.0 and
 BSD; the npm dependencies are predominantly MIT and ISC. The one file-level
-copyleft licence present is MPL-2.0, on build-time tooling only — see the
-MPL-2.0 section below.
+copyleft licence present is MPL-2.0 — see the MPL-2.0 section below, which lists
+every MPL component.
 
 
 Dual-licensed components — our election
@@ -40,10 +40,33 @@ what creates an argument years later.
 Mozilla Public License 2.0 components
 -------------------------------------
 
-lightningcss (and its platform-specific binaries) are licensed under MPL-2.0.
 MPL-2.0 is a file-level copyleft: it obliges publication of modifications to
-MPL-licensed files. We do not modify them, and they are build-time tooling that
-is not distributed in the product. Their notices are retained.
+MPL-licensed files. We do not modify them. MPL-2.0 components are accepted in
+this product, build-time or runtime, on that basis and on the condition that each
+one is listed in this section — so this list is the complete set, and a component
+absent from it is a component we do not ship.
+
+- lightningcss (and its platform-specific binaries) — build-time tooling, not
+  distributed in the product.
+
+Their notices are retained.
+
+
+THIRD-PARTY DATA
+----------------
+
+This product mirrors third-party datasets into your own deployment, and can
+export them as an offline bundle for an air-gapped install. Each source keeps its
+own terms, and those terms travel with the data — a built bundle carries this
+same wording as an ATTRIBUTION.md file inside it.
+
+- NVD (NIST). This product uses data from the NVD API but is not endorsed or
+  certified by the NVD. See https://nvd.nist.gov/developers/terms-of-use.
+- OSV (osv.dev). The aggregated database is published under CC-BY-4.0.
+  Attribution: OSV, https://osv.dev, and the upstream database named on each
+  record. See https://github.com/google/osv.dev.
+- endoflife.date. A community-maintained dataset, mirrored under its published
+  API terms. See https://endoflife.date/docs/api.
 
 
 Cryptographic notice

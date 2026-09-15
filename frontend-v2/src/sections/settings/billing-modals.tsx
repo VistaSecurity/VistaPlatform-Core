@@ -176,7 +176,7 @@ export function CancelSubscriptionModal({ open, periodEnd, contractEnd, billingI
   const contractual = billingInterval !== 'annual' && !!contractEnd && !!periodEnd &&
     new Date(contractEnd).getTime() > new Date(periodEnd).getTime();
   const description = contractual
-    ? `Your plan is a 12-month agreement: monthly billing and service continue until ${fmt(contractEnd!)}, when your subscription ends. You can reactivate any time before then.`
+    ? `Your plan is a 12-month agreement: monthly billing and service continue until ${fmt(contractEnd)}, when your subscription ends. You can reactivate any time before then.`
     : `Your plan stays active until ${periodEnd ? fmt(periodEnd) : 'the end of the current billing period'}. You can reactivate any time before then with no interruption.`;
 
   return (
@@ -192,7 +192,7 @@ export function CancelSubscriptionModal({ open, periodEnd, contractEnd, billingI
       description={description}
       primary={<button className="ui-btn" style={{ background: 'var(--danger)', color: '#fff', borderColor: 'var(--danger)' }} disabled={cancel.isPending} onClick={submit}>{cancel.isPending ? 'Cancelling…' : contractual ? 'Cancel at end of agreement' : 'Cancel at period end'}</button>}
       secondary={<button className="ui-btn" onClick={onClose} disabled={cancel.isPending}>Keep plan</button>}
-      footerNote={cancel.isError ? <span style={{ color: 'var(--danger-text)' }}>{(cancel.error as Error).message}</span> : undefined}
+      footerNote={cancel.isError ? <span style={{ color: 'var(--danger-text)' }}>{cancel.error.message}</span> : undefined}
     >
       <ModalField label="Reason (optional)" hint="Helps us improve — not required.">
         <textarea

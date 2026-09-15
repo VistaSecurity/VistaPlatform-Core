@@ -45,6 +45,16 @@ func NewCycloneDXFormatter() *CycloneDXFormatter {
 // ========================================================================
 
 // CDXDocument is the root CycloneDX BOM document.
+//
+// The fields below `Dependencies` are used only by the xBOM kinds (sbom, hbom,
+// inventory — see internal/xbom). They are `omitempty` and left unset on the
+// CBOM path, so a CBOM's canonical bytes are byte-for-byte what they were
+// before the kinds existed. That is a hard requirement, not a nicety: those
+// bytes are what every stored artifact's content_hash and signature refer to.
+//
+// New fields go at the END for the same reason — encoding/json emits struct
+// fields in declaration order, so inserting one in the middle would reorder the
+// JSON of every document that populates the fields after it.
 type CDXDocument struct {
 	BOMFormat    string          `json:"bomFormat"`
 	SpecVersion  string          `json:"specVersion"`
@@ -53,6 +63,105 @@ type CDXDocument struct {
 	Metadata     *CDXMetadata    `json:"metadata"`
 	Components   []CDXComponent  `json:"components"`
 	Dependencies []CDXDependency `json:"dependencies,omitempty"`
+
+	// Services carries the network faces an inventory snapshot reports —
+	// CycloneDX models a listening endpoint as a service, not a component —
+	// and the assets whose class maps to `service` in the class registry.
+	Services []CDXService `json:"services,omitempty"`
+
+	// Vulnerabilities carries CVE-bearing findings. ONLY the `vulnerability`
+	// producer's findings land here. The other producers — compliance, eol,
+	// hygiene, configuration, drift — are findings but not vulnerabilities, and
+	// putting them in this array would tell every downstream scanner that a
+	// missing asset owner is a CVE.
+	Vulnerabilities []CDXVulnerability `json:"vulnerabilities,omitempty"`
+}
+
+// CDXService is a CycloneDX service entry. `name` is the only required field.
+type CDXService struct {
+	BOMRef string `json:"bom-ref,omitempty"`
+	Group  string `json:"group,omitempty"`
+	Name   string `json:"name"`
+	// Version is the service version where one was identified — CycloneDX's
+	// own field, distinct from the component version.
+	Version     string `json:"version,omitempty"`
+	Description string `json:"description,omitempty"`
+	// Endpoints are IRI references. The schema asserts the `iri-reference`
+	// format, so a bare "host:port" is not acceptable here — the writer emits
+	// a scheme.
+	Endpoints  []string      `json:"endpoints,omitempty"`
+	Properties []CDXProperty `json:"properties,omitempty"`
+}
+
+// CDXVulnerability is a CycloneDX vulnerability entry.
+type CDXVulnerability struct {
+	BOMRef      string                   `json:"bom-ref,omitempty"`
+	ID          string                   `json:"id,omitempty"`
+	Source      *CDXVulnerabilitySource  `json:"source,omitempty"`
+	Ratings     []CDXVulnerabilityRating `json:"ratings,omitempty"`
+	CWEs        []int                    `json:"cwes,omitempty"`
+	Description string                   `json:"description,omitempty"`
+	Detail      string                   `json:"detail,omitempty"`
+	Created     string                   `json:"created,omitempty"`
+	Published   string                   `json:"published,omitempty"`
+	Updated     string                   `json:"updated,omitempty"`
+	Affects     []CDXVulnerabilityAffect `json:"affects,omitempty"`
+	Properties  []CDXProperty            `json:"properties,omitempty"`
+}
+
+// CDXVulnerabilitySource names who published the vulnerability.
+type CDXVulnerabilitySource struct {
+	Name string `json:"name,omitempty"`
+	URL  string `json:"url,omitempty"`
+}
+
+// CDXVulnerabilityRating is one severity/risk rating of a vulnerability.
+type CDXVulnerabilityRating struct {
+	Source   *CDXVulnerabilitySource `json:"source,omitempty"`
+	Score    *float64                `json:"score,omitempty"`
+	Severity string                  `json:"severity,omitempty"`
+	Method   string                  `json:"method,omitempty"`
+	Vector   string                  `json:"vector,omitempty"`
+}
+
+// CDXVulnerabilityAffect names a component or service the vulnerability
+// affects, by bom-ref.
+type CDXVulnerabilityAffect struct {
+	Ref string `json:"ref"`
+}
+
+// CDXEvidence carries a component's collection evidence. Only `occurrences` is
+// populated today: an SBOM lists one component per software PRODUCT, and the
+// occurrences are the assets it was found on.
+type CDXEvidence struct {
+	Occurrences []CDXOccurrence `json:"occurrences,omitempty"`
+}
+
+// CDXOccurrence is one place a component was observed. `location` is required
+// by the schema.
+type CDXOccurrence struct {
+	BOMRef   string `json:"bom-ref,omitempty"`
+	Location string `json:"location"`
+	// AdditionalContext names the asset the occurrence is on, in prose, so a
+	// reader who does not resolve bom-refs still learns where it was found.
+	AdditionalContext string `json:"additionalContext,omitempty"`
+}
+
+// CDXLicenseEntry is one entry of a component's `licenses` array.
+//
+// Only the `name` form is emitted, never `id`. `id` must be a valid SPDX
+// identifier and the schema enforces the enumeration; `software_products.license_id`
+// is a string a collector reported and nothing in the pipeline validates it as
+// SPDX. Emitting it as `id` would make an unrecognised string fail schema
+// validation for the whole document, and "we did not verify this is SPDX" is a
+// true statement that `name` carries and `id` does not.
+type CDXLicenseEntry struct {
+	License CDXLicenseName `json:"license"`
+}
+
+// CDXLicenseName is the named (non-SPDX-asserted) license form.
+type CDXLicenseName struct {
+	Name string `json:"name"`
 }
 
 // CDXMetadata contains BOM-level metadata.
@@ -92,6 +201,14 @@ type CDXComponent struct {
 	CryptoProperties   *CDXCryptoProps  `json:"cryptoProperties,omitempty"`
 	Properties         []CDXProperty    `json:"properties,omitempty"`
 	ExternalReferences []CDXExternalRef `json:"externalReferences,omitempty"`
+
+	// The fields below are used only by the xBOM kinds. See the note on
+	// CDXDocument: they are omitempty, unset on the CBOM path, and appended
+	// rather than inserted, so CBOM canonical bytes do not move.
+	CPE      string            `json:"cpe,omitempty"`
+	Group    string            `json:"group,omitempty"`
+	Licenses []CDXLicenseEntry `json:"licenses,omitempty"`
+	Evidence *CDXEvidence      `json:"evidence,omitempty"`
 }
 
 // CDXCryptoProps contains the cryptographic properties per CycloneDX 1.7.

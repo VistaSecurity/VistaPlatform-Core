@@ -82,10 +82,10 @@ func TestCBOMAssembleComponentsIncludesRelationsAndDeterministicIDs(t *testing.T
 		cryptos,
 		certs,
 		nil, // algorithmLookup — nil triggers heuristic fallback
-		compilePredicate(AssetPredicate{Include: &AssetClause{
-			Environment: []string{"production"},
-			RiskLevel:   []string{"high"},
-		}}),
+		// scoped: the fixture's asset IS in the fetched set, which is what a
+		// narrowing scope looks like from here — inventory-service already
+		// applied the predicate.
+		true,
 		true,
 		true,
 		true,
@@ -176,8 +176,8 @@ func TestCBOMAssembleComponentsIncludesStandaloneCertificates(t *testing.T) {
 		assets,
 		cryptos,
 		certs,
-		nil,                 // algorithmLookup
-		compiledPredicate{}, // "All" scope
+		nil,   // algorithmLookup
+		false, // the "All" scope: no narrowing
 		false,
 		true,
 		false,
@@ -268,10 +268,10 @@ func mustAssembleSameComponents(
 		cryptos,
 		certs,
 		nil, // algorithmLookup
-		compilePredicate(AssetPredicate{Include: &AssetClause{
-			Environment: []string{"production"},
-			RiskLevel:   []string{"high"},
-		}}),
+		// scoped: the fixture's asset IS in the fetched set, which is what a
+		// narrowing scope looks like from here — inventory-service already
+		// applied the predicate.
+		true,
 		true,
 		true,
 		true,
@@ -362,7 +362,7 @@ func TestCBOMAlgorithmEnrichmentUsesCanonicalData(t *testing.T) {
 		cryptos,
 		certs,
 		algorithmLookup,
-		compiledPredicate{},
+		false,
 		true,
 		true,
 		true,
@@ -464,7 +464,7 @@ func TestCBOMPQCAlgorithmEnrichment(t *testing.T) {
 		cryptos,
 		[]map[string]interface{}{},
 		algorithmLookup,
-		compiledPredicate{},
+		false,
 		true, false, false, false, false,
 	)
 

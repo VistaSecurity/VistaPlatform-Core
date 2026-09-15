@@ -177,7 +177,7 @@ function CreateTokenModal({ open, onClose }: { open: boolean; onClose: () => voi
     },
     onSuccess: (data) => {
       setPlaintext(data.plaintext_token);
-      qc.invalidateQueries({ queryKey: ['settings', 'api-tokens'] });
+      void qc.invalidateQueries({ queryKey: ['settings', 'api-tokens'] });
     },
   });
 

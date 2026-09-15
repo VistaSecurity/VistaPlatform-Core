@@ -4,29 +4,38 @@ This guide explains, in plain language, the difference between Infrastructure As
 
 ## Quick Summary
 
-**Infrastructure Assets** = Your infrastructure (servers, services, appliances)  
+**Infrastructure Assets** = The things in your estate — one row per thing, whatever it is  
+**Endpoints** = The network faces a thing listens on (an address, a port, a service)  
 **Cryptographic Configurations** = How those assets USE cryptography  
 **Certificates** = The identity documents used by those configurations
 
 ## Infrastructure Assets
 
-Infrastructure Assets are the endpoints and services we discover in your environment. Each asset represents a unique networked thing, identified by details like hostname, IP address, and (optionally) port, along with business and technical metadata (asset type, environment, owner, tags).
+An Infrastructure Asset is **one thing** — a server, a switch, a virtual machine, an S3 bucket, a business service. Not one row per open port: a host running HTTPS, SSH and a database is **one asset with three endpoints**, so when you look at it you see the whole machine rather than three unrelated-looking rows.
 
-**Think of it like your infrastructure:**
-- Physical: Servers in racks, network appliances, firewalls
-- Logical: Services, applications, API endpoints, databases
+Every asset has three things:
+
+- **A class.** What kind of thing it is — Server, Switch, Firewall, Virtual Machine, Object Storage, Business Service, and so on. Classes form a tree: `hardware → computer → server`, so filtering by **Hardware** includes every server, switch and firewall beneath it. The class also decides which attributes the asset carries — a server has an operating system, an S3 bucket has a region and a bucket name — and which columns the list shows.
+- **Identifiers.** How the thing is known: FQDN, hostname, IP address, MAC address, serial number, a CMDB sys_id, an agent id. Identifiers are what let two sightings of one machine become one asset instead of two, and each one records where it came from and when it was last seen. A serial you typed in is as much identity as one a scanner read.
+- **Endpoints.** Each network face it listens on: an address, a port, and the service identified there. An asset can have many, one, or none — an S3 bucket or a business service has no listening port at all, and that is a real answer rather than a gap.
+
+**Think of it like your estate:**
+- Physical: servers in racks, switches, firewalls, OT devices
+- Virtual: virtual machines, containers, clusters
+- Cloud: buckets, managed databases, key stores, load balancers
+- Logical: applications, databases, business services
 
 **What it measures:**  
-The breadth of your inventory — how many endpoints/services exist.
+The breadth of your inventory — how many *things* exist.
 
 **Examples:**
-- `web-01.demo.local:443` (production web server)
-- `10.0.5.12:22` (SSH server)
-- `db-prod-01.internal:5432` (PostgreSQL database)
-- `api-gateway.company.com:8443` (API service)
+- `web-01.demo.local` — class **Server**, endpoints on 443 (HTTPS) and 22 (SSH)
+- `db-prod-01.internal` — class **Server**, endpoint on 5432 (PostgreSQL)
+- `api-gateway.company.com` — class **API Gateway**, endpoint on 8443
+- `payments-prod` — class **Object Storage** (an S3 bucket), no endpoints: nothing dials it on a port
 
 **Why it matters:**  
-Asset visibility is the foundation for effective crypto risk management, compliance, and remediation. You can't secure what you don't know about.
+Asset visibility is the foundation for effective crypto risk management, compliance, and remediation. You can't secure what you don't know about — and you can't count what you're counting twice.
 
 ## Cryptographic Configurations
 
@@ -65,12 +74,12 @@ Security posture and compliance depend on the details. Modern TLS 1.3 with stron
 ### Example 1: Modern Production Web Server ✅
 
 ```
-Asset: web-01.prod.company.com:443
-├─ Asset Type: server
-├─ IP: 10.0.1.15
-├─ Port: 443
+Asset: web-01.prod.company.com
+├─ Class: Server  (hardware → computer → server)
+├─ Identifiers: FQDN web-01.prod.company.com · IP 10.0.1.15 · serial J7K2QX1
 ├─ Environment: production
-└─ Crypto Configuration:
+├─ Endpoint: 10.0.1.15:443  (HTTPS)
+└─ Crypto Configuration (on that endpoint):
    ├─ Protocol: TLS 1.3
    ├─ Cipher Suite: TLS_AES_256_GCM_SHA384
    ├─ Key Exchange: ECDHE (ephemeral, provides PFS)
@@ -91,12 +100,12 @@ Asset: web-01.prod.company.com:443
 ### Example 2: Legacy Database Server ⚠️
 
 ```
-Asset: db-legacy-01.prod.company.com:5432
-├─ Asset Type: server
-├─ IP: 10.0.2.50
-├─ Port: 5432 (PostgreSQL)
+Asset: db-legacy-01.prod.company.com
+├─ Class: Server
+├─ Identifiers: FQDN db-legacy-01.prod.company.com · IP 10.0.2.50
 ├─ Environment: production
-└─ Crypto Configuration:
+├─ Endpoint: 10.0.2.50:5432  (PostgreSQL)
+└─ Crypto Configuration (on that endpoint):
    ├─ Protocol: TLS 1.0  ⚠️ DEPRECATED
    ├─ Cipher Suite: TLS_RSA_WITH_RC4_128_SHA  ⚠️ WEAK
    ├─ Key Exchange: RSA (no PFS)
@@ -118,12 +127,12 @@ Asset: db-legacy-01.prod.company.com:5432
 ### Example 3: API Gateway with Mixed Security 🟡
 
 ```
-Asset: api-gateway.internal.company.com:8443
-├─ Asset Type: service
-├─ IP: 10.0.3.100
-├─ Port: 8443
+Asset: api-gateway.internal.company.com
+├─ Class: API Gateway  (cloud_resource → api_gateway)
+├─ Identifiers: FQDN api-gateway.internal.company.com · cloud resource id arn:aws:apigateway:…
 ├─ Environment: production
-└─ Crypto Configuration:
+├─ Endpoint: 10.0.3.100:8443
+└─ Crypto Configuration (on that endpoint):
    ├─ Protocol: TLS 1.2  🟡 ACCEPTABLE
    ├─ Cipher Suite: TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
    ├─ Key Exchange: ECDHE (provides PFS)
@@ -147,32 +156,41 @@ Asset: api-gateway.internal.company.com:8443
 Your Data Center / Cloud Environment
     └─ Network Segment: DMZ
         └─ Server Rack A
-            └─ web-01.prod.company.com
-                ├─ Infrastructure Asset Record (the server itself)
-                │   • Hostname: web-01.prod.company.com
-                │   • IP Address: 10.0.1.15
-                │   • Port: 443
-                │   • Type: server
+            └─ Infrastructure Asset: web-01.prod.company.com   ← ONE asset
+                ├─ Class: Server
+                ├─ Identifiers
+                │   • FQDN: web-01.prod.company.com
+                │   • IP:   10.0.1.15
+                │   • MAC:  00:1b:44:11:3a:b7
+                ├─ Context
                 │   • Environment: production
                 │   • Owner: Platform Team
                 │
-                └─ Crypto Configuration (HTTPS on port 443)
-                    ├─ Protocol: TLS 1.3
-                    ├─ Cipher: TLS_AES_256_GCM_SHA384
-                    ├─ Certificate → *.company.com
-                    ├─ Risk Score: 10
-                    └─ Compliance Status: ✓ PCI-DSS, ✓ SOC2, ✓ ISO27001
+                ├─ Endpoint 10.0.1.15:443 (HTTPS)
+                │   └─ Crypto Configuration
+                │       ├─ Protocol: TLS 1.3
+                │       ├─ Cipher: TLS_AES_256_GCM_SHA384
+                │       ├─ Certificate → *.company.com
+                │       ├─ Risk Score: 10
+                │       └─ Compliance Status: ✓ PCI-DSS, ✓ SOC2, ✓ ISO27001
+                │
+                └─ Endpoint 10.0.1.15:22 (SSH)
+                    └─ Crypto Configuration
+                        ├─ Protocol: SSH-2.0
+                        └─ Risk Score: 15
 ```
 
 **Key Relationships:**
-- **One Asset → Multiple Implementations**: A web server might have TLS on port 443 AND SSH on port 22 (that's 2 implementations)
-- **One Certificate → Multiple Assets**: A wildcard cert `*.company.com` can be used by many servers
-- **One Asset → Multiple Certificates**: An asset might use different certs for different services/endpoints
+- **One Asset → Multiple Endpoints**: the machine above listens on 443 and on 22. It is one row in Inventory, not two.
+- **One Endpoint → Its Crypto Configuration**: the configuration hangs off the face it was measured on, which is why the asset page can tell you *where* the weak TLS is.
+- **One Certificate → Multiple Assets**: a wildcard cert `*.company.com` can be installed on many servers.
+- **One Asset → Multiple Certificates**: different endpoints on one asset can present different certificates.
+- **An asset with no endpoints is normal**: an S3 bucket, a KMS key or a business service has nothing listening on a port. Its protection is recorded as at-rest posture, not as a listener.
 
 **Dashboard Metrics:**
-- **Infrastructure Assets**: Counts unique endpoints/services discovered (265 in demo)
-- **Crypto Configurations**: Counts distinct protocol instances attached to those assets (145 in demo)
-- **Coverage Ratio**: ~54% of assets have crypto configurations (145/265)
+- **Infrastructure Assets**: counts *things* — one per asset, however many endpoints it has.
+- **Crypto Configurations**: counts distinct protocol instances on those assets' endpoints.
+- **Coverage**: what share of your assets have any cryptography observed on them. Because an asset is a thing rather than a port, this ratio no longer flatters a busy host: a server with six TLS listeners counts once.
 
 ## How We Discover and Build Implementations
 
@@ -298,10 +316,13 @@ Risk scores (0-100) are calculated based on multiple security factors:
 
 | Risk Level | Score Range | Description | Examples |
 |------------|-------------|-------------|----------|
-| **Low** | 0-29 | Modern, secure configurations | TLS 1.3, strong ciphers, large keys, valid certs |
-| **Medium** | 30-59 | Acceptable but not optimal | TLS 1.2, 2048-bit keys, approaching cert expiration |
-| **High** | 60-79 | Significant weaknesses | TLS 1.1, weak ciphers, small keys, expiring soon |
-| **Critical** | 80-100 | Severe vulnerabilities | TLS 1.0, RC4, SHA1, expired certs, 1024-bit keys |
+| **Informational** | 0 | Not assessed — nothing has evaluated this yet. It is not a clean bill of health. | A newly discovered asset before any producer has looked at it |
+| **Low** | 1-39 | Modern, secure configurations | TLS 1.3, strong ciphers, large keys, valid certs |
+| **Medium** | 40-69 | Acceptable but not optimal | TLS 1.2, 2048-bit keys, approaching cert expiration |
+| **High** | 70-89 | Significant weaknesses | TLS 1.1, weak ciphers, small keys, expiring soon |
+| **Critical** | 90-100 | Severe vulnerabilities | TLS 1.0, RC4, SHA1, expired certs, 1024-bit keys |
+
+The bands are the CVSS v3.1 qualitative severity ratings on a 0–100 scale, so a "High" here means the same thing it means in a CVE advisory.
 
 **Risk Score Factors:**
 - Protocol version (TLS 1.0/1.1 = high penalty)
@@ -316,11 +337,12 @@ Risk scores (0-100) are calculated based on multiple security factors:
 
 ### For Asset Management
 **Use Infrastructure Assets to:**
-- Ensure complete inventory coverage across your infrastructure
-- Track physical and logical infrastructure components
-- Organize assets by environment (prod, staging, dev)
+- Ensure complete inventory coverage across your estate
+- Track physical, virtual, cloud and logical things in one list, told apart by class
+- Organize assets by environment (prod, staging, dev), site, business unit and owner
 - Assign ownership and business context
-- Monitor asset lifecycle (creation, updates, stale detection)
+- Monitor asset lifecycle (creation, updates, stale detection, archival)
+- Find a machine by any identifier it has ever been known by — a hostname, an IP it used to hold, a serial from a spreadsheet
 
 ### For Security Posture
 **Use Cryptographic Configurations to:**
@@ -365,7 +387,13 @@ Risk scores (0-100) are calculated based on multiple security factors:
 ## FAQ
 
 **Q: Can one asset have multiple crypto configurations?**  
-A: Yes! A web server might have TLS on port 443 and SSH on port 22 - that's 2 implementations.
+A: Yes. A web server with TLS on port 443 and SSH on port 22 is **one asset with two endpoints**, and a configuration on each.
+
+**Q: I used to see one row per port. Where did they go?**  
+A: They became endpoints of the thing they were always part of. The host is the row; open its asset page and **Services & Endpoints** lists every face it presents, each with its own crypto configuration. If two rows for one machine have merged into one, that is the intended outcome — and if the platform is unsure whether two records are the same thing, it proposes a merge in Discovery → Approvals rather than deciding for you.
+
+**Q: What decides an asset's class?**  
+A: Whatever discovered it says what it is, and the platform records *how* it knows — measured, declared, imported or inferred. You can change a class by hand on the asset page; that records you as the source.
 
 **Q: Can one certificate be used by multiple assets?**  
 A: Yes! A wildcard certificate like `*.company.com` can be installed on many servers.

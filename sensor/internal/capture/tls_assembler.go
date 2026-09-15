@@ -216,6 +216,13 @@ func (f *TLSStreamFactory) emitDiscovery(state *tlsSessionState, skipDedup bool)
 	}
 	if state.sniServerName != "" {
 		metadata["sni_server_name"] = state.sniServerName
+		// `sni` is the first-class key. The name has been parsed here since
+		// JA4 needed it, and it is the single most useful endpoint attribute
+		// passive capture produces — the name the CLIENT asked for, which is
+		// often the only name an inventory ever learns for a service behind a
+		// load balancer. `sni_server_name` is kept alongside because existing
+		// consumers read it; new readers should use `sni`.
+		metadata["sni"] = state.sniServerName
 	}
 	if len(state.supportedCiphers) > 0 {
 		metadata["supported_ciphers"] = state.supportedCiphers
@@ -239,6 +246,21 @@ func (f *TLSStreamFactory) emitDiscovery(state *tlsSessionState, skipDedup bool)
 	}
 	if state.selectedALPN != "" {
 		metadata["alpn_selected"] = state.selectedALPN
+	}
+	// `alpn` is the first-class key: the application protocol this connection
+	// actually carries. The SELECTED protocol is preferred over the offered
+	// list, because what the server chose is what ran; the client's first
+	// offer is the fallback, and only because under TLS 1.3 the selected value
+	// is inside EncryptedExtensions and passive capture cannot see it at all.
+	// Recording the offer as though it were the selection would be a guess
+	// wearing a measurement's clothes, so it is written only when there is no
+	// measurement to write.
+	if state.selectedALPN != "" {
+		metadata["alpn"] = state.selectedALPN
+		metadata["alpn_source"] = "server_selected"
+	} else if first := firstString(state.alpnProtocols); first != "" {
+		metadata["alpn"] = first
+		metadata["alpn_source"] = "client_offered"
 	}
 	// BACnet/SC (ASHRAE 135 Annex AB) runs BACnet over WebSocket-over-TLS
 	// and identifies itself via ALPN "bacnet.sc". Tag the discovery so the

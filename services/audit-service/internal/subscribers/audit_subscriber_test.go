@@ -84,8 +84,10 @@ func TestConvertAuditEventToActivityLog_FieldMapping(t *testing.T) {
 	if got.EventType != "billing.invoice_paid" {
 		t.Errorf("EventType = %q, want %q", got.EventType, "billing.invoice_paid")
 	}
-	if got.EventCategory != "api" {
-		t.Errorf("EventCategory = %q, want %q", got.EventCategory, "api")
+	// No category on the envelope → the storable catch-all, never "api",
+	// which the activity_logs CHECK rejects.
+	if got.EventCategory != "system" {
+		t.Errorf("EventCategory = %q, want %q", got.EventCategory, "system")
 	}
 	if !got.Success {
 		t.Error("Success = false, want true for StatusCode 200")

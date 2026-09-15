@@ -12,7 +12,7 @@ package services
 //   1. no *_legacy relation exists and nothing depends on one (pg_class /
 //      pg_depend / pg_constraint — not name-regex over source);
 //   2. the partitioned tables' (tenant_id, id) PRIMARY KEYs are VALID — the
-//      pre-retirement schema created network_assets_partitioned's PK with
+//      pre-retirement schema created the old asset table's PK with
 //      ALTER TABLE ONLY, which left it INVALID (uniqueness unenforced) and
 //      unusable as an FK target;
 //   3. the composite FK accepts a same-tenant asset reference and makes a
@@ -82,7 +82,7 @@ func TestIntegration_Schema_NoLegacyResidue(t *testing.T) {
 	rows, err := db.Query(`
 		SELECT c.relname, i.indisvalid FROM pg_index i
 		JOIN pg_class c ON c.oid = i.indexrelid
-		WHERE c.relname IN ('network_assets_partitioned_pkey',
+		WHERE c.relname IN ('assets_pkey',
 		                    'crypto_implementations_partitioned_pkey',
 		                    'sensor_discoveries_partitioned_pkey')`)
 	if err != nil {
@@ -102,7 +102,11 @@ func TestIntegration_Schema_NoLegacyResidue(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"network_assets_partitioned_pkey",
+		// network_assets_partitioned_pkey is gone with its table (phase 1,
+		// ADR-0007 D2). `assets_pkey` replaces it and is declared IN the
+		// CREATE TABLE, so it cannot be created INVALID the way an
+		// ALTER TABLE ONLY parent key was.
+		"assets_pkey",
 		"crypto_implementations_partitioned_pkey",
 		"sensor_discoveries_partitioned_pkey",
 	} {
@@ -120,8 +124,8 @@ func TestIntegration_CompositeAssetFK_TenantScoped(t *testing.T) {
 
 	assetID := uuid.New()
 	mustExec(t, db, `
-		INSERT INTO network_assets (id, tenant_id, hostname, ip_address, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,'fk-scope.example.test','10.44.44.44','server','monitoring',NOW(),NOW(),NOW(),NOW())`, assetID, tenantA)
+		INSERT INTO assets (id, tenant_id, hostname, primary_address, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, 'fk-scope.example.test', '10.44.44.44', 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`, assetID, tenantA)
 
 	// Same tenant: accepted.
 	mustExec(t, db, `
@@ -144,8 +148,8 @@ func TestIntegration_ExternalConnection_PersistsSourceAssetID(t *testing.T) {
 
 	assetID := uuid.New()
 	mustExec(t, raw, `
-		INSERT INTO network_assets (id, tenant_id, hostname, ip_address, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,'ext-src.example.test','10.55.55.55','server','monitoring',NOW(),NOW(),NOW(),NOW())`, assetID, tenant)
+		INSERT INTO assets (id, tenant_id, hostname, primary_address, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, 'ext-src.example.test', '10.55.55.55', 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`, assetID, tenant)
 
 	svc := NewExternalConnectionsService(db, NewAlgorithmService(db))
 	conn, err := svc.Upsert(tenant, models.ExternalConnectionUpsert{
@@ -170,8 +174,8 @@ func TestIntegration_VCIInventory_ServesLiveInventory(t *testing.T) {
 
 	assetID, implID := uuid.New(), uuid.New()
 	mustExec(t, db, `
-		INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,'ci-inv.example.test','server','monitoring',NOW(),NOW(),NOW(),NOW())`, assetID, tenant)
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, 'ci-inv.example.test', 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`, assetID, tenant)
 	mustExec(t, db, `
 		INSERT INTO crypto_implementations (id, tenant_id, asset_id, protocol, discovery_method, risk_score, created_at, updated_at)
 		VALUES ($1,$2,$3,'TLS','passive',75,NOW(),NOW())`, implID, tenant, assetID)

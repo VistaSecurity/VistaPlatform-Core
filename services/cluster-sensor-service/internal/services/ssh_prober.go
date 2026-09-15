@@ -2,130 +2,75 @@ package services
 
 import (
 	"fmt"
-	"log"
-	"net"
-	"strings"
 	"time"
 
-	"golang.org/x/crypto/ssh"
+	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 )
 
-// SSHProber handles SSH probing and algorithm extraction
+// SSHProber performs SSH probing for the in-cluster Platform Sensor.
+//
+// The handshake is NOT implemented here — it is the same shared/discovery code
+// the standalone sensor runs, because the two runtimes are meant to be
+// functionally equivalent and a bespoke copy drifted: it kept storing the
+// remote device's version-exchange banner raw (no PEM redaction, no length
+// bound) after shared/discovery had started bounding it. Like TLSProber, this
+// type owns only the cluster-specific concerns: the timeout and flattening
+// the neutral ProbeResult into the finding Data map.
 type SSHProber struct {
-	timeout time.Duration
+	prober *shareddisc.Prober
 }
 
 // NewSSHProber creates a new SSH prober instance
 func NewSSHProber(timeout time.Duration) *SSHProber {
 	return &SSHProber{
-		timeout: timeout,
+		prober: shareddisc.NewProber(timeout),
 	}
 }
 
 // ProbeSSH performs an SSH handshake to collect algorithm negotiation data.
 // It completes the key exchange, capturing: server banner, host key type and
-// SHA256 fingerprint, and negotiated algorithms. No authentication is attempted.
+// SHA256 fingerprint. No authentication is attempted. When the handshake fails
+// before a host key is delivered, the shared prober falls back to a plain
+// banner read on a fresh connection.
 func (sp *SSHProber) ProbeSSH(hostname string, port int) (map[string]interface{}, error) {
-	address := net.JoinHostPort(hostname, fmt.Sprintf("%d", port))
-
-	conn, err := net.DialTimeout("tcp", address, sp.timeout)
+	res, err := sp.prober.Probe(hostname, hostname, "SSH", port)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect: %w", err)
+		return nil, fmt.Errorf("SSH probe failed: %w", err)
 	}
-	defer func() { _ = conn.Close() }()
-	if err := conn.SetDeadline(time.Now().Add(sp.timeout)); err != nil {
-		log.Printf("SSH probe %s: could not set connection deadline, probe may block until the SSH client timeout: %v", address, err)
+	if res == nil {
+		return nil, fmt.Errorf("SSH probe returned no result for %s:%d", hostname, port)
 	}
-
-	var hostKeyType, hostKeyFingerprint string
-
-	sshCfg := &ssh.ClientConfig{
-		User: "discovery-probe",
-		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-			hostKeyType = key.Type()
-			hostKeyFingerprint = ssh.FingerprintSHA256(key)
-			return nil
-		},
-		Config: ssh.Config{
-			KeyExchanges: []string{
-				"curve25519-sha256",
-				"curve25519-sha256@libssh.org",
-				"ecdh-sha2-nistp256",
-				"ecdh-sha2-nistp384",
-				"ecdh-sha2-nistp521",
-				"diffie-hellman-group14-sha256",
-				"diffie-hellman-group14-sha1",
-				"diffie-hellman-group1-sha1",
-			},
-			Ciphers: []string{
-				"aes128-gcm@openssh.com",
-				"aes256-gcm@openssh.com",
-				"chacha20-poly1305@openssh.com",
-				"aes128-ctr",
-				"aes192-ctr",
-				"aes256-ctr",
-				"aes128-cbc",
-				"3des-cbc",
-			},
-			MACs: []string{
-				"hmac-sha2-256-etm@openssh.com",
-				"hmac-sha2-512-etm@openssh.com",
-				"hmac-sha2-256",
-				"hmac-sha2-512",
-				"hmac-sha1",
-			},
-		},
-		Timeout: sp.timeout,
-	}
-
-	sshConn, chans, reqs, err := ssh.NewClientConn(conn, address, sshCfg)
-	banner := ""
-	if err != nil {
-		// Auth failure is expected — kex succeeded if we got the host key
-		if hostKeyType == "" {
-			// True handshake failure — NewClientConn already consumed the version
-			// banner from this TCP stream; open a fresh connection for banner-only read.
-			return sp.probeBannerOnly(hostname, port)
-		}
-	}
-	if sshConn != nil {
-		go ssh.DiscardRequests(reqs)
-		go func() {
-			for range chans {
-			}
-		}()
-		banner = strings.TrimSpace(string(sshConn.ServerVersion()))
-		_ = sshConn.Close()
-	}
-
-	result := map[string]interface{}{
-		"ssh_banner":               banner,
-		"ssh_host_key_type":        hostKeyType,
-		"ssh_host_key_fingerprint": hostKeyFingerprint,
-		"ssh_key_types":            []string{hostKeyType},
-	}
-
-	return result, nil
+	return sshProbeMetadata(res), nil
 }
 
-// probeBannerOnly reads just the SSH version banner when the full kex fails.
-func (sp *SSHProber) probeBannerOnly(hostname string, port int) (map[string]interface{}, error) {
-	address := net.JoinHostPort(hostname, fmt.Sprintf("%d", port))
-	bannerConn, err := net.DialTimeout("tcp", address, sp.timeout)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect for SSH banner: %w", err)
+// sshProbeMetadata flattens a shared ProbeResult into the finding Data shape
+// the rest of the platform reads. The key names are load-bearing:
+// inventory-service's SSH ingest reads ssh_banner, ssh_host_key_type and
+// ssh_key_types, and asset identity resolution reads
+// ssh_host_key_fingerprint. The banner is always present (possibly empty);
+// the host-key keys appear only when a kex actually delivered one, so a
+// banner-only fallback does not manufacture an empty key type or a
+// one-element list holding "".
+func sshProbeMetadata(res *shareddisc.ProbeResult) map[string]interface{} {
+	out := make(map[string]interface{}, len(res.Metadata)+4)
+
+	// Shared metadata carries the banner and host key under their neutral
+	// names (banner, host_key_type, host_key_fingerprint); keep them so a
+	// reader that accepts either spelling still finds them.
+	for k, v := range res.Metadata {
+		out[k] = v
 	}
-	defer func() { _ = bannerConn.Close() }()
-	if err := bannerConn.SetDeadline(time.Now().Add(sp.timeout)); err != nil {
-		log.Printf("SSH banner probe %s: could not set connection deadline, read may block indefinitely: %v", address, err)
+
+	out["ssh_banner"] = res.SSHBanner
+	if res.SSHHostKeyType != "" {
+		out["ssh_host_key_type"] = res.SSHHostKeyType
 	}
-	buf := make([]byte, 1024)
-	n, err := bannerConn.Read(buf)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read SSH banner: %w", err)
+	if res.SSHHostKeyFingerprint != "" {
+		out["ssh_host_key_fingerprint"] = res.SSHHostKeyFingerprint
 	}
-	banner := strings.TrimSpace(string(buf[:n]))
-	return map[string]interface{}{
-		"ssh_banner": banner,
-	}, nil
+	if len(res.SSHKeyTypes) > 0 {
+		out["ssh_key_types"] = res.SSHKeyTypes
+	}
+
+	return out
 }

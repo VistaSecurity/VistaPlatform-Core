@@ -60,8 +60,12 @@ export type ScopeListResponse = components["schemas"]["ScopeListResponse"];
 export type CreateScopeRequest = components["schemas"]["CreateScopeRequest"];
 export type UpdateScopeRequest = components["schemas"]["UpdateScopeRequest"];
 export type PreviewResult = components["schemas"]["PreviewResult"];
-export type Predicate = components["schemas"]["Predicate"];
-export type PredicateClause = components["schemas"]["PredicateClause"];
+/**
+ * A scope's boundary, as a query-language string. It replaced the `Predicate` /
+ * `PredicateClause` pair — a JSONB include/exclude shape only cbom-service could
+ * evaluate — with the one predicate form the whole product speaks.
+ */
+export type ScopeQuery = components["schemas"]["ScopeQuery"];
 /** ADR-0002 go-forward envelope types (carried ahead of the backend). */
 export type ApiError = components["schemas"]["Error"];
 export type Pagination = components["schemas"]["Pagination"];

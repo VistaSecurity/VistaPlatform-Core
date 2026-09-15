@@ -6,12 +6,14 @@
 import { Fragment, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { Library, Pencil, Plus, Trash2, Send, Archive, ChevronRight, ChevronDown, ListTree } from 'lucide-react';
+import { Library, Pencil, Plus, Trash2, Send, Archive, ChevronRight, ChevronDown, ListTree, Sparkles } from 'lucide-react';
 import type { complianceEngineComponents } from '@vistasecurity/api-contract';
+import { draftingOffered } from '@vistasecurity/primitives/authoring';
 import { clients } from '../../lib/clients';
 import { Tag, relTime } from '../../components/ui/primitives';
 import { Modal, ModalField, modalInputStyle } from '../../components/ui/modal';
 import { MeasurementRulesModal } from './measurement-rules-modal';
+import { DraftControlsModal, useDraftingAvailability } from './draft-controls-modal';
 
 type AdminFramework = complianceEngineComponents['schemas']['PublishedFramework'];
 type FrameworkInput = complianceEngineComponents['schemas']['PlatformFrameworkInput'];
@@ -195,6 +197,12 @@ export function FrameworksPage() {
   const [controlModal, setControlModal] = useState<ControlModalState>({ kind: 'closed' });
   const [rulesControl, setRulesControl] = useState<{ id: string; control_id: string; title: string } | null>(null);
   const [expandedFw, setExpandedFw] = useState<string | null>(null);
+  // ADR-0008's Author seam. The action is offered only when this deployment can
+  // actually answer — a Core build has no drafting endpoint at all, and an
+  // Enterprise build with no AI_PROVIDER would 503 — so the button is hidden
+  // rather than shown-and-broken.
+  const draftAvailability = useDraftingAvailability();
+  const [draftFramework, setDraftFramework] = useState<AdminFramework | null>(null);
 
   return (
     <div className="op-fade" style={{ padding: '20px 24px 40px', display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -252,6 +260,15 @@ export function FrameworksPage() {
                             <span style={{ fontWeight: 600, fontSize: 12.5, color: 'var(--op-t1)' }}>Controls</span>
                             <span className="mono" style={{ fontSize: 11, color: 'var(--op-t3)' }}>{controls.length}</span>
                             <div style={{ flex: 1 }} />
+                            {/* Drafting writes into an unpublished framework only: publishing
+                                IS the approval step, so it has to stay ahead of the draft.
+                                The endpoint enforces this with a 409; hiding the button on a
+                                published framework means nobody meets that error. */}
+                            {draftingOffered(draftAvailability.data) && !published && (
+                              <button className="op-btn sm" title="Draft controls from the text of a standard" onClick={() => setDraftFramework(f)}>
+                                <Sparkles size={13} />Draft from a standard…
+                              </button>
+                            )}
                             <button className="op-btn sm" onClick={() => setControlModal({ kind: 'create', frameworkId: f.id })}><Plus size={13} />Add control</button>
                           </div>
                           {controls.length === 0 ? (
@@ -262,6 +279,11 @@ export function FrameworksPage() {
                                 <div key={ctrl.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 8, border: '1px solid var(--op-border)', background: 'var(--op-panel)' }}>
                                   <span className="mono" style={{ fontSize: 11, fontWeight: 600, color: 'var(--op-t2)', minWidth: 64 }}>{ctrl.control_id}</span>
                                   <span style={{ flex: 1, fontSize: 12.5, color: 'var(--op-t1)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ctrl.title}</span>
+                                  {ctrl.source_kind === 'inferred' && (
+                                    <Tag color="var(--info)">
+                                      <span title={`Drafted by ${(ctrl.source_ref ?? '').replace(/^author:/, '') || 'a model'} and accepted by a platform admin`}>drafted</span>
+                                    </Tag>
+                                  )}
                                   {ctrl.crypto_relevant && <Tag color="var(--info)">crypto</Tag>}
                                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 600, color: CONTROL_SEVERITY_COLOR[ctrl.baseline_severity] ?? 'var(--op-t3)' }}>
                                     <span style={{ width: 6, height: 6, borderRadius: 50, background: CONTROL_SEVERITY_COLOR[ctrl.baseline_severity] ?? 'var(--op-t3)' }} />{ctrl.baseline_severity}
@@ -298,6 +320,9 @@ export function FrameworksPage() {
       )}
       {rulesControl && (
         <MeasurementRulesModal control={rulesControl} onClose={() => setRulesControl(null)} />
+      )}
+      {draftFramework && (
+        <DraftControlsModal framework={draftFramework} onClose={() => setDraftFramework(null)} />
       )}
     </div>
   );

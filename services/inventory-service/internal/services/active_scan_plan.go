@@ -57,6 +57,10 @@ func probeableProtocol(protocol string) string {
 // optimistically stamped it. Captured so a failed dispatch can restore the
 // exact prior value instead of guessing one.
 type scanStamp struct {
+	// assetID names the ENDPOINT the stamp belongs to since phase 1: scan
+	// freshness is a property of the socket that was probed, not of the thing
+	// that exposes it (DATA_MODEL §2). The field keeps its name because the
+	// restore statements address it by id and nothing else reads it.
 	assetID       uuid.UUID
 	lastScannedAt sql.NullTime
 }

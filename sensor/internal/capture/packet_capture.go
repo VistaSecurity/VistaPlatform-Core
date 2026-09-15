@@ -29,6 +29,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor/internal/config"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/crypto"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/hostobs"
 )
 
 // capturedPacket pairs a raw packet with the interface it arrived on
@@ -71,10 +72,14 @@ type PacketCapture struct {
 	enipAssembler      *tcpassembly.Assembler
 	hartipFactory      *HARTIPStreamFactory
 	hartipAssembler    *tcpassembly.Assembler
-	starttlsPorts      []int      // resolved list (defaults applied) for routing + factory parity
-	assemblerMu        sync.Mutex // protects assemblers (not concurrent-safe)
-	packetCount        int64      // atomic counter
-	dropCount          int64      // atomic counter
+	starttlsPorts      []int // resolved list (defaults applied) for routing + factory parity
+	// hostObs decodes ARP/DHCP/mDNS/NetBIOS/DNS/LLDP/CDP into host
+	// observations on its own goroutine. nil when the feature is off, which
+	// is the only condition the capture path checks — see Offer.
+	hostObs     *hostObsPipeline
+	assemblerMu sync.Mutex // protects assemblers (not concurrent-safe)
+	packetCount int64      // atomic counter
+	dropCount   int64      // atomic counter
 }
 
 // NewPacketCapture creates a new packet capture instance
@@ -186,6 +191,16 @@ func NewPacketCapture(cfg *config.Config) *PacketCapture {
 		hartipAssembler.MaxBufferedPagesTotal = 500
 	}
 
+	var hostObs *hostObsPipeline
+	if cfg.Capture.HostObservation {
+		hostObs = newHostObsPipeline(
+			cfg.SensorID,
+			discoveries,
+			time.Duration(cfg.Capture.HostObservationWindowSeconds)*time.Second,
+			hostObsConfig(cfg),
+		)
+	}
+
 	return &PacketCapture{
 		config:             cfg,
 		interfaces:         cfg.Capture.Interfaces,
@@ -218,6 +233,7 @@ func NewPacketCapture(cfg *config.Config) *PacketCapture {
 		hartipFactory:      hartipFactory,
 		hartipAssembler:    hartipAssembler,
 		starttlsPorts:      starttlsPorts,
+		hostObs:            hostObs,
 	}
 }
 
@@ -259,6 +275,12 @@ func (pc *PacketCapture) Start() error {
 			"4. Permission issues (Linux/macOS):\n" +
 			"   - Run with sudo: sudo ./crypto-sensor\n\n" +
 			"See WINDOWS_SETUP.md for detailed Windows setup instructions")
+	}
+
+	if pc.hostObs != nil {
+		pc.hostObs.Start(pc.ctx)
+		log.Printf("Passive host observation enabled (coalescing window %s, DNS decoder %s)",
+			pc.hostObs.window, enabledWord(pc.hostObs.decoders.DNS))
 	}
 
 	// Start bounded worker goroutines — these consume from the workers channel
@@ -349,6 +371,12 @@ func (pc *PacketCapture) Stop() {
 	// Wait for all captureInterface goroutines to exit before closing channels
 	pc.wg.Wait()
 	close(pc.workers)
+	// The host-observation pipeline writes to pc.discoveries, so it has to
+	// finish its shutdown drain before that channel is closed — otherwise the
+	// final window's observations are a send on a closed channel.
+	if pc.hostObs != nil {
+		pc.hostObs.Stop()
+	}
 	close(pc.discoveries)
 	close(pc.errors)
 	log.Println("Packet capture stopped")
@@ -374,6 +402,19 @@ func (pc *PacketCapture) GetErrors() <-chan error {
 // GetStats returns packet capture statistics
 func (pc *PacketCapture) GetStats() (packetCount, dropCount int64) {
 	return atomic.LoadInt64(&pc.packetCount), atomic.LoadInt64(&pc.dropCount)
+}
+
+// HostObservationMetrics returns the passive host-observation counters for the
+// heartbeat, or nil when the feature is off.
+//
+// The drop counters are the point. A decoder that is running but shedding every
+// frame looks exactly like one that is running and finding nothing, and only
+// these numbers tell the operator which they have.
+func (pc *PacketCapture) HostObservationMetrics() map[string]interface{} {
+	if pc.hostObs == nil {
+		return nil
+	}
+	return pc.hostObs.Metrics()
 }
 
 // GetInterfaceStats returns packet statistics as a list of per-interface entries.
@@ -418,6 +459,92 @@ func snapLenFromConfig(bufferSize int) int32 {
 		return defaultSnapLen
 	}
 	return int32(bufferSize)
+}
+
+// buildBPFFilter assembles the capture filter from the enabled features.
+//
+// Extracted from startInterfaceCapture so it can be tested without opening a
+// live handle. A filter term missing for an enabled decoder is invisible at
+// runtime: the decoder runs, reports success and never receives a frame.
+func buildBPFFilter(cfg *config.Config) string {
+	// Build BPF filter for crypto-related traffic.
+	// Base set covers the most common TLS/SSH ports; operators can extend via config.
+	basePorts := []string{"443", "22", "993", "995", "465", "587", "636", "5671", "8443", "853"}
+	// UDP ports for QUIC, IKE/IPsec, and WireGuard
+	udpParts := []string{"udp port 443", "udp port 500", "udp port 4500"}
+	if cfg.Capture.EnableWireGuard {
+		udpParts = append(udpParts, "udp port 51820")
+	}
+	if cfg.Capture.EnableOpenVPN {
+		udpParts = append(udpParts, "udp port 1194")
+	}
+	if cfg.Capture.EnableKerberos {
+		udpParts = append(udpParts, "udp port 88")
+	}
+	// TCP 3389 for RDP (which uses TLS over TCP), TCP 445 for SMB, TCP 88 for Kerberos
+	tcpExtra := []string{"tcp port 3389"}
+	if cfg.Capture.EnableSMB {
+		tcpExtra = append(tcpExtra, "tcp port 445")
+	}
+	if cfg.Capture.EnableKerberos {
+		tcpExtra = append(tcpExtra, "tcp port 88")
+	}
+	// Modbus/TCP on 502 routes to the Modbus assembler; Modbus/TLS on 802
+	// routes to the existing TLS assembler (handled automatically by the
+	// "TLS" protocol classification once 802 is in getProtocolFromPort).
+	if cfg.Capture.EnableModbus {
+		tcpExtra = append(tcpExtra, "tcp port 502", "tcp port 802")
+	}
+	// MMS / ICCP on 102 — routes to BOTH the MMS assembler (plaintext path)
+	// and the TLS assembler (TLS-wrapped MMS / ICCP per IEC 62351-3). One
+	// or the other fires depending on the wire bytes.
+	if cfg.Capture.EnableMMS {
+		tcpExtra = append(tcpExtra, "tcp port 102")
+	}
+	// DNP3 on TCP port 20000 — passive only (no safe well-known active probe).
+	// Also capture UDP 20000 for the (less common) UDP DNP3 path.
+	if cfg.Capture.EnableDNP3 {
+		tcpExtra = append(tcpExtra, "tcp port 20000")
+		udpParts = append(udpParts, "udp port 20000")
+	}
+	// OPC UA Binary on TCP 4840 — passive HEL/ACK detection plus OPN
+	// SecurityPolicy URI extraction.
+	if cfg.Capture.EnableOPCUA {
+		tcpExtra = append(tcpExtra, "tcp port 4840")
+	}
+	// EtherNet/IP CIP on TCP 44818 — passive encapsulation-header detection.
+	// CIP Security (TLS-wrapped EtherNet/IP) goes through the TLS assembler.
+	if cfg.Capture.EnableENIP {
+		tcpExtra = append(tcpExtra, "tcp port 44818")
+	}
+	// HART-IP (HCF Spec 85) on TCP+UDP 5094 — passive header-recognition.
+	if cfg.Capture.EnableHARTIP {
+		tcpExtra = append(tcpExtra, "tcp port 5094")
+		udpParts = append(udpParts, "udp port 5094")
+	}
+	filterParts := make([]string, 0, len(basePorts)+len(udpParts)+len(tcpExtra)+len(cfg.Capture.ExtraPortsToMonitor)+len(cfg.Capture.STARTTLSPorts))
+	for _, p := range basePorts {
+		filterParts = append(filterParts, "tcp port "+p)
+	}
+	filterParts = append(filterParts, udpParts...)
+	filterParts = append(filterParts, tcpExtra...)
+	for _, p := range cfg.Capture.ExtraPortsToMonitor {
+		filterParts = append(filterParts, fmt.Sprintf("tcp port %d", p))
+	}
+	// STARTTLS ports for plaintext protocols that may upgrade to TLS
+	if cfg.Capture.EnableSTARTTLS {
+		for _, p := range cfg.Capture.STARTTLSPorts {
+			filterParts = append(filterParts, fmt.Sprintf("tcp port %d", p))
+		}
+	}
+	// Host observation needs frames the crypto filter would never admit: ARP
+	// and LLDP/CDP are not IP at all, and DHCP/mDNS/NetBIOS/DNS are on ports
+	// no crypto path watches. Added only when the feature is on, so a sensor
+	// with it disabled keeps exactly the capture load it has today.
+	if cfg.Capture.HostObservation {
+		filterParts = append(filterParts, hostobs.BPFTerms(hostObsConfig(cfg))...)
+	}
+	return strings.Join(filterParts, " or ")
 }
 
 // startInterfaceCapture starts packet capture on a specific interface
@@ -486,77 +613,7 @@ func (pc *PacketCapture) startInterfaceCapture(iface string) error {
 		return fmt.Errorf("failed to open interface %s: %v", iface, err)
 	}
 
-	// Build BPF filter for crypto-related traffic.
-	// Base set covers the most common TLS/SSH ports; operators can extend via config.
-	basePorts := []string{"443", "22", "993", "995", "465", "587", "636", "5671", "8443", "853"}
-	// UDP ports for QUIC, IKE/IPsec, and WireGuard
-	udpParts := []string{"udp port 443", "udp port 500", "udp port 4500"}
-	if pc.config.Capture.EnableWireGuard {
-		udpParts = append(udpParts, "udp port 51820")
-	}
-	if pc.config.Capture.EnableOpenVPN {
-		udpParts = append(udpParts, "udp port 1194")
-	}
-	if pc.config.Capture.EnableKerberos {
-		udpParts = append(udpParts, "udp port 88")
-	}
-	// TCP 3389 for RDP (which uses TLS over TCP), TCP 445 for SMB, TCP 88 for Kerberos
-	tcpExtra := []string{"tcp port 3389"}
-	if pc.config.Capture.EnableSMB {
-		tcpExtra = append(tcpExtra, "tcp port 445")
-	}
-	if pc.config.Capture.EnableKerberos {
-		tcpExtra = append(tcpExtra, "tcp port 88")
-	}
-	// Modbus/TCP on 502 routes to the Modbus assembler; Modbus/TLS on 802
-	// routes to the existing TLS assembler (handled automatically by the
-	// "TLS" protocol classification once 802 is in getProtocolFromPort).
-	if pc.config.Capture.EnableModbus {
-		tcpExtra = append(tcpExtra, "tcp port 502", "tcp port 802")
-	}
-	// MMS / ICCP on 102 — routes to BOTH the MMS assembler (plaintext path)
-	// and the TLS assembler (TLS-wrapped MMS / ICCP per IEC 62351-3). One
-	// or the other fires depending on the wire bytes.
-	if pc.config.Capture.EnableMMS {
-		tcpExtra = append(tcpExtra, "tcp port 102")
-	}
-	// DNP3 on TCP port 20000 — passive only (no safe well-known active probe).
-	// Also capture UDP 20000 for the (less common) UDP DNP3 path.
-	if pc.config.Capture.EnableDNP3 {
-		tcpExtra = append(tcpExtra, "tcp port 20000")
-		udpParts = append(udpParts, "udp port 20000")
-	}
-	// OPC UA Binary on TCP 4840 — passive HEL/ACK detection plus OPN
-	// SecurityPolicy URI extraction.
-	if pc.config.Capture.EnableOPCUA {
-		tcpExtra = append(tcpExtra, "tcp port 4840")
-	}
-	// EtherNet/IP CIP on TCP 44818 — passive encapsulation-header detection.
-	// CIP Security (TLS-wrapped EtherNet/IP) goes through the TLS assembler.
-	if pc.config.Capture.EnableENIP {
-		tcpExtra = append(tcpExtra, "tcp port 44818")
-	}
-	// HART-IP (HCF Spec 85) on TCP+UDP 5094 — passive header-recognition.
-	if pc.config.Capture.EnableHARTIP {
-		tcpExtra = append(tcpExtra, "tcp port 5094")
-		udpParts = append(udpParts, "udp port 5094")
-	}
-	filterParts := make([]string, 0, len(basePorts)+len(udpParts)+len(tcpExtra)+len(pc.config.Capture.ExtraPortsToMonitor)+len(pc.config.Capture.STARTTLSPorts))
-	for _, p := range basePorts {
-		filterParts = append(filterParts, "tcp port "+p)
-	}
-	filterParts = append(filterParts, udpParts...)
-	filterParts = append(filterParts, tcpExtra...)
-	for _, p := range pc.config.Capture.ExtraPortsToMonitor {
-		filterParts = append(filterParts, fmt.Sprintf("tcp port %d", p))
-	}
-	// STARTTLS ports for plaintext protocols that may upgrade to TLS
-	if pc.config.Capture.EnableSTARTTLS {
-		for _, p := range pc.config.Capture.STARTTLSPorts {
-			filterParts = append(filterParts, fmt.Sprintf("tcp port %d", p))
-		}
-	}
-	filter := strings.Join(filterParts, " or ")
+	filter := buildBPFFilter(pc.config)
 	if err := handle.SetBPFFilter(filter); err != nil {
 		log.Printf("Warning: Failed to set BPF filter on %s: %v", iface, err)
 	}
@@ -606,6 +663,14 @@ func (pc *PacketCapture) runWorker() {
 
 // analyzePacket analyzes a captured packet for crypto information
 func (pc *PacketCapture) analyzePacket(packet gopacket.Packet, iface string) {
+	// Host observation runs FIRST and unconditionally, because ARP, LLDP and
+	// CDP have no network layer at all and the guard below would return before
+	// they were ever looked at. Offer classifies, copies a bounded payload and
+	// hands off without blocking; the crypto paths below are unaffected.
+	if pc.hostObs != nil {
+		pc.hostObs.Offer(packet, iface)
+	}
+
 	// Extract network layer information
 	networkLayer := packet.NetworkLayer()
 	if networkLayer == nil {

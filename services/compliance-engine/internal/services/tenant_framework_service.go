@@ -27,9 +27,18 @@ func NewTenantFrameworkService(db *sqlx.DB) *TenantFrameworkService {
 // ListPublishedFrameworks lists all published platform frameworks (read-only for tenants)
 // Best Practices framework (platform default) is returned first
 // If tenantID is provided, includes license status for that tenant
+//
+// f.description/f.organization are COALESCEd in every query in this file:
+// both columns are NULLABLE (scripts/database/schema.sql) but
+// models.PlatformFramework scans them into plain Go strings, and a NULL fails
+// the row's scan outright — which used to take down the whole tenant-facing
+// Frameworks list (and ListPublishedFrameworksWithLicense,
+// listPublishedFrameworksBasic and ViewFramework below) for one framework
+// somebody created without naming an organization (the same defect
+// framework_license_service.go was fixed for first).
 func (s *TenantFrameworkService) ListPublishedFrameworks(tenantID *uuid.UUID) ([]models.PlatformFramework, error) {
 	query := `
-		SELECT f.id, f.code, f.name, f.version, f.description, f.organization, f.status,
+		SELECT f.id, f.code, f.name, f.version, COALESCE(f.description, '') AS description, COALESCE(f.organization, '') AS organization, f.status,
 		       f.is_platform_default, f.published_at, f.published_by, f.created_by, f.created_at, f.updated_at,
 		       COALESCE(c.controls_count, 0) as controls_count
 		FROM platform_frameworks f
@@ -94,7 +103,7 @@ func (s *TenantFrameworkService) ListPublishedFrameworks(tenantID *uuid.UUID) ([
 // ListPublishedFrameworksWithLicense lists all published frameworks with license status for a tenant
 func (s *TenantFrameworkService) ListPublishedFrameworksWithLicense(tenantID uuid.UUID) ([]models.PublishedFrameworkWithLicense, error) {
 	query := `
-		SELECT f.id, f.code, f.name, f.version, f.description, f.organization, f.status,
+		SELECT f.id, f.code, f.name, f.version, COALESCE(f.description, '') AS description, COALESCE(f.organization, '') AS organization, f.status,
 		       f.is_platform_default, f.published_at, f.published_by, f.created_by, f.created_at, f.updated_at,
 		       COALESCE(c.controls_count, 0) as controls_count,
 		       CASE WHEN tfl.platform_framework_id IS NOT NULL THEN true ELSE false END as is_licensed
@@ -147,7 +156,7 @@ func (s *TenantFrameworkService) ListPublishedFrameworksWithLicense(tenantID uui
 // listPublishedFrameworksBasic lists published frameworks without license info (fallback)
 func (s *TenantFrameworkService) listPublishedFrameworksBasic() ([]models.PublishedFrameworkWithLicense, error) {
 	query := `
-		SELECT f.id, f.code, f.name, f.version, f.description, f.organization, f.status,
+		SELECT f.id, f.code, f.name, f.version, COALESCE(f.description, '') AS description, COALESCE(f.organization, '') AS organization, f.status,
 		       f.is_platform_default, f.published_at, f.published_by, f.created_by, f.created_at, f.updated_at,
 		       COALESCE(c.controls_count, 0) as controls_count,
 		       false as is_licensed
@@ -173,7 +182,7 @@ func (s *TenantFrameworkService) listPublishedFrameworksBasic() ([]models.Publis
 // ViewFramework gets a published platform framework (read-only) with its controls
 func (s *TenantFrameworkService) ViewFramework(id uuid.UUID) (*models.PlatformFramework, error) {
 	query := `
-		SELECT f.id, f.code, f.name, f.version, f.description, f.organization, f.status,
+		SELECT f.id, f.code, f.name, f.version, COALESCE(f.description, '') AS description, COALESCE(f.organization, '') AS organization, f.status,
 		       f.is_platform_default, f.published_at, f.published_by, f.created_by, f.created_at, f.updated_at,
 		       COALESCE(c.controls_count, 0) as controls_count
 		FROM platform_frameworks f
@@ -274,9 +283,17 @@ func (s *TenantFrameworkService) loadPlatformMeasurementsByControl(frameworkID u
 }
 
 // ListTenantFrameworks lists all frameworks for a tenant
+//
+// f.description is COALESCEd: tenant_frameworks.description is NULLABLE
+// (scripts/database/schema.sql) but models.TenantFramework scans it into a
+// plain Go string, and a NULL fails the row's scan outright — which would
+// take down this whole list (sqlx.Select aborts the entire scan on one row's
+// error) for a single custom policy that predates stricter validation or was
+// edited directly. The identical defect in platform_frameworks readers was
+//this is the tenant_frameworks sibling.
 func (s *TenantFrameworkService) ListTenantFrameworks(tenantID uuid.UUID) ([]models.TenantFramework, error) {
 	query := `
-		SELECT f.id, f.tenant_id, f.name, f.version, f.description, f.source_framework_id, f.created_by, f.created_at, f.updated_at,
+		SELECT f.id, f.tenant_id, f.name, f.version, COALESCE(f.description, '') AS description, f.source_framework_id, f.created_by, f.created_at, f.updated_at,
 		       COALESCE(c.controls_count, 0) as controls_count
 		FROM tenant_frameworks f
 		LEFT JOIN (
@@ -309,9 +326,14 @@ func (s *TenantFrameworkService) ListTenantFrameworks(tenantID uuid.UUID) ([]mod
 }
 
 // GetTenantFramework gets a tenant framework by ID with its controls
+// GetTenantFramework fetches one tenant framework by id with its controls.
+//
+// description is COALESCEd for the same reason as ListTenantFrameworks above:
+// tenant_frameworks.description is NULLABLE and models.TenantFramework has no
+// way to represent that.
 func (s *TenantFrameworkService) GetTenantFramework(tenantID, frameworkID uuid.UUID) (*models.TenantFramework, error) {
 	query := `
-		SELECT id, tenant_id, name, version, description, source_framework_id, created_by, created_at, updated_at
+		SELECT id, tenant_id, name, version, COALESCE(description, '') AS description, source_framework_id, created_by, created_at, updated_at
 		FROM tenant_frameworks
 		WHERE id = $1 AND tenant_id = $2
 	`
@@ -338,7 +360,7 @@ func (s *TenantFrameworkService) GetTenantFramework(tenantID, frameworkID uuid.U
 
 	// Load controls for the framework
 	controlsQuery := `
-		SELECT id, framework_id, family_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at
+		SELECT ` + models.FrameworkControlColumns + `
 		FROM tenant_framework_controls
 		WHERE framework_id = $1
 		ORDER BY control_id

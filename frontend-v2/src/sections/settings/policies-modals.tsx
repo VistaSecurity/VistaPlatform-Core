@@ -10,7 +10,7 @@ import type { auditServiceComponents as AC } from '@vistasecurity/api-contract';
 type RetentionPolicy = AC['schemas']['RetentionPolicy'];
 
 function legacyMessage(error: unknown, fallback: string): string {
-  if (error && typeof error === 'object' && 'error' in error) return String((error as { error: unknown }).error);
+  if (error && typeof error === 'object' && 'error' in error) return String(error.error);
   return fallback;
 }
 
@@ -44,7 +44,7 @@ export function RetentionPolicyModal({ policy, open, onClose }: { policy: Retent
       }
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['settings', 'retention-policies'] });
+      void queryClient.invalidateQueries({ queryKey: ['settings', 'retention-policies'] });
       onClose();
     },
   });

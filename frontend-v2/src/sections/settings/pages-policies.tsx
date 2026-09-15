@@ -1,11 +1,11 @@
 // Settings · Policies pages — Scopes (cbom-service), Compliance Frameworks
 // (compliance-engine licenses + catalog), and Retention Policies (audit-service)
-// ported from the mock's settings/sectionF.jsx. Predicate summaries are
-// rendered from the typed Scope.predicate shape.
+// ported from the mock's settings/sectionF.jsx.
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
+import { QueryChip } from '../inventory/query-editor';
 import { clients } from '../../lib/clients';
 import { Icon } from '../../components/ui';
 import { SPage, SSection, SCard, STable, STableRow, STag, SDot, SToggle, StateNote, GREEN, AMBER } from './kit';
@@ -16,30 +16,13 @@ import type { SettingsNavItem } from './nav';
 // cbom-service schemas are the root `components` export of the contract package.
 import type { components as CbomComponents } from '@vistasecurity/api-contract';
 
-type Predicate = CbomComponents['schemas']['Predicate'];
-type PredicateClause = CbomComponents['schemas']['PredicateClause'];
-
-function clausePhrase(c?: PredicateClause): string {
-  if (!c) return '';
-  const parts: string[] = [];
-  const f = c as Record<string, unknown>;
-  for (const [key, label] of [
-    ['environment', 'env'], ['asset_type', 'type'], ['asset_ownership', 'ownership'],
-    ['asset_status', 'status'], ['business_unit', 'BU'], ['location_region', 'region'],
-    ['risk_level', 'risk'], ['tags_any_of', 'tags'],
-  ] as const) {
-    const v = f[key];
-    if (Array.isArray(v) && v.length) parts.push(`${label} ∈ {${v.join(', ')}}`);
-  }
-  return parts.join(' · ');
-}
-
-function predicateSummary(p?: Predicate): string {
-  if (!p || (!p.include && !p.exclude)) return 'All assets';
-  const inc = clausePhrase(p.include);
-  const exc = clausePhrase(p.exclude);
-  return [inc && `include ${inc}`, exc && `exclude ${exc}`].filter(Boolean).join(' — ') || 'All assets';
-}
+// A scope's boundary, for the row.
+//
+// It USED to reassemble a sentence from eight predicate fields — "include env ∈
+// {production} · type ∈ {server}" — because the stored shape was JSON and had
+// no human reading. A scope is a query string now, which already reads, so the
+// row shows the query itself, through the shared `QueryChip` that picks out its
+// field names using the real parser's spans.
 
 type ScopeModalState =
   | { kind: 'closed' }
@@ -96,11 +79,14 @@ export function ScopesPage({ meta }: { meta: SettingsNavItem }) {
                   {s.is_system && <STag color="var(--accent)">System</STag>}
                 </div>
                 <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {s.description || predicateSummary(s.predicate)} · used by CBOM
+                  {s.description || 'No description'} · used by CBOM
                 </div>
               </div>
-              <span className="mono" style={{ fontSize: 11.5, color: 'var(--app-t3)', flex: 'none' }} title={predicateSummary(s.predicate)}>
-                {predicateSummary(s.predicate).length > 42 ? `${predicateSummary(s.predicate).slice(0, 42)}…` : predicateSummary(s.predicate)}
+              {/* The scope's actual boundary, with its field names picked out.
+                  It is not truncated: the query IS the scope, and a boundary a
+                  reader can only see half of is a boundary they cannot check. */}
+              <span style={{ flex: '0 1 320px', minWidth: 0, textAlign: 'right' }}>
+                <QueryChip query={s.query} />
               </span>
               <PermissionGate permission={TENANT_PERMISSIONS.compliance.update}>
                 <div style={{ display: 'flex', gap: 8, flex: 'none' }}>
@@ -157,11 +143,11 @@ export function FrameworksPage({ meta }: { meta: SettingsNavItem }) {
   const available = frameworks.filter((f) => !f.is_licensed);
 
   const refresh = () => {
-    queryClient.invalidateQueries({ queryKey: ['settings', 'frameworks-available'] });
-    queryClient.invalidateQueries({ queryKey: ['settings', 'framework-licenses'] });
+    void queryClient.invalidateQueries({ queryKey: ['settings', 'frameworks-available'] });
+    void queryClient.invalidateQueries({ queryKey: ['settings', 'framework-licenses'] });
   };
   const fail = (error: unknown, fallback: string) => {
-    setActionError(error && typeof error === 'object' && 'error' in error ? String((error as { error: unknown }).error) : fallback);
+    setActionError(error && typeof error === 'object' && 'error' in error ? String(error.error) : fallback);
   };
 
   const clear = () => { setActionError(null); setActionNote(null); };

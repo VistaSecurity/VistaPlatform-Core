@@ -60,7 +60,7 @@ const certificateColumns = `
 const effectiveOwnershipExpr = `COALESCE(
 	(SELECT na.asset_ownership
 	   FROM crypto_implementations ci
-	   JOIN network_assets na ON na.id = ci.asset_id
+	   JOIN assets na ON na.tenant_id = ci.tenant_id AND na.id = ci.asset_id
 	  WHERE ci.certificate_id = certificates.id
 	    AND ci.tenant_id = certificates.tenant_id
 	    AND ci.deleted_at IS NULL
@@ -289,7 +289,7 @@ func (s *CertificateService) GetCertificates(tenantID uuid.UUID, filters models.
 		(WITH RECURSIVE deployed_chain AS (
 			SELECT ci.asset_id, ci.certificate_id AS cert_id
 			  FROM crypto_implementations ci
-			  JOIN network_assets na ON na.id = ci.asset_id
+			  JOIN assets na ON na.tenant_id = ci.tenant_id AND na.id = ci.asset_id
 			 WHERE ci.tenant_id = certificates.tenant_id
 			   AND ci.deleted_at IS NULL
 			   AND na.deleted_at IS NULL
@@ -542,7 +542,7 @@ func (s *CertificateService) getRelatedAssets(tenantID, certID uuid.UUID) ([]mod
 		WITH RECURSIVE deployed_chain AS (
 			SELECT ci.asset_id, ci.certificate_id AS cert_id
 			  FROM crypto_implementations ci
-			  JOIN network_assets na ON na.id = ci.asset_id
+			  JOIN assets na ON na.tenant_id = ci.tenant_id AND na.id = ci.asset_id
 			 WHERE ci.tenant_id = $2
 			   AND ci.deleted_at IS NULL
 			   AND na.deleted_at IS NULL
@@ -554,12 +554,12 @@ func (s *CertificateService) getRelatedAssets(tenantID, certID uuid.UUID) ([]mod
 			 WHERE c.issuer_certificate_id IS NOT NULL
 		)
 		SELECT DISTINCT
-			a.id, a.tenant_id, a.hostname, a.ip_address, a.port, a.asset_type,
-			a.operating_system, a.environment, a.business_unit, a.owner_email,
+			a.id, a.tenant_id, a.hostname, host(a.primary_address), ep.port, a.class_key,
+			` + assetOperatingSystemSQL + `, a.environment, a.business_unit, a.owner_email,
 			a.description, a.tags::text, a.metadata::text, a.asset_ownership, a.asset_status,
 			a.first_discovered_at, a.last_seen_at,
 			a.created_at, a.updated_at, a.deleted_at
-		FROM network_assets a
+		FROM assets a` + primaryEndpointJoin + `
 		JOIN deployed_chain dc ON dc.asset_id = a.id
 		WHERE dc.cert_id = $1
 		AND a.tenant_id = $2
@@ -567,7 +567,7 @@ func (s *CertificateService) getRelatedAssets(tenantID, certID uuid.UUID) ([]mod
 		LIMIT 10
 	`
 
-	// RLS-scoped read over network_assets / crypto_implementations.
+	// RLS-scoped read over assets / crypto_implementations.
 	var assets []models.Asset
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		rows, e := tx.Query(query, certID, tenantID)
@@ -579,10 +579,12 @@ func (s *CertificateService) getRelatedAssets(tenantID, certID uuid.UUID) ([]mod
 		for rows.Next() {
 			var asset models.Asset
 			var tagsText, metadataText sql.NullString
+			var operatingSystem *string
+			var ep models.Endpoint
 
 			if e := rows.Scan(
-				&asset.ID, &asset.TenantID, &asset.Hostname, &asset.IPAddress, &asset.Port,
-				&asset.AssetType, &asset.OperatingSystem, &asset.Environment, &asset.BusinessUnit,
+				&asset.ID, &asset.TenantID, &asset.Hostname, &asset.PrimaryAddress, &ep.Port,
+				&asset.ClassKey, &operatingSystem, &asset.Environment, &asset.BusinessUnit,
 				&asset.OwnerEmail, &asset.Description, &tagsText, &metadataText, &asset.AssetOwnership, &asset.AssetStatus,
 				&asset.FirstDiscoveredAt, &asset.LastSeenAt, &asset.CreatedAt, &asset.UpdatedAt,
 				&asset.DeletedAt,
@@ -590,6 +592,9 @@ func (s *CertificateService) getRelatedAssets(tenantID, certID uuid.UUID) ([]mod
 				continue
 			}
 
+			setAssetOperatingSystem(&asset, operatingSystem)
+			attachPrimaryEndpoint(&asset, ep)
+			normalizeAssetCollections(&asset)
 			if tagsText.Valid {
 				_ = json.Unmarshal([]byte(tagsText.String), &asset.Tags)
 			}

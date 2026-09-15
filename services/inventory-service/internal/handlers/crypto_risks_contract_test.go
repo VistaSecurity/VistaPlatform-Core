@@ -24,6 +24,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
+
+	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 )
 
 // --- stub cryptoRisksService ----------------------------------------------
@@ -89,7 +91,7 @@ func sampleRisk() services.CryptoRisk {
 		AssetHostname:          strPtr("web-01.example.com"),
 		AssetIPAddress:         strPtr("10.0.0.5"),
 		AssetPort:              intPtr(443),
-		AssetType:              "server",
+		AssetClassKey:          assetclass.KeyServer,
 		Protocol:               "tls",
 		ProtocolVersion:        strPtr("1.0"),
 		CipherSuite:            strPtr("TLS_RSA_WITH_AES_128_CBC_SHA"),

@@ -16,6 +16,8 @@ import (
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/middleware"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/services"
+	aiedition "github.com/vistasecurity/vistaplatform/shared/ai/edition"
+	seams "github.com/vistasecurity/vistaplatform/shared/ai/seams"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
@@ -211,6 +213,24 @@ func main() {
 	// Raw *sql.DB reference for the shared RBAC middleware.
 	// compliance-engine's database.Connect returns *sqlx.DB, which embeds *sql.DB.
 	rawDB := db.DB
+	// ── Remediator seam (ADR-0008 D1) ──────────────────────────────────────
+	//
+	// Resolved once at start, like every other seam: the provider environment
+	// and the build tags decide the answer and neither changes between
+	// requests. edition.NewRemediator returns seams.NullRemediator in Core and
+	// in an Enterprise build with no reachable AI_PROVIDER — never nil — so the
+	// handlers below are wired identically in every edition and answer for
+	// themselves.
+	//
+	// The audit sink is the SAME one the author seam gets: the boundary's
+	// per-call records and the seam's own per-finding record belong on one rail,
+	// and two sinks would split a single question's trail across two.
+	remediatorSeam, remediatorDesc := aiedition.NewRemediator(
+		auditmiddleware.NewAISink(auditMiddleware, "compliance-engine"))
+	remediationDraftHandlers := handlers.NewRemediationDraftHandlers(
+		remediatorSeam, services.NewRemediationDraftService(db), planService, db.DB)
+	log.Printf("🛠  remediation drafting (remediator seam): implementation=%s state=%s linked=%t",
+		remediatorDesc.Implementation, remediatorDesc.State, aiedition.RemediatorLinked())
 
 	// API routes (service namespace must be compliance-engine per standards)
 	api := router.Group("/api/v1")
@@ -378,6 +398,30 @@ func main() {
 		compliance.PUT("/plans/:id/items/:itemId/ticket", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionComplianceUpdate), planHandlers.LinkTicketToItem)
 		compliance.GET("/plans/:id/progress", planHandlers.GetPlanProgress)
 
+		// ── Remediator seam: drafting a plan for one finding (ADR-0008 D1) ──
+		//
+		// Mounted in EVERY edition, on purpose. A Core build has no remediator
+		// (the implementation is shared/ai/ee/remediator) and these answer 402;
+		// an Enterprise build with no AI_PROVIDER answers 503. Not mounting them
+		// in Core would make "this is not in your edition" indistinguishable
+		// from "the route is broken", and would put a 404 in every Core user's
+		// console — the reason AI_SEAMS §10 and §12 give for their own routes.
+		//
+		// Availability is NOT asked here: GET /api/v1/auth-service/tenant/ai
+		// already answers it deployment-wide, and a second endpoint saying the
+		// same thing is a second thing to keep true.
+		//
+		// Both sit on the same permission as every other write to a remediation
+		// plan. Drafting writes nothing, but it spends the tenant's tokens and
+		// exists only to produce something the same person then accepts, so
+		// gating it lower would offer the button to a reader who cannot use it.
+		compliance.POST("/findings/:id/remediation/draft",
+			sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionComplianceUpdate),
+			remediationDraftHandlers.Draft)
+		compliance.POST("/findings/:id/remediation/accept",
+			sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionComplianceUpdate),
+			remediationDraftHandlers.Accept)
+
 		// Mappings (admin-only in future)
 		compliance.GET("/mappings", complianceHandlers.ListMappings)
 		compliance.GET("/mappings/:id", complianceHandlers.GetMapping)
@@ -452,6 +496,32 @@ func main() {
 		admin.DELETE("/tenants/:tenantId/subscriptions/:frameworkId", frameworkLicenseHandlers.AdminCancelTenantSubscription)
 		admin.POST("/templates/:id/apply", templateHandlers.ApplyTemplate)
 	}
+
+	// ── Author seam: drafting controls from a pasted standard (ADR-0008 D1) ──
+	//
+	// Wired after both groups exist because the capability has one surface per
+	// authoring plane — a platform admin drafting into the shared catalogue,
+	// and an Enterprise tenant drafting into a custom policy — and both should
+	// be resolved from ONE seam, one provider and one audit sink. Splitting the
+	// wiring across the two blocks above would have given the process two
+	// providers and two answers to "is this available".
+	//
+	// The availability endpoints are registered HERE, in Core, on both planes.
+	// A Core build has no drafting routes at all (the model clients are
+	// Enterprise), and its availability answer is the zero value —
+	// `{"available":false,"reason":"edition"}`. That is what stops the two UIs
+	// having to infer a missing capability from a 404, which cannot be told
+	// apart from a broken route.
+	authorAvailability := models.AuthorAvailability{Reason: models.AuthorReasonEdition}
+	if hooks.RegisterAuthorRoutes != nil {
+		authorAvailability = hooks.RegisterAuthorRoutes(compliance, admin, db, rawDB,
+			auditmiddleware.NewAISink(auditMiddleware, "compliance-engine"))
+	}
+	authorHandlers := handlers.NewAuthorHandlers(authorAvailability)
+	compliance.GET("/custom-policies/draft-controls/availability", authorHandlers.GetAvailability)
+	admin.GET("/frameworks/draft-controls/availability", authorHandlers.GetAvailability)
+	log.Printf("🖉  control drafting (author seam): available=%t reason=%q provider=%q",
+		authorAvailability.Available, authorAvailability.Reason, authorAvailability.Provider)
 
 	// Initialize and start event subscriber
 	var eventSubscriber *services.EventSubscriberService
@@ -528,7 +598,23 @@ func main() {
 	scoreDropJob := jobs.NewComplianceScoreDropScanJob(db, bypassDB, alertCatalog, alertEngine, 1*time.Hour)
 	scoreDropJob.Start()
 	defer scoreDropJob.Stop()
-	log.Printf("📉 Compliance policy detectors started (control-noncompliant 30m, score-drop 1h)")
+	log.Printf("📉 Compliance policy detectors started (control-noncompliant 30m, score-drop 1h + hygiene-score-drop)")
+
+	// Findings-driven detectors (ADR-0005 D7): one alert per SUBJECT from the
+	// vulnerability and eol producers' open findings, escalating with the worst
+	// one and auto-resolving when the condition stops being detected. Hourly,
+	// because both producers are inventory-paced — a CVSS does not change
+	// between one discovery pass and the next.
+	vulnerabilityAlertJob := jobs.NewVulnerabilityAlertScanJob(db, bypassDB, alertCatalog, alertEngine, 1*time.Hour)
+	vulnerabilityAlertJob.Start()
+	defer vulnerabilityAlertJob.Stop()
+	endOfLifeAlertJob := jobs.NewEndOfLifeAlertScanJob(db, bypassDB, alertCatalog, alertEngine, 1*time.Hour)
+	endOfLifeAlertJob.Start()
+	defer endOfLifeAlertJob.Stop()
+	driftAlertJob := jobs.NewDriftAlertScanJob(db, bypassDB, alertCatalog, alertEngine, 1*time.Hour)
+	driftAlertJob.Start()
+	defer driftAlertJob.Stop()
+	log.Printf("🧬 Findings-driven detectors started (known-vulnerability 1h, end-of-life 1h, drift 1h)")
 
 	// Discovery-job-failed detector: one medium alert per failed discovery job
 	// not yet superseded by a later successful run; auto-resolves when a
@@ -584,7 +670,9 @@ func main() {
 	go planService.StartOverdueChecker(jobCtx)
 	log.Printf("📋 Remediation plan overdue checker started (runs every hour)")
 
-	// Health check server (HTTP, port 8080)
+	// Health check server (HTTP, port 8080). Answers a static body and never
+	// calls a seam, so it keeps its own short timeout — see
+	// seams.GenerativeWriteTimeout for why the API server below does not.
 	healthRouter := gin.New()
 	healthRouter.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -618,7 +706,7 @@ func main() {
 		apiServer.Addr = ":" + cfg.TLSPort
 		apiServer.ReadHeaderTimeout = 5 * time.Second
 		apiServer.ReadTimeout = 10 * time.Second
-		apiServer.WriteTimeout = 15 * time.Second
+		apiServer.WriteTimeout = seams.GenerativeWriteTimeout
 		apiServer.IdleTimeout = 60 * time.Second
 	} else {
 		// Fallback to HTTP if mTLS disabled
@@ -627,7 +715,7 @@ func main() {
 			Handler:           router,
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       10 * time.Second,
-			WriteTimeout:      15 * time.Second,
+			WriteTimeout:      seams.GenerativeWriteTimeout,
 			IdleTimeout:       60 * time.Second,
 		}
 	}

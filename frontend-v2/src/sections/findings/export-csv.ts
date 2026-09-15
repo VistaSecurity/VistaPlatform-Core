@@ -8,7 +8,8 @@
 // module — separate from findings-page.tsx's JSX — so the row-building logic
 // is directly unit-testable.
 import type { ComplianceFinding, ControlRef, CryptoRisk } from './model';
-import { catOf, issueLabel, sevLevel, targetLabel, wfOf } from './model';
+import { catOf, findingCitation, issueLabel, sevLevel, targetLabel, wfOf } from './model';
+import { kindLabel, producerLabel } from './producer-evidence';
 
 export interface ControlMeta { fwId: string; fwName: string; control: ControlRef }
 
@@ -27,21 +28,39 @@ export function buildCryptoRiskCsvRows(risks: CryptoRisk[]): (string | number | 
   ]);
 }
 
-export const COMPLIANCE_FINDING_CSV_HEADER = ['control_id', 'framework', 'target', 'severity', 'workflow_status', 'assigned_to', 'first_seen', 'last_seen', 'summary'];
+// `producer` and `kind` lead, and `control_id`/`framework` are blank for every
+// producer but compliance. The export follows the page: once the list shows
+// end-of-life and vulnerability findings, a CSV that still had "control_id"
+// as its first column would be describing the page it used to be.
+export const COMPLIANCE_FINDING_CSV_HEADER = ['producer', 'kind', 'control_id', 'framework', 'target', 'severity', 'score', 'workflow_status', 'assigned_to', 'first_seen', 'last_seen', 'summary', 'citation'];
+
+/** The all-zero uuid `control_id` carries for every non-compliance producer. */
+const NIL_UUID = '00000000-0000-0000-0000-000000000000';
 
 export function buildComplianceFindingCsvRows(findings: ComplianceFinding[], controlMeta: Map<string, ControlMeta>): (string | number | null | undefined)[][] {
   return findings.map((f) => {
-    const meta = controlMeta.get(f.control_id);
+    const isCompliance = (f.producer ?? 'compliance') === 'compliance';
+    const meta = isCompliance ? controlMeta.get(f.control_id) : undefined;
+    // The nil uuid is "no control", not a control nobody can find. Exporting it
+    // verbatim would put a plausible-looking id in a column it does not belong
+    // in — the same mistake the ticket asset link made for certificates.
+    const controlCell = isCompliance && f.control_id && f.control_id !== NIL_UUID
+      ? (meta?.control.name ?? f.control_id)
+      : '';
     return [
-      meta?.control.name ?? f.control_id,
+      producerLabel(f.producer),
+      kindLabel(f.kind),
+      controlCell,
       meta?.fwName ?? '',
       targetLabel(f),
       sevLevel(f.severity),
+      f.score ?? 0,
       wfOf(f),
       f.assigned_to ?? '',
       f.first_seen,
       f.last_seen,
       f.summary,
+      findingCitation(f)?.href ?? '',
     ];
   });
 }

@@ -9,12 +9,12 @@ package services
 //     writes the SPACED form ("TLS 1.0"), so the filter skipped the actual
 //     legacy endpoints — while its family-blind `key_size < 2048` clause
 //     returned healthy 256-bit EC hosts as deprecated. Both directions wrong.
-//   - B-18: network_assets.risk_level is never written by anything, so it sits
+//   - B-18: assets.risk_level is never written by anything, so it sits
 //     at its schema DEFAULT 'Informational' forever. Location summaries counted
 //     Critical/High/Medium assets by reading that column and therefore always
 //     reported zero.
 //   - B-45: crypto_implementations.discovery_method was the literal
-//     'integration' in the only production INSERT, and network_assets omitted
+//     'integration' in the only production INSERT, and assets omitted
 //     the column entirely.
 //
 // Skips without TEST_DATABASE_URL (nightly test-backend / make
@@ -30,6 +30,9 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
+
+	"github.com/vistasecurity/vistaplatform/shared/assetclass"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
 )
 
 func newPredicateFixture(t *testing.T) (*database.DB, uuid.UUID) {
@@ -48,9 +51,8 @@ func insertConfigForPredicate(
 	t.Helper()
 	asset := uuid.New()
 	if _, err := db.Exec(`
-		INSERT INTO network_assets (id, tenant_id, hostname, ip_address, asset_type, asset_status,
-		                            last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,$3,$4::inet,'server','monitoring',NOW(),NOW(),NOW(),NOW())`,
+		INSERT INTO assets (id, tenant_id, hostname, primary_address, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, $4::inet, 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`,
 		asset, tenant, hostname, ip); err != nil {
 		t.Fatalf("insert asset %s: %v", hostname, err)
 	}
@@ -227,9 +229,8 @@ func TestIntegration_LocationSummary_BandsRiskScore(t *testing.T) {
 	insertScored := func(hostname string, score int) {
 		t.Helper()
 		if _, err := db.Exec(`
-			INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, location_id,
-			                            risk_score, last_seen_at, first_discovered_at, created_at, updated_at)
-			VALUES ($1,$2,$3,'server','monitoring',$4,$5,NOW(),NOW(),NOW(),NOW())`,
+			INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, location_id, risk_score, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, 'server', 'hardware.computer.server', 'monitoring', $4, $5, NOW(), NOW(), NOW(), NOW())`,
 			uuid.New(), tenant, hostname, loc, score); err != nil {
 			t.Fatalf("insert asset %s: %v", hostname, err)
 		}
@@ -241,16 +242,20 @@ func TestIntegration_LocationSummary_BandsRiskScore(t *testing.T) {
 	insertScored("low-a.example.test", 10)
 	insertScored("none-a.example.test", 0)
 
-	// Confirm the premise: the stored column really is untouched.
-	var stored int
-	if err := db.QueryRow(
-		`SELECT COUNT(*) FROM network_assets WHERE tenant_id = $1 AND location_id = $2 AND risk_level = 'Informational'`,
-		tenant, loc,
-	).Scan(&stored); err != nil {
-		t.Fatalf("read stored risk_level: %v", err)
+	// Confirm the premise the harder way now: there IS no stored risk_level
+	// column any more (phase 1, DATA_MODEL §2), so nothing can read a default
+	// back as an assessment. The band is derived from risk_score wherever it is
+	// needed. A column reappearing is the regression this guards.
+	var storedColumn int
+	if err := db.QueryRow(`
+		SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = 'assets' AND column_name = 'risk_level'`,
+	).Scan(&storedColumn); err != nil {
+		t.Fatalf("look for a stored risk_level column: %v", err)
 	}
-	if stored != 6 {
-		t.Fatalf("premise failed: %d/6 rows still carry the DEFAULT risk_level — something now writes it, revisit this fix", stored)
+	if storedColumn != 0 {
+		t.Fatalf("assets.risk_level is back: nothing ever wrote the old one, so every reader of it " +
+			"reported Informational forever. The band belongs to models.RiskBands, derived from risk_score.")
 	}
 
 	sum, err := (&LocationService{db: db}).GetLocationSummary(tenant, loc)
@@ -283,9 +288,8 @@ func TestIntegration_LocationAssets_ReportBandedRiskLevel(t *testing.T) {
 		t.Fatalf("insert location: %v", err)
 	}
 	if _, err := db.Exec(`
-		INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status, location_id,
-		                            risk_score, last_seen_at, first_discovered_at, created_at, updated_at)
-		VALUES ($1,$2,'banded.example.test','server','monitoring',$3,92,NOW(),NOW(),NOW(),NOW())`,
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, location_id, risk_score, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, 'banded.example.test', 'server', 'hardware.computer.server', 'monitoring', $3, 92, NOW(), NOW(), NOW(), NOW())`,
 		uuid.New(), tenant, loc); err != nil {
 		t.Fatalf("insert asset: %v", err)
 	}
@@ -333,9 +337,8 @@ func TestIntegration_IngestFindings_RecordsRealDiscoveryMethod(t *testing.T) {
 			asset := uuid.New()
 			hostname := "prov-" + uuid.New().String()[:8] + ".example.test"
 			if _, err := db.Exec(`
-				INSERT INTO network_assets (id, tenant_id, hostname, asset_type, asset_status,
-				                            last_seen_at, first_discovered_at, created_at, updated_at)
-				VALUES ($1,$2,$3,'server','monitoring',NOW(),NOW(),NOW(),NOW())`,
+				INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`,
 				asset, tenant, hostname); err != nil {
 				t.Fatalf("insert asset: %v", err)
 			}
@@ -366,25 +369,29 @@ func TestIntegration_IngestFindings_RecordsRealDiscoveryMethod(t *testing.T) {
 // TestIntegration_CreateAsset_StampsDiscoveryMethod covers the asset half of
 // B-45 — the column was omitted from the INSERT entirely, so the asset
 // drawer's Discovery row was blank for every asset.
+//
+// The stamp now comes from the observation's SOURCE REF rather than a separate
+// argument: the identification engine writes it, so the provenance the asset
+// carries and the provenance its history carries are the same string by
+// construction.
 func TestIntegration_CreateAsset_StampsDiscoveryMethod(t *testing.T) {
 	db, tenant := newPredicateFixture(t)
 	svc := &AssetService{db: db}
 
 	host := "manual.example.test"
-	assetType := "server"
-	asset, err := svc.createAssetWithStatus(tenant, models.AssetInput{
-		Hostname:  &host,
-		AssetType: assetType,
-	}, "monitoring", "passive")
+	asset, err := svc.createAssetFromInput(tenant, models.AssetInput{
+		Hostname: &host,
+		ClassKey: assetclass.KeyServer,
+	}, identity.Source{Kind: identity.SourceDeclared, Ref: "manual"}, "monitoring")
 	if err != nil {
-		t.Fatalf("createAssetWithStatus: %v", err)
+		t.Fatalf("createAssetFromInput: %v", err)
 	}
 
 	var got string
-	if err := db.QueryRow(`SELECT COALESCE(discovery_method, '') FROM network_assets WHERE id = $1`, asset.ID).Scan(&got); err != nil {
-		t.Fatalf("read network_assets.discovery_method: %v", err)
+	if err := db.QueryRow(`SELECT COALESCE(discovery_method, '') FROM assets WHERE id = $1`, asset.ID).Scan(&got); err != nil {
+		t.Fatalf("read assets.discovery_method: %v", err)
 	}
-	if got != "passive" {
-		t.Errorf("network_assets.discovery_method = %q, want %q", got, "passive")
+	if got != "manual" {
+		t.Errorf("assets.discovery_method = %q, want %q", got, "manual")
 	}
 }

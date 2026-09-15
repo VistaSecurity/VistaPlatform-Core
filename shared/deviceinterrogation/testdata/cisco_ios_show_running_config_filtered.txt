@@ -1,0 +1,11 @@
+Building configuration...
+
+ssl cipher tlsv1.2 custom ECDHE-RSA-AES256-GCM-SHA384
+ssl cipher dtlsv1 high
+enable secret 5 $1$MUST-NOT-BE-COLLECTED
+snmp-server community MUST-NOT-BE-COLLECTED RO
+crypto isakmp key MUST-NOT-BE-COLLECTED address 203.0.113.7
+ pre-shared-key MUST-NOT-BE-COLLECTED
+username admin privilege 15 secret 9 $9$MUST-NOT-BE-COLLECTED
+tunnel-group 203.0.113.7 ipsec-attributes
+ ikev2 remote-authentication pre-shared-key MUST-NOT-BE-COLLECTED

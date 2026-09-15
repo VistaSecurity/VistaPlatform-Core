@@ -71,7 +71,7 @@ func TestIntegration_SubmitJobResult_CrossTenantWriteBlocked(t *testing.T) {
 	jobA, err := jobQueue.CreateJob(ctx, models.CreateDeviceJobRequest{
 		TenantID: tenantA,
 		JobType:  models.JobTypeDeviceInterrogation,
-		DeviceID: &dev.ID, // agent_id stays NULL → unassigned, tenant-A owned
+		AssetID:  &dev.ID, // agent_id stays NULL → unassigned, tenant-A owned
 	})
 	if err != nil {
 		t.Fatalf("CreateJob(tenantA) = %v, want nil", err)
@@ -155,7 +155,7 @@ func TestIntegration_GetNextJobForAgent_CrossTenantClaimBlocked(t *testing.T) {
 	unassigned, err := jobQueue.CreateJob(ctx, models.CreateDeviceJobRequest{
 		TenantID: tenantA,
 		JobType:  models.JobTypeDeviceInterrogation,
-		DeviceID: &dev.ID, // agent_id stays NULL → unassigned, tenant-A owned
+		AssetID:  &dev.ID, // agent_id stays NULL → unassigned, tenant-A owned
 	})
 	if err != nil {
 		t.Fatalf("CreateJob(tenantA unassigned) = %v, want nil", err)
@@ -216,7 +216,7 @@ func TestIntegration_GetNextJob_UnassignedJobClaimedOnce(t *testing.T) {
 	unassigned, err := jobQueue.CreateJob(ctx, models.CreateDeviceJobRequest{
 		TenantID: tenantID,
 		JobType:  models.JobTypeDeviceInterrogation,
-		DeviceID: &dev.ID,
+		AssetID:  &dev.ID,
 	})
 	if err != nil {
 		t.Fatalf("CreateJob(unassigned) = %v, want nil", err)

@@ -1,0 +1,20 @@
+{
+  "id": "CVE-2021-44228",
+  "aliases": ["GHSA-jfh8-c2jp-5v3q"],
+  "modified": "2023-11-08T04:00:00Z",
+  "published": "2021-12-10T00:00:00Z",
+  "summary": "Remote code injection in Log4j",
+  "severity": [
+    { "type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H" }
+  ],
+  "affected": [
+    {
+      "package": { "ecosystem": "Maven", "name": "org.apache.logging.log4j:log4j-core", "purl": "pkg:maven/org.apache.logging.log4j/log4j-core" },
+      "ranges": [{ "type": "ECOSYSTEM", "events": [{ "introduced": "2.0-beta9" }, { "fixed": "2.15.0" }] }]
+    },
+    {
+      "package": { "ecosystem": "Maven", "name": "no-purl-package" }
+    }
+  ],
+  "database_specific": { "severity": "CRITICAL" }
+}

@@ -62,7 +62,7 @@ func (s *ExternalConnectionsService) Upsert(tenantID uuid.UUID, input models.Ext
 	}
 
 	// source_asset_id is resolved best-effort inside the tenant tx below (the
-	// network_assets lookup, the external_connections upsert, and the history
+	// assets lookup, the external_connections upsert, and the history
 	// write are all RLS-scoped and run as one unit).
 	var sourceAssetID *uuid.UUID
 
@@ -187,7 +187,7 @@ LEFT JOIN prev ON true
 	var scanSupportedTLSVersions pq.StringArray
 	var scanWeakReasons pq.StringArray
 
-	// RLS-scoped unit: resolve source_asset_id (network_assets), upsert the row
+	// RLS-scoped unit: resolve source_asset_id (assets), upsert the row
 	// (external_connections), and write the history row (external_connection_history)
 	// all inside one WithTenantTx so app.tenant_id is set for every statement and
 	// the upsert + its history land atomically.
@@ -198,7 +198,16 @@ LEFT JOIN prev ON true
 			// host() rather than ::text: casting inet to text renders the netmask
 			// ("10.0.0.5/32"), which never equals a bare source IP — this lookup
 			// matched nothing for as long as the ::text form was here.
-			q := `SELECT id FROM network_assets WHERE tenant_id = $1 AND host(ip_address) = $2 AND deleted_at IS NULL LIMIT 1`
+			// The address may be the asset's primary_address or any of its
+			// endpoints' — a host with three interfaces originates from all
+			// three, and only one of them is the primary.
+			q := `
+				SELECT a.id FROM assets a
+				LEFT JOIN asset_endpoints e ON e.tenant_id = a.tenant_id AND e.asset_id = a.id
+				WHERE a.tenant_id = $1
+				  AND (host(a.primary_address) = $2 OR host(e.address) = $2)
+				  AND a.deleted_at IS NULL
+				LIMIT 1`
 			if e := tx.QueryRow(q, tenantID, input.SourceIP).Scan(&id); e == nil {
 				sourceAssetID = &id
 			}
@@ -344,10 +353,10 @@ LEFT JOIN prev ON true
 	// through this Upsert, so the freshness logic lives here once.
 	// (Re-materializing a rotated cert into the managed asset is a follow-up — it
 	// needs idempotent crypto handling to avoid duplicate crypto_implementations.)
-	// RLS-scoped write over network_assets (and reads external_connections).
+	// RLS-scoped write over assets (and reads external_connections).
 	_ = database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		_, _ = tx.Exec(`
-			UPDATE network_assets na
+			UPDATE assets na
 			SET last_seen_at = NOW(), updated_at = NOW()
 			FROM external_connections ec
 			WHERE ec.id = $1 AND ec.tenant_id = $2
@@ -952,8 +961,15 @@ func (s *ExternalConnectionsService) GetByID(tenantID, id uuid.UUID) (*models.Ex
 		return tx.QueryRow(`
 			SELECT
 				id, tenant_id,
-				source_ip::text, source_hostname, source_asset_id,
-				dest_ip::text, dest_hostname, dest_port,
+				-- host(), not ::text. An inet renders as 203.0.113.40/32, and
+				-- that is NOT an IP address: identity normalisation rejects it,
+				-- so an elevated connection was created with no ip_address
+				-- identifier at all — the one identifier that would let the next
+				-- sighting of that endpoint match it instead of minting a
+				-- duplicate beside it. The rejection was logged and dropped, so
+				-- nothing surfaced.
+				host(source_ip), source_hostname, source_asset_id,
+				host(dest_ip), dest_hostname, dest_port,
 				protocol, protocol_version, cipher_suite, key_exchange_algorithm, key_size,
 				supported_tls_versions,
 				crypto_strength, is_pqc_resistant, weak_reasons,

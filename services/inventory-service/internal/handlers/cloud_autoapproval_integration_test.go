@@ -120,7 +120,7 @@ func cloudDiscovery(t *testing.T, tenant uuid.UUID) approval.Discovery {
 	if err != nil {
 		t.Fatalf("marshal discovery metadata: %v", err)
 	}
-	return approval.Discovery{TenantID: tenant, Confidence: 0.95, Metadata: meta}
+	return approval.Discovery{TenantID: tenant, Metadata: meta}.WithConfidence(0.95)
 }
 
 // setSegmentAutoApproval turns auto-approve on for the segment the cloud
@@ -259,7 +259,7 @@ func TestIntegration_SegmentWithBothSources_ApprovesSensorAndCloud(t *testing.T)
 
 	// A sensor discovery is one with no cloud_api marker in its metadata.
 	sensorAuto, _, err := f.approv.EvaluateAutoApprovalWithRules(rules,
-		approval.Discovery{TenantID: f.tenant, Confidence: 0.9}, classification)
+		approval.Discovery{TenantID: f.tenant}.WithConfidence(0.9), classification)
 	if err != nil {
 		t.Fatalf("evaluate sensor: %v", err)
 	}

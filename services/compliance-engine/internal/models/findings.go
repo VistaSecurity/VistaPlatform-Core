@@ -33,14 +33,46 @@ type RuleVulnerabilityMapping struct {
 	UpdatedAt        time.Time      `json:"updated_at" db:"updated_at"`
 }
 
-// ComplianceFinding represents a finding linked to a specific compliance control
+// ComplianceFinding is the compliance producer's row in the ONE `findings`
+// table (ADR-0005 D3, workstream 3.1). It is not a table of its own any more:
+// every row it reads or writes carries `producer = 'compliance'` and
+// `kind = 'control_noncompliant'`, which is what separates it from the eol,
+// vulnerability, configuration, hygiene and drift producers' rows.
+//
+// Subject, not asset. The old table's `(asset_id, asset_type)` pair — with its
+// three-value CHECK — is now the registry's `(subject_id, subject_type)`:
+//
+//	network_asset        -> asset                (assets.id)
+//	certificate          -> certificate          (certificates.id)
+//	crypto_implementation-> crypto_configuration (crypto_implementations.id)
+//
+// The Go fields are named for what they hold. `AssetID` was never an asset id
+// on three quarters of the rows, and reading it as one is how a certificate
+// finding came to render its raw UUID where a hostname belonged.
 type ComplianceFinding struct {
-	ID               uuid.UUID      `json:"id" db:"id"`
-	TenantID         uuid.UUID      `json:"tenant_id" db:"tenant_id"`
-	ControlID        uuid.UUID      `json:"control_id" db:"control_id"`
-	AssetID          uuid.UUID      `json:"asset_id" db:"asset_id"`
-	AssetType        string         `json:"asset_type" db:"asset_type"` // network_asset, certificate, crypto_implementation
-	Severity         string         `json:"severity" db:"severity"`
+	ID       uuid.UUID `json:"id" db:"id"`
+	TenantID uuid.UUID `json:"tenant_id" db:"tenant_id"`
+	// Producer and Kind are the registry keys (shared/findings). They are
+	// constants for this struct — it only ever reads the compliance producer's
+	// rows — but they travel on the wire so a client rendering a mixed list
+	// (the asset page's Findings tab) can say which producer judged what.
+	Producer  string    `json:"producer" db:"producer"`
+	Kind      string    `json:"kind" db:"kind"`
+	ControlID uuid.UUID `json:"control_id" db:"control_id"`
+	// SubjectID is the id of the object the control failed on, and SubjectType
+	// says which table it lives in. See the type comment for the mapping.
+	SubjectID   uuid.UUID `json:"subject_id" db:"subject_id"`
+	SubjectType string    `json:"subject_type" db:"subject_type"`
+	// SubjectLabel is the display name captured at write time. Nullable, and a
+	// read still joins for the live name — this is the fallback for a subject
+	// whose row has since gone.
+	SubjectLabel *string `json:"subject_label,omitempty" db:"subject_label"`
+	Severity     string  `json:"severity" db:"severity"`
+	// Score is 0 for every compliance finding: the registry sets
+	// control_noncompliant's feeds_risk to false, because compliance is scored
+	// by the framework score and counting one control across every asset it
+	// touches would swamp the per-asset risk rollup (ADR-0005 D4).
+	Score            int            `json:"score" db:"score"`
 	Summary          string         `json:"summary" db:"summary"`
 	Evidence         map[string]any `json:"evidence" db:"evidence"`
 	FirstSeen        time.Time      `json:"first_seen" db:"first_seen"`
@@ -66,7 +98,9 @@ type ComplianceFinding struct {
 	// Computed fields
 	TicketCount int `json:"ticket_count,omitempty" db:"-"`
 
-	// Joined fields
+	// Joined fields. `Asset` is the SUBJECT's display object — for a
+	// certificate or a crypto-configuration subject it is the host the object
+	// was observed on, carrying a DisplayName for the object itself.
 	Control *Control `json:"control,omitempty" db:"-"`
 	Asset   *Asset   `json:"asset,omitempty" db:"-"`
 }

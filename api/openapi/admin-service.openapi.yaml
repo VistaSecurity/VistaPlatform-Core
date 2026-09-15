@@ -40,6 +40,7 @@ paths:
   /my-billing/invoices:
     get:
       operationId: listTenantInvoices
+      x-edition: enterprise
       tags:
       - my-billing
       summary: List the tenant's invoices
@@ -76,6 +77,7 @@ paths:
   /my-billing/invoices/{invoice_id}/download:
     get:
       operationId: downloadTenantInvoice
+      x-edition: enterprise
       tags:
       - my-billing
       summary: Redirect to an invoice PDF
@@ -99,6 +101,7 @@ paths:
   /billing/setup-intent:
     post:
       operationId: createBillingSetupIntent
+      x-edition: enterprise
       tags:
       - billing-onboarding
       summary: Create a Stripe SetupIntent to collect a payment method
@@ -127,6 +130,7 @@ paths:
   /billing/subscriptions:
     post:
       operationId: createBillingSubscription
+      x-edition: enterprise
       tags:
       - billing-onboarding
       summary: Create the Stripe subscription after payment-method confirmation
@@ -155,6 +159,7 @@ paths:
   /billing/subscriptions/{subscription_id}:
     get:
       operationId: getBillingSubscriptionStatus
+      x-edition: enterprise
       tags:
       - billing-onboarding
       summary: Get the status of the authenticated tenant's subscription by external id
@@ -183,6 +188,7 @@ paths:
   /my-billing/subscription:
     get:
       operationId: getTenantSubscription
+      x-edition: enterprise
       tags:
       - my-billing
       summary: Get the tenant's subscription, tier, next payment and discount
@@ -200,6 +206,7 @@ paths:
   /my-billing/subscription/change-plan:
     post:
       operationId: changeTenantPlan
+      x-edition: enterprise
       tags:
       - my-billing
       summary: Change the subscription tier / billing interval
@@ -225,6 +232,7 @@ paths:
   /my-billing/subscription/cancel:
     post:
       operationId: cancelTenantSubscription
+      x-edition: enterprise
       tags:
       - my-billing
       summary: Cancel the subscription at period end
@@ -250,6 +258,7 @@ paths:
   /my-billing/subscription/reactivate:
     post:
       operationId: reactivateTenantSubscription
+      x-edition: enterprise
       tags:
       - my-billing
       summary: Clear a pending cancellation
@@ -269,6 +278,7 @@ paths:
   /my-billing/payment-method/setup:
     post:
       operationId: setupTenantPaymentMethod
+      x-edition: enterprise
       tags:
       - my-billing
       summary: Create a Stripe SetupIntent for adding a payment method
@@ -286,6 +296,7 @@ paths:
   /my-billing/payment-method/confirm:
     post:
       operationId: confirmTenantPaymentMethod
+      x-edition: enterprise
       tags:
       - my-billing
       summary: Set a confirmed payment method as the subscription default
@@ -311,6 +322,7 @@ paths:
   /my-billing/payment-methods:
     get:
       operationId: listTenantPaymentMethods
+      x-edition: enterprise
       tags:
       - my-billing
       summary: List the tenant's saved payment methods
@@ -328,6 +340,7 @@ paths:
   /my-billing/active-discount:
     get:
       operationId: getTenantActiveDiscount
+      x-edition: enterprise
       tags:
       - my-billing
       summary: Get the tenant's active discount (if any)
@@ -345,6 +358,7 @@ paths:
   /my-billing/portal-session:
     post:
       operationId: createTenantPortalSession
+      x-edition: enterprise
       tags:
       - my-billing
       summary: Open a Stripe-hosted billing portal session
@@ -592,6 +606,7 @@ paths:
   /admin/billing/coupons:
     get:
       operationId: listCoupons
+      x-edition: enterprise
       tags:
       - coupons
       summary: List coupons
@@ -616,6 +631,7 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
     post:
       operationId: createCoupon
+      x-edition: enterprise
       tags:
       - coupons
       summary: Create a coupon
@@ -641,6 +657,7 @@ paths:
   /admin/billing/coupons/{id}:
     get:
       operationId: getCoupon
+      x-edition: enterprise
       tags:
       - coupons
       summary: Get a coupon
@@ -668,6 +685,7 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
     put:
       operationId: updateCoupon
+      x-edition: enterprise
       tags:
       - coupons
       summary: Update a coupon
@@ -702,6 +720,7 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
     delete:
       operationId: deleteCoupon
+      x-edition: enterprise
       tags:
       - coupons
       summary: Deactivate a coupon
@@ -729,6 +748,7 @@ paths:
   /admin/billing/coupons/validate/{code}:
     get:
       operationId: validateCoupon
+      x-edition: enterprise
       tags:
       - coupons
       summary: Validate a coupon code
@@ -755,6 +775,7 @@ paths:
   /admin/billing/coupons/apply:
     post:
       operationId: applyCoupon
+      x-edition: enterprise
       tags:
       - coupons
       summary: Apply a coupon to a tenant
@@ -780,6 +801,7 @@ paths:
   /admin/billing/coupons/tenants/{tenant_id}:
     get:
       operationId: getTenantCoupons
+      x-edition: enterprise
       tags:
       - coupons
       summary: List a tenant's coupon redemptions
@@ -1340,9 +1362,791 @@ paths:
                 $ref: '#/components/schemas/LegacyError'
         '500':
           $ref: '#/components/responses/LegacyServerError'
+  /admin/catalogs/eol:
+    get:
+      operationId: listEolCatalogue
+      tags:
+      - catalogs
+      summary: Browse the end-of-life catalogue
+      description: |
+        One page of `eol_catalogue` — release cycles and their support dates,
+        mirrored from endoflife.date and importable from an offline bundle.
+        Platform-scoped: these rows carry no tenant_id and every tenant reads
+        the same catalogue. Gated by `catalogs.manage`.
+
+        `entries` is always present and never null. `total` is the unpaginated
+        count for the same filters. A `page_size` above 200 is clamped to 200
+        and the response echoes what was actually served.
+      parameters:
+      - name: search
+        in: query
+        required: false
+        description: Case-insensitive substring over product, vendor and cycle.
+        schema:
+          type: string
+      - name: kind
+        in: query
+        required: false
+        description: Filter by product kind.
+        schema:
+          type: string
+          enum: [os, software, hardware]
+      - name: page
+        in: query
+        required: false
+        description: 1-based page number (default 1).
+        schema:
+          type: integer
+      - name: page_size
+        in: query
+        required: false
+        description: Rows per page (default 50, max 200).
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: One page of the end-of-life catalogue.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EolCatalogueListResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /admin/catalogs/vulnerabilities:
+    get:
+      operationId: listVulnerabilityCatalogue
+      tags:
+      - catalogs
+      summary: Browse the vulnerability catalogue
+      description: |
+        One page of `vulnerability_catalogue` — CVEs mirrored from the NVD 2.0
+        API and osv.dev's bulk exports. Match rules (CPE / PURL) are NOT joined
+        in: a single CVE can carry thousands, and this is a browsing surface.
+        Gated by `catalogs.manage`.
+
+        `cvss_score` may be null while `cvss_vector` is set: OSV publishes a
+        vector and no base score, and this product does not compute one from the
+        vector rather than invent a number NVD publishes authoritatively.
+      parameters:
+      - name: search
+        in: query
+        required: false
+        description: Case-insensitive substring over the CVE id and description.
+        schema:
+          type: string
+      - name: severity
+        in: query
+        required: false
+        description: Filter by CVSS qualitative band.
+        schema:
+          type: string
+          enum: [none, low, medium, high, critical]
+      - name: page
+        in: query
+        required: false
+        description: 1-based page number (default 1).
+        schema:
+          type: integer
+      - name: page_size
+        in: query
+        required: false
+        description: Rows per page (default 50, max 200).
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: One page of the vulnerability catalogue.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VulnerabilityCatalogueListResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /admin/catalogs/feeds:
+    get:
+      operationId: listCatalogFeeds
+      tags:
+      - catalogs
+      summary: Catalogue mirror-feed status
+      description: |
+        One entry per KNOWN feed (`eol`, `nvd`, `osv`), in that order, including
+        feeds that have never run — those report `last_status: never` rather
+        than being omitted, so the console lists every feed the product has
+        rather than only the ones that happened to work.
+
+        `enabled` is the `CATALOG_FEEDS_ENABLED` kill switch for the deployment.
+        When it is false nothing is scheduled AND the manual trigger refuses
+        with 409. Gated by `catalogs.manage`.
+      responses:
+        '200':
+          description: Status of every catalogue feed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogFeedListResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /admin/catalogs/feeds/{feed}/sync:
+    post:
+      operationId: syncCatalogFeed
+      tags:
+      - catalogs
+      summary: Run one catalogue feed now
+      description: |
+        Starts the feed and returns **202** immediately — the run is started,
+        not finished. A pass takes minutes (NVD's 5-requests-per-30-seconds
+        unkeyed limit alone guarantees it), so the outcome is reported through
+        `GET /admin/catalogs/feeds`, which the console polls.
+
+        409 means either that the deployment has feeds disabled or that a run is
+        already in flight; the `error` string says which. Gated by
+        `catalogs.manage`.
+      parameters:
+      - name: feed
+        in: path
+        required: true
+        schema:
+          type: string
+          enum: [eol, nvd, osv]
+      responses:
+        '202':
+          description: The sync was started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogFeedSyncResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '409':
+          $ref: '#/components/responses/LegacyConflict'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+        '503':
+          description: 'The feed runner is not configured in this deployment.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /admin/catalogs/import-bundle:
+    post:
+      operationId: importCatalogBundle
+      tags:
+      - catalogs
+      summary: Import an offline catalogue bundle
+      description: |
+        Multipart upload (field `file`) of a `catalog-bundle-<date>.tar.gz`
+        produced by `make build-catalog-bundle` on a connected install. The
+        archive holds `manifest.json` plus one JSONL file per catalogue, and
+        EVERY file's SHA-256 and row count is verified against the manifest
+        BEFORE a single row is applied — a corrupt transfer must not leave a
+        half-imported catalogue behind.
+
+        Integrity, not entitlement: these catalogues are Core, so the bundle
+        carries a hash rather than the ECDSA signature the Enterprise content
+        bundle uses. Gated by `catalogs.manage`.
+
+        400 carries the verification failure verbatim (e.g. a sha256 mismatch
+        naming the file) — that message is the operator's diagnosis — and means
+        the bundle was refused whole: NOTHING was written.
+
+        500 is the other outcome and is deliberately a different status: the
+        manifest verified and the apply then failed partway, so rows ARE in the
+        catalogue. The console renders a different sentence for each, because
+        telling an operator "nothing was applied" over a half-imported catalogue
+        is worse than telling them nothing. Re-importing the same bundle is the
+        repair; import is idempotent.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+              - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: The bundle was verified and applied.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogBundleImportResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+        '503':
+          description: 'Bundle import is not configured in this deployment.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /admin/catalogs/eol/lookup:
+    post:
+      operationId: lookupEolCatalogue
+      tags:
+      - catalogs
+      summary: Ask what the platform knows about a product
+      description: |
+        The ADR-0008 **Enricher** seam with a person on the other end. Resolves a
+        vendor/product/version against `eol_catalogue` and the CPE names already
+        carried by `vulnerability_matches`, and returns each fact with its full
+        provenance — `source_kind`, `source_ref`, `confidence`, `model_id` — plus
+        the `source_url` that cites it.
+
+        The matching is deliberately exact. The cycle is chosen from the
+        version's own numeric components, most specific first, and a version
+        that matches no cycle resolves to NOTHING rather than to the
+        neighbouring cycle: the support date of the release beside yours is not
+        your support date, and returning it would be wrong in the reassuring
+        direction. A vendor named on both sides must agree; a vendor named on
+        neither cannot contradict one.
+
+        A lookup that resolves nothing is recorded on the gap list
+        (`catalog_lookup_misses`, with a count), which is what
+        `GET /admin/catalogs/eol/misses` shows and what a proposal run works
+        from. That is the intended way to fill the gap list deliberately.
+
+        The answer is three-valued, and the three are carried as separate
+        fields rather than left for a client to infer from an empty array.
+        `matched` says a catalogue ROW resolved — which it can do while stating
+        nothing, because a row whose `eol_date` is null or which carries no
+        `source_url` yields no fact. `miss_recorded` says the gap was counted,
+        and is true only when nothing matched and the write succeeded. So
+        "resolved", "the catalogue has it and publishes no date", "nothing, and
+        it is now on the gap list" and "nothing, and the gap list could not be
+        written" are four distinguishable outcomes of one 200. Gated by
+        `catalogs.manage`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EolLookupRequest'
+      responses:
+        '200':
+          description: What the catalogues can say, possibly nothing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EolLookupResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /admin/catalogs/eol/proposals:
+    get:
+      operationId: listEolProposals
+      tags:
+      - catalogs
+      summary: The AI proposal review queue
+      description: |
+        One page of `eol_catalogue_proposals` — proposed end-of-life catalogue
+        rows awaiting a platform admin's decision (ADR-0008 D3: AI output is a
+        proposal, and proposals go through approval).
+
+        Each row carries the SUBJECT that was asked about and the PROPOSAL that
+        came back, kept apart on purpose: a model that answered about a
+        different product than the one asked about is exactly what comparing
+        them catches.
+
+        `source_url` and `model_id` are never null. Cite or refuse (D4.4) means
+        a proposal that could not cite was dropped before it reached the table,
+        and an unattributable one likewise. `confidence` is 0 on everything
+        written today — we do not ask a model to score itself, and a number we
+        invented would read as a measurement. Gated by `catalogs.manage`.
+      parameters:
+      - name: status
+        in: query
+        required: false
+        description: Filter by review status. Omit for all.
+        schema:
+          type: string
+          enum: [pending, accepted, rejected]
+      - name: page
+        in: query
+        required: false
+        description: 1-based page number (default 1).
+        schema:
+          type: integer
+      - name: page_size
+        in: query
+        required: false
+        description: Rows per page (default 50, max 200).
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: One page of the proposal queue.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EolProposalListResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /admin/catalogs/eol/proposals/{id}/accept:
+    post:
+      operationId: acceptEolProposal
+      tags:
+      - catalogs
+      summary: Accept a proposal into the catalogue
+      description: |
+        Writes the proposed row into `eol_catalogue` with
+        `source_kind: inferred` and the cited `source_url`, and marks the
+        proposal accepted with the reviewer's identity — both in one
+        transaction, because they are one decision.
+
+        This is the only route in the product that puts a model's claim into a
+        platform catalogue. It is audited with the subject, the proposed dates,
+        the model id and the source URL, because the question asked afterwards is
+        "who put THIS date in the catalogue and what did they read first", and
+        only the cited URL settles it.
+
+        The accepted catalogue row is visibly marked in Catalog ▸ End-of-life by
+        its `source_kind`, permanently.
+
+        The citation is RE-VALIDATED here rather than trusted from write time —
+        https, a public host, not an address literal — because this is the
+        moment a claim becomes data every tenant is evaluated against, and "it
+        was checked when it was stored" is a promise about a writer that may not
+        have existed when this route was written.
+
+        409 covers both state refusals, and the message says which. Either the
+        proposal has already been accepted or rejected — the row exists and the
+        reviewer is looking at a stale list, which is a different fix from a bad
+        id — or its cited source is not a checkable public page, so it cannot be
+        accepted as it stands. Reviewing is deliberately not idempotent: a second
+        accept would write a second catalogue row, and answering 200 would tell
+        two reviewers they each made the decision. Gated by `catalogs.manage`.
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Accepted; the catalogue row was written.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EolProposalReviewResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '409':
+          $ref: '#/components/responses/LegacyConflict'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /admin/catalogs/eol/proposals/{id}/reject:
+    post:
+      operationId: rejectEolProposal
+      tags:
+      - catalogs
+      summary: Reject a proposal
+      description: |
+        Marks the proposal rejected and writes NOTHING to the catalogue. The row
+        stays: a rejected proposal is the record of a model having been wrong
+        about something, and a queue where rejections vanished could not answer
+        "how often is this thing right" — which is the question that decides
+        whether the capability is worth running. Audited as heavily as accept
+        for the same reason. Gated by `catalogs.manage`.
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Rejected.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EolProposalReviewResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '409':
+          $ref: '#/components/responses/LegacyConflict'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /admin/catalogs/eol/misses:
+    get:
+      operationId: listCatalogMisses
+      tags:
+      - catalogs
+      summary: The catalogue gap list
+      description: |
+        One page of `catalog_lookup_misses`: the vendor/product/version subjects
+        the catalogues could not answer for, ordered by how often each has been
+        asked about. Counting rather than logging is the point — a product asked
+        about four thousand times is a different priority from one asked about
+        once, and a log line cannot be sorted.
+
+        `last_proposed_at` is when a proposal run last asked a model about this
+        gap. It is stamped whether or not the ask produced a proposal, because
+        "we asked and got nothing usable" is an answer and re-deriving it nightly
+        spends an operator's tokens on a settled question. Gated by
+        `catalogs.manage`.
+      parameters:
+      - name: page
+        in: query
+        required: false
+        description: 1-based page number (default 1).
+        schema:
+          type: integer
+      - name: page_size
+        in: query
+        required: false
+        description: Rows per page (default 50, max 200).
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: One page of the gap list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogMissListResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /admin/catalogs/eol/enrich:
+    post:
+      operationId: runCatalogEnrichment
+      tags:
+      - catalogs
+      summary: Propose catalogue rows for the top gaps
+      description: |
+        Starts a proposal run over the most-hit gaps and returns **202** — the
+        run is started, not finished. It makes one model call per gap and a
+        batch takes minutes, so blocking would time out at the gateway and leave
+        the operator unable to tell whether anything happened. The outcome lands
+        in the proposal queue, which is what the console reloads.
+
+        The same pass also runs automatically after each scheduled catalogue-feed
+        pass, in that order: a gap the endoflife.date mirror has just filled
+        should not have a model asked about it.
+
+        503 means this deployment cannot propose — a Core build (no generative
+        enricher at all) or an Enterprise build with no reachable `AI_PROVIDER`.
+        Ask `GET /admin/catalogs/eol/enrich/availability` first; it tells the two
+        apart. 409 means a run is already in flight. Gated by `catalogs.manage`.
+      responses:
+        '202':
+          description: The proposal run was started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogEnrichRunResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '409':
+          $ref: '#/components/responses/LegacyConflict'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+        '503':
+          description: 'AI end-of-life proposals are not available on this deployment.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /admin/catalogs/eol/enrich/availability:
+    get:
+      operationId: getCatalogEnrichAvailability
+      tags:
+      - catalogs
+      summary: Whether AI proposals are offered here
+      description: |
+        Served in EVERY edition, including Core, which answers
+        `{"available":false,"reason":"edition"}`. The console asks before
+        rendering "Propose with AI" rather than after someone clicks it: letting
+        a UI infer the capability from a 404 cannot tell "this build has no
+        generative enricher" from "the route is broken", and would put a 404 in
+        every Core operator's console on every visit to the page.
+
+        Three fields rather than a bool because the two "no" answers have
+        different fixes — an operator who configured a provider and still sees no
+        button needs to know which they are looking at. Gated by
+        `catalogs.manage`.
+      responses:
+        '200':
+          description: Whether a proposal run could succeed right now.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogEnrichAvailability'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+  /admin/catalogs/classification-rules:
+    get:
+      operationId: listClassificationRules
+      tags:
+      - catalogs
+      summary: Browse the classification rules
+      description: |
+        One page of `classification_rules` — the evidence behind every class
+        proposal (asset-inventory ADR-0004 D6). A rule maps something a
+        collector observed (an IEEE OUI, an SNMP sysObjectID, an EtherNet/IP
+        vendor id, a cloud resource type, a service banner, a port profile, a
+        model prefix, or the management platform the device answered) onto a
+        vendor and — only where the mapping is unambiguous — an asset class.
+
+        Platform-scoped: these rows carry no tenant_id and every tenant is
+        classified against the same table. Gated by `catalogs.manage`.
+
+        `rules` is always present and never null. `total` is the unpaginated
+        count for the same filters. A `page_size` above 200 is clamped to 200
+        and the response echoes what was actually served.
+
+        `kinds` is the rule-kind vocabulary, served WITH the list so a client's
+        filter and form cannot carry their own copy and drift from what the
+        engine actually matches.
+      parameters:
+      - name: search
+        in: query
+        required: false
+        description: Case-insensitive substring over pattern, vendor, model and class key.
+        schema:
+          type: string
+      - name: kind
+        in: query
+        required: false
+        description: Filter by rule kind.
+        schema:
+          $ref: '#/components/schemas/ClassificationRuleKind'
+      - name: page
+        in: query
+        required: false
+        description: 1-based page number (default 1).
+        schema:
+          type: integer
+      - name: page_size
+        in: query
+        required: false
+        description: Rows per page (default 50, max 200).
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: One page of the classification rules.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassificationRuleListResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+    post:
+      operationId: createClassificationRule
+      tags:
+      - catalogs
+      summary: Add a classification rule
+      description: |
+        Adds a curated rule. The seeded rules come from
+        `standards/classification-rules.yaml`; this is how the catalogue grows
+        between releases, which is D6's entire argument for holding the rules as
+        data. Gated by `catalogs.manage`.
+
+        The body is validated against the SAME rules the classifier applies at
+        load — pattern shape per kind, a class key that exists in the asset-class
+        taxonomy, a confidence inside the band — so a rule that saves is a rule
+        that will fire. 400 carries the validator's own message, which names what
+        to change.
+
+        409 means the `(rule_kind, pattern)` pair already has a rule. Edit that
+        one rather than adding a second: two rules for one pattern is how a
+        catalogue starts disagreeing with itself.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClassificationRuleInput'
+      responses:
+        '201':
+          description: The rule was created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassificationRule'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '409':
+          $ref: '#/components/responses/LegacyConflict'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /admin/catalogs/classification-rules/{id}:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    get:
+      operationId: getClassificationRule
+      tags:
+      - catalogs
+      summary: Get one classification rule
+      description: 'Returns the rule directly (not wrapped). Gated by `catalogs.manage`.'
+      responses:
+        '200':
+          description: The rule.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassificationRule'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+    put:
+      operationId: updateClassificationRule
+      tags:
+      - catalogs
+      summary: Replace a classification rule
+      description: |
+        Replaces the rule. Every field is restated: this is a PUT, so omitting an
+        optional field CLEARS it. That is deliberate — clearing a class is how an
+        admin turns a rule that guessed into a rule that only names a vendor, and
+        a partial update could not express it.
+
+        Validated exactly as create is. 409 means the new `(rule_kind, pattern)`
+        pair belongs to a different rule.
+
+        Editing a SEEDED rule works, but the next release's seed run restates it
+        from `standards/classification-rules.yaml` and the edit is lost. To
+        override a seeded answer durably, add a more specific rule instead — a
+        longer sysObjectID prefix, a longer model prefix — which wins on its own
+        merits. Rules you ADD are never touched by a seed run.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClassificationRuleInput'
+      responses:
+        '200':
+          description: The updated rule.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassificationRule'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '409':
+          $ref: '#/components/responses/LegacyConflict'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+    delete:
+      operationId: deleteClassificationRule
+      tags:
+      - catalogs
+      summary: Delete a classification rule
+      description: |
+        Removes the rule. A hard delete: a classification rule is a lookup row,
+        not a record of something that happened, and a soft-deleted one would
+        have to be filtered out of the classifier's load — one more place for a
+        rule to be silently absent.
+
+        Class proposals already made from it are unaffected. A proposal carries a
+        COPY of the rules that matched, precisely so a reviewer can still see the
+        argument after the rule is gone.
+
+        Deleting a SEEDED rule works and the next release's seed run puts it
+        back. Gated by `catalogs.manage`.
+      responses:
+        '200':
+          description: The rule was deleted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
   /admin/costs/tenants/{id}:
     get:
       operationId: getTenantCost
+      x-edition: enterprise
       tags:
       - costs
       summary: Get a tenant's cost for a period
@@ -1376,6 +2180,7 @@ paths:
   /admin/costs/tenants/{id}/history:
     get:
       operationId: getTenantCostHistory
+      x-edition: enterprise
       tags:
       - costs
       summary: Get a tenant's cost history
@@ -1408,6 +2213,7 @@ paths:
   /admin/costs/platform:
     get:
       operationId: getPlatformCosts
+      x-edition: enterprise
       tags:
       - costs
       summary: Get platform-wide cost summary
@@ -1432,6 +2238,7 @@ paths:
   /admin/costs/breakdown:
     get:
       operationId: getCostBreakdown
+      x-edition: enterprise
       tags:
       - costs
       summary: Get a tenant's cost breakdown
@@ -1464,6 +2271,7 @@ paths:
   /admin/costs/trends:
     get:
       operationId: getCostTrends
+      x-edition: enterprise
       tags:
       - costs
       summary: Get cost trends (tenant history or platform summary)
@@ -1496,6 +2304,7 @@ paths:
   /admin/announcements:
     get:
       operationId: listAnnouncements
+      x-edition: enterprise
       tags:
       - announcements
       summary: List platform announcements
@@ -1520,6 +2329,7 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
     post:
       operationId: createAnnouncement
+      x-edition: enterprise
       tags:
       - announcements
       summary: Create a platform announcement
@@ -1545,6 +2355,7 @@ paths:
   /admin/announcements/{id}:
     put:
       operationId: updateAnnouncement
+      x-edition: enterprise
       tags:
       - announcements
       summary: Update a platform announcement
@@ -1578,6 +2389,7 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
     delete:
       operationId: deleteAnnouncement
+      x-edition: enterprise
       tags:
       - announcements
       summary: Delete a platform announcement
@@ -1605,6 +2417,7 @@ paths:
   /admin/maintenance-windows:
     get:
       operationId: listMaintenanceWindows
+      x-edition: enterprise
       tags:
       - maintenance-windows
       summary: List maintenance windows
@@ -1629,6 +2442,7 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
     post:
       operationId: createMaintenanceWindow
+      x-edition: enterprise
       tags:
       - maintenance-windows
       summary: Create a maintenance window
@@ -1655,6 +2469,7 @@ paths:
   /admin/maintenance-windows/{id}:
     put:
       operationId: updateMaintenanceWindow
+      x-edition: enterprise
       tags:
       - maintenance-windows
       summary: Update a maintenance window
@@ -1688,6 +2503,7 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
     delete:
       operationId: deleteMaintenanceWindow
+      x-edition: enterprise
       tags:
       - maintenance-windows
       summary: Delete a maintenance window
@@ -1715,6 +2531,7 @@ paths:
   /admin/support-tickets:
     get:
       operationId: listSupportTickets
+      x-edition: enterprise
       tags:
       - support-tickets
       summary: List support tickets
@@ -1748,6 +2565,7 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
     post:
       operationId: createSupportTicket
+      x-edition: enterprise
       tags:
       - support-tickets
       summary: Create a support ticket
@@ -1773,6 +2591,7 @@ paths:
   /admin/support-tickets/{id}:
     get:
       operationId: getSupportTicket
+      x-edition: enterprise
       tags:
       - support-tickets
       summary: Get a support ticket with its messages
@@ -1800,6 +2619,7 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
     put:
       operationId: updateSupportTicket
+      x-edition: enterprise
       tags:
       - support-tickets
       summary: Update a support ticket
@@ -1834,6 +2654,7 @@ paths:
   /admin/support-tickets/{id}/messages:
     post:
       operationId: addSupportTicketMessage
+      x-edition: enterprise
       tags:
       - support-tickets
       summary: Add a message to a support ticket
@@ -1868,6 +2689,7 @@ paths:
   /admin/tenants/{id}/notes:
     get:
       operationId: listTenantNotes
+      x-edition: enterprise
       tags:
       - support-tickets
       summary: List notes for a tenant
@@ -1892,6 +2714,7 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
     post:
       operationId: createTenantNote
+      x-edition: enterprise
       tags:
       - support-tickets
       summary: Create a note for a tenant
@@ -1924,6 +2747,7 @@ paths:
   /admin/billing/analytics/dashboard:
     get:
       operationId: getBillingDashboard
+      x-edition: enterprise
       tags:
       - billing-analytics
       summary: Billing analytics dashboard metrics
@@ -1942,6 +2766,7 @@ paths:
   /admin/billing/analytics/mrr:
     get:
       operationId: getBillingMRR
+      x-edition: enterprise
       tags:
       - billing-analytics
       summary: Monthly Recurring Revenue (time series or point)
@@ -1971,6 +2796,7 @@ paths:
   /admin/billing/analytics/churn:
     get:
       operationId: getBillingChurn
+      x-edition: enterprise
       tags:
       - billing-analytics
       summary: Churn rate for a period
@@ -1997,6 +2823,7 @@ paths:
   /admin/billing/analytics/ltv:
     get:
       operationId: getBillingLTV
+      x-edition: enterprise
       tags:
       - billing-analytics
       summary: Customer lifetime value
@@ -2014,6 +2841,7 @@ paths:
   /admin/billing/analytics/revenue-by-tier:
     get:
       operationId: getBillingRevenueByTier
+      x-edition: enterprise
       tags:
       - billing-analytics
       summary: Revenue breakdown by subscription tier
@@ -2040,6 +2868,7 @@ paths:
   /admin/billing/analytics/trial-conversion:
     get:
       operationId: getBillingTrialConversion
+      x-edition: enterprise
       tags:
       - billing-analytics
       summary: Trial-to-paid conversion rate
@@ -2066,6 +2895,7 @@ paths:
   /admin/billing/analytics/subscription-distribution:
     get:
       operationId: getBillingSubscriptionDistribution
+      x-edition: enterprise
       tags:
       - billing-analytics
       summary: Tenant distribution across tiers
@@ -2083,6 +2913,7 @@ paths:
   /admin/billing/analytics/coupon-stats:
     get:
       operationId: getBillingCouponStats
+      x-edition: enterprise
       tags:
       - billing-analytics
       summary: Coupon usage statistics
@@ -2101,6 +2932,7 @@ paths:
   /admin/billing/analytics/forecast:
     get:
       operationId: getBillingForecast
+      x-edition: enterprise
       tags:
       - billing-analytics
       summary: Projected MRR forecast
@@ -2125,6 +2957,7 @@ paths:
   /admin/billing/analytics/cohort:
     get:
       operationId: getBillingCohortRetention
+      x-edition: enterprise
       tags:
       - billing-analytics
       summary: Monthly cohort retention analysis
@@ -2149,6 +2982,7 @@ paths:
   /admin/tenants/onboarding/dashboard:
     get:
       operationId: getTenantOnboardingDashboard
+      x-edition: enterprise
       tags:
       - tenant-lifecycle
       summary: Onboarding dashboard
@@ -2167,6 +3001,7 @@ paths:
   /admin/tenants/{id}/onboarding:
     get:
       operationId: getTenantOnboardingStatus
+      x-edition: enterprise
       tags:
       - tenant-lifecycle
       summary: Tenant onboarding checklist
@@ -2193,6 +3028,7 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
     put:
       operationId: updateTenantOnboardingStatus
+      x-edition: enterprise
       tags:
       - tenant-lifecycle
       summary: Update a tenant's onboarding status
@@ -2227,6 +3063,7 @@ paths:
   /admin/tenants/{id}/offboard:
     post:
       operationId: initiateTenantOffboarding
+      x-edition: enterprise
       tags:
       - tenant-lifecycle
       summary: Initiate tenant offboarding
@@ -2263,6 +3100,7 @@ paths:
   /admin/tenants/{id}/billing/change-plan:
     post:
       operationId: adminChangeTenantPlan
+      x-edition: enterprise
       tags:
       - tenant-billing-admin
       summary: Change a tenant's plan on platform authority (support downgrade path)
@@ -2295,6 +3133,7 @@ paths:
   /admin/tenants/{id}/offboarding-status:
     get:
       operationId: getTenantOffboardingStatus
+      x-edition: enterprise
       tags:
       - tenant-lifecycle
       summary: Tenant offboarding status
@@ -2322,6 +3161,7 @@ paths:
   /admin/tenants/{id}/cancel-offboard:
     post:
       operationId: cancelTenantOffboarding
+      x-edition: enterprise
       tags:
       - tenant-lifecycle
       summary: Cancel tenant offboarding
@@ -2352,6 +3192,7 @@ paths:
   /admin/tenants:
     get:
       operationId: listTenants
+      x-edition: enterprise
       tags:
       - tenants
       summary: List tenants
@@ -2422,6 +3263,7 @@ paths:
   /admin/tenants/{id}:
     get:
       operationId: getTenant
+      x-edition: enterprise
       tags:
       - tenants
       summary: Get a tenant
@@ -2448,6 +3290,7 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
     put:
       operationId: updateTenant
+      x-edition: enterprise
       tags:
       - tenants
       summary: Update a tenant
@@ -2479,6 +3322,7 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
     delete:
       operationId: deleteTenant
+      x-edition: enterprise
       tags:
       - tenants
       summary: Soft-delete a tenant
@@ -2503,6 +3347,7 @@ paths:
   /admin/tenants/{id}/users:
     get:
       operationId: getTenantUsers
+      x-edition: enterprise
       tags:
       - tenants
       summary: List a tenant's users
@@ -2529,6 +3374,7 @@ paths:
   /admin/tenants/{id}/stats:
     get:
       operationId: getTenantStats
+      x-edition: enterprise
       tags:
       - tenants
       summary: Tenant usage statistics
@@ -2552,6 +3398,7 @@ paths:
   /admin/tenants/{id}/suspend:
     post:
       operationId: suspendTenant
+      x-edition: enterprise
       tags:
       - tenants
       summary: Suspend a tenant
@@ -2575,6 +3422,7 @@ paths:
   /admin/tenants/{id}/activate:
     post:
       operationId: activateTenant
+      x-edition: enterprise
       tags:
       - tenants
       summary: Activate a tenant
@@ -2598,6 +3446,7 @@ paths:
   /admin/tenants/{id}/entitlements:
     get:
       operationId: listTenantEntitlements
+      x-edition: enterprise
       tags:
       - tenant-entitlements
       summary: List a tenant's entitlement overrides (Plan Exceptions)
@@ -2624,6 +3473,7 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
     post:
       operationId: createTenantEntitlement
+      x-edition: enterprise
       tags:
       - tenant-entitlements
       summary: Grant a tenant entitlement override
@@ -2657,6 +3507,7 @@ paths:
   /admin/tenants/{id}/entitlements/{overrideId}:
     put:
       operationId: updateTenantEntitlement
+      x-edition: enterprise
       tags:
       - tenant-entitlements
       summary: Update a tenant entitlement override
@@ -2697,6 +3548,7 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
     delete:
       operationId: deleteTenantEntitlement
+      x-edition: enterprise
       tags:
       - tenant-entitlements
       summary: Remove a tenant entitlement override
@@ -2755,6 +3607,7 @@ paths:
   /admin/tenants/{id}/purge:
     delete:
       operationId: purgeTenant
+      x-edition: enterprise
       tags:
       - tenants
       summary: Hard-delete (purge) a tenant
@@ -3312,6 +4165,7 @@ paths:
   /admin/legal/acceptances:
     get:
       operationId: listLegalAcceptances
+      x-edition: enterprise
       tags:
       - platform-settings
       summary: Cross-tenant legal acceptance audit ledger
@@ -3489,6 +4343,7 @@ paths:
   /admin/stats/tenants:
     get:
       operationId: getTenantsStats
+      x-edition: enterprise
       tags:
       - platform-stats
       summary: Per-tenant usage statistics
@@ -3519,6 +4374,7 @@ paths:
   /admin/monitoring/metrics:
     get:
       operationId: getMonitoringMetrics
+      x-edition: enterprise
       tags:
       - platform-monitoring
       summary: System metrics (from the dashboard service)
@@ -3544,6 +4400,7 @@ paths:
   /admin/dashboard/platform-metrics:
     get:
       operationId: getDashboardPlatformMetrics
+      x-edition: enterprise
       tags:
       - platform-dashboard
       summary: Real-time platform metrics
@@ -3569,6 +4426,7 @@ paths:
   /admin/dashboard/usage-analytics:
     get:
       operationId: getDashboardUsageAnalytics
+      x-edition: enterprise
       tags:
       - platform-dashboard
       summary: Usage analytics
@@ -3594,6 +4452,7 @@ paths:
   /admin/dashboard/performance-kpis:
     get:
       operationId: getDashboardPerformanceKpis
+      x-edition: enterprise
       tags:
       - platform-dashboard
       summary: Performance KPIs
@@ -3619,6 +4478,7 @@ paths:
   /admin/dashboard/geographic-distribution:
     get:
       operationId: getDashboardGeographicDistribution
+      x-edition: enterprise
       tags:
       - platform-dashboard
       summary: Tenant geographic distribution
@@ -3644,6 +4504,7 @@ paths:
   /admin/dashboard/summary:
     get:
       operationId: getDashboardSummary
+      x-edition: enterprise
       tags:
       - platform-dashboard
       summary: Complete dashboard summary
@@ -3792,6 +4653,7 @@ paths:
   /admin/billing/invoices:
     get:
       operationId: listAdminInvoices
+      x-edition: enterprise
       tags:
       - billing
       summary: List billing invoices (platform-wide or per-tenant)
@@ -3813,6 +4675,7 @@ paths:
   /admin/billing/credits:
     post:
       operationId: issueCredits
+      x-edition: enterprise
       tags:
       - billing
       summary: Issue an account credit (async; acknowledged)
@@ -7590,3 +8453,694 @@ components:
         reset_link:
           type: string
           description: "The one-time reset link, returned only when email delivery was skipped or failed."
+    # --- Platform catalogues: end-of-life + vulnerability (ADR-0005 D3) -----
+    EolLookupRequest:
+      type: object
+      additionalProperties: false
+      description: 'A vendor/product/version to resolve against the platform catalogues.'
+      required:
+      - product
+      properties:
+        product_kind:
+          type: string
+          enum: [os, software, hardware]
+          description: >-
+            Narrows the search. Omit it and every kind is searched, with the
+            fact key derived from the kind of the row that MATCHED — which is
+            wider and more honest than placing the subject before looking.
+        vendor:
+          type: string
+          description: >-
+            Optional. A vendor named here must agree with a vendor named on the
+            catalogue row; a vendor named on neither side cannot contradict one,
+            because NULL on a catalogue row means unknown and not "none".
+        product: { type: string }
+        version:
+          type: string
+          description: >-
+            Optional. The cycle is chosen from this version's numeric
+            components, most specific first (22.04.3 → "22.04.3", then "22.04",
+            then "22"). An empty version resolves only where the product has
+            exactly one row, because then there is nothing to choose between.
+    EolFact:
+      type: object
+      additionalProperties: false
+      description: >-
+        One resolved fact and its ADR-0008 D4.1 provenance. All four provenance
+        fields are on the wire: the claim this feature makes is that an answer
+        says where it came from, and a response missing source_ref would show a
+        date with no way back to the row that stated it.
+      required:
+      - key
+      - value
+      - source_url
+      - source_kind
+      - source_ref
+      - confidence
+      properties:
+        key:
+          type: string
+          description: 'The fact key — eol.os.date, eol.sw.date, eol.hw.date, or sw.cpe.'
+        value: {}
+        source_url:
+          type: string
+          description: 'The citation. Never empty: an uncited fact is commentary and is not returned.'
+        source_kind:
+          type: string
+          enum: [measured, imported, declared, inferred]
+          description: >-
+            "imported" for a catalogue lookup — the value was READ out of a row
+            a mirror imported, and calling it inferred would understate its
+            provenance as badly as the reverse overstates.
+        source_ref:
+          type: string
+          description: 'What said it — "catalog:eol:<row id>" or "catalog:vulnerability_match:<cve id>".'
+        confidence:
+          type: number
+          description: '0 for a catalogue lookup: it made no estimate.'
+        model_id:
+          type: string
+          description: 'Empty for a catalogue lookup — no model was involved, and "" is not a model called unknown.'
+    EolLookupResponse:
+      type: object
+      additionalProperties: false
+      description: 'What the catalogues can say. `facts` is always present (empty, never null).'
+      required:
+      - facts
+      - matched
+      - miss_recorded
+      - message
+      properties:
+        facts:
+          type: array
+          items: { $ref: '#/components/schemas/EolFact' }
+        matched:
+          type: boolean
+          description: >-
+            Whether a catalogue ROW resolved for this subject — regardless of
+            whether it yielded a fact. It is deliberately NOT `facts.length > 0`:
+            a row whose `eol_date` is null, or which carries no `source_url`,
+            matches and states nothing. "The catalogue has never heard of this
+            product" and "the catalogue has it and the upstream source publishes
+            no date" are different answers with different fixes, and only the
+            first is a gap.
+        miss_recorded:
+          type: boolean
+          description: >-
+            Whether this lookup was counted on the gap list — true only when
+            nothing matched AND the write succeeded. Separate from `!matched`
+            because the console tells an operator their product went on the gap
+            list, and saying so when the write failed asserts something that did
+            not happen.
+        message: { type: string }
+    EolProposal:
+      type: object
+      additionalProperties: false
+      description: >-
+        One proposed eol_catalogue row awaiting review. The subject_* fields are
+        what was ASKED about; the proposed_* fields are what came back.
+      required:
+      - id
+      - product_kind
+      - subject_vendor
+      - subject_product
+      - subject_version
+      - proposed_cycle
+      - proposed_release_date
+      - proposed_eol_date
+      - proposed_extended_support_date
+      - source_url
+      - model_id
+      - source_kind
+      - confidence
+      - status
+      - reviewer_id
+      - reviewer_email
+      - reviewed_at
+      - created_at
+      - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        product_kind:
+          type: string
+          enum: [os, software, hardware]
+        subject_vendor:
+          type: [string, 'null']
+          description: 'Null means the gap carried no vendor, not that the product has none.'
+        subject_product: { type: string }
+        subject_version: { type: [string, 'null'] }
+        proposed_cycle:
+          type: string
+          description: 'Never empty: a proposal is a catalogue row and a row names a cycle.'
+        proposed_release_date: { type: [string, 'null'], format: date-time }
+        proposed_eol_date:
+          type: [string, 'null']
+          format: date-time
+          description: >-
+            Null when the model named a cycle but not its end-of-life date. That
+            is the model obeying "never guess a date" and is a legitimate
+            proposal, not a defective one.
+        proposed_extended_support_date: { type: [string, 'null'], format: date-time }
+        source_url:
+          type: string
+          description: 'The cited page. Never null — an uncited proposal was dropped before storage (D4.4).'
+        model_id:
+          type: string
+          description: 'Never null — an unattributable proposal was dropped before storage (D4.1).'
+        source_kind:
+          type: string
+          enum: [inferred]
+          description: 'Always "inferred", as a stored field rather than an assumption about the table name.'
+        confidence:
+          type: number
+          description: '0 on everything written today: we do not ask a model to score itself.'
+        status:
+          type: string
+          enum: [pending, accepted, rejected]
+        reviewer_id: { type: [string, 'null'], format: uuid }
+        reviewer_email: { type: [string, 'null'] }
+        reviewed_at: { type: [string, 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    EolProposalListResponse:
+      type: object
+      additionalProperties: false
+      description: 'One page of the proposal queue. `proposals` is always present (empty, never null).'
+      required:
+      - proposals
+      - total
+      - page
+      - page_size
+      properties:
+        proposals:
+          type: array
+          items: { $ref: '#/components/schemas/EolProposal' }
+        total:
+          type: integer
+          description: Unpaginated row count for the same filter.
+        page: { type: integer }
+        page_size: { type: integer }
+    EolProposalReviewResponse:
+      type: object
+      additionalProperties: false
+      description: 'The reviewed proposal, so the console renders the row it changed rather than the row it hoped for.'
+      required:
+      - proposal
+      - message
+      properties:
+        proposal: { $ref: '#/components/schemas/EolProposal' }
+        eol_entry_id:
+          type: string
+          format: uuid
+          description: >-
+            On accept, the eol_catalogue row that was written or updated. Absent
+            on reject, where nothing was written.
+        message: { type: string }
+    CatalogMiss:
+      type: object
+      additionalProperties: false
+      description: >-
+        One gap: a subject the catalogues could not answer for, and how often it
+        has been asked about. The subject is stored verbatim while the
+        uniqueness folds case, so a reviewer sees what was actually asked — a
+        vendor-name mismatch is one of the commonest causes of a miss and a
+        normalised display would hide it.
+      required:
+      - id
+      - product_kind
+      - vendor
+      - product
+      - version
+      - miss_count
+      - first_seen_at
+      - last_seen_at
+      - last_proposed_at
+      properties:
+        id: { type: string, format: uuid }
+        product_kind:
+          type: string
+          enum: [os, software, hardware]
+        vendor: { type: [string, 'null'] }
+        product: { type: string }
+        version: { type: [string, 'null'] }
+        miss_count:
+          type: integer
+          description: 'How many lookups this gap has swallowed. The list is ordered by it.'
+        first_seen_at: { type: string, format: date-time }
+        last_seen_at: { type: string, format: date-time }
+        last_proposed_at:
+          type: [string, 'null']
+          format: date-time
+          description: >-
+            When a proposal run last asked about this gap, whether or not the ask
+            produced anything. Null means never asked.
+    CatalogMissListResponse:
+      type: object
+      additionalProperties: false
+      description: 'One page of the gap list. `misses` is always present (empty, never null).'
+      required:
+      - misses
+      - total
+      - page
+      - page_size
+      properties:
+        misses:
+          type: array
+          items: { $ref: '#/components/schemas/CatalogMiss' }
+        total: { type: integer }
+        page: { type: integer }
+        page_size: { type: integer }
+    CatalogEnrichRunResponse:
+      type: object
+      additionalProperties: false
+      description: 'Acknowledgement that a proposal run was STARTED (202). The outcome arrives in the proposal queue.'
+      required:
+      - status
+      - message
+      properties:
+        status: { type: string }
+        message: { type: string }
+    CatalogEnrichAvailability:
+      type: object
+      additionalProperties: false
+      description: >-
+        Whether "Propose with AI" is offered on this deployment. Three fields
+        rather than a bool because the two "no" answers have different fixes.
+      required:
+      - available
+      properties:
+        available:
+          type: boolean
+          description: 'Whether a proposal run could succeed right now.'
+        reason:
+          type: string
+          enum: [edition, no_provider]
+          description: >-
+            "edition" — this build has no generative enricher (Core). The lookup
+            enricher, the gap list and the review queue are all still present.
+            "no_provider" — the build has one, but AI_PROVIDER names nothing
+            reachable; the operator configures a provider. Empty when available.
+        provider:
+          type: string
+          description: 'The configured provider name ("none", "anthropic", "openai-compatible").'
+    EolCatalogueEntry:
+      type: object
+      additionalProperties: false
+      description: 'One release cycle of one product. Identity is (product_kind, vendor, product, cycle).'
+      required:
+      - id
+      - product_kind
+      - vendor
+      - product
+      - cycle
+      - release_date
+      - eol_date
+      - extended_support_date
+      - source_url
+      - source_kind
+      properties:
+        id: { type: string, format: uuid }
+        product_kind:
+          type: string
+          enum: [os, software, hardware]
+        vendor:
+          type: [string, 'null']
+          description: >-
+            Null means UNKNOWN, not "none". The mirror leaves it null rather than
+            writing "Unknown", which would make the identity index treat two
+            different products as one row the day the real vendor is filled in.
+        product: { type: string }
+        cycle:
+          type: string
+          description: 'The release train, e.g. "22.04", "3.11", "17".'
+        release_date: { type: [string, 'null'], format: date-time }
+        eol_date:
+          type: [string, 'null']
+          format: date-time
+          description: >-
+            Null when the source has not announced a date — including when it
+            says support has ended but gives no date. A fabricated date would
+            give the EOL producer a precise-looking days-past-EOL number derived
+            from nothing.
+        extended_support_date: { type: [string, 'null'], format: date-time }
+        source_url: { type: [string, 'null'] }
+        source_kind:
+          type: string
+          enum: [measured, declared, imported, inferred]
+        updated_at: { type: string, format: date-time }
+    EolCatalogueListResponse:
+      type: object
+      additionalProperties: false
+      description: 'One page of the end-of-life catalogue. `entries` is always present (empty, never null).'
+      required:
+      - entries
+      - total
+      - page
+      - page_size
+      properties:
+        entries:
+          type: array
+          items: { $ref: '#/components/schemas/EolCatalogueEntry' }
+        total:
+          type: integer
+          description: Unpaginated row count for the same filters.
+        page: { type: integer }
+        page_size: { type: integer }
+    ClassificationRuleKind:
+      type: string
+      description: |
+        How a rule's `pattern` is matched (asset-inventory ADR-0004 D6). Mirrors
+        the `rule_kind` CHECK on `classification_rules` and the matcher set in
+        `shared/classify`; adding a value is a change in all three at once — and
+        in this enum, which is the one in a different language and therefore the
+        one that gets left behind. `TestClassificationRuleKind_SpecMatchesTheEngine`
+        compares the two and fails either way round.
+
+        * `oui` — the 24-bit IEEE assignment at the front of a MAC, as 6
+          uppercase hex digits with no separators.
+        * `sysobjectid` — an OID prefix under the IANA private-enterprise arc
+          `1.3.6.1.4.1`, matched on arc boundaries; longest prefix wins.
+        * `enip` — an ODVA vendor id in decimal, from an EtherNet/IP List
+          Identity response.
+        * `cloud_type` — a provider resource type as the cloud collectors spell
+          it (`aws_s3_bucket`).
+        * `banner` — a Go RE2 regexp matched against every captured banner. The
+          pattern carries its own anchoring.
+        * `port_profile` — an ascending comma-separated port list, matching only
+          when EVERY listed port is open.
+        * `model` — a case-insensitive prefix of the model or product id the
+          device stated; longest prefix wins, and a rule that names a vendor
+          fires only for that vendor.
+        * `platform` — the collector path's own identity for the device: the
+          management API it answered (`panos`), or the profile it was registered
+          under (`cisco_asa`).
+        * `cdp_capabilities` — an ascending comma-separated SET of Cisco CDP
+          capability names (`router,switch`), spelled as the decoder in
+          `shared/hostobs` spells them. Matches only when EVERY name is
+          advertised, and only the matching rules naming the MOST capabilities
+          are returned, so a combination refines rather than argues with the
+          single-capability rules under it.
+        * `lldp_capability` — the same matching over IEEE 802.1AB system
+          capabilities. Two kinds and not one because the vocabularies use
+          different words for overlapping ideas: CDP's `switch` says the device
+          switches, while 802.1AB's `bridge` is the bridging FUNCTION, which an
+          access point and a desk phone also perform.
+        * `mdns_service` — one DNS-SD service type in its registry spelling,
+          lowercase (`_ipp._tcp`). Exact, case-insensitive.
+      enum:
+      - oui
+      - sysobjectid
+      - enip
+      - cloud_type
+      - banner
+      - port_profile
+      - model
+      - platform
+      - cdp_capabilities
+      - lldp_capability
+      - mdns_service
+    ClassificationRule:
+      type: object
+      additionalProperties: false
+      description: |
+        One curated rule. Identity is `(rule_kind, pattern)`.
+
+        `class_key` is NULLABLE and usually null on an OUI rule, which is the
+        table's whole posture: a manufacturer that sells servers, switches and
+        printers under one assignment gets a VENDOR and no class, because a
+        wrong class is worse than none — an absent class shows as unclassified
+        and invites someone to look, a wrong one shows as a fact.
+      required:
+      - id
+      - rule_kind
+      - pattern
+      - class_key
+      - vendor
+      - model
+      - confidence
+      - source_url
+      - created_at
+      - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        rule_kind:
+          $ref: '#/components/schemas/ClassificationRuleKind'
+        pattern:
+          type: string
+          description: The thing matched, in the kind's own syntax.
+        class_key:
+          type: [string, 'null']
+          description: >-
+            Asset class key from the platform taxonomy, or null. Null means the
+            rule deliberately proposes NO class — not "unknown class", and not
+            an empty string.
+        vendor:
+          type: [string, 'null']
+          description: >-
+            The manufacturer this pattern identifies. On a `model` rule it is
+            also a guard: the rule fires only when the observed vendor agrees or
+            is absent.
+        model:
+          type: [string, 'null']
+          description: 'The specific model, where the pattern pins one. Rarely set.'
+        confidence:
+          type: number
+          format: double
+          minimum: 0.5
+          maximum: 0.95
+          description: >-
+            What the rule ASSERTS, 0.50–0.95 — not how sure we are that the
+            pattern matched, which is exact. A vendor-only rule carries the
+            confidence of its vendor claim, so it sits HIGHER than the
+            class-bearing rules beside it: it asserts less. 1.0 is refused
+            because nothing here is a measurement.
+        source_url:
+          type: [string, 'null']
+          description: 'Where the mapping comes from. A rule that cannot cite anything is somebody''s memory.'
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ClassificationRuleInput:
+      type: object
+      additionalProperties: false
+      description: |
+        A rule to create, or the full replacement for an existing one. On PUT
+        every field is restated and an omitted optional field is CLEARED —
+        clearing a class is how an admin turns a rule that guessed into a rule
+        that only names a vendor.
+
+        At least one of `class_key`, `vendor` or `model` must be populated: a
+        rule that asserts nothing can only waste a reviewer's time, and the
+        database refuses it too.
+      required:
+      - rule_kind
+      - pattern
+      - confidence
+      properties:
+        rule_kind:
+          $ref: '#/components/schemas/ClassificationRuleKind'
+        pattern: { type: string }
+        class_key: { type: [string, 'null'] }
+        vendor: { type: [string, 'null'] }
+        model: { type: [string, 'null'] }
+        confidence:
+          type: number
+          format: double
+          minimum: 0.5
+          maximum: 0.95
+        source_url: { type: [string, 'null'] }
+    ClassificationRuleListResponse:
+      type: object
+      additionalProperties: false
+      description: 'One page of the classification rules. `rules` is always present (empty, never null).'
+      required:
+      - rules
+      - total
+      - page
+      - page_size
+      - kinds
+      properties:
+        rules:
+          type: array
+          items: { $ref: '#/components/schemas/ClassificationRule' }
+        total:
+          type: integer
+          description: Unpaginated row count for the same filters.
+        page: { type: integer }
+        page_size: { type: integer }
+        kinds:
+          type: array
+          description: >-
+            The rule-kind vocabulary, served with the list so a client's filter
+            and form cannot keep their own copy and drift from what the engine
+            matches.
+          items:
+            $ref: '#/components/schemas/ClassificationRuleKind'
+    VulnerabilityCatalogueEntry:
+      type: object
+      additionalProperties: false
+      description: 'One CVE. `cve_id` is the identity — there is no surrogate key.'
+      required:
+      - cve_id
+      - cvss_version
+      - cvss_score
+      - cvss_vector
+      - severity
+      - published_at
+      - modified_at
+      - description
+      - source_kind
+      properties:
+        cve_id: { type: string }
+        cvss_version:
+          type: [string, 'null']
+          description: 'Which CVSS ladder the score came from ("4.0", "3.1", "2.0"). Recorded so a reader never has to guess.'
+        cvss_score:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 10
+        cvss_vector: { type: [string, 'null'] }
+        severity:
+          type: [string, 'null']
+          enum: [none, low, medium, high, critical, null]
+          description: 'The CVSS qualitative band. Derived from the score when the feed omits the word, so a 9.8 never renders as "—".'
+        published_at: { type: [string, 'null'], format: date-time }
+        modified_at: { type: [string, 'null'], format: date-time }
+        description: { type: [string, 'null'] }
+        source_kind:
+          type: string
+          enum: [measured, declared, imported, inferred]
+    VulnerabilityCatalogueListResponse:
+      type: object
+      additionalProperties: false
+      description: 'One page of the vulnerability catalogue. `vulnerabilities` is always present (empty, never null).'
+      required:
+      - vulnerabilities
+      - total
+      - page
+      - page_size
+      properties:
+        vulnerabilities:
+          type: array
+          items: { $ref: '#/components/schemas/VulnerabilityCatalogueEntry' }
+        total:
+          type: integer
+          description: Unpaginated row count for the same filters.
+        page: { type: integer }
+        page_size: { type: integer }
+    CatalogFeedStatus:
+      type: object
+      additionalProperties: false
+      description: 'Where one mirror feed got to and how it went.'
+      required:
+      - feed
+      - cursor
+      - last_run_at
+      - last_status
+      - last_error
+      - row_count
+      properties:
+        feed:
+          type: string
+          enum: [eol, nvd, osv]
+        cursor:
+          type: [string, 'null']
+          description: >-
+            Opaque and per-feed: NVD stores the end of the last modification
+            window it consumed, OSV a JSON map of per-ecosystem watermarks, and
+            the EOL feed the date it last completed a full pass. Advanced only
+            on success, so a failed run retries its window rather than skipping
+            it.
+        last_run_at: { type: [string, 'null'], format: date-time }
+        last_status:
+          type: string
+          enum: [never, running, ok, error]
+          description: '`never` is a real answer — the feed has not run — as distinct from a run whose outcome was lost.'
+        last_error: { type: [string, 'null'] }
+        row_count:
+          type: integer
+          description: Catalogue rows written by the last successful run.
+        updated_at: { type: [string, 'null'], format: date-time }
+    CatalogFeedListResponse:
+      type: object
+      additionalProperties: false
+      description: 'Status of every catalogue feed, plus the deployment-level switches the console renders.'
+      required:
+      - feeds
+      - enabled
+      - interval_seconds
+      properties:
+        feeds:
+          type: array
+          items: { $ref: '#/components/schemas/CatalogFeedStatus' }
+        enabled:
+          type: boolean
+          description: 'The CATALOG_FEEDS_ENABLED kill switch. False ⇒ nothing scheduled and manual sync refused with 409.'
+        interval_seconds:
+          type: integer
+          description: Scheduled cadence between passes.
+    CatalogFeedSyncResponse:
+      type: object
+      additionalProperties: false
+      description: 'Acknowledgement that a feed run was STARTED (202). The outcome arrives via GET /admin/catalogs/feeds.'
+      required:
+      - feed
+      - status
+      - message
+      properties:
+        feed:
+          type: string
+          enum: [eol, nvd, osv]
+        status:
+          type: string
+          enum: [running]
+        message: { type: string }
+    CatalogBundleFile:
+      type: object
+      additionalProperties: false
+      description: 'One verified file from an offline bundle''s manifest.'
+      required:
+      - name
+      - sha256
+      - rows
+      - bytes
+      properties:
+        name: { type: string }
+        sha256: { type: string }
+        rows: { type: integer }
+        bytes: { type: integer }
+    CatalogBundleImportResponse:
+      type: object
+      additionalProperties: false
+      description: 'What an offline-bundle import applied, after every file passed its SHA-256 and row-count check.'
+      required:
+      - files
+      - eol_rows
+      - vulnerability_rows
+      - match_rows
+      - message
+      properties:
+        files:
+          type: array
+          items: { $ref: '#/components/schemas/CatalogBundleFile' }
+        eol_rows:
+          type: integer
+          description: >-
+            End-of-life rows the database affected. The upsert is ON CONFLICT DO
+            UPDATE, so re-importing the same bundle reports the same number
+            again — it answers "how much of the bundle was applied", not "how
+            much changed".
+        vulnerability_rows:
+          type: integer
+          description: CVE rows the database affected. Same DO UPDATE semantics as eol_rows.
+        match_rows:
+          type: integer
+          description: >-
+            Match rules the database actually WROTE. These are INSERT ... DO
+            NOTHING, so re-importing a bundle the catalogue already holds
+            reports 0 — not the count of rules in the file, which would claim
+            tens of thousands of writes that did not happen.
+        generated_at:
+          type: string
+          format: date-time
+          description: When the bundle was built on the connected install.
+        message: { type: string }

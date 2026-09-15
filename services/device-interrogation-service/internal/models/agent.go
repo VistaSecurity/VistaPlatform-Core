@@ -4,6 +4,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 )
 
 // Agent represents a registered device agent. Field order and nullability mirror
@@ -51,6 +53,27 @@ type Agent struct {
 	// LastJobAt is nil when the agent has never been assigned a job.
 	JobCount  int        `json:"job_count"`
 	LastJobAt *time.Time `json:"last_job_at"`
+
+	// LastHostInventoryAt and the two counts beside it summarise the agent's
+	// most recent HOST INVENTORY — what it found out about the machine it is
+	// installed on, rather than what it was told to go and interrogate
+	// (asset-inventory workstream 2.11b).
+	//
+	// It is a separate line from JobCount/LastJobAt because it answers a
+	// different question. A host-inventory collection is not work an operator
+	// queued; it is the agent describing its own host on its own timer, and
+	// "this agent has run 47 jobs" says nothing about whether that is
+	// happening. An agent that is busy interrogating firewalls and has never
+	// reported its own host is a normal, invisible misconfiguration
+	// (HOST_INVENTORY_ENABLED unset) that these fields make visible.
+	//
+	// All three are nil together when the agent has never reported one. The
+	// counts are pointers rather than zero-valued ints for the usual reason: a
+	// host that genuinely has no packages and a host nobody has enumerated are
+	// different answers, and `0` cannot say which.
+	LastHostInventoryAt    *time.Time `json:"last_host_inventory_at"`
+	HostInventoryPackages  *int       `json:"host_inventory_packages"`
+	HostInventoryListeners *int       `json:"host_inventory_listeners"`
 }
 
 // AgentAddress is one address bound on an agent host, as reported by the agent's
@@ -111,8 +134,22 @@ type RegisterAgentResponse struct {
 
 // Job represents a job for an agent to execute
 type Job struct {
-	ID          uuid.UUID              `json:"id"`
-	Type        string                 `json:"type"`
+	ID   uuid.UUID `json:"id"`
+	Type string    `json:"type"`
+	// AssetID is the asset the job targets (phase 1: `devices` merged into
+	// `assets`, ADR-0002 D5).
+	AssetID *uuid.UUID `json:"asset_id,omitempty"`
+	// DeviceID is the SAME value as AssetID, kept on the wire for one release.
+	//
+	// The device-agent ships separately from the platform, so a customer will
+	// be running an older agent against a newer control plane; that agent reads
+	// `device_id`. Removing it would hand every such agent a job with no
+	// target, which the executor reports as an unrelated failure against the
+	// device. Both are emitted, both carry the asset id, and the agent in this
+	// tree prefers `asset_id`.
+	//
+	// Deprecated: use AssetID. Remove one release after the agent that reads
+	// `asset_id` has shipped.
 	DeviceID    *uuid.UUID             `json:"device_id,omitempty"`
 	DeviceType  string                 `json:"device_type"`
 	Credentials map[string]interface{} `json:"credentials"` // Encrypted credentials
@@ -129,6 +166,14 @@ type JobResult struct {
 	Assets      []DiscoveredAsset      `json:"assets,omitempty"`
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
 	CompletedAt time.Time              `json:"completed_at"`
+
+	// Facts and Relationships are the ops observations a collector emitted
+	// alongside the crypto assets (ADR-0004 D1, ADR-0003). They mirror the
+	// shared core's InterrogateResult fields exactly so the agent path and the
+	// in-cluster path persist the same shape; an agent that does not send them
+	// simply sends none, which is not the same as sending an empty one.
+	Facts         []di.FactObservation         `json:"facts,omitempty"`
+	Relationships []di.RelationshipObservation `json:"relationships,omitempty"`
 }
 
 // DiscoveredAsset represents an infrastructure asset discovered during interrogation.

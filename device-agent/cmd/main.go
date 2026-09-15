@@ -2,10 +2,13 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -13,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +27,8 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/config"
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/devices"
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
+	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform/shared/hostinventory"
 	"golang.org/x/term"
 )
 
@@ -63,8 +69,19 @@ func main() {
 		caFingerprint = flag.String("ca-fingerprint", "",
 			"Expected SHA-256 fingerprint of the platform's CA certificate. Required for unattended "+
 				"enrollment against a platform whose certificate is signed by a private CA this host does not trust.")
+		// hostInventoryOnce is a SUPPORT flag: collect this host once, print
+		// the report as JSON, exit. It reaches no network and needs no
+		// enrollment, so an operator can see exactly what the agent would send
+		// before enabling the schedule. The report is secrets-free by
+		// construction — see shared/hostinventory.
+		hostInventoryOnce = flag.Bool("host-inventory-once", false,
+			"Collect this host's inventory once, print it as JSON, and exit. Sends nothing to the platform.")
 	)
 	flag.Parse()
+
+	if *hostInventoryOnce {
+		os.Exit(runHostInventoryOnce())
+	}
 
 	// Show version and exit
 	if *version {
@@ -345,13 +362,206 @@ func (a *DeviceAgent) Start() error {
 	// because that detector excludes rows whose last_heartbeat is NULL.
 	go a.sendHeartbeats()
 
+	// Start the LOCAL host-inventory schedule, when the operator has turned it
+	// on. It is not a job: the agent describes the host it is installed on, on
+	// its own cadence, with no credentials and nothing for the platform to have
+	// queued (asset-inventory ADR-0004 D3).
+	if a.config.HostInventoryEnabled {
+		log.Printf("🖥️  Local host inventory enabled, every %v", a.config.HostInventoryInterval)
+		go a.collectHostInventory()
+	}
+
 	return nil
+}
+
+// collectHostInventory runs the local collection on start and then on the
+// configured interval.
+//
+// On start as well as on the interval, because an agent that is restarted daily
+// — a container, a laptop — would otherwise never reach its first tick and the
+// feature would appear to do nothing.
+func (a *DeviceAgent) collectHostInventory() {
+	runLocalHostInventoryLoop(a.apiClient, a.config.AgentID, a.config.HostInventoryInterval, nil)
+}
+
+// hostInventorySubmitter is the slice of the API client the local loop needs,
+// so the loop can be tested without a platform.
+type hostInventorySubmitter interface {
+	SubmitHostInventory(report *hostinventory.Report, observations *di.InterrogateResult) error
+}
+
+// runLocalHostInventoryLoop collects immediately, then on the interval, until
+// stop closes.
+//
+// A failed collection or a failed submission is logged and retried on the next
+// tick. It must not end the loop for the lifetime of the process: a transient
+// network blip, or one boot where `ss` was momentarily unavailable, would
+// otherwise silently stop host inventory forever on that host — the same
+// reasoning as the heartbeat loop's.
+func runLocalHostInventoryLoop(submitter hostInventorySubmitter, agentID string, interval time.Duration, stop <-chan struct{}) {
+	if submitter == nil {
+		return
+	}
+	if interval < config.MinHostInventoryInterval {
+		interval = config.MinHostInventoryInterval
+	}
+
+	collect := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), hostInventoryCollectTimeout)
+		defer cancel()
+
+		report, observations, err := devices.CollectLocalHostInventory(ctx, agentID)
+		if err != nil {
+			log.Printf("⚠️  Host inventory collection failed: %v", err)
+			return
+		}
+		if err := submitter.SubmitHostInventory(report, observations); err != nil {
+			log.Print(hostInventorySubmitFailure(err, interval))
+			return
+		}
+		// Say what was learned AND what was not: a report with three failed
+		// sections that logs "collected" reads as a success it is not.
+		log.Printf("🖥️  Host inventory submitted: %s, %d packages, %d listeners, %d interfaces%s",
+			report.Platform, len(report.Packages), len(report.Listeners), len(report.Interfaces),
+			failedSectionSuffix(report))
+	}
+
+	collect()
+
+	// Jittered timer rather than a fixed ticker.
+	//
+	// A ticker keeps a fleet in whatever phase it started in, forever. Agents
+	// on a customer estate are rolled out and upgraded in batches, so "whatever
+	// phase it started in" is commonly the same minute for hundreds of hosts —
+	// and each one then walks its whole package database and posts a report
+	// bounded at 16 MiB, at that minute, every day. Jitter spreads them and
+	// keeps them spread, because each wait is drawn afresh.
+	//
+	// It is ADDED, never subtracted: the floor is a safety bound on how often a
+	// customer's host is made to do this work, and jitter must not be a way
+	// under it.
+	//
+	// The loop is also strictly sequential — collect() returns before the next
+	// wait begins — so two collections can never overlap on one host, however
+	// long one of them takes.
+	timer := time.NewTimer(jitteredInterval(interval))
+	defer timer.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-timer.C:
+			collect()
+			timer.Reset(jitteredInterval(interval))
+		}
+	}
+}
+
+// hostInventorySubmitFailure is the log line for a failed submission.
+//
+// Split out so both branches are testable — the distinction between them is the
+// whole point, and a distinction that lives only inside a log call in a
+// goroutine is one nothing can check.
+//
+// An over-cap report is NOT a transient failure. Every other submission error
+// is worth trying again and this one is not: the same host produces the same
+// size on the next run, so the line says so plainly and names the measured
+// size, rather than leaving an operator to infer it from a report that never
+// arrives. The loop retries neither — it returns and waits for the next
+// scheduled collection either way — but only one of them is worth an operator's
+// attention today.
+func hostInventorySubmitFailure(err error, interval time.Duration) string {
+	var tooLarge *api.ReportTooLargeError
+	if errors.As(err, &tooLarge) {
+		return fmt.Sprintf("⚠️  Host inventory NOT submitted — report too large: %d bytes exceeds the platform's cap. "+
+			"This will not fix itself: the next collection (in ~%v) will be the same size. "+
+			"Reduce what is collected or raise the platform's cap. Platform said: %s",
+			tooLarge.Bytes, interval, tooLarge.Detail)
+	}
+	return fmt.Sprintf("⚠️  Host inventory submission failed (retrying at the next scheduled collection, in ~%v): %v", interval, err)
+}
+
+// hostInventoryJitterFraction is how much may be added to an interval: at most
+// a tenth, so a 24-hour cadence spreads a fleet over ~2.4 hours while staying
+// recognisably daily.
+const hostInventoryJitterFraction = 10
+
+// jitteredInterval returns interval plus a random fraction of it, up to
+// 1/hostInventoryJitterFraction.
+//
+// Never less than interval — see the caller. math/rand/v2 is the right
+// generator here: this is scheduling, not a secret, and a crypto/rand failure
+// mode inside a scheduling loop would be a new way for host inventory to stop.
+func jitteredInterval(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		return interval
+	}
+	span := interval / hostInventoryJitterFraction
+	if span <= 0 {
+		return interval
+	}
+	return interval + time.Duration(rand.Int64N(int64(span)))
+}
+
+// failedSectionSuffix names the sections that did not complete, so the log line
+// cannot report a partial collection as a whole one.
+func failedSectionSuffix(report *hostinventory.Report) string {
+	var failed []string
+	for section, state := range report.Sections {
+		if state == hostinventory.SectionFailed {
+			failed = append(failed, section)
+		}
+	}
+	if len(failed) == 0 {
+		return ""
+	}
+	sort.Strings(failed)
+	return " (failed: " + strings.Join(failed, ", ") + ")"
+}
+
+// hostInventoryCollectTimeout bounds one local collection.
+const hostInventoryCollectTimeout = 10 * time.Minute
+
+// runHostInventoryOnce implements --host-inventory-once: collect, print, exit.
+//
+// It reads no configuration and opens no connection, so it works on a host that
+// has never been enrolled — which is the point, since the question it answers is
+// "what would this agent send if I turned host inventory on?". The report it
+// prints is the same object the scheduler submits.
+func runHostInventoryOnce() int {
+	ctx, cancel := context.WithTimeout(context.Background(), hostInventoryCollectTimeout)
+	defer cancel()
+
+	report, observations, err := devices.CollectLocalHostInventory(ctx, "")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "host inventory failed: %v\n", err)
+		return 1
+	}
+
+	out := map[string]any{"report": report, "observations": observations}
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(out); err != nil {
+		fmt.Fprintf(os.Stderr, "could not render the report: %v\n", err)
+		return 1
+	}
+	// A collection with failed sections is a partial answer, and exiting 0 for
+	// it would tell a script everything was fine. The report is still printed —
+	// a partial inventory is worth reading.
+	if failedSectionSuffix(report) != "" {
+		fmt.Fprintf(os.Stderr, "note: some sections did not complete%s\n", failedSectionSuffix(report))
+		return 2
+	}
+	return 0
 }
 
 // Stop stops the device agent
 func (a *DeviceAgent) Stop() {
 	if a.auditLogger != nil {
-		a.auditLogger.Close()
+		// Close on a file being WRITTEN can surface a lost final write.
+		if err := a.auditLogger.Close(); err != nil {
+			log.Printf("⚠️  Failed to close audit log %s: %v", a.auditLogger.GetPath(), err)
+		}
 	}
 }
 
@@ -523,28 +733,36 @@ func saveConfigFile(configPath string, cfg *config.Config) error {
 
 	// Add header
 	configContent.WriteString("# Vista Platform Device Agent Configuration\n")
-	configContent.WriteString(fmt.Sprintf("# Generated after registration\n\n"))
+	configContent.WriteString("# Generated after registration\n\n")
 
 	// Write config with proper quoting for Windows paths
-	configContent.WriteString(fmt.Sprintf("agent_id: %q\n", cfg.AgentID))
-	configContent.WriteString(fmt.Sprintf("platform_url: %s\n", cfg.PlatformURL))
-	configContent.WriteString(fmt.Sprintf("registration_key: %s\n", cfg.RegistrationKey))
-	configContent.WriteString(fmt.Sprintf("poll_interval: %s\n", cfg.PollInterval))
-	configContent.WriteString(fmt.Sprintf("data_path: %q\n", cfg.DataPath))
+	fmt.Fprintf(&configContent, "agent_id: %q\n", cfg.AgentID)
+	fmt.Fprintf(&configContent, "platform_url: %s\n", cfg.PlatformURL)
+	fmt.Fprintf(&configContent, "registration_key: %s\n", cfg.RegistrationKey)
+	fmt.Fprintf(&configContent, "poll_interval: %s\n", cfg.PollInterval)
+	fmt.Fprintf(&configContent, "data_path: %q\n", cfg.DataPath)
 	// Only write `verbose:` when something actually set it. Writing the
 	// resolved value would silently pin the command-line default into the file
 	// and make it look like an operator choice.
 	if cfg.Verbose != nil {
-		configContent.WriteString(fmt.Sprintf("verbose: %t\n", *cfg.Verbose))
+		fmt.Fprintf(&configContent, "verbose: %t\n", *cfg.Verbose)
+	}
+	// Only written once the operator has turned local host inventory on.
+	// Writing `host_inventory_enabled: false` into every generated config
+	// would freeze the default into the file and make a later change of
+	// default look like an operator decision that was never made.
+	if cfg.HostInventoryEnabled {
+		configContent.WriteString("host_inventory_enabled: true\n")
+		fmt.Fprintf(&configContent, "host_inventory_interval: %s\n", cfg.HostInventoryInterval)
 	}
 
 	// Add security section with certificate paths
 	if cfg.Security.ClientCertPath != "" {
 		configContent.WriteString("\n# mTLS Certificate Configuration (auto-generated after registration)\n")
 		configContent.WriteString("security:\n")
-		configContent.WriteString(fmt.Sprintf("  client_cert_path: %q\n", cfg.Security.ClientCertPath))
-		configContent.WriteString(fmt.Sprintf("  client_key_path: %q\n", cfg.Security.ClientKeyPath))
-		configContent.WriteString(fmt.Sprintf("  server_ca_cert_path: %q\n", cfg.Security.ServerCACertPath))
+		fmt.Fprintf(&configContent, "  client_cert_path: %q\n", cfg.Security.ClientCertPath)
+		fmt.Fprintf(&configContent, "  client_key_path: %q\n", cfg.Security.ClientKeyPath)
+		fmt.Fprintf(&configContent, "  server_ca_cert_path: %q\n", cfg.Security.ServerCACertPath)
 		configContent.WriteString("  use_tls: true\n")
 	}
 

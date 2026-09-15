@@ -2,21 +2,24 @@
 // so it can be unit tested without a DOM/React harness (H-9).
 //
 // Bug this fixes: the grid used to pivot findings against /infrastructure-assets
-// rows ONLY, via `g.ids.has(f.asset_id)`. Live QA data showed 15 of 19
-// findings carry asset_ids that are certificate or crypto-configuration ids —
-// they can never appear in any (dim value) x (control) cell, because
-// AssetFacts is keyed by infrastructure-asset id. Those findings were silently
-// dropped from every cell and from every row total, so the grid's totals
-// contradicted the scorecards and Top Exposures panel on the same page, which
-// both read the same underlying finding set.
+// rows ONLY, via `g.ids.has(f.subject_id)`. Live QA data showed 15 of 19
+// findings are about a certificate or a crypto configuration — they can never
+// appear in any (dim value) x (control) cell, because AssetFacts is keyed by
+// infrastructure-asset id. Those findings were silently dropped from every cell
+// and from every row total, so the grid's totals contradicted the scorecards and
+// Top Exposures panel on the same page, which both read the same underlying
+// finding set.
 //
-// Fix: any finding whose asset_id does not resolve to a known infrastructure
+// Fix: any finding whose subject_id does not resolve to a known infrastructure
 // asset is now rolled into an explicit "Certificates / Configurations" row
 // instead of vanishing. This keeps the pivot honest — sum of all row totals
-// across the grid always equals the number of (control, asset_id) finding
-// pairs fed in — without requiring a backend change to resolve every
+// across the grid always equals the number of (control, subject) finding pairs
+// fed in — without requiring a backend change to resolve every
 // certificate/config back to a specific deployed asset (tracked as an open
 // question for a fuller fix).
+//
+// `subject_id` is the field's real name since workstream 3.1; it was `asset_id`,
+// which is precisely the misnomer that made this pivot look correct.
 import { levelFromScore, type RiskLevel } from '../../components/ui';
 import { sevLevel, sevRank, type BatchFinding } from './model';
 import { normalizeControlStatus } from './control-status';
@@ -63,9 +66,9 @@ export interface GridRow {
  *
  * `facts` keys by infrastructure-asset id (the only asset kind that carries
  * environment/business-unit/asset-type dims). `findingsByControl` values may
- * reference asset_ids of ANY kind compliance_findings.asset_type allows
- * (network_asset / certificate / crypto_implementation) — see
- * scripts/database/schema.sql `compliance_findings_asset_type_check`.
+ * reference a subject of ANY kind the compliance producer emits — an asset, a
+ * certificate or a crypto configuration (findings.subject_type), and on live
+ * data three in four are not an asset.
  */
 export function buildControlGrid(
   facts: Map<string, AssetFacts>,
@@ -91,7 +94,7 @@ export function buildControlGrid(
 
   const rows: GridRow[] = [...groups.entries()].map(([key, g]) => {
     const cells = cols.map((ck, ci) => {
-      const fs = (findingsByControl.get(ck.id) ?? []).filter((f) => g.ids.has(f.asset_id));
+      const fs = (findingsByControl.get(ck.id) ?? []).filter((f) => g.ids.has(f.subject_id));
       return {
         fail: fs.length,
         ratio: g.ids.size ? Math.min(1, fs.length / g.ids.size) : 0,
@@ -104,15 +107,15 @@ export function buildControlGrid(
     return { key, count: g.ids.size, cells, totFail, level: levelFromScore(avg) };
   });
 
-  // Findings whose asset_id never matched an infrastructure-asset row — these
+  // Findings whose subject_id never matched an infrastructure-asset row — these
   // are the certificate/crypto-configuration-scoped findings the pivot used to
   // drop outright. Collect them into one labeled row instead.
   const unattributedIds = new Set<string>();
   const unattributedFindings: BatchFinding[] = [];
   cols.forEach((ck) => {
     (findingsByControl.get(ck.id) ?? []).forEach((f) => {
-      if (!facts.has(f.asset_id)) {
-        unattributedIds.add(f.asset_id);
+      if (!facts.has(f.subject_id)) {
+        unattributedIds.add(f.subject_id);
         unattributedFindings.push(f);
       }
     });
@@ -120,7 +123,7 @@ export function buildControlGrid(
 
   if (unattributedIds.size) {
     const cells = cols.map((ck, ci) => {
-      const fs = (findingsByControl.get(ck.id) ?? []).filter((f) => !facts.has(f.asset_id));
+      const fs = (findingsByControl.get(ck.id) ?? []).filter((f) => !facts.has(f.subject_id));
       return {
         fail: fs.length,
         ratio: unattributedIds.size ? Math.min(1, fs.length / unattributedIds.size) : 0,

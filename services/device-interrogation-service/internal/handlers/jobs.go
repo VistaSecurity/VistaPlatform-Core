@@ -31,6 +31,138 @@ type jobResultsPayload struct {
 // execution paths that never go through ResultProcessor (e.g. the direct
 // in-service cloud discovery handler, which writes sensor_discoveries itself
 // without a processing log).
+// CloudEnumerationCounts is what a cloud discovery run's enumeration half found
+// — compute instances, virtual networks, subnets and the distinct security
+// groups it saw membership of (BUILD_PLAN 2.4).
+//
+// It is surfaced on the job row rather than left inside `results` because the
+// Job Logs stream's one line per run is where an operator looks to see whether
+// a run did what they expected, and "42 assets" does not say whether the
+// enumeration ran at all.
+type CloudEnumerationCounts struct {
+	Instances      int `json:"instances"`
+	Networks       int `json:"networks"`
+	Subnets        int `json:"subnets"`
+	SecurityGroups int `json:"security_groups"`
+}
+
+// HostInventoryCounts is what a host-inventory run put into the inventory
+// (asset-inventory workstream 2.11b), surfaced on the job row for the same
+// reason the enumeration counts are: the Job Logs stream's one line per run is
+// where an operator looks to see whether a run did what they expected, and
+// "1 asset" says nothing about whether the package list or the sockets landed.
+//
+// It is a narrower projection than services.HostInventoryCounts on purpose.
+// That type is the consumer's full record and lives on the job row; this is the
+// handful a log line can show, and widening it means deciding what a log line
+// is for rather than copying a struct.
+type HostInventoryCounts struct {
+	// AssetID is the asset the collection landed on, empty when the identity
+	// was contested and nothing was created.
+	AssetID   string `json:"asset_id,omitempty"`
+	Facts     int    `json:"facts"`
+	Endpoints int    `json:"endpoints"`
+	// Packages is the number of ACTIVE measured installs after the run — the
+	// number an inventory query would return — not the number the collector
+	// enumerated. Absent when the package step failed, which is not the same as
+	// zero.
+	Packages        *int `json:"packages,omitempty"`
+	InstallsCreated int  `json:"installs_created"`
+	InstallsRemoved int  `json:"installs_removed"`
+	// Contested says a merge proposal is waiting because the identity could not
+	// be settled. Neither a failure nor a success, and the log line must not
+	// read as either.
+	Contested bool `json:"contested,omitempty"`
+}
+
+// hostInventoryFromResults extracts the host-inventory counts from a job's
+// results JSON, or nil when the run recorded none.
+//
+// Nil and a zeroed struct are different answers, as with the enumeration
+// counts: nil means this was not a host inventory (or it never reached the
+// consumer), while zeros mean one ran and landed nothing.
+func hostInventoryFromResults(resultsJSON string) *HostInventoryCounts {
+	if resultsJSON == "" {
+		return nil
+	}
+	var payload jobResultsPayload
+	if err := json.Unmarshal([]byte(resultsJSON), &payload); err != nil {
+		return nil
+	}
+	raw, ok := payload.Processing["host_inventory"]
+	if !ok || raw == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var stored struct {
+		AssetID         string `json:"asset_id"`
+		Facts           int    `json:"facts"`
+		Endpoints       int    `json:"endpoints"`
+		InstallsActive  *int   `json:"installs_active"`
+		PackagesCounted *int   `json:"packages_enumerated"`
+		InstallsCreated int    `json:"installs_created"`
+		InstallsRemoved int    `json:"installs_removed"`
+		Contested       bool   `json:"contested"`
+	}
+	if err := json.Unmarshal(encoded, &stored); err != nil {
+		return nil
+	}
+	out := &HostInventoryCounts{
+		AssetID:         stored.AssetID,
+		Facts:           stored.Facts,
+		Endpoints:       stored.Endpoints,
+		InstallsCreated: stored.InstallsCreated,
+		InstallsRemoved: stored.InstallsRemoved,
+		Contested:       stored.Contested,
+	}
+	// `installs_active` is only meaningful when the package step succeeded,
+	// which is exactly what `packages_enumerated` being present says. Reading
+	// the first without checking the second would report 0 packages for a host
+	// whose dpkg could not be read.
+	if stored.PackagesCounted != nil {
+		active := 0
+		if stored.InstallsActive != nil {
+			active = *stored.InstallsActive
+		}
+		out.Packages = &active
+	}
+	return out
+}
+
+// enumerationFromResults extracts the enumeration counts from a job's results
+// JSON, or nil when the run recorded none.
+//
+// Nil and a zeroed struct are different answers and both occur: a run with
+// enumeration switched off writes no block at all, while a run that enumerated
+// an empty account writes four zeros. Flattening them would make "we did not
+// look" and "there was nothing there" the same row, which is the three-valued
+// mistake this codebase keeps paying for.
+func enumerationFromResults(resultsJSON string) *CloudEnumerationCounts {
+	if resultsJSON == "" {
+		return nil
+	}
+	var payload jobResultsPayload
+	if err := json.Unmarshal([]byte(resultsJSON), &payload); err != nil {
+		return nil
+	}
+	raw, ok := payload.Metadata["enumeration"]
+	if !ok || raw == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var counts CloudEnumerationCounts
+	if err := json.Unmarshal(encoded, &counts); err != nil {
+		return nil
+	}
+	return &counts
+}
+
 func assetsDiscoveredFromResults(resultsJSON string) *int {
 	if resultsJSON == "" {
 		return nil
@@ -91,12 +223,30 @@ func executorLabel(agentID *uuid.UUID, agentName *string) string {
 	return "Device Agent"
 }
 
+// firstQuery returns the first non-empty value among the given query
+// parameters, so a filter can be renamed without breaking the clients still
+// sending the old name.
+func firstQuery(c *gin.Context, names ...string) string {
+	for _, n := range names {
+		if v := c.Query(n); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // InterrogationJob represents a job for the API response
 type InterrogationJob struct {
-	ID               uuid.UUID  `json:"id"`
-	TenantID         uuid.UUID  `json:"tenant_id"`
-	JobType          string     `json:"job_type"`
-	Status           string     `json:"status"`
+	ID       uuid.UUID `json:"id"`
+	TenantID uuid.UUID `json:"tenant_id"`
+	JobType  string    `json:"job_type"`
+	Status   string    `json:"status"`
+	// AssetID is device_jobs.asset_id — the asset the job targets.
+	AssetID *uuid.UUID `json:"asset_id,omitempty"`
+	// DeviceID carries the SAME value as AssetID, for one release, so a client
+	// that has not moved off the old name keeps working.
+	//
+	// Deprecated: use AssetID.
 	DeviceID         *uuid.UUID `json:"device_id,omitempty"`
 	DeviceName       *string    `json:"device_name,omitempty"`
 	DeviceType       *string    `json:"device_type,omitempty"`
@@ -108,6 +258,14 @@ type InterrogationJob struct {
 	ErrorMessage     *string    `json:"error_message,omitempty"`
 	Progress         *int       `json:"progress,omitempty"`
 	AssetsDiscovered *int       `json:"assets_discovered,omitempty"`
+	// Enumeration is present only on a cloud discovery run whose enumeration
+	// half actually ran (BUILD_PLAN 2.4). Absent means it did not run; four
+	// zeros mean it ran and found nothing.
+	Enumeration *CloudEnumerationCounts `json:"enumeration,omitempty"`
+	// HostInventory is present only on a host_inventory run that reached the
+	// consumer (BUILD_PLAN 2.11b). Absent means it did not; zeros mean it ran
+	// and landed nothing.
+	HostInventory *HostInventoryCounts `json:"host_inventory,omitempty"`
 	// AgentID is device_jobs.agent_id — nil means the in-cluster platform agent
 	// executed the job rather than a named device agent.
 	AgentID *uuid.UUID `json:"agent_id,omitempty"`
@@ -129,12 +287,15 @@ type InterrogationJob struct {
 // as InterrogationJob plus per-row tenant identity (name/slug from a cheap join)
 // and the assigned worker (device_jobs.agent_id). Gated by RequirePlatformAdmin.
 type AdminInterrogationJob struct {
-	ID               uuid.UUID  `json:"id"`
-	TenantID         uuid.UUID  `json:"tenant_id"`
-	TenantName       string     `json:"tenant_name"`
-	TenantSlug       string     `json:"tenant_slug"`
-	JobType          string     `json:"job_type"`
-	Status           string     `json:"status"`
+	ID         uuid.UUID `json:"id"`
+	TenantID   uuid.UUID `json:"tenant_id"`
+	TenantName string    `json:"tenant_name"`
+	TenantSlug string    `json:"tenant_slug"`
+	JobType    string    `json:"job_type"`
+	Status     string    `json:"status"`
+	// AssetID is device_jobs.asset_id; DeviceID is the deprecated alias carrying
+	// the same value for one release.
+	AssetID          *uuid.UUID `json:"asset_id,omitempty"`
 	DeviceID         *uuid.UUID `json:"device_id,omitempty"`
 	DeviceName       *string    `json:"device_name,omitempty"`
 	DeviceType       *string    `json:"device_type,omitempty"`
@@ -199,11 +360,12 @@ func (h *JobHandlers) ListJobs(c *gin.Context) {
 	}
 
 	f := JobListFilters{
-		Page:          page,
-		PageSize:      pageSize,
-		Status:        c.QueryArray("status"),
-		JobType:       c.Query("job_type"),
-		DeviceID:      c.Query("device_id"),
+		Page:     page,
+		PageSize: pageSize,
+		Status:   c.QueryArray("status"),
+		JobType:  c.Query("job_type"),
+		// `asset_id` is the current name; `device_id` is accepted for one release.
+		DeviceID:      firstQuery(c, "asset_id", "device_id"),
 		IntegrationID: c.Query("integration_id"),
 	}
 
@@ -249,11 +411,12 @@ func (h *JobHandlers) ListAdminJobs(c *gin.Context) {
 	}
 
 	f := JobListFilters{
-		Page:          page,
-		PageSize:      pageSize,
-		Status:        c.QueryArray("status"),
-		JobType:       c.Query("job_type"),
-		DeviceID:      c.Query("device_id"),
+		Page:     page,
+		PageSize: pageSize,
+		Status:   c.QueryArray("status"),
+		JobType:  c.Query("job_type"),
+		// `asset_id` is the current name; `device_id` is accepted for one release.
+		DeviceID:      firstQuery(c, "asset_id", "device_id"),
 		IntegrationID: c.Query("integration_id"),
 		TenantID:      tenantFilter,
 	}

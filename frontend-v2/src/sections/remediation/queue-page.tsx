@@ -115,7 +115,7 @@ export function QueuePage() {
                 </div>
                 <div style={{ textAlign: 'right' }}>
                   {d == null ? <span style={{ fontSize: 11.5, color: 'var(--app-t3)' }}>—</span>
-                    : <span className="mono" style={{ fontSize: 12, color: sla === 'none' ? 'var(--app-t3)' : SLA_META[sla as Exclude<SlaState, 'none'>].color }}>{d < 0 ? `${-d}d late` : `${d}d`}</span>}
+                    : <span className="mono" style={{ fontSize: 12, color: sla === 'none' ? 'var(--app-t3)' : SLA_META[sla].color }}>{d < 0 ? `${-d}d late` : `${d}d`}</span>}
                 </div>
               </div>
             );

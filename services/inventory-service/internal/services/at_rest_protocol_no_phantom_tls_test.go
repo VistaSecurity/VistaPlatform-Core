@@ -3,8 +3,8 @@ package services
 // Guard for B-22: an AT-REST finding must never be materialized as a TLS
 // crypto configuration.
 //
-// device-interrogation-service stamps protocol "AT-REST" on nine cloud device
-// types (atRestProtocolPort). Six of them — the storage and database collectors
+// device-interrogation-service marks nine cloud device types as at-rest
+// (atRestDiscoveryShape). Six of them — the storage and database collectors
 // — write a `resource_type` metadata key, and inventory-service's at-rest
 // producer routes those into crypto_applications. The three key stores
 // (aws_kms, azure_keyvault_key, gcp_kms_crypto_key) write no resource_type, so
@@ -25,17 +25,32 @@ package services
 
 import "testing"
 
-func TestIsAtRestProtocol(t *testing.T) {
+// TestFindingIsAtRest covers both spellings the classifier accepts: the
+// explicit `at_rest` flag the producer writes as of phase 1, and the legacy
+// AT-REST protocol string that a sensor_discoveries row queued before the
+// upgrade still carries.
+func TestFindingIsAtRest(t *testing.T) {
+	// The current spelling: an explicit flag, in a field whose type matches its
+	// meaning. Note the negative case — `at_rest: false` is an ANSWER and must
+	// read as "this IS an endpoint", not as absence.
+	if !findingIsAtRest(IngestFinding{RawData: map[string]interface{}{"at_rest": true}}) {
+		t.Error(`findingIsAtRest({at_rest: true}) = false, want true`)
+	}
+	if findingIsAtRest(IngestFinding{Protocol: "TLS", RawData: map[string]interface{}{"at_rest": false}}) {
+		t.Error(`findingIsAtRest({at_rest: false, protocol: TLS}) = true, want false`)
+	}
+
+	// The legacy spelling, still accepted on read.
 	for _, in := range []string{"AT-REST", "at-rest", "  AT-REST  ", "At-Rest"} {
-		if !isAtRestProtocol(in) {
-			t.Errorf("isAtRestProtocol(%q) = false, want true", in)
+		if !findingIsAtRest(IngestFinding{Protocol: in}) {
+			t.Errorf("findingIsAtRest(protocol %q) = false, want true", in)
 		}
 	}
 	// Negative polarity — without it a function returning true for everything
-	// would pass the loop above.
+	// would pass the loops above.
 	for _, in := range []string{"TLS", "SSH", "", "REST", "AT REST", "atrest"} {
-		if isAtRestProtocol(in) {
-			t.Errorf("isAtRestProtocol(%q) = true, want false", in)
+		if findingIsAtRest(IngestFinding{Protocol: in}) {
+			t.Errorf("findingIsAtRest(protocol %q) = true, want false", in)
 		}
 	}
 }

@@ -964,6 +964,15 @@ func (s *Sensor) sendHeartbeat() {
 		metrics[k] = v
 	}
 
+	// Passive host observation. Absent entirely when the feature is off, which
+	// is a different statement from all-zero counters — "not running" and
+	// "running and seeing nothing" must not look the same on the heartbeat.
+	if s.packetCapture != nil {
+		for k, v := range s.packetCapture.HostObservationMetrics() {
+			metrics[k] = v
+		}
+	}
+
 	// Resolved once so the flagged primary in Interfaces matches IPAddress exactly.
 	primaryIP := s.config.CurrentIPAddress()
 
@@ -1033,6 +1042,10 @@ func (s *Sensor) updateConfig(config *models.SensorConfig) {
 	// Update capture config
 	s.config.Capture.ActiveProbing = config.CaptureConfig.ActiveProbing
 	s.config.Capture.NetworkDiscovery = config.CaptureConfig.NetworkDiscovery
+	// Only when the platform actually stated a value — see the field comment.
+	if config.CaptureConfig.HostObservation != nil {
+		s.config.Capture.HostObservation = *config.CaptureConfig.HostObservation
+	}
 	if config.CaptureConfig.MaxConnections > 0 {
 		s.config.Capture.MaxConnections = config.CaptureConfig.MaxConnections
 	}
@@ -1276,6 +1289,20 @@ func (s *Sensor) handleUpdateConfig(command models.Command) *models.CommandRespo
 			s.config.Capture.NetworkDiscovery = nd
 			updatesApplied++
 		}
+		if ho, ok := captureRaw["host_observation"].(bool); ok {
+			// Recorded so the value is reported back and survives a config
+			// save. It does NOT take effect on the running capture: the BPF
+			// filter is set when the interface handle is opened, so a sensor
+			// told to start observing hosts would have the decoders running
+			// and no frames reaching them — a pipeline that reports success
+			// while seeing nothing. The change lands on the next restart, and
+			// the log says so rather than leaving the operator to wonder.
+			if ho != s.config.Capture.HostObservation {
+				log.Printf("📝 Host observation set to: %v (applies on next sensor restart — the capture filter is fixed at interface open)", ho)
+			}
+			s.config.Capture.HostObservation = ho
+			updatesApplied++
+		}
 		if dedupTTLRaw, ok := captureRaw["dedup_ttl_minutes"].(float64); ok && dedupTTLRaw > 0 {
 			s.applyDedupTTL(int(dedupTTLRaw))
 			updatesApplied++
@@ -1339,11 +1366,13 @@ func (s *Sensor) handleTriggerScan(command models.Command) *models.CommandRespon
 	s.mu.RUnlock()
 
 	data := map[string]interface{}{
-		"interfaces":          s.config.Capture.Interfaces,
-		"active_probing":      s.config.Capture.ActiveProbing,
-		"network_discovery":   s.config.Capture.NetworkDiscovery,
-		"pending_discoveries": pending,
-		"uptime_seconds":      int64(time.Since(s.startTime).Seconds()),
+		"interfaces":           s.config.Capture.Interfaces,
+		"active_probing":       s.config.Capture.ActiveProbing,
+		"network_discovery":    s.config.Capture.NetworkDiscovery,
+		"host_observation":     s.config.Capture.HostObservation,
+		"host_observation_dns": s.config.Capture.HostObservationDNS,
+		"pending_discoveries":  pending,
+		"uptime_seconds":       int64(time.Since(s.startTime).Seconds()),
 	}
 
 	return &models.CommandResponse{
@@ -2613,12 +2642,14 @@ func createConfigFile(configPath, controlPlaneURL, registrationKey string, inter
 			DataPath string `yaml:"dataPath"`
 		} `yaml:"storage"`
 		Capture struct {
-			Interfaces       []string `yaml:"interfaces"`
-			ActiveProbing    bool     `yaml:"activeProbing"`
-			NetworkDiscovery bool     `yaml:"networkDiscovery"`
-			MaxConnections   int      `yaml:"maxConnections"`
-			TimeoutSeconds   int      `yaml:"timeoutSeconds"`
-			BufferSize       int      `yaml:"bufferSize"`
+			Interfaces         []string `yaml:"interfaces"`
+			ActiveProbing      bool     `yaml:"activeProbing"`
+			NetworkDiscovery   bool     `yaml:"networkDiscovery"`
+			HostObservation    bool     `yaml:"hostObservation"`
+			HostObservationDNS bool     `yaml:"hostObservationDNS"`
+			MaxConnections     int      `yaml:"maxConnections"`
+			TimeoutSeconds     int      `yaml:"timeoutSeconds"`
+			BufferSize         int      `yaml:"bufferSize"`
 		} `yaml:"capture"`
 	}
 
@@ -2631,6 +2662,11 @@ func createConfigFile(configPath, controlPlaneURL, registrationKey string, inter
 	cfg.Capture.Interfaces = interfaces
 	cfg.Capture.ActiveProbing = true
 	cfg.Capture.NetworkDiscovery = true
+	cfg.Capture.HostObservation = true
+	// OFF, unlike its parent. Written out anyway so an operator can see the
+	// knob exists without reading the source: a setting nobody knows about is
+	// not really opt-in, it is just absent.
+	cfg.Capture.HostObservationDNS = false
 	cfg.Capture.MaxConnections = 1000
 	cfg.Capture.TimeoutSeconds = 30
 	cfg.Capture.BufferSize = 1048576 // 1 MB
@@ -2660,6 +2696,14 @@ func createConfigFile(configPath, controlPlaneURL, registrationKey string, inter
 	}
 	fmt.Fprintf(&configContent, "  activeProbing: %t\n", cfg.Capture.ActiveProbing)
 	fmt.Fprintf(&configContent, "  networkDiscovery: %t\n", cfg.Capture.NetworkDiscovery)
+	// Written so an operator-set or platform-pushed value survives the restart
+	// it needs in order to take effect — the capture filter is fixed when the
+	// interface handle opens, so this setting is only ever applied at startup.
+	fmt.Fprintf(&configContent, "  hostObservation: %t\n", cfg.Capture.HostObservation)
+	fmt.Fprintf(&configContent, "  # DNS (UDP 53) answers are decoded only when this is true.\n")
+	fmt.Fprintf(&configContent, "  # Off by default: an answer names what was asked, so turning it\n")
+	fmt.Fprintf(&configContent, "  # on records which names this network resolved. mDNS is unaffected.\n")
+	fmt.Fprintf(&configContent, "  hostObservationDNS: %t\n", cfg.Capture.HostObservationDNS)
 	fmt.Fprintf(&configContent, "  maxConnections: %d\n", cfg.Capture.MaxConnections)
 	fmt.Fprintf(&configContent, "  timeoutSeconds: %d\n", cfg.Capture.TimeoutSeconds)
 	fmt.Fprintf(&configContent, "  bufferSize: %d\n", cfg.Capture.BufferSize)

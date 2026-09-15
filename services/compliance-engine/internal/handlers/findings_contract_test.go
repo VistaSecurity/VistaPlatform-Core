@@ -28,11 +28,18 @@ import (
 // --- stub findingsStore ----------------------------------------------------
 
 type stubFindingsStore struct {
-	stats         *services.FindingStatistics
-	statsErr      error
-	list          []models.ComplianceFinding
-	listTotal     int
-	listErr       error
+	stats          *services.FindingStatistics
+	statsErr       error
+	list           []models.ComplianceFinding
+	listTotal      int
+	listErr        error
+	producerCounts map[string]int
+	producerErr    error
+	// lastFilters records what the handler passed down, so a query-parameter
+	// case can assert the filter ARRIVED rather than only that the request
+	// returned 200 — a parameter the handler drops is invisible from the
+	// status code.
+	lastFilters   *services.FindingListFilters
 	byAsset       []models.ComplianceFinding
 	byAssetErr    error
 	history       []models.ComplianceFindingHistory
@@ -49,8 +56,12 @@ type stubFindingsStore struct {
 	byControlErr  error
 }
 
-func (s *stubFindingsStore) ListFindings(_ uuid.UUID, _ services.FindingListFilters, _, _ int) ([]models.ComplianceFinding, int, error) {
+func (s *stubFindingsStore) ListFindings(_ uuid.UUID, f services.FindingListFilters, _, _ int) ([]models.ComplianceFinding, int, error) {
+	s.lastFilters = &f
 	return s.list, s.listTotal, s.listErr
+}
+func (s *stubFindingsStore) CountFindingsByProducer(_ uuid.UUID, _ services.FindingListFilters) (map[string]int, error) {
+	return s.producerCounts, s.producerErr
 }
 func (s *stubFindingsStore) AssignFindingOwner(_, _, _, _ uuid.UUID, _ *string) error {
 	return s.assignErr
@@ -105,9 +116,11 @@ func sampleFinding() models.ComplianceFinding {
 	return models.ComplianceFinding{
 		ID:                uuid.New(),
 		TenantID:          uuid.New(),
+		Producer:          "compliance",
+		Kind:              "control_noncompliant",
 		ControlID:         uuid.New(),
-		AssetID:           uuid.New(),
-		AssetType:         "network_asset",
+		SubjectID:         uuid.New(),
+		SubjectType:       "asset",
 		Severity:          "high",
 		Summary:           "Weak protocol in use",
 		Evidence:          map[string]any{"protocol": "TLS 1.0"},
@@ -149,7 +162,7 @@ func TestContract_GetFindingStatistics_200(t *testing.T) {
 		TotalFindings: 10, ActiveFindings: 7, InactiveFindings: 2, ArchivedFindings: 1,
 		NewFindings: 4, NotifiedFindings: 2, ResolvedFindings: 3, SuppressedFindings: 1,
 		ResurfacedFindings: 0,
-		SeverityCounts:     services.SeverityCounts{Critical: 4, High: 3, Med: 2, Low: 1},
+		SeverityCounts:     services.SeverityCounts{Critical: 4, High: 3, Medium: 2, Low: 1},
 	}})
 	w := do(eng, http.MethodGet, cBase+"/findings/statistics", nil)
 	if w.Code != http.StatusOK {
@@ -163,12 +176,12 @@ func TestContract_GetFindingsByControl_200(t *testing.T) {
 	eng := newFindingsEngine(&stubFindingsStore{byControl: []services.FindingsByControlGroup{
 		{
 			ControlID: uuid.New(), ControlName: "Strong Cryptography", FrameworkID: uuid.New(),
-			FrameworkName: "PCI DSS", WorstSeverity: "Critical", FindingCount: 29, AffectedAssets: 29,
+			FrameworkName: "PCI DSS", WorstSeverity: "critical", FindingCount: 29, AffectedAssets: 29,
 			SeverityCounts: services.SeverityCounts{Critical: 29}, TargetKind: "asset",
 		},
 		{
 			ControlID: uuid.New(), ControlName: "Secure Protocols", FrameworkID: uuid.New(),
-			FrameworkName: "ISO/IEC 27001", WorstSeverity: "High", FindingCount: 12, AffectedAssets: 8,
+			FrameworkName: "ISO/IEC 27001", WorstSeverity: "high", FindingCount: 12, AffectedAssets: 8,
 			SeverityCounts: services.SeverityCounts{High: 12}, TargetKind: "certificate",
 		},
 	}})
@@ -222,7 +235,7 @@ func TestContract_ListFindings_200(t *testing.T) {
 	f := sampleFinding()
 	host := "web-01.example.com"
 	env := "production"
-	f.Asset = &models.Asset{ID: f.AssetID, TenantID: f.TenantID, Hostname: &host, Environment: &env, AssetType: "server"}
+	f.Asset = &models.Asset{ID: f.SubjectID, TenantID: f.TenantID, Hostname: &host, Environment: &env, AssetType: "server"}
 	eng := newFindingsEngine(&stubFindingsStore{list: []models.ComplianceFinding{f}, listTotal: 1})
 	w := do(eng, http.MethodGet, cBase+"/findings?workflow_status=NEW&page=1&page_size=50", nil)
 	if w.Code != http.StatusOK {
@@ -249,6 +262,100 @@ func TestContract_ListFindings_400_badFrameworkID(t *testing.T) {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+// Every producer, and the per-producer tally beside the page.
+//
+// The list this endpoint returns is what Risk & Compliance → Findings renders,
+// and it carried a compliance-only scope until the eol and vulnerability
+// producers shipped. The response has to CARRY a non-compliance row — one whose
+// subject is a software install and whose control_id is the nil uuid — or the
+// contract would still be describing the old, narrower answer.
+func TestContract_ListFindings_200_everyProducer(t *testing.T) {
+	sv := loadSpec(t)
+	compliance := sampleFinding()
+	eol := sampleFinding()
+	eol.Producer = "eol"
+	eol.Kind = "software_end_of_life"
+	eol.ControlID = uuid.Nil
+	eol.SubjectType = "software_install"
+	eol.Severity = "medium"
+	eol.Score = 50
+	eol.Summary = "openssl 1.1.1 is end of life (412 days ago)"
+	eol.Evidence = map[string]any{
+		"catalogue_id":         uuid.New().String(),
+		"catalogue_source_url": "https://endoflife.date/openssl",
+	}
+	vuln := sampleFinding()
+	vuln.Producer = "vulnerability"
+	vuln.Kind = "known_vulnerability"
+	vuln.ControlID = uuid.Nil
+	vuln.SubjectType = "software_install"
+	vuln.Severity = "critical"
+	vuln.Score = 98
+	vuln.Evidence = map[string]any{"cves": []any{map[string]any{"cve_id": "CVE-2026-1000"}}}
+
+	svc := &stubFindingsStore{
+		list:           []models.ComplianceFinding{compliance, eol, vuln},
+		listTotal:      3,
+		producerCounts: map[string]int{"compliance": 1, "eol": 1, "vulnerability": 1},
+	}
+	w := do(newFindingsEngine(svc), http.MethodGet, cBase+"/findings", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "FindingListResponse", w.Body.Bytes())
+
+	if !strings.Contains(w.Body.String(), `"producer_counts"`) {
+		t.Error("the response carries no producer_counts; the page's producer facets have nothing to count")
+	}
+	// The default is EVERY producer. A filter left set here would make the
+	// widening a no-op that still passed every schema assertion above.
+	if svc.lastFilters == nil || svc.lastFilters.Producer != "" {
+		t.Errorf("ListFindings was called with Producer=%q, want \"\" (every producer) by default", svc.lastFilters.Producer)
+	}
+}
+
+func TestContract_ListFindings_200_producerFilterReachesTheService(t *testing.T) {
+	sv := loadSpec(t)
+	svc := &stubFindingsStore{producerCounts: map[string]int{"eol": 4}}
+	w := do(newFindingsEngine(svc), http.MethodGet, cBase+"/findings?producer=eol", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "FindingListResponse", w.Body.Bytes())
+	if svc.lastFilters == nil || svc.lastFilters.Producer != "eol" {
+		t.Fatalf("the producer filter did not reach the service (%+v) — a query parameter the handler drops narrows nothing and looks fine", svc.lastFilters)
+	}
+}
+
+func TestContract_ListFindings_400_unknownProducer(t *testing.T) {
+	sv := loadSpec(t)
+	svc := &stubFindingsStore{}
+	w := do(newFindingsEngine(svc), http.MethodGet, cBase+"/findings?producer=eol-typo", nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+	if svc.lastFilters != nil {
+		t.Error("an unregistered producer key reached the service; it would have listed EVERY producer while the caller believed it had narrowed to one")
+	}
+}
+
+// A failed COUNT must not fail the page: the findings are the answer and the
+// facet numbers are navigation.
+func TestContract_ListFindings_200_producerCountFailureDoesNotFailThePage(t *testing.T) {
+	sv := loadSpec(t)
+	svc := &stubFindingsStore{
+		list:        []models.ComplianceFinding{sampleFinding()},
+		listTotal:   1,
+		producerErr: errors.New("boom"),
+	}
+	w := do(newFindingsEngine(svc), http.MethodGet, cBase+"/findings", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "FindingListResponse", w.Body.Bytes())
 }
 
 func TestContract_GetFindingsByAsset_200(t *testing.T) {
@@ -347,5 +454,152 @@ func TestContract_Finding_DriftIsCaught(t *testing.T) {
 	}
 	if err := sch.Validate(bad); err == nil {
 		t.Fatal("expected validation to FAIL for a drifted ComplianceFinding, but it passed — the guardrail is not actually checking")
+	}
+}
+
+// --- the subject filter ------------------------------------------------------
+//
+// This is what makes a count in a table clickable. The software surfaces render
+// "3 vulnerabilities" from a per-install rollup and link here; if the parameter
+// did not reach the service the link would open the whole tenant's findings
+// stream while claiming to show one package's.
+
+func TestContract_ListFindings_200_subjectFilterReachesTheService(t *testing.T) {
+	sv := loadSpec(t)
+	svc := &stubFindingsStore{}
+	install := uuid.New()
+	w := do(newFindingsEngine(svc), http.MethodGet,
+		cBase+"/findings?subject_type=software_install&subject_id="+install.String(), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "FindingListResponse", w.Body.Bytes())
+	if svc.lastFilters == nil {
+		t.Fatal("the service was never called")
+	}
+	if svc.lastFilters.SubjectType != "software_install" {
+		t.Errorf("SubjectType = %q, want software_install — a dropped filter lists the whole tenant while the link says otherwise", svc.lastFilters.SubjectType)
+	}
+	if svc.lastFilters.SubjectID == nil || *svc.lastFilters.SubjectID != install {
+		t.Errorf("SubjectID = %v, want %s", svc.lastFilters.SubjectID, install)
+	}
+}
+
+// Both or neither. Either half alone is refused rather than half-applied: a
+// lone id can collide across subject vocabularies and a lone type is the
+// producer filter with a worse name — and answering either with a WIDER set is
+// the "filter that reads as applied and is not" failure this handler already
+// refuses for `producer`.
+func TestContract_ListFindings_400_subjectHalfGiven(t *testing.T) {
+	sv := loadSpec(t)
+	for _, q := range []string{
+		"?subject_type=software_install",
+		"?subject_id=" + uuid.New().String(),
+	} {
+		svc := &stubFindingsStore{}
+		w := do(newFindingsEngine(svc), http.MethodGet, cBase+"/findings"+q, nil)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", q, w.Code)
+			continue
+		}
+		sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+		if svc.lastFilters != nil {
+			t.Errorf("%s: reached the service; it would have answered the unfiltered stream", q)
+		}
+	}
+}
+
+func TestContract_ListFindings_400_unknownSubjectType(t *testing.T) {
+	sv := loadSpec(t)
+	svc := &stubFindingsStore{}
+	w := do(newFindingsEngine(svc), http.MethodGet,
+		cBase+"/findings?subject_type=softwareinstall&subject_id="+uuid.New().String(), nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+	if svc.lastFilters != nil {
+		t.Error("an unregistered subject type reached the service")
+	}
+}
+
+func TestContract_ListFindings_400_badSubjectID(t *testing.T) {
+	sv := loadSpec(t)
+	svc := &stubFindingsStore{}
+	w := do(newFindingsEngine(svc), http.MethodGet,
+		cBase+"/findings?subject_type=software_install&subject_id=not-a-uuid", nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+	if svc.lastFilters != nil {
+		t.Error("an unparseable subject id reached the service")
+	}
+}
+
+// The other polarity: with NEITHER parameter the filter must stay off, or every
+// caller that does not ask for a subject would get an empty page.
+func TestContract_ListFindings_200_noSubjectFilterByDefault(t *testing.T) {
+	svc := &stubFindingsStore{}
+	w := do(newFindingsEngine(svc), http.MethodGet, cBase+"/findings", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if svc.lastFilters == nil {
+		t.Fatal("the service was never called")
+	}
+	if svc.lastFilters.SubjectType != "" || svc.lastFilters.SubjectID != nil {
+		t.Errorf("a subject filter was applied without being asked for: %+v", svc.lastFilters)
+	}
+}
+
+// --- free-text search (`q`) ------------------------------------------------
+//
+// The page's search box used to narrow the rows it had already fetched, and it
+// fetches at most five pages of 200. A term that matched only the 1,200th
+// finding therefore answered "no findings match". These pin the parameter
+// REACHING the service — a handler that drops it returns a perfectly valid 200
+// over the unnarrowed set, which is the failure shape the whole thing is
+// written against.
+
+func TestContract_ListFindings_200_searchTermReachesTheService(t *testing.T) {
+	sv := loadSpec(t)
+	svc := &stubFindingsStore{producerCounts: map[string]int{"eol": 1}}
+	w := do(newFindingsEngine(svc), http.MethodGet, cBase+"/findings?q=openssl", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "FindingListResponse", w.Body.Bytes())
+	if svc.lastFilters == nil || svc.lastFilters.Search != "openssl" {
+		t.Fatalf("the search term did not reach the service (%+v) — a dropped `q` lists the whole tenant under a link that promised a match", svc.lastFilters)
+	}
+}
+
+// No `q` must leave the filter EMPTY, not defaulted to something. A search
+// applied when none was asked for narrows a page nobody narrowed.
+func TestContract_ListFindings_200_noSearchLeavesTheFilterEmpty(t *testing.T) {
+	svc := &stubFindingsStore{producerCounts: map[string]int{}}
+	w := do(newFindingsEngine(svc), http.MethodGet, cBase+"/findings", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if svc.lastFilters == nil || svc.lastFilters.Search != "" {
+		t.Fatalf("Search = %q with no q= in the request", svc.lastFilters.Search)
+	}
+}
+
+// An unmatchable term is a 200 with an empty page, NOT a 400. A search that
+// finds nothing is an answer; only a filter KEY that does not exist is a
+// caller bug (which is why `producer` is refused and this is not).
+func TestContract_ListFindings_200_unmatchableSearchIsAnAnswerNotAnError(t *testing.T) {
+	sv := loadSpec(t)
+	svc := &stubFindingsStore{producerCounts: map[string]int{}}
+	w := do(newFindingsEngine(svc), http.MethodGet, cBase+"/findings?q=%25%25%25", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "FindingListResponse", w.Body.Bytes())
+	if svc.lastFilters == nil || svc.lastFilters.Search != "%%%" {
+		t.Fatalf("Search = %q, want the literal %%%%%% — the handler must not strip or interpret wildcards", svc.lastFilters.Search)
 	}
 }

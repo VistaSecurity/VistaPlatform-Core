@@ -8,10 +8,25 @@ import (
 	"github.com/google/uuid"
 )
 
-// Device represents a network device or cloud resource
+// Device is the API projection of an ASSET WITH MANAGEMENT CONFIGURED
+// (ADR-0002 D5). The `devices` table it used to mirror is gone; the fields come
+// from `assets`, `asset_management`, `asset_credentials`, `asset_facts` and
+// `asset_identifiers` — see internal/services/managed_asset.go for the map.
+//
+// The shape is kept for the clients that read it, with two additions: `id` is
+// now the asset id and `asset_id` says so explicitly rather than making a
+// client infer it, and `class` is the asset class the device_type resolved to.
 type Device struct {
-	ID              uuid.UUID  `json:"id" db:"id"`
-	TenantID        uuid.UUID  `json:"tenant_id" db:"tenant_id"`
+	ID uuid.UUID `json:"id" db:"id"`
+	// AssetID is the same value as ID, spelled so a client migrating to the
+	// asset API does not have to guess which id it is holding. Both are the
+	// asset's id; there is no separate device id any more.
+	AssetID  uuid.UUID `json:"asset_id" db:"asset_id"`
+	TenantID uuid.UUID `json:"tenant_id" db:"tenant_id"`
+	// ClassKey is the asset class (shared/assetclass) — what the device IS.
+	// DeviceType names the interrogation DRIVER, which is a different question
+	// and is why both are present.
+	ClassKey        string     `json:"class,omitempty" db:"class_key"`
 	DeviceType      string     `json:"device_type" db:"device_type"`
 	Vendor          *string    `json:"vendor" db:"vendor"`
 	Model           *string    `json:"model" db:"model"`

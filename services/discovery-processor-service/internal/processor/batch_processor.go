@@ -211,12 +211,6 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 		Discovery      *models.SensorDiscovery
 		Classification *models.NetworkClassification
 	}
-	type FindingWithStatus struct {
-		Finding     converter.IngestFinding
-		AssetStatus string
-		Discovery   *models.SensorDiscovery
-	}
-
 	var externalEntries []externalEntry
 	var findingsWithStatus []FindingWithStatus
 
@@ -227,8 +221,19 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 	var externalErr error
 
 	for _, discovery := range discoveries {
+		// Host observations (asset-inventory ADR-0004 D2) travel through this
+		// loop untouched by two steps that would otherwise misread them.
+		hostObservation := isHostObservationDiscovery(discovery)
+
 		// Attempt reverse DNS if no hostname was captured by the sensor.
-		if discovery.Hostname == nil || *discovery.Hostname == "" {
+		//
+		// Not for a host observation. Its names are the measurement — what the
+		// host called itself over DHCP, mDNS or NetBIOS — and a resolver answer
+		// is a different claim from a different source. Mixing the two into one
+		// hostname field destroys the provenance the identification engine
+		// needs, and for an observation whose dest_ip is 0.0.0.0 ("no address
+		// observed") the lookup is a wasted query as well.
+		if !hostObservation && (discovery.Hostname == nil || *discovery.Hostname == "") {
 			if resolved := reverseDNSLookup(discovery.DestIP); resolved != "" {
 				discovery.Hostname = &resolved
 			}
@@ -239,11 +244,39 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 			classification.Ownership = "unknown"
 			classification.Type = "private"
 		}
+		if hostObservation && classification.Ownership == "third_party" {
+			// A passively observed host is never a third party, whatever its
+			// address classifies as.
+			//
+			// `third_party` means "a public endpoint something here connected
+			// OUT to", and that is a statement about a FLOW. A host observation
+			// is a statement that a device exists on a segment we are watching:
+			// there is no flow, no far end, and the device is on our own wire.
+			// Two ways it reached third_party — an observation with no address
+			// at all (dest_ip 0.0.0.0, which is not RFC 1918) and one carrying a
+			// public address that is simply not in a registered segment — and
+			// both are the classifier answering a question it was not asked.
+			//
+			// `unknown` rather than `internal`, because we genuinely do not know
+			// it is in a registered segment; that is what `unknown` means, and
+			// it keeps the row on the managed-asset path where it belongs.
+			// Auto-approval still has to find a matching segment rule to fire,
+			// so this widens nothing.
+			classification.Ownership = "unknown"
+		}
 
 		// Third-party public internet connections bypass the asset lifecycle entirely.
 		// They are written to external_connections for 3rd party crypto visibility.
 		// Skip third-party discoveries without a source IP (cannot create a connection row).
-		if classification.Ownership == "third_party" {
+		//
+		// A host observation is never one of these, whatever its address
+		// classifies as. external_connections records a CONNECTION — a flow
+		// between two endpoints with a protocol and a cipher — and a host
+		// observation has no flow, no source and no cryptography. Without this
+		// guard an observation of a host with a public address would be routed
+		// there and then dropped for having no source IP, logging a warning
+		// about a row that was never a connection.
+		if !hostObservation && classification.Ownership == "third_party" {
 			if discovery.SourceIP != nil && *discovery.SourceIP != "" {
 				externalEntries = append(externalEntries, externalEntry{
 					Discovery:      discovery,
@@ -257,7 +290,14 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 
 		// Evaluate auto-approval rules for managed assets against the
 		// batch-scoped rule set loaded above.
-		autoApprove, ruleID, err := p.approvalService.EvaluateAutoApprovalWithRules(rules, discovery.ApprovalInput(), classification)
+		//
+		// The observation's KIND is part of the rule vocabulary, so a tenant can
+		// write `kind:host_observation and network.segment_id=…` — auto-approve
+		// the passively seen hosts on a segment I own — without that rule also
+		// approving every TLS endpoint the same sensor reports. `source` cannot
+		// express it: both come from the sensor.
+		approvalInput := discovery.ApprovalInput().WithKind(approvalKindOf(hostObservation))
+		autoApprove, ruleID, err := p.approvalService.EvaluateAutoApprovalWithRules(rules, approvalInput, classification)
 		if err != nil {
 			fmt.Printf("Warning: failed to evaluate auto-approval for discovery %s: %v\n", discovery.ID, err)
 		}
@@ -303,6 +343,24 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 			discovery.ApprovalStatus = "pending"
 		}
 	}
+
+	// Host observations are forwarded to inventory-service like everything else
+	// now — the consumer exists (asset-inventory workstream 2.5, consumer half).
+	//
+	// They used to be REMOVED from the batch here by splitHeldHostObservations,
+	// because inventory-service re-bound every finding through
+	// ClusterSensorFinding, which had no `kind` field, and would therefore act
+	// on an observation as if it were a crypto finding: route it to
+	// external_connections, DNS-resolve a LAN-only hostname, or mint another
+	// nameless `server`. `kind` now survives the boundary and
+	// inventory-service's ingest branches on it before any of those three can
+	// happen. `TestHostObservationsReachInventoryWithTheirKind` and
+	// inventory-service's own resolver-ban test are what hold that open.
+	//
+	// Counted so an operator can still see how much of a batch was host
+	// presence rather than cryptography — the number that was
+	// `host_observations_held`, now saying what actually happens to them.
+	ba.counts["host_observations_forwarded"] = countHostObservations(findingsWithStatus)
 
 	now := time.Now()
 
@@ -375,6 +433,10 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 	ba.counts["external_failed"] = externalFailed
 
 	// --- Managed asset pipeline ---
+	// A batch of nothing but host observations was processed correctly — the
+	// rows are stored and deliberately not imported. Returning
+	// ErrNoValidFindings for it would mark a healthy batch permanently failed,
+	// because that sentinel is classified as terminal.
 	if len(findingsWithStatus) == 0 && len(externalEntries) == 0 {
 		return fmt.Errorf("%w for batch %s", ErrNoValidFindings, batchID)
 	}
@@ -444,11 +506,12 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 			batchID, len(monitoringFindings)+len(pendingFindings), len(monitoringFindings), len(pendingFindings), deferredNote,
 			totalImported, len(externalEntries)-externalFailed, externalFailed)
 	} else {
-		// This branch means the batch genuinely contained no internal (managed-asset)
-		// discoveries — everything classified third_party. Say that, rather than the
-		// old "0 asset findings", which read as "the pipeline produced nothing" even
+		// This branch means the batch produced no importable internal
+		// (managed-asset) findings — everything was classified third_party or
+		// held back as a host observation. Say which, rather than the old "0
+		// asset findings", which read as "the pipeline produced nothing" even
 		// when other batches were creating pending assets.
-		fmt.Printf("Successfully processed batch %s: no internal findings in this batch (external-only), %d external connections (%d failed)\n",
+		fmt.Printf("Successfully processed batch %s: no internal findings imported from this batch (%d external connection(s), %d failed)\n",
 			batchID, len(externalEntries)-externalFailed, externalFailed)
 	}
 
@@ -465,6 +528,57 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 	}
 
 	return nil
+}
+
+// FindingWithStatus pairs a converted finding with the asset status
+// discovery-processor already decided for it and the row it came from.
+type FindingWithStatus struct {
+	Finding     converter.IngestFinding
+	AssetStatus string
+	Discovery   *models.SensorDiscovery
+}
+
+// countHostObservations reports how many of a batch's findings are passive
+// host-presence rows rather than cryptographic measurements.
+//
+// It replaced splitHeldHostObservations, which used to REMOVE them from the set
+// handed to inventory-service. The hold existed because the boundary between
+// the two services lost the one field that distinguished them:
+// inventory-service re-bound every finding through ClusterSensorFinding, which
+// had no `kind`, so a host observation arriving there was acted on as a crypto
+// finding — classified third_party for having no RFC-1918 address and written
+// into external_connections, or DNS-resolved on a hostname that exists only on
+// the customer's LAN, or turned into another nameless asset typed `server`.
+//
+// `kind` now crosses the boundary (converter.IngestFinding.Kind →
+// services.ClusterSensorFinding.Kind → services.IngestFinding.Kind) and
+// inventory-service branches on it before any of those three can happen. The
+// count stays because "how much of this batch was host presence" is still the
+// question an operator asks of a batch log.
+func countHostObservations(findings []FindingWithStatus) int {
+	n := 0
+	for _, fws := range findings {
+		if fws.Finding.Kind == converter.KindHostObservation {
+			n++
+		}
+	}
+	return n
+}
+
+// approvalKindOf maps "is this a host observation" onto the `kind` vocabulary
+// the observation target publishes (shared/query/catalog/registrycatalog).
+//
+// Both values are STATED rather than one being left absent. A rule writer can
+// then say `kind:crypto` and mean it — where leaving the crypto path empty
+// would make that predicate Unknown for the very findings it names, which is
+// the "a check that cannot fire" shape. The paths that genuinely have no answer
+// (manual create, spreadsheet import, CMDB pull) are the ones that leave it
+// empty.
+func approvalKindOf(hostObservation bool) string {
+	if hostObservation {
+		return converter.KindHostObservation
+	}
+	return approval.KindCrypto
 }
 
 // processedMark is the row state a settled discovery should be stamped with.
@@ -676,4 +790,30 @@ func reverseDNSLookup(ipAddress string) string {
 		name = name[:len(name)-1]
 	}
 	return name
+}
+
+// isHostObservationDiscovery reports whether a stored discovery is a passive
+// host observation rather than a cryptographic one.
+//
+// The marker is read from both levels of the sensor-manager envelope for the
+// same reason the converter reads both: sensor-manager promotes it to the top
+// level while pcap-processor writes it flat, and checking one level would miss
+// half of them.
+func isHostObservationDiscovery(d *models.SensorDiscovery) bool {
+	if d == nil || len(d.Metadata) == 0 {
+		return false
+	}
+	var metadata map[string]interface{}
+	if err := json.Unmarshal(d.Metadata, &metadata); err != nil {
+		return false
+	}
+	if v, ok := metadata["discovery_type"].(string); ok && v == "host_observation" {
+		return true
+	}
+	if nested, ok := metadata["raw_metadata"].(map[string]interface{}); ok {
+		if v, ok := nested["discovery_type"].(string); ok && v == "host_observation" {
+			return true
+		}
+	}
+	return false
 }

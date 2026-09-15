@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/audit-service/internal/config"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
+	"github.com/vistasecurity/vistaplatform/shared/rbac"
 )
 
 type testRevocationChecker struct {
@@ -165,6 +166,95 @@ func TestRequireAuth_RevokedTokensRejected(t *testing.T) {
 			w := httptest.NewRecorder()
 			r.ServeHTTP(w, req)
 
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestRequireAuth_SurfacesPATScopesForDownstreamRBAC(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	secret := "test-secret-for-jwt-issuance-only-do-not-use"
+	cfg := &config.Config{JWT: config.JWTConfig{Secret: secret}}
+	userID := uuid.New()
+	tenantID := uuid.New()
+
+	previous := revocationCheckerFromEnv
+	revocationCheckerFromEnv = func() sharedmw.RevocationChecker { return nil }
+	t.Cleanup(func() { revocationCheckerFromEnv = previous })
+
+	mintToken := func(scopes []string) string {
+		claims := jwt.MapClaims{
+			"user_id":   userID.String(),
+			"tenant_id": tenantID.String(),
+			"email":     "tenant-admin@test.com",
+			"role":      "tenant_admin",
+			"type":      "access",
+			"iss":       "crypto-inventory-auth",
+			"aud":       "crypto-inventory",
+			"sub":       userID.String(),
+			"jti":       uuid.NewString(),
+			"iat":       time.Now().Unix(),
+			"nbf":       time.Now().Add(-time.Minute).Unix(),
+			"exp":       time.Now().Add(time.Hour).Unix(),
+		}
+		if scopes != nil {
+			claims["token_type"] = "pat"
+			claims["scopes"] = scopes
+		}
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+		signed, err := token.SignedString([]byte(secret))
+		if err != nil {
+			t.Fatalf("SignedString: %v", err)
+		}
+		return signed
+	}
+
+	newRouter := func(requiredPermission string) *gin.Engine {
+		r := gin.New()
+		r.GET("/activity-logs", RequireAuth(cfg), func(c *gin.Context) {
+			if !sharedmw.PermissionWithinTokenScope(c, requiredPermission) {
+				c.JSON(http.StatusForbidden, gin.H{"error": "outside scope"})
+				return
+			}
+			c.Status(http.StatusOK)
+		})
+		return r
+	}
+
+	cases := []struct {
+		name               string
+		scopes             []string
+		requiredPermission string
+		wantStatus         int
+	}{
+		{
+			name:               "scoped PAT allows permission inside audit scope",
+			scopes:             []string{"audit.read"},
+			requiredPermission: rbac.PermissionAuditRead,
+			wantStatus:         http.StatusOK,
+		},
+		{
+			name:               "scoped PAT denies permission outside token scope",
+			scopes:             []string{"assets.read"},
+			requiredPermission: rbac.PermissionAuditRead,
+			wantStatus:         http.StatusForbidden,
+		},
+		{
+			name:               "normal unscoped session remains unchanged",
+			scopes:             nil,
+			requiredPermission: rbac.PermissionAuditManage,
+			wantStatus:         http.StatusOK,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/activity-logs", nil)
+			req.Header.Set("Authorization", "Bearer "+mintToken(tc.scopes))
+			w := httptest.NewRecorder()
+			newRouter(tc.requiredPermission).ServeHTTP(w, req)
 			if w.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
 			}

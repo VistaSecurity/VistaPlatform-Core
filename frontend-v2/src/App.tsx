@@ -1,3 +1,4 @@
+import { Suspense, lazy } from 'react';
 import { Navigate, Route, Routes } from 'react-router';
 import { AppShell } from './app/app-shell';
 import { PlatformBrandingEffects } from './app/platform-branding';
@@ -13,6 +14,7 @@ import { LegalPage } from './pages/legal-page';
 import { ResetPasswordPage } from './pages/reset-password-page';
 import { AboutPage } from './pages/about-page';
 import { InventoryPage } from './sections/inventory/inventory-page';
+import { AssetPage } from './sections/inventory/asset-page';
 import { SensorsPage } from './sections/discovery/sensors-page';
 import { PlansPage } from './sections/remediation/plans-page';
 import { QueuePage } from './sections/remediation/queue-page';
@@ -26,6 +28,7 @@ import { ActiveScanPage } from './sections/discovery/active-scan-page';
 import { CloudPage } from './sections/discovery/cloud-page';
 import { ApprovalsPage } from './sections/discovery/approvals-page';
 import { PcapPage } from './sections/discovery/pcap-page';
+import { SbomPage } from './sections/discovery/sbom-page';
 import { DashboardPage } from './sections/dashboard/dashboard-page';
 import { SettingsPage, ProfilePage } from './sections/settings/settings-page';
 import { FindingsPage } from './sections/findings/findings-page';
@@ -33,6 +36,13 @@ import { PosturePage } from './sections/posture/posture-page';
 import { CbomPage } from './sections/cbom/cbom-page';
 import { ComparePage } from './sections/cbom/compare-page';
 import { GettingStartedPage } from './sections/onboarding/getting-started-page';
+
+// The full-screen map (ADR-0006 D4). Lazy for the same reason the lens is: it
+// is the only thing that loads `@xyflow/react` and dagre, and it must not be in
+// the bundle a user downloads to sign in.
+const AssetMapFullscreen = lazy(
+  () => import('./sections/inventory/map-lens').then((m) => ({ default: m.AssetMapFullscreen })),
+);
 
 // Public /login; everything else is gated by RequireAuth (which also mounts the
 // PermissionProvider) and laid out in the AppShell. Section bodies are built
@@ -64,6 +74,27 @@ export default function App() {
       <Route path="/legal/privacy" element={<LegalPage kind="privacy" />} />
 
       <Route element={<RequireAuth />}>
+        {/* The full-screen map (ADR-0006 D4). Inside the auth gate, OUTSIDE the
+            AppShell: it is the same component as the `?lens=map` body, given
+            the whole viewport with no rail competing with the canvas. Its Exit
+            control returns to the lens carrying the depth and pending state, so
+            leaving full screen is not a reset. */}
+        <Route
+          path="/inventory/map/:assetId"
+          element={
+            <Suspense
+              fallback={
+                // Not `null`: this route has no shell behind it, so an empty
+                // fallback is a blank window for as long as the chunk takes.
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', fontSize: 13, color: 'var(--app-t3)', background: 'var(--app-bg)' }}>
+                  Loading the map…
+                </div>
+              }
+            >
+              <AssetMapFullscreen />
+            </Suspense>
+          }
+        />
         <Route element={<AppShell />}>
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="/dashboard" element={<DashboardPage />} />
@@ -80,9 +111,17 @@ export default function App() {
           <Route path="/discovery/logs" element={<LogsPage />} />
           <Route path="/discovery/cloud" element={<CloudPage />} />
           <Route path="/discovery/pcap" element={<PcapPage />} />
+          <Route path="/discovery/sbom" element={<SbomPage />} />
 
           {/* Inventory */}
           <Route path="/inventory" element={<InventoryPage />} />
+          {/* The asset page (ADR-0006 D3). Two routes, one page: the bare path
+              is Overview, so the URL a user copies off the first tab is the
+              short one, and `/:tab` deep-links the rest. An unknown tab falls
+              back to Overview rather than 404ing — a stale link should still
+              show the asset. */}
+          <Route path="/inventory/assets/:id" element={<AssetPage />} />
+          <Route path="/inventory/assets/:id/:tab" element={<AssetPage />} />
 
           {/* Risk & Compliance */}
           <Route path="/risk-compliance/posture" element={<PosturePage />} />

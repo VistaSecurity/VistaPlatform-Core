@@ -159,7 +159,7 @@ func (c *OutboundClient) Register(version string) error {
 	if err != nil {
 		return fmt.Errorf("failed to send registration request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
@@ -263,7 +263,7 @@ func (c *OutboundClient) GetNextJob() (*models.Job, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNoContent {
 		// No job available
@@ -307,7 +307,7 @@ func (c *OutboundClient) SubmitResult(result *models.JobResult) error {
 	if err != nil {
 		return fmt.Errorf("failed to send result: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
@@ -369,7 +369,7 @@ func (c *OutboundClient) SendHeartbeat() error {
 	if err != nil {
 		return fmt.Errorf("failed to send heartbeat: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

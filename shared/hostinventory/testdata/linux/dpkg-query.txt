@@ -1,0 +1,7 @@
+adduser	3.118ubuntu5	all	Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+apt	2.4.11	amd64	APT Development Team <deity@lists.debian.org>
+ca-certificates	20230311ubuntu0.22.04.1	all	Julien Cristau <jcristau@debian.org>
+libssl3	3.0.2-0ubuntu1.15	amd64	Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+openssh-server	1:8.9p1-3ubuntu0.10	amd64	Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+openssl	3.0.2-0ubuntu1.15	amd64	Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+python3	3.10.6-1~22.04	amd64	Matthias Klose <doko@debian.org>

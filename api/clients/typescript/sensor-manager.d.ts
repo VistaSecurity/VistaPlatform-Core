@@ -784,8 +784,8 @@ export interface components {
         /**
          * @description Request body for PUT /sensors/{sensor_id}/config. All fields optional;
          *     only provided fields are applied. Capture options
-         *     (active_probing/network_discovery/dedup_ttl_minutes) additionally queue
-         *     an update_config command for the sensor.
+         *     (active_probing/network_discovery/host_observation/dedup_ttl_minutes)
+         *     additionally queue an update_config command for the sensor.
          */
         UpdateSensorConfigRequest: {
             air_gapped?: boolean;
@@ -794,6 +794,15 @@ export interface components {
             description?: string;
             active_probing?: boolean;
             network_discovery?: boolean;
+            /**
+             * @description Passive host observation: ARP, DHCP, mDNS, NetBIOS, DNS answers,
+             *     LLDP and CDP decoded into host identity. Queues an update_config
+             *     command, but the sensor applies it on its next RESTART rather than
+             *     immediately — the packet-capture filter is fixed when the interface
+             *     handle opens, so enabling the decoders without reopening it would
+             *     leave them running and receiving nothing.
+             */
+            host_observation?: boolean;
             dedup_ttl_minutes?: number;
             /**
              * @description Sensor data-send cadence in seconds. Must be one of the allowed
@@ -1044,6 +1053,26 @@ export interface components {
             packets_captured: number;
             discoveries_made: number;
             errors_count: number;
+            /**
+             * @description Heartbeat counters that have no column of their own — today, the
+             *     eight `host_observations_*` metrics the passive host-observation
+             *     pipeline reports (offered, decoded, emitted, malformed,
+             *     queue_dropped, emit_dropped, coalesce_dropped, pending).
+             *
+             *     ABSENT means the sensor reported none: an older build, or host
+             *     observation switched off. That is deliberately distinct from an
+             *     empty object, which would mean it reported the set and every counter
+             *     was zero — "not running" and "running and seeing nothing" must not
+             *     look the same.
+             *
+             *     An open map rather than named fields because the set grows with the
+             *     decoders: a protocol added to shared/hostobs brings its own
+             *     counters, and a schema change per counter is how a diagnostic stops
+             *     being worth adding.
+             */
+            extra_counters?: {
+                [key: string]: number;
+            } | null;
             /** Format: date-time */
             recorded_at: string;
         };

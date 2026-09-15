@@ -76,6 +76,19 @@ var NotificationChannelPolicy = Policy{
 	},
 }
 
+// ConnectorAuthConfigPolicy covers public.connector_connections.auth_config —
+// the network-source-of-truth connector family (NetBox today).
+//
+// It is the base floor plus the header bag, and deliberately NOT a narrower
+// list even though NetBox's only credential is `api_token`: the store is shared
+// by every connector of this kind, and a policy that enumerated one connector's
+// fields would silently leave the next one's password in the clear. Narrow the
+// STORE, not the denylist.
+var ConnectorAuthConfigPolicy = Policy{
+	Fields:      BaseIntegrationFields,
+	AllValuesIn: []string{"headers", "extra_headers"},
+}
+
 // IntegrationAuthConfigPolicy covers public.integrations.auth_config, which is
 // written by inventory-service (tenant self-service) and admin-service's MSP
 // writer, and must decode identically from either. The blob is entirely

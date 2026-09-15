@@ -333,3 +333,47 @@ image:
 #       - keycloak.corp.example.com
 #     allowedIdpSuffixes:
 #       - .sso.example.com
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: connect a model provider (Enterprise image line only).
+# -----------------------------------------------------------------------------
+# Leave this out entirely and the product is complete. Every AI capability has a
+# rule-based behaviour behind it that runs with no provider configured — the CBOM
+# comparison writes its summary, findings carry their remediation guidance, the
+# end-of-life catalogue is consulted, assets are classified, inventory is
+# searched with the query language — and Settings → AI assistant states what
+# answers for each. Nothing is degraded and nothing nags.
+#
+# Setting it turns on the five generative capabilities. It never reaches risk
+# scoring, compliance evaluation, approval decisions or signing.
+#
+# The credential goes in a Secret you create in the release namespace; the chart
+# injects it as an environment variable and the platform reads it at the moment
+# of use, so rotating the key needs no restart and nothing can log it.
+#
+#   kubectl -n vista create secret generic vista-ai-credential \
+#     --from-literal=api-key='sk-ant-...'
+#
+# ai:
+#   provider: anthropic          # or openai_compat, or none (the default)
+#   model: ""                    # required for openai_compat
+#   apiKey:
+#     existingSecret: vista-ai-credential
+#
+# Your own endpoint instead — Ollama, vLLM, LM Studio, anything speaking the
+# OpenAI chat-completions shape. allowPrivateEndpoints is required for a private
+# or loopback address and is the one place the platform's outbound SSRF guard is
+# an operator decision rather than a rule, so set it only for an endpoint that is
+# genuinely yours:
+#
+# ai:
+#   provider: openai_compat
+#   baseUrl: http://ollama.internal:11434/v1
+#   model: llama3.3:70b
+#   allowPrivateEndpoints: true
+#
+# NOTE: this is a config-only change, so the upgrade restarts every backend (the
+# chart hashes the shared ConfigMap into each pod template on purpose — envFrom
+# values are read once at pod start). Mind the surge on a single-node cluster.
+#
+# See docsv4/core/operate/configuration/ai-provider.md for the full set.

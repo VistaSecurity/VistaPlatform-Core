@@ -73,12 +73,19 @@ func (s *MetricsService) GetPlatformMetrics() (models.SystemMetrics, error) {
 			COUNT(DISTINCT CASE WHEN u.last_login_at > NOW() - INTERVAL '30 days' THEN t.id END) as active_tenants,
 			COUNT(DISTINCT u.id) as total_users,
 			COUNT(DISTINCT a.id) as total_assets
-		-- network_assets, not "assets" — see B-41; the phantom relation made this
-		-- query error out, and the caller discarded the error behind a 200 with
-		-- all four required counts zeroed.
+		-- The asset spine is the assets table (ADR-0002 D1). B-41 was this
+		-- query naming a relation that did not exist: it errored on every call,
+		-- and the caller discarded the error behind a 200 with all four required
+		-- counts zeroed. The name is now real; the lesson about swallowing the
+		-- error is not.
+		--
+		-- total_assets counts ASSETS: COUNT(DISTINCT a.id) because the users
+		-- join fans each asset out per user, and the assets table with no reach
+		-- through asset_endpoints, because a host exposing five listening
+		-- services is five endpoints of one asset (phase 1), not five assets.
 		FROM tenants t
 		LEFT JOIN users u ON t.id = u.tenant_id
-		LEFT JOIN network_assets a ON t.id = a.tenant_id AND a.deleted_at IS NULL
+		LEFT JOIN assets a ON t.id = a.tenant_id AND a.deleted_at IS NULL
 	`
 
 	var metrics models.SystemMetrics
@@ -96,14 +103,19 @@ func (s *MetricsService) GetPlatformMetrics() (models.SystemMetrics, error) {
 }
 
 func (s *MetricsService) GetTenantMetrics(tenantID string) (models.SystemMetrics, error) {
-	// Query tenant-specific metrics
+	// Query tenant-specific metrics.
+	//
+	// total_assets counts assets, not endpoints (phase 1: one host with five
+	// listening services is one asset row and five asset_endpoints rows). The
+	// DISTINCT is separately load-bearing — the cross join against users
+	// repeats every asset once per user.
 	query := `
 		SELECT
 			COUNT(DISTINCT u.id) as total_users,
 			COUNT(DISTINCT a.id) as total_assets,
 			COUNT(DISTINCT CASE WHEN u.last_login_at > NOW() - INTERVAL '7 days' THEN u.id END) as active_users
 		FROM users u
-		LEFT JOIN network_assets a ON u.tenant_id = a.tenant_id AND a.deleted_at IS NULL
+		LEFT JOIN assets a ON u.tenant_id = a.tenant_id AND a.deleted_at IS NULL
 		WHERE u.tenant_id = $1
 	`
 

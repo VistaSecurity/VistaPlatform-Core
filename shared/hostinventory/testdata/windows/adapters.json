@@ -1,0 +1,1 @@
+[{"Name":"Ethernet","MAC":"B4-96-91-1A-2B-3C","Status":"Up","Virtual":false,"Addresses":["198.51.100.44/24","2001:db8:aa::44/64"]},{"Name":"Ethernet 2","MAC":"B4-96-91-1A-2B-3D","Status":"Disconnected","Virtual":false,"Addresses":[]},{"Name":"vEthernet (Default Switch)","MAC":"00-15-5D-3A-4B-01","Status":"Up","Virtual":true,"Addresses":["203.0.113.17/20"]}]

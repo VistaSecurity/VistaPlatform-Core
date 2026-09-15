@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -37,6 +38,8 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 	sharedservices "github.com/vistasecurity/vistaplatform/shared/services"
 	"gopkg.in/yaml.v3"
+
+	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 )
 
 const specBaseURI = "https://vistaplatform.local/inventory-service.openapi.yaml"
@@ -99,36 +102,40 @@ func (sv *specValidator) assertConforms(t *testing.T, schemaName string, body []
 // the methods exercised by this slice (list / get / update) carry behavior;
 // the rest are present to satisfy the interface and panic if ever called.
 type stubAssetStore struct {
-	list          []models.Asset
-	total         int
-	listErr       error
-	getResult     *models.Asset
-	getErr        error
-	updateRes     *models.Asset
-	updateErr     error
-	cryptoImpls   []models.CryptoImplementation
-	riskSummary   *models.RiskSummary
-	riskErr       error
-	trend         []models.PostureTrendPoint
-	trendErr      error
-	pqcReady      *models.PQCReadinessSummary
-	pqcReadyErr   error
-	facets        []models.AssetFacetBucket
-	facetsErr     error
-	stats         *models.AssetStats
-	statsErr      error
-	history       []models.AssetHistory
-	historyErr    error
-	createRes     *models.Asset
-	createErr     error
-	deleteErr     error
-	hardDeleteErr error
-	restoreErr    error
-	elevatedAsset *models.Asset
-	elevateErr    error
-	recentCount   int
-	recentErr     error
-	gotFilters    models.AssetFilters
+	list            []models.Asset
+	total           int
+	listErr         error
+	getResult       *models.Asset
+	getErr          error
+	updateRes       *models.Asset
+	updateReport    *models.IdentifierUpdateReport
+	updateErr       error
+	gotActor        uuid.UUID
+	cryptoImpls     []models.CryptoImplementation
+	riskSummary     *models.RiskSummary
+	riskErr         error
+	trend           []models.PostureTrendPoint
+	trendErr        error
+	pqcReady        *models.PQCReadinessSummary
+	pqcReadyErr     error
+	facets          []models.AssetFacetBucket
+	facetsErr       error
+	stats           *models.AssetStats
+	statsErr        error
+	history         []models.AssetHistory
+	historyErr      error
+	classHistory    []models.AssetClassChange
+	classHistoryErr error
+	createRes       *models.Asset
+	createErr       error
+	deleteErr       error
+	hardDeleteErr   error
+	restoreErr      error
+	elevatedAsset   *models.Asset
+	elevateErr      error
+	recentCount     int
+	recentErr       error
+	gotFilters      models.AssetFilters
 }
 
 func (s *stubAssetStore) GetAssets(_ uuid.UUID, filters models.AssetFilters) ([]models.Asset, int, error) {
@@ -141,12 +148,17 @@ func (s *stubAssetStore) GetAssetByID(_, _ uuid.UUID) (*models.Asset, error) {
 func (s *stubAssetStore) GetCryptoImplementations(_, _ uuid.UUID) ([]models.CryptoImplementation, error) {
 	return s.cryptoImpls, nil
 }
-func (s *stubAssetStore) UpdateAsset(_, _ uuid.UUID, _ models.AssetInput) (*models.Asset, error) {
-	return s.updateRes, s.updateErr
+func (s *stubAssetStore) UpdateAsset(_, _ uuid.UUID, _ models.AssetInput, actor uuid.UUID) (*models.Asset, *models.IdentifierUpdateReport, error) {
+	s.gotActor = actor
+	return s.updateRes, s.updateReport, s.updateErr
 }
 
 func (s *stubAssetStore) GetAssetHistory(_, _ uuid.UUID) ([]models.AssetHistory, error) {
 	return s.history, s.historyErr
+}
+
+func (s *stubAssetStore) GetAssetClassHistory(_, _ uuid.UUID) ([]models.AssetClassChange, error) {
+	return s.classHistory, s.classHistoryErr
 }
 func (s *stubAssetStore) GetRiskSummary(_ uuid.UUID) (*models.RiskSummary, error) {
 	return s.riskSummary, s.riskErr
@@ -197,7 +209,9 @@ type stubApprovalStore struct {
 	denyErr    error
 }
 
-func (s *stubApprovalStore) ApproveAssets(_ uuid.UUID, _ []uuid.UUID) error { return s.approveErr }
+func (s *stubApprovalStore) ApproveAssets(_ uuid.UUID, _ []uuid.UUID, _ uuid.UUID) error {
+	return s.approveErr
+}
 func (s *stubApprovalStore) DenyAssets(_ uuid.UUID, _ []uuid.UUID, _ uuid.UUID) error {
 	return s.denyErr
 }
@@ -237,6 +251,7 @@ func newEngine(assets *stubAssetStore, approvals *stubApprovalStore) *gin.Engine
 	grp.POST("/inventory-service/infrastructure-assets/:id/restore", ah.RestoreAsset)
 	grp.GET("/inventory-service/infrastructure-assets/:id/crypto", ah.GetAssetCrypto)
 	grp.GET("/inventory-service/infrastructure-assets/:id/history", ah.GetAssetHistory)
+	grp.GET("/inventory-service/infrastructure-assets/:id/class-history", ah.GetAssetClassHistory)
 	return r
 }
 
@@ -289,13 +304,20 @@ func intPtr(i int) *int       { return &i }
 func sampleAsset() models.Asset {
 	now := time.Now().UTC()
 	return models.Asset{
-		ID:                uuid.New(),
-		TenantID:          uuid.New(),
-		Hostname:          strPtr("web-01.example.com"),
-		IPAddress:         strPtr("10.0.0.5"),
-		Port:              intPtr(443),
-		AssetType:         "server",
-		OperatingSystem:   strPtr("linux"),
+		ID:              uuid.New(),
+		TenantID:        uuid.New(),
+		Hostname:        strPtr("web-01.example.com"),
+		PrimaryAddress:  strPtr("10.0.0.5"),
+		ClassKey:        assetclass.KeyServer,
+		ClassPath:       "hardware.computer.server",
+		ClassSourceKind: "measured",
+		Attributes:      map[string]interface{}{"operating_system": "linux"},
+		PrimaryEndpoint: &models.Endpoint{
+			ID: uuid.New(), TenantID: uuid.New(), AssetID: uuid.New(),
+			Address: strPtr("10.0.0.5"), Port: intPtr(443), Transport: "tcp",
+			SourceKind: "measured", Status: "active",
+			FirstSeenAt: now, LastSeenAt: now,
+		},
 		Environment:       strPtr("production"),
 		BusinessUnit:      strPtr("platform"),
 		OwnerEmail:        strPtr("ops@example.com"),
@@ -309,6 +331,7 @@ func sampleAsset() models.Asset {
 		CreatedAt:         now,
 		UpdatedAt:         now,
 		RiskScore:         42,
+		RiskAssessedBy:    []string{"crypto"},
 		RiskLevel:         "Medium",
 	}
 }
@@ -321,7 +344,10 @@ func nullFieldsAsset() models.Asset {
 	return models.Asset{
 		ID:                uuid.New(),
 		TenantID:          uuid.New(),
-		AssetType:         "service",
+		ClassKey:          assetclass.KeyApplication,
+		ClassPath:         "application",
+		ClassSourceKind:   "measured",
+		Attributes:        map[string]interface{}{},
 		Tags:              map[string]interface{}{},
 		Metadata:          map[string]interface{}{},
 		AssetOwnership:    "unknown",
@@ -331,7 +357,10 @@ func nullFieldsAsset() models.Asset {
 		CreatedAt:         now,
 		UpdatedAt:         now,
 		RiskScore:         0,
-		RiskLevel:         "Informational",
+		// Empty, not nil: an asset nothing has assessed. Score 0 with an empty
+		// array is NOT ASSESSED; score 0 with {crypto} is assessed clean.
+		RiskAssessedBy: []string{},
+		RiskLevel:      "Informational",
 	}
 }
 
@@ -435,24 +464,112 @@ func TestContract_UpdateAsset_200(t *testing.T) {
 	sv := loadSpec(t)
 	a := sampleAsset()
 	eng := newEngine(&stubAssetStore{getResult: &a, updateRes: &a}, &stubApprovalStore{})
-	body := strings.NewReader(`{"asset_type":"server","environment":"production"}`)
+	body := strings.NewReader(`{"class_key":"server","environment":"production"}`)
 	w := do(eng, http.MethodPut, "/api/v2/inventory-service/infrastructure-assets/"+aUUID, body)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
-	sv.assertConforms(t, "AssetResponse", w.Body.Bytes())
+	sv.assertConforms(t, "AssetUpdateResponse", w.Body.Bytes())
 }
 
-// A missing required asset_type is rejected at bind time -> 400 LegacyError.
-func TestContract_UpdateAsset_400_missingType(t *testing.T) {
+// TestContract_UpdateAsset_ReportsWhatItDidToTheIdentifiers: the update is the
+// only hand-driven write path, and `identifiers` used to be accepted and
+// dropped. The response now says what was attached, what was retired, and —
+// the part that matters — what was KEPT BACK, because a collector-minted
+// identifier is not an edit form's to delete and a client that reported the
+// deletion as successful would be lying on the next read.
+func TestContract_UpdateAsset_ReportsWhatItDidToTheIdentifiers(t *testing.T) {
 	sv := loadSpec(t)
-	eng := newEngine(&stubAssetStore{}, &stubApprovalStore{})
-	body := strings.NewReader(`{"environment":"production"}`)
-	w := do(eng, http.MethodPut, "/api/v2/inventory-service/infrastructure-assets/"+aUUID, body)
+	a := sampleAsset()
+	store := &stubAssetStore{getResult: &a, updateRes: &a, updateReport: &models.IdentifierUpdateReport{
+		Attached: []models.IdentifierChange{
+			{Kind: "serial_number", Value: "SN-1", SourceKind: "declared"},
+		},
+		Removed: []models.IdentifierChange{
+			{Kind: "hostname", Value: "old-01", Scope: "tenant", SourceKind: "declared"},
+		},
+		Kept: []models.IdentifierChange{{
+			Kind: "cloud_resource_id", Value: "arn:aws:ec2:::i-1", SourceKind: "measured",
+			Reason: "issued by a collector, not by a person — an edit form does not retire it",
+		}},
+	}}
+	eng := newEngine(store, &stubApprovalStore{})
+	w := do(eng, http.MethodPut, "/api/v2/inventory-service/infrastructure-assets/"+aUUID,
+		strings.NewReader(`{"identifiers":[{"kind":"serial_number","value":"SN-1"}]}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "AssetUpdateResponse", w.Body.Bytes())
+
+	var got struct {
+		Identifiers *models.IdentifierUpdateReport `json:"identifiers"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Identifiers == nil {
+		t.Fatal("the response must carry the identifier report; without it a refused deletion reads as a successful one")
+	}
+	if len(got.Identifiers.Kept) != 1 || got.Identifiers.Kept[0].Reason == "" {
+		t.Errorf("kept = %+v; a kept identifier must say WHY it was kept", got.Identifiers.Kept)
+	}
+	if store.gotActor == uuid.Nil {
+		t.Error("the actor from the session must reach the service; an identifier edit is attributable")
+	}
+}
+
+// TestContract_UpdateAsset_409OnAForeignIdentifier: the edit is refused and the
+// body names the merge proposal that was opened. A 409 saying only "conflict"
+// would leave the operator with no way to reach the asset that disagreed.
+func TestContract_UpdateAsset_409OnAForeignIdentifier(t *testing.T) {
+	sv := loadSpec(t)
+	owner, proposal := uuid.New(), uuid.New()
+	eng := newEngine(&stubAssetStore{updateErr: &services.IdentifierConflictError{
+		Kind: "serial_number", Value: "SN-1", OwnerAssetID: owner, ProposalID: proposal,
+	}}, &stubApprovalStore{})
+	w := do(eng, http.MethodPut, "/api/v2/inventory-service/infrastructure-assets/"+aUUID,
+		strings.NewReader(`{"identifiers":[{"kind":"serial_number","value":"SN-1"}]}`))
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "IdentifierConflict", w.Body.Bytes())
+	if !strings.Contains(w.Body.String(), proposal.String()) {
+		t.Errorf("the 409 must name the merge proposal it told the operator to read; body=%s", w.Body.String())
+	}
+}
+
+// TestContract_UpdateAsset_400WhenItWouldStripTheLastIdentifier: an asset with
+// no identifiers can never be matched again. The engine refuses to CREATE one;
+// an edit must not be able to produce one by subtraction.
+func TestContract_UpdateAsset_400WhenItWouldStripTheLastIdentifier(t *testing.T) {
+	eng := newEngine(&stubAssetStore{updateErr: services.ErrIdentifierFloor}, &stubApprovalStore{})
+	w := do(eng, http.MethodPut, "/api/v2/inventory-service/infrastructure-assets/"+aUUID,
+		strings.NewReader(`{"identifiers":[]}`))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
 	}
-	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+	if !strings.Contains(w.Body.String(), "at least one identifier") {
+		t.Errorf("the 400 must say what the floor is; body=%s", w.Body.String())
+	}
+}
+
+// A partial update does NOT have to restate the class.
+//
+// This asserted 400 while `asset_type` carried `binding:"required"` on the
+// input struct that create and update share — so changing an owner email meant
+// resending the type, and a client that forgot silently got a 400 for a field
+// it was not editing. The class is required on CREATE (checked in the handler,
+// see TestContract_CreateAsset_400) and optional here.
+func TestContract_UpdateAsset_200_partialWithoutClass(t *testing.T) {
+	sv := loadSpec(t)
+	updated := sampleAsset()
+	eng := newEngine(&stubAssetStore{updateRes: &updated}, &stubApprovalStore{})
+	body := strings.NewReader(`{"environment":"production"}`)
+	w := do(eng, http.MethodPut, "/api/v2/inventory-service/infrastructure-assets/"+aUUID, body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "AssetUpdateResponse", w.Body.Bytes())
 }
 
 func TestContract_ApproveAssets_200(t *testing.T) {
@@ -595,6 +712,105 @@ func TestContract_SearchAssets_400(t *testing.T) {
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
 }
 
+// The list and facet envelopes carry the CANONICAL query that selected the
+// rows, not the string the caller sent. ADR-0008 D4.4: an agent repeating an
+// answer has to be able to show the query behind it, and the two differ — the
+// platform AND-s its default scope in, and normalises the spelling.
+//
+// Both surfaces are asserted here because they have to agree: a rail whose
+// counts were taken over a different predicate from its list is the drift the
+// single-predicate design exists to prevent.
+func TestContract_ListAndFacets_echoTheCanonicalQuery(t *testing.T) {
+	sv := loadSpec(t)
+	eng := newEngine(&stubAssetStore{
+		list:   []models.Asset{sampleAsset()},
+		total:  1,
+		facets: []models.AssetFacetBucket{{Key: "production", Count: 12}},
+	}, &stubApprovalStore{})
+
+	const sent = "environment:PRODUCTION"
+	// The default scope the platform adds; a caller that echoed its own input
+	// would never show it, and would describe a wider set than it read.
+	const want = "environment:PRODUCTION and status:monitoring"
+
+	for _, tc := range []struct{ name, path, schema string }{
+		{"list", "/api/v2/inventory-service/infrastructure-assets?query=" + url.QueryEscape(sent), "AssetListResponse"},
+		{"facets", "/api/v2/inventory-service/infrastructure-assets/facets?level=environment&query=" + url.QueryEscape(sent), "AssetFacetsResponse"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := do(eng, http.MethodGet, tc.path, nil)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+			}
+			sv.assertConforms(t, tc.schema, w.Body.Bytes())
+
+			var body struct {
+				Query string `json:"query"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if body.Query == "" {
+				t.Fatalf("no query echo; a caller cannot show the query it ran. body=%s", w.Body.String())
+			}
+			if body.Query != want {
+				t.Errorf("query echo = %q, want %q", body.Query, want)
+			}
+		})
+	}
+}
+
+// An empty predicate is still a predicate: with no query and no filters the
+// platform's own default scope is what ran, and the echo has to say so rather
+// than going silent and leaving a caller to assume "everything".
+func TestContract_ListAssets_echoShowsTheDefaultScope(t *testing.T) {
+	eng := newEngine(&stubAssetStore{list: []models.Asset{sampleAsset()}, total: 1}, &stubApprovalStore{})
+	w := do(eng, http.MethodGet, "/api/v2/inventory-service/infrastructure-assets", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Query string `json:"query"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Query != "status:monitoring" {
+		t.Errorf("query echo = %q, want the default scope the read applied", body.Query)
+	}
+}
+
+// The default scope is a DEFAULT, not a floor: a caller who names `status`
+// themselves gets their own term and nothing added. The echo is how they can
+// tell, which is the only way an MCP agent can report honestly on the approval
+// queue or on an asset a merge archived — both of which the default hides.
+func TestContract_ListAssets_echoDropsTheDefaultWhenTheCallerNamesStatus(t *testing.T) {
+	eng := newEngine(&stubAssetStore{list: []models.Asset{sampleAsset()}, total: 1}, &stubApprovalStore{})
+
+	for _, tc := range []struct{ name, query, want string }{
+		{"pending approval", "status:pending_approval", "status:pending_approval"},
+		{"archived — where a merge tombstone lives", "status:archived", "status:archived"},
+		{"a different column does NOT count", "stale_status:stale", "stale_status:stale and status:monitoring"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := do(eng, http.MethodGet,
+				"/api/v2/inventory-service/infrastructure-assets?query="+url.QueryEscape(tc.query), nil)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+			}
+			var body struct {
+				Query string `json:"query"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if body.Query != tc.want {
+				t.Errorf("query echo = %q, want %q", body.Query, tc.want)
+			}
+		})
+	}
+}
+
 func TestContract_GetAssetFacets_200(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newEngine(&stubAssetStore{facets: []models.AssetFacetBucket{{Key: "production", Count: 12}, {Key: "staging", Count: 4}}}, &stubApprovalStore{})
@@ -645,6 +861,57 @@ func TestContract_GetAssetHistory_200(t *testing.T) {
 	sv.assertConforms(t, "AssetHistoryListResponse", w.Body.Bytes())
 }
 
+// The class-history endpoint conforms to the spec, in both the shape a
+// reclassified asset produces and the one its creation produces.
+//
+// Two rows, not one: `from_class_key` is REQUIRED to be absent on the creation
+// row and present on every other, and a fixture with only one of them would
+// pass whichever half the schema happened to get right.
+func TestContract_GetAssetClassHistory_200(t *testing.T) {
+	sv := loadSpec(t)
+	now := time.Now().UTC()
+	uid := uuid.New()
+	from := "unknown_host"
+	eng := newEngine(&stubAssetStore{classHistory: []models.AssetClassChange{
+		{
+			ID: uuid.New(), AssetID: uuid.New(), TenantID: uuid.New(),
+			FromClassKey: &from, FromClassLabel: "Unknown host",
+			ToClassKey: "printer", ToClassLabel: "Printer",
+			Source: "proposal", ActorUserID: &uid,
+			Evidence:  map[string]interface{}{"rule_ids": []string{"r-1"}},
+			CreatedAt: now,
+		},
+		{
+			ID: uuid.New(), AssetID: uuid.New(), TenantID: uuid.New(),
+			ToClassKey: "unknown_host", ToClassLabel: "Unknown host",
+			Source:    "classifier",
+			Evidence:  map[string]interface{}{"class_source_kind": "measured"},
+			CreatedAt: now.Add(-time.Hour),
+		},
+	}}, &stubApprovalStore{})
+	w := do(eng, http.MethodGet, "/api/v2/inventory-service/infrastructure-assets/"+aUUID+"/class-history", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "AssetClassHistoryListResponse", w.Body.Bytes())
+}
+
+// An asset with no recorded class change answers with an EMPTY array, not
+// `null`. `[]` and `null` are the same to a Go client and different to every
+// TypeScript one, and the spec says array.
+func TestContract_GetAssetClassHistory_EmptyIsAnArray(t *testing.T) {
+	sv := loadSpec(t)
+	eng := newEngine(&stubAssetStore{}, &stubApprovalStore{})
+	w := do(eng, http.MethodGet, "/api/v2/inventory-service/infrastructure-assets/"+aUUID+"/class-history", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Body.String(); !strings.Contains(got, `"class_history":[]`) {
+		t.Errorf("body = %s, want an empty array under class_history", got)
+	}
+	sv.assertConforms(t, "AssetClassHistoryListResponse", w.Body.Bytes())
+}
+
 func TestContract_GetAssetCrypto_200(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newEngine(&stubAssetStore{cryptoImpls: []models.CryptoImplementation{sampleCryptoConfig()}}, &stubApprovalStore{})
@@ -661,7 +928,7 @@ func TestContract_CreateAsset_201(t *testing.T) {
 	sv := loadSpec(t)
 	a := sampleAsset()
 	eng := newEngine(&stubAssetStore{createRes: &a}, &stubApprovalStore{})
-	body := strings.NewReader(`{"asset_type":"server","hostname":"web-01"}`)
+	body := strings.NewReader(`{"class_key":"server","hostname":"web-01"}`)
 	w := do(eng, http.MethodPost, "/api/v2/inventory-service/infrastructure-assets", body)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body=%s", w.Code, w.Body.String())
@@ -713,7 +980,7 @@ func TestContract_CreateAsset_402_overLimit(t *testing.T) {
 			UpgradePrompt: "Upgrade your plan or contact support to add more assets",
 		}},
 	)
-	body := strings.NewReader(`{"asset_type":"server","hostname":"web-01"}`)
+	body := strings.NewReader(`{"class_key":"server","hostname":"web-01"}`)
 	w := do(eng, http.MethodPost, "/api/v2/inventory-service/infrastructure-assets", body)
 	if w.Code != http.StatusPaymentRequired {
 		t.Fatalf("status = %d, want 402; body=%s", w.Code, w.Body.String())
@@ -728,14 +995,14 @@ func TestContract_CreateAsset_201_underLimit(t *testing.T) {
 		&stubAssetStore{createRes: &a},
 		&stubAssetLimitChecker{res: &sharedservices.LimitCheckResult{Allowed: true, CurrentUsage: 1, Limit: &limit}},
 	)
-	body := strings.NewReader(`{"asset_type":"server","hostname":"web-01"}`)
+	body := strings.NewReader(`{"class_key":"server","hostname":"web-01"}`)
 	w := do(eng, http.MethodPost, "/api/v2/inventory-service/infrastructure-assets", body)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body=%s", w.Code, w.Body.String())
 	}
 }
 
-// Missing required asset_type -> 400.
+// Missing required class_key -> 400.
 func TestContract_CreateAsset_400(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newEngine(&stubAssetStore{}, &stubApprovalStore{})

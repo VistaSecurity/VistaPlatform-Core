@@ -39,12 +39,24 @@ type RemediationPlanItem struct {
 	AddedAt   time.Time  `json:"added_at" db:"added_at"`
 	AddedBy   uuid.UUID  `json:"added_by" db:"added_by"`
 
-	// Joined from compliance_findings
+	// SourceKind and SourceRef record where this item's notes came from
+	// (ADR-0008 D4.1). Both nil for an item added the ordinary way.
+	// `inferred` + `remediator:<model id>` means a person accepted a plan the
+	// Remediator seam drafted — and `AddedBy` above names that person, which
+	// is the other half of D5: a seam proposes, a human approves.
+	//
+	// nil is a distinct state, not a default. An item created before the
+	// columns existed carries nil and is not backfilled: saying `declared`
+	// would assert that somebody typed it, which we do not know.
+	SourceKind *string `json:"source_kind,omitempty" db:"source_kind"`
+	SourceRef  *string `json:"source_ref,omitempty" db:"source_ref"`
+
+	// Joined from findings (the compliance producer's rows)
 	FindingSeverity       *string    `json:"finding_severity,omitempty" db:"finding_severity"`
 	FindingSummary        *string    `json:"finding_summary,omitempty" db:"finding_summary"`
 	FindingWorkflowStatus *string    `json:"finding_workflow_status,omitempty" db:"finding_workflow_status"`
-	FindingAssetType      *string    `json:"finding_asset_type,omitempty" db:"finding_asset_type"`
-	FindingAssetID        *uuid.UUID `json:"finding_asset_id,omitempty" db:"finding_asset_id"`
+	FindingSubjectType    *string    `json:"finding_subject_type,omitempty" db:"finding_subject_type"`
+	FindingSubjectID      *uuid.UUID `json:"finding_subject_id,omitempty" db:"finding_subject_id"`
 
 	// Joined from tickets (if linked)
 	TicketStatus *string `json:"ticket_status,omitempty" db:"ticket_status"`

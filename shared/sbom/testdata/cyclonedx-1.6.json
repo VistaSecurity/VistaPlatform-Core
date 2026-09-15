@@ -1,0 +1,80 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:7b1a9d0c-1111-4f6e-bb44-2c8f0a9e5d31",
+  "version": 3,
+  "metadata": {
+    "timestamp": "2026-09-11T09:00:00Z",
+    "tools": {
+      "components": [
+        { "type": "application", "name": "syft", "version": "1.20.0" }
+      ]
+    },
+    "component": {
+      "type": "container",
+      "bom-ref": "img-registry.example.test/billing:4.2.0",
+      "name": "registry.example.test/billing",
+      "version": "4.2.0",
+      "purl": "pkg:oci/billing@sha256%3Aabc123"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:deb/debian/openssl@3.0.11-1",
+      "name": "openssl",
+      "version": "3.0.11-1",
+      "publisher": "Debian OpenSSL Team",
+      "scope": "required",
+      "purl": "pkg:deb/debian/openssl@3.0.11-1?OS=linux&arch=amd64",
+      "cpe": "cpe:2.3:a:openssl:openssl:3.0.11:*:*:*:*:*:*:*",
+      "description": "Secure Sockets Layer toolkit",
+      "hashes": [
+        { "alg": "SHA-256", "content": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+      ],
+      "externalReferences": [
+        { "type": "website", "url": "https://www.openssl.org" }
+      ],
+      "licenses": [
+        { "license": { "id": "Apache-2.0" } }
+      ],
+      "thisFieldDoesNotExistInAnySpec": { "nested": [1, 2, 3] }
+    },
+    {
+      "type": "framework",
+      "bom-ref": "lib-spring",
+      "group": "org.springframework.boot",
+      "name": "spring-boot",
+      "version": "3.2.1",
+      "scope": "optional",
+      "purl": "pkg:maven/org.springframework.boot/spring-boot@3.2.1",
+      "licenses": [
+        { "license": { "name": "Apache License, Version 2.0" } }
+      ]
+    },
+    {
+      "type": "file",
+      "bom-ref": "file-config",
+      "name": "/etc/billing/config.yaml",
+      "scope": "excluded"
+    },
+    {
+      "type": "library",
+      "bom-ref": "lib-unversioned",
+      "name": "libz"
+    },
+    {
+      "type": "wildly-unofficial-type",
+      "bom-ref": "thing-1",
+      "name": "some-vendor-thing",
+      "version": "1.0"
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "img-registry.example.test/billing:4.2.0",
+      "dependsOn": ["pkg:deb/debian/openssl@3.0.11-1", "lib-spring"]
+    },
+    { "ref": "lib-spring", "dependsOn": ["lib-unversioned", "lib-that-does-not-exist"] }
+  ]
+}

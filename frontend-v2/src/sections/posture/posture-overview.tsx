@@ -124,7 +124,7 @@ export function PostureOverview() {
     byLevel: {
       Critical: g.severity_counts.critical,
       High: g.severity_counts.high,
-      Medium: g.severity_counts.med,
+      Medium: g.severity_counts.medium,
       Low: g.severity_counts.low,
       Informational: 0,
     } as Record<RiskLevel, number>,

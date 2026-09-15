@@ -136,6 +136,40 @@ type CaptureConfig struct {
 	// refineries, water treatment, chemical plants) for instrument
 	// diagnostics. Default: true.
 	EnableHARTIP bool `json:"enable_hartip"`
+	// HostObservation enables passive host observation: ARP, DHCP, mDNS,
+	// NetBIOS, DNS answers, LLDP and CDP decoded into host identity
+	// (asset-inventory ADR-0004 D2). Default: true, and pushed from the
+	// platform like network_discovery.
+	//
+	// Turning it on widens the BPF filter — the crypto filter is a list of
+	// ports, and ARP and LLDP are not even IP — so the sensor sees more
+	// packets. The decoders run on their own goroutine behind a bounded
+	// queue, so that extra traffic cannot delay the TLS/SSH paths; on a
+	// segment busy enough to saturate the queue the sensor sheds host
+	// observations and says so on the heartbeat.
+	HostObservation bool `json:"host_observation"`
+	// HostObservationWindowSeconds is how long observations about one host
+	// are merged before being emitted. Default: 60. Longer means fewer,
+	// richer rows and a longer wait before a new device appears.
+	HostObservationWindowSeconds int `json:"host_observation_window_seconds"`
+	// HostObservationDNS enables the unicast-DNS decoder on UDP 53.
+	// Default: FALSE — the one part of host observation that is opt-in.
+	//
+	// Volume: UDP 53 on a busy segment is more packets than every other
+	// protocol host observation decodes put together, and the BPF filter is
+	// the only place that cost can be avoided outright.
+	//
+	// Privacy: the decoder reads answers only and never the question section,
+	// but an answer names what was asked. A stream of A-record answers is a
+	// record of which names this network resolved — a materially different
+	// collection from "these devices are on this segment", and one somebody
+	// should choose rather than inherit.
+	//
+	// Deliberately configured ON THE SENSOR HOST (file or environment) and not
+	// pushed from the platform: whoever owns the segment being captured is who
+	// should be turning this on. mDNS is unaffected — a multicast
+	// announcement is a device advertising itself, not a lookup.
+	HostObservationDNS bool `json:"host_observation_dns"`
 }
 
 // NetworkConfig represents network configuration
@@ -193,29 +227,32 @@ type ConfigFile struct {
 		DataPath string `yaml:"dataPath"`
 	} `yaml:"storage"`
 	Capture struct {
-		Interfaces          []string `yaml:"interfaces"`
-		ActiveProbing       bool     `yaml:"activeProbing"`
-		NetworkDiscovery    bool     `yaml:"networkDiscovery"`
-		MaxConnections      int      `yaml:"maxConnections"`
-		TimeoutSeconds      int      `yaml:"timeoutSeconds"`
-		BufferSize          int      `yaml:"bufferSize"`
-		ExtraPortsToMonitor []int    `yaml:"extraPortsToMonitor"`
-		DeepScan            bool     `yaml:"deepScan"`
-		DedupTTLMinutes     int      `yaml:"dedupTTLMinutes"`
-		STARTTLSPorts       []int    `yaml:"starttlsPorts"`
-		EnableJA3           *bool    `yaml:"enableJA3"`
-		EnableSTARTTLS      *bool    `yaml:"enableSTARTTLS"`
-		EnableQUICDecrypt   *bool    `yaml:"enableQUICDecrypt"`
-		EnableWireGuard     *bool    `yaml:"enableWireGuard"`
-		EnableSMB           *bool    `yaml:"enableSMB"`
-		EnableOpenVPN       *bool    `yaml:"enableOpenVPN"`
-		EnableKerberos      *bool    `yaml:"enableKerberos"`
-		EnableModbus        *bool    `yaml:"enableModbus"`
-		EnableMMS           *bool    `yaml:"enableMMS"`
-		EnableDNP3          *bool    `yaml:"enableDNP3"`
-		EnableOPCUA         *bool    `yaml:"enableOPCUA"`
-		EnableENIP          *bool    `yaml:"enableENIP"`
-		EnableHARTIP        *bool    `yaml:"enableHARTIP"`
+		Interfaces                   []string `yaml:"interfaces"`
+		ActiveProbing                bool     `yaml:"activeProbing"`
+		NetworkDiscovery             bool     `yaml:"networkDiscovery"`
+		MaxConnections               int      `yaml:"maxConnections"`
+		TimeoutSeconds               int      `yaml:"timeoutSeconds"`
+		BufferSize                   int      `yaml:"bufferSize"`
+		ExtraPortsToMonitor          []int    `yaml:"extraPortsToMonitor"`
+		DeepScan                     bool     `yaml:"deepScan"`
+		DedupTTLMinutes              int      `yaml:"dedupTTLMinutes"`
+		STARTTLSPorts                []int    `yaml:"starttlsPorts"`
+		EnableJA3                    *bool    `yaml:"enableJA3"`
+		EnableSTARTTLS               *bool    `yaml:"enableSTARTTLS"`
+		EnableQUICDecrypt            *bool    `yaml:"enableQUICDecrypt"`
+		EnableWireGuard              *bool    `yaml:"enableWireGuard"`
+		EnableSMB                    *bool    `yaml:"enableSMB"`
+		EnableOpenVPN                *bool    `yaml:"enableOpenVPN"`
+		EnableKerberos               *bool    `yaml:"enableKerberos"`
+		EnableModbus                 *bool    `yaml:"enableModbus"`
+		EnableMMS                    *bool    `yaml:"enableMMS"`
+		EnableDNP3                   *bool    `yaml:"enableDNP3"`
+		EnableOPCUA                  *bool    `yaml:"enableOPCUA"`
+		EnableENIP                   *bool    `yaml:"enableENIP"`
+		EnableHARTIP                 *bool    `yaml:"enableHARTIP"`
+		HostObservation              *bool    `yaml:"hostObservation"`
+		HostObservationWindowSeconds int      `yaml:"hostObservationWindowSeconds"`
+		HostObservationDNS           *bool    `yaml:"hostObservationDNS"`
 	} `yaml:"capture"`
 	// Security holds the mTLS material written after a successful registration
 	// (see Sensor.saveConfigFile). It MUST be parsed back here so that the
@@ -280,29 +317,35 @@ func LoadFromFile(filePath string) (*Config, error) {
 			DataPath: cfgFile.Storage.DataPath,
 		},
 		Capture: CaptureConfig{
-			Interfaces:          cfgFile.Capture.Interfaces,
-			ActiveProbing:       cfgFile.Capture.ActiveProbing,
-			NetworkDiscovery:    cfgFile.Capture.NetworkDiscovery,
-			MaxConnections:      cfgFile.Capture.MaxConnections,
-			TimeoutSeconds:      cfgFile.Capture.TimeoutSeconds,
-			BufferSize:          cfgFile.Capture.BufferSize,
-			ExtraPortsToMonitor: cfgFile.Capture.ExtraPortsToMonitor,
-			DeepScan:            cfgFile.Capture.DeepScan,
-			DedupTTLMinutes:     cfgFile.Capture.DedupTTLMinutes,
-			STARTTLSPorts:       cfgFile.Capture.STARTTLSPorts,
-			EnableJA3:           cfgFile.Capture.EnableJA3 == nil || *cfgFile.Capture.EnableJA3,
-			EnableSTARTTLS:      cfgFile.Capture.EnableSTARTTLS == nil || *cfgFile.Capture.EnableSTARTTLS,
-			EnableQUICDecrypt:   cfgFile.Capture.EnableQUICDecrypt == nil || *cfgFile.Capture.EnableQUICDecrypt,
-			EnableWireGuard:     cfgFile.Capture.EnableWireGuard == nil || *cfgFile.Capture.EnableWireGuard,
-			EnableSMB:           cfgFile.Capture.EnableSMB == nil || *cfgFile.Capture.EnableSMB,
-			EnableOpenVPN:       cfgFile.Capture.EnableOpenVPN == nil || *cfgFile.Capture.EnableOpenVPN,
-			EnableKerberos:      cfgFile.Capture.EnableKerberos == nil || *cfgFile.Capture.EnableKerberos,
-			EnableModbus:        cfgFile.Capture.EnableModbus == nil || *cfgFile.Capture.EnableModbus,
-			EnableMMS:           cfgFile.Capture.EnableMMS == nil || *cfgFile.Capture.EnableMMS,
-			EnableDNP3:          cfgFile.Capture.EnableDNP3 == nil || *cfgFile.Capture.EnableDNP3,
-			EnableOPCUA:         cfgFile.Capture.EnableOPCUA == nil || *cfgFile.Capture.EnableOPCUA,
-			EnableENIP:          cfgFile.Capture.EnableENIP == nil || *cfgFile.Capture.EnableENIP,
-			EnableHARTIP:        cfgFile.Capture.EnableHARTIP == nil || *cfgFile.Capture.EnableHARTIP,
+			Interfaces:                   cfgFile.Capture.Interfaces,
+			ActiveProbing:                cfgFile.Capture.ActiveProbing,
+			NetworkDiscovery:             cfgFile.Capture.NetworkDiscovery,
+			MaxConnections:               cfgFile.Capture.MaxConnections,
+			TimeoutSeconds:               cfgFile.Capture.TimeoutSeconds,
+			BufferSize:                   cfgFile.Capture.BufferSize,
+			ExtraPortsToMonitor:          cfgFile.Capture.ExtraPortsToMonitor,
+			DeepScan:                     cfgFile.Capture.DeepScan,
+			DedupTTLMinutes:              cfgFile.Capture.DedupTTLMinutes,
+			STARTTLSPorts:                cfgFile.Capture.STARTTLSPorts,
+			EnableJA3:                    cfgFile.Capture.EnableJA3 == nil || *cfgFile.Capture.EnableJA3,
+			EnableSTARTTLS:               cfgFile.Capture.EnableSTARTTLS == nil || *cfgFile.Capture.EnableSTARTTLS,
+			EnableQUICDecrypt:            cfgFile.Capture.EnableQUICDecrypt == nil || *cfgFile.Capture.EnableQUICDecrypt,
+			EnableWireGuard:              cfgFile.Capture.EnableWireGuard == nil || *cfgFile.Capture.EnableWireGuard,
+			EnableSMB:                    cfgFile.Capture.EnableSMB == nil || *cfgFile.Capture.EnableSMB,
+			EnableOpenVPN:                cfgFile.Capture.EnableOpenVPN == nil || *cfgFile.Capture.EnableOpenVPN,
+			EnableKerberos:               cfgFile.Capture.EnableKerberos == nil || *cfgFile.Capture.EnableKerberos,
+			EnableModbus:                 cfgFile.Capture.EnableModbus == nil || *cfgFile.Capture.EnableModbus,
+			EnableMMS:                    cfgFile.Capture.EnableMMS == nil || *cfgFile.Capture.EnableMMS,
+			EnableDNP3:                   cfgFile.Capture.EnableDNP3 == nil || *cfgFile.Capture.EnableDNP3,
+			EnableOPCUA:                  cfgFile.Capture.EnableOPCUA == nil || *cfgFile.Capture.EnableOPCUA,
+			EnableENIP:                   cfgFile.Capture.EnableENIP == nil || *cfgFile.Capture.EnableENIP,
+			EnableHARTIP:                 cfgFile.Capture.EnableHARTIP == nil || *cfgFile.Capture.EnableHARTIP,
+			HostObservation:              cfgFile.Capture.HostObservation == nil || *cfgFile.Capture.HostObservation,
+			HostObservationWindowSeconds: cfgFile.Capture.HostObservationWindowSeconds,
+			// Absent means OFF, the opposite of its neighbours above: this one
+			// defaults off, so silence in the file is the default rather than
+			// an override of it.
+			HostObservationDNS: cfgFile.Capture.HostObservationDNS != nil && *cfgFile.Capture.HostObservationDNS,
 		},
 		Security: SecurityConfig{
 			ClientCert:       cfgFile.Security.ClientCert,
@@ -462,6 +505,15 @@ func mergeEnvVars(cfg *Config) {
 	if v := os.Getenv("ENABLE_HARTIP"); v != "" {
 		cfg.Capture.EnableHARTIP = getBoolEnv("ENABLE_HARTIP", true)
 	}
+	if v := os.Getenv("HOST_OBSERVATION"); v != "" {
+		cfg.Capture.HostObservation = getBoolEnv("HOST_OBSERVATION", true)
+	}
+	if v := os.Getenv("HOST_OBSERVATION_WINDOW_SECONDS"); v != "" {
+		cfg.Capture.HostObservationWindowSeconds = getIntEnv("HOST_OBSERVATION_WINDOW_SECONDS", 60)
+	}
+	if v := os.Getenv("HOST_OBSERVATION_DNS"); v != "" {
+		cfg.Capture.HostObservationDNS = getBoolEnv("HOST_OBSERVATION_DNS", false)
+	}
 	if dataPath := sharedconfig.GetEnv("DATA_PATH", ""); dataPath != "" {
 		if cfg.Storage.DataPath != dataPath {
 			fmt.Printf("⚠️  Environment variable DATA_PATH=%s overriding config file value\n", dataPath)
@@ -537,28 +589,31 @@ func Load() *Config {
 			DataPath: sharedconfig.GetEnv("DATA_PATH", getDefaultDataPath()),
 		},
 		Capture: CaptureConfig{
-			Interfaces:          getStringSliceEnv("INTERFACES", []string{"eth0"}),
-			ActiveProbing:       getBoolEnv("ACTIVE_PROBING", true),
-			NetworkDiscovery:    getBoolEnv("NETWORK_DISCOVERY", true),
-			MaxConnections:      getIntEnv("MAX_CONNECTIONS", 1000),
-			TimeoutSeconds:      getIntEnv("TIMEOUT_SECONDS", 30),
-			BufferSize:          getIntEnv("BUFFER_SIZE", 1024*1024), // 1MB
-			ExtraPortsToMonitor: []int{},
-			DeepScan:            getBoolEnv("DEEP_SCAN", false),
-			STARTTLSPorts:       getIntSliceEnv("STARTTLS_PORTS", []int{25, 143, 110, 5432, 3306, 21, 5222, 389}),
-			EnableJA3:           getBoolEnv("ENABLE_JA3", true),
-			EnableSTARTTLS:      getBoolEnv("ENABLE_STARTTLS", true),
-			EnableQUICDecrypt:   getBoolEnv("ENABLE_QUIC_DECRYPT", true),
-			EnableWireGuard:     getBoolEnv("ENABLE_WIREGUARD", true),
-			EnableSMB:           getBoolEnv("ENABLE_SMB", true),
-			EnableOpenVPN:       getBoolEnv("ENABLE_OPENVPN", true),
-			EnableKerberos:      getBoolEnv("ENABLE_KERBEROS", true),
-			EnableModbus:        getBoolEnv("ENABLE_MODBUS", true),
-			EnableMMS:           getBoolEnv("ENABLE_MMS", true),
-			EnableDNP3:          getBoolEnv("ENABLE_DNP3", true),
-			EnableOPCUA:         getBoolEnv("ENABLE_OPCUA", true),
-			EnableENIP:          getBoolEnv("ENABLE_ENIP", true),
-			EnableHARTIP:        getBoolEnv("ENABLE_HARTIP", true),
+			Interfaces:                   getStringSliceEnv("INTERFACES", []string{"eth0"}),
+			ActiveProbing:                getBoolEnv("ACTIVE_PROBING", true),
+			NetworkDiscovery:             getBoolEnv("NETWORK_DISCOVERY", true),
+			MaxConnections:               getIntEnv("MAX_CONNECTIONS", 1000),
+			TimeoutSeconds:               getIntEnv("TIMEOUT_SECONDS", 30),
+			BufferSize:                   getIntEnv("BUFFER_SIZE", 1024*1024), // 1MB
+			ExtraPortsToMonitor:          []int{},
+			DeepScan:                     getBoolEnv("DEEP_SCAN", false),
+			STARTTLSPorts:                getIntSliceEnv("STARTTLS_PORTS", []int{25, 143, 110, 5432, 3306, 21, 5222, 389}),
+			EnableJA3:                    getBoolEnv("ENABLE_JA3", true),
+			EnableSTARTTLS:               getBoolEnv("ENABLE_STARTTLS", true),
+			EnableQUICDecrypt:            getBoolEnv("ENABLE_QUIC_DECRYPT", true),
+			EnableWireGuard:              getBoolEnv("ENABLE_WIREGUARD", true),
+			EnableSMB:                    getBoolEnv("ENABLE_SMB", true),
+			EnableOpenVPN:                getBoolEnv("ENABLE_OPENVPN", true),
+			EnableKerberos:               getBoolEnv("ENABLE_KERBEROS", true),
+			EnableModbus:                 getBoolEnv("ENABLE_MODBUS", true),
+			EnableMMS:                    getBoolEnv("ENABLE_MMS", true),
+			EnableDNP3:                   getBoolEnv("ENABLE_DNP3", true),
+			EnableOPCUA:                  getBoolEnv("ENABLE_OPCUA", true),
+			EnableENIP:                   getBoolEnv("ENABLE_ENIP", true),
+			EnableHARTIP:                 getBoolEnv("ENABLE_HARTIP", true),
+			HostObservation:              getBoolEnv("HOST_OBSERVATION", true),
+			HostObservationWindowSeconds: getIntEnv("HOST_OBSERVATION_WINDOW_SECONDS", 60),
+			HostObservationDNS:           getBoolEnv("HOST_OBSERVATION_DNS", false),
 		},
 		Network: NetworkConfig{
 			Interfaces: getStringSliceEnv("NETWORK_INTERFACES", []string{"eth0"}),
@@ -578,6 +633,7 @@ func Load() *Config {
 			"certificate_analysis": getBoolEnv("FEATURE_CERTIFICATE_ANALYSIS", true),
 			"active_probing":       getBoolEnv("FEATURE_ACTIVE_PROBING", true),
 			"network_discovery":    getBoolEnv("FEATURE_NETWORK_DISCOVERY", true),
+			"host_observation":     getBoolEnv("FEATURE_HOST_OBSERVATION", true),
 			"air_gapped_export":    getBoolEnv("FEATURE_AIR_GAPPED_EXPORT", false),
 		},
 		TestMode: getBoolEnv("TEST_MODE", false),

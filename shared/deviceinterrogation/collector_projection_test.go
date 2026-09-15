@@ -3,10 +3,13 @@ package deviceinterrogation
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/vistasecurity/vistaplatform/shared/redact"
 )
 
 // Every collector that turns a vendor response into asset metadata must project
@@ -127,7 +130,7 @@ func TestIsSecretFieldName_FoldsSeparators(t *testing.T) {
 		"psk-secret", "psk_secret", "x-api-key", "x.api.key",
 		"admin-password", "shared-secret",
 	} {
-		if !isSecretFieldName(name) {
+		if !redact.IsSecretName(name) {
 			t.Errorf("field %q should be treated as secret material but was not", name)
 		}
 	}
@@ -136,12 +139,12 @@ func TestIsSecretFieldName_FoldsSeparators(t *testing.T) {
 	// spelled with underscores. Without folding these are false positives and we
 	// lose the public-key algorithm we are in business to report.
 	for _, name := range []string{"public-key", "public key", "Public-Key"} {
-		if isSecretFieldName(name) {
+		if redact.IsSecretName(name) {
 			t.Errorf("posture field %q was redacted; separator folding is not being applied", name)
 		}
 	}
 	for _, name := range []string{"key-size", "key-algorithm", "host-key-type"} {
-		if isSecretFieldName(name) {
+		if redact.IsSecretName(name) {
 			t.Errorf("posture field %q was redacted after separator folding", name)
 		}
 	}
@@ -177,5 +180,212 @@ func TestHTTPInterrogator_ProjectionIsWired(t *testing.T) {
 	}
 	if result.Assets[0].Metadata["subject"] != "CN=api.example.net" {
 		t.Errorf("certificate detail lost: %#v", result.Assets[0].Metadata)
+	}
+}
+
+// Every projection allowlist in this package, checked against the one predicate
+// that decides whether a field name is material.
+//
+// This is the layer the per-collector tests cannot reach. A collector that
+// builds its result entry field by field — fortinetInterfaces does, and so do
+// the UniFi projections — is already safe by construction, so widening its
+// allowlist with `psksecret` leaks nothing TODAY and no test notices. The leak
+// arrives later, when someone copies the projected map somewhere instead of
+// picking fields out of it, and by then the allowlist has carried a secret name
+// for months with a green suite behind it.
+//
+// redact.IsSecretName's own doc names this as its contract: "the one a caller
+// building its own projection allowlist should consult (ADR-0004 D4: every
+// allowlist widening reviews the new field names against this)." This is that
+// review, run by the machine.
+//
+// To mutation-test: add "psksecret" to fortinetInterfaceFields, or "passphrase"
+// to f5HardwareFields, and this fails.
+func TestProjectionAllowlists_NameNoSecretFields(t *testing.T) {
+	allowlists := map[string][]string{
+		"fortinetInterfaceFields":        fortinetInterfaceFields,
+		"fortinetMonitorInterfaceFields": fortinetMonitorInterfaceFields,
+		"fortinetRouteFields":            fortinetRouteFields,
+		"fortinetSSLVPNFields":           fortinetSSLVPNFields,
+		"fortinetIPSecTunnelFields":      fortinetIPSecTunnelFields,
+		"fortinetCertificateFields":      fortinetCertificateFields,
+		"fortinetSystemStatusFields":     fortinetSystemStatusFields,
+		"f5SystemVersionFields":          f5SystemVersionFields,
+		"f5HardwareFields":               f5HardwareFields,
+		"unifiDeviceInventoryFields":     unifiDeviceInventoryFields,
+		"unifiDeviceStructuredFields":    unifiDeviceStructuredFields,
+		"unifiPortFields":                unifiPortFields,
+		"unifiEthernetFields":            unifiEthernetFields,
+		"unifiLLDPFields":                unifiLLDPFields,
+		"unifiUplinkFields":              unifiUplinkFields,
+		"httpCertificateFields":          httpCertificateFields,
+	}
+
+	// A walker that checks nothing passes vacuously.
+	total := 0
+	for _, fields := range allowlists {
+		total += len(fields)
+	}
+	if len(allowlists) < 16 || total < 60 {
+		t.Fatalf("only %d allowlists / %d field names were checked; the test has stopped covering the package", len(allowlists), total)
+	}
+
+	for name, fields := range allowlists {
+		for _, field := range fields {
+			if redact.IsSecretName(field) {
+				t.Errorf("%s names %q, which redact.IsSecretName reads as secret material. An allowlist is the layer that decides what is COLLECTED; the backstop is not a licence to name a secret here.", name, field)
+			}
+		}
+	}
+}
+
+// --- the projections nothing observed -------------------------------------
+//
+// The tests above call a converter and assert the material is absent. That
+// catches a projection whose output is READ AS A WHOLE. It does not catch one
+// whose output is then picked apart field by field by its caller, because in
+// that shape removing the projection changes nothing any assertion can see —
+// the caller asks for `name` and `mac` and gets them either way.
+//
+// Three of this package's projections are in exactly that shape, and the gate-2
+// sweep found all three surviving a mutation that deleted them outright:
+// unifiProject (the nested device tables), projectFortinet over the interface
+// allowlists, and projectF5 over `sys/version`. "Safe by construction" is a true
+// statement about today's callers and a promise about nobody else's, and the
+// comments on those allowlists make the promise out loud.
+//
+// The tests below assert the promise itself: the OUTPUT of each projection
+// carries nothing but the names its allowlist lists. They fail when a
+// projection is widened — including with a field that is material without being
+// NAMED like one, which redact.IsSecretName cannot see and the allowlist-name
+// test below therefore cannot catch (`secondaryip` is the worked example: a
+// nested FortiOS table whose entries carry the PPPoE password).
+//
+// Where the projection is reached through a function these tests can call —
+// unifiTableEntries, f5Client.getSystemInfo — they also fail when it is
+// REMOVED. FortiOS is the one residual: projectFortinet is called inline inside
+// fortinetInterfaces, whose output is then built field by field, so deleting
+// the call changes nothing observable from outside. That is recorded rather
+// than papered over; the guard there is the bounded output plus the
+// allowlist-name test, and the leak it defends against arrives the day a caller
+// copies a projected entry instead of picking fields out of it.
+
+// assertKeysWithin fails when a projected object carries a key its allowlist
+// does not name.
+func assertKeysWithin(t *testing.T, label string, got map[string]interface{}, allow []string) {
+	t.Helper()
+	allowed := make(map[string]bool, len(allow))
+	for _, f := range allow {
+		allowed[f] = true
+	}
+	if len(got) == 0 {
+		t.Fatalf("%s: the projection returned nothing, so this proves nothing", label)
+	}
+	for key := range got {
+		if !allowed[key] {
+			t.Errorf("%s: projected key %q is not on its allowlist %v", label, key, allow)
+		}
+	}
+}
+
+// The UniFi nested device tables. Each entry of port_table / ethernet_table /
+// lldp_table is projected by unifiTableEntries, and the fixture carries the
+// x_-prefixed controller secrets and the unbounded `system_desc` banner that
+// projection exists to drop.
+func TestUnifiTableProjections_OutputIsBoundedByItsAllowlist(t *testing.T) {
+	device := unifiSwitchFixture()
+
+	for _, tc := range []struct {
+		table string
+		allow []string
+	}{
+		{"port_table", unifiPortFields},
+		{"ethernet_table", unifiEthernetFields},
+		{"lldp_table", unifiLLDPFields},
+	} {
+		entries := unifiTableEntries(device, tc.table)
+		if len(entries) == 0 {
+			t.Fatalf("%s: no entries projected; the fixture no longer exercises this table", tc.table)
+		}
+		assertNoPoison(t, "unifi "+tc.table, entries)
+		for i, entry := range entries {
+			assertKeysWithin(t, fmt.Sprintf("unifi %s[%d]", tc.table, i), entry, tc.allow)
+		}
+	}
+
+	// The uplink object is projected on its own, by unifiUplinkEdge.
+	uplink, ok := device["uplink"].(map[string]interface{})
+	if !ok {
+		t.Fatal("the fixture no longer carries an uplink object")
+	}
+	projected := unifiProject(uplink, unifiUplinkFields)
+	assertNoPoison(t, "unifi uplink", projected)
+	assertKeysWithin(t, "unifi uplink", projected, unifiUplinkFields)
+
+	// The fixture must really carry the material, or every assertion above is
+	// the absence of something that was never there.
+	blob, _ := json.Marshal(device)
+	if !strings.Contains(string(blob), poison) {
+		t.Fatal("the UniFi switch fixture no longer carries secret-shaped fields; this test now proves nothing")
+	}
+}
+
+// The FortiOS interface allowlists. `system/interface` is CONFIGURATION, and
+// the fixture carries the PPPoE password, the dialup psksecret and the nested
+// secondaryip table alongside the addressing we want.
+func TestFortinetInterfaceProjections_OutputIsBoundedByItsAllowlist(t *testing.T) {
+	configured := fortinetResultsFromJSON(t, fortinetInterfaceResponse)
+	running := fortinetMonitorResultsFromJSON(t, fortinetMonitorInterfaceResponse)
+	routes := fortinetResultsFromJSON(t, fortinetRouteResponse)
+
+	for i, raw := range configured {
+		projected := projectFortinet(raw, fortinetInterfaceFields)
+		assertNoPoison(t, fmt.Sprintf("fortinet cmdb interface[%d]", i), projected)
+		assertKeysWithin(t, fmt.Sprintf("fortinet cmdb interface[%d]", i), projected, fortinetInterfaceFields)
+	}
+	for i, raw := range running {
+		projected := projectFortinet(raw, fortinetMonitorInterfaceFields)
+		assertNoPoison(t, fmt.Sprintf("fortinet monitor interface[%d]", i), projected)
+		assertKeysWithin(t, fmt.Sprintf("fortinet monitor interface[%d]", i), projected, fortinetMonitorInterfaceFields)
+	}
+	// The route allowlist has ONE field, and what it projects is the customer's
+	// routing table. A widening here is the largest single leak in this package
+	// by volume.
+	for i, raw := range routes {
+		projected := projectFortinet(raw, fortinetRouteFields)
+		assertKeysWithin(t, fmt.Sprintf("fortinet route[%d]", i), projected, fortinetRouteFields)
+	}
+
+	if !strings.Contains(fortinetInterfaceResponse, poison) {
+		t.Fatal("the FortiOS interface fixture no longer carries secret-shaped fields; this test now proves nothing")
+	}
+}
+
+// F5 `sys/version`, read through the REAL client and BEFORE any redaction.
+//
+// This is the projection the gate-2 sweep found genuinely unguarded rather than
+// merely unobserved: its only test drove the interrogator through Registry.Get,
+// so Sanitize scrubbed `adminPassphrase` and `sslPrivateKey` by NAME and the
+// test stayed green with projectF5 deleted. The backstop is name-based, so a
+// vendor field that is sensitive without being named like one — a licence key
+// under `Title`, a support-contract id — would have reached DeviceInfo on every
+// F5 interrogation with nothing failing.
+func TestF5SystemVersionProjection_RunsBeforeAnyRedaction(t *testing.T) {
+	srv := newF5OpsTestServer(t)
+	defer srv.Close()
+	c := newF5Client(srv.URL, "admin", "admin", "", true)
+
+	info, err := c.getSystemInfo(context.Background())
+	if err != nil {
+		t.Fatalf("getSystemInfo: %v", err)
+	}
+
+	assertNoPoison(t, "f5 sys/version", info)
+	assertKeysWithin(t, "f5 sys/version", info, f5SystemVersionFields)
+	if info["Version"] != "17.1.1.3" || info["Product"] != "BIG-IP" {
+		t.Errorf("the version identity was lost by the projection: %#v", info)
+	}
+	if !strings.Contains(f5VersionResponse, poison) {
+		t.Fatal("the F5 sys/version fixture no longer carries secret-shaped fields; this test now proves nothing")
 	}
 }

@@ -74,9 +74,8 @@ func TestIntegration_Schema_MatviewsRebuildAndBandRiskScore(t *testing.T) {
 		id := uuid.New()
 		ids[a.host] = id
 		mustExec(t, db, `
-			INSERT INTO network_assets (id, tenant_id, location_id, hostname, ip_address, environment,
-			                            asset_type, asset_status, risk_score, last_seen_at, first_discovered_at, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,'production','server','monitoring',$6,NOW(),NOW(),NOW(),NOW())`,
+			INSERT INTO assets (id, tenant_id, location_id, hostname, primary_address, environment, class_key, class_path, asset_status, risk_score, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, 'production', 'server', 'hardware.computer.server', 'monitoring', $6, NOW(), NOW(), NOW(), NOW())`,
 			id, tenant, locationID, a.host, a.ip, a.score)
 	}
 

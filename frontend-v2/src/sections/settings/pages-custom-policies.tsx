@@ -68,14 +68,14 @@ function PolicyFormModal({ policy, onClose, mut }: { policy: TenantFramework | n
     setError(null);
     const body: TenantFrameworkInput = { name: name.trim(), version: version.trim(), description };
     const opts = { onSuccess: onClose, onError: (e: unknown) => setError(e instanceof Error ? e.message : 'Save failed') };
-    if (editing) mut.update.mutate({ id: policy!.id, body }, opts);
+    if (editing) mut.update.mutate({ id: policy.id, body }, opts);
     else mut.create.mutate(body, opts);
   };
 
   return (
     <Modal
       open onClose={onClose} icon="scroll-text" eyebrow="Custom policy"
-      title={editing ? `Edit — ${policy!.name}` : 'New custom policy'}
+      title={editing ? `Edit — ${policy.name}` : 'New custom policy'}
       description="A tenant-authored compliance framework. Add controls and measurement rules to make it evaluate your inventory."
       footerNote={error ?? 'Enterprise feature'}
       primary={<button className="ui-btn sm accent" disabled={invalid || saving} onClick={save}>{saving ? 'Saving…' : editing ? 'Save' : 'Create'}</button>}
@@ -186,7 +186,7 @@ export function CustomPoliciesPage({ meta }: { meta: SettingsNavItem }) {
                 </SCard>
                 {expanded && (
                   <div style={{ border: '1px solid var(--app-border)', borderTop: 'none', borderRadius: '0 0 10px 10px', background: 'var(--app-panel2)' }}>
-                    <CustomPolicyControls policyId={p.id} canManage={canManage} />
+                    <CustomPolicyControls policyId={p.id} policyName={p.name} canManage={canManage} />
                   </div>
                 )}
               </div>

@@ -36,8 +36,8 @@ func insertRollupAsset(t *testing.T, db *database.DB, tenant uuid.UUID, hostname
 	t.Helper()
 	id := uuid.New()
 	_, err := db.Exec(`
-		INSERT INTO network_assets (id, tenant_id, hostname, ip_address, asset_type, asset_status, created_at, updated_at)
-		VALUES ($1, $2, $3, '192.0.2.10'::inet, 'server', 'monitoring', NOW(), NOW())`,
+		INSERT INTO assets (id, tenant_id, hostname, primary_address, class_key, class_path, asset_status, created_at, updated_at)
+			VALUES ($1, $2, $3, '192.0.2.10'::inet, 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW())`,
 		id, tenant, hostname)
 	if err != nil {
 		t.Fatalf("insert asset: %v", err)

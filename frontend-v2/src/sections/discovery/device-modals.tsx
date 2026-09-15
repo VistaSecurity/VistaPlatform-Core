@@ -146,7 +146,14 @@ export function DeviceFormModal({ open, device, onClose }: {
   );
 }
 
-// ---- Delete device (danger confirm) --------------------------------------
+// ---- Unmanage (danger confirm) -------------------------------------------
+//
+// The copy says "stop managing", not "delete", because that is what the call
+// does: it removes the management configuration and its stored credentials. The
+// ASSET survives with every certificate and configuration ever discovered on
+// it — deleting an asset is an inventory action and lives on the asset page.
+// Saying "delete" here would make an operator think twice about a reversible
+// change, or worse, believe they had removed an asset they had not.
 export function DeviceDeleteModal({ open, device, onClose }: {
   open: boolean;
   device: Device | null;
@@ -157,7 +164,7 @@ export function DeviceDeleteModal({ open, device, onClose }: {
     mutationFn: async () => {
       if (!device) return;
       const { data, error } = await clients.devices.DELETE('/devices/{id}', { params: { path: { id: device.id } } });
-      if (error || !data) throw new Error('Failed to delete device');
+      if (error || !data) throw new Error('Failed to stop managing this asset');
       return data;
     },
     onSuccess: () => {
@@ -173,13 +180,13 @@ export function DeviceDeleteModal({ open, device, onClose }: {
       dismissible={!del.isPending}
       size="sm"
       tone="danger"
-      icon="x-circle"
+      icon="unplug"
       eyebrow="Discovery"
-      title="Delete device"
-      description={`Remove ${label} from interrogation? This cannot be undone.`}
+      title="Stop managing this asset?"
+      description={`${label} will no longer be interrogated, and its stored management credentials are removed. The asset itself stays in Inventory with everything already discovered about it — you can manage it again at any time.`}
       primary={
         <button className="ui-btn" style={{ background: 'var(--danger)', color: '#fff', borderColor: 'transparent' }} disabled={del.isPending} onClick={() => del.mutate()}>
-          {del.isPending ? 'Deleting…' : 'Delete'}
+          {del.isPending ? 'Removing…' : 'Stop managing'}
         </button>
       }
       secondary={<button className="ui-btn" onClick={onClose} disabled={del.isPending}>Cancel</button>}

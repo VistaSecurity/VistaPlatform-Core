@@ -27,7 +27,7 @@ editions:
     tagline: Free and source-available. One team securing its own estate.
     summary: >-
       Everything not listed as Enterprise or MSP below. Full discovery, the
-      complete crypto inventory and CMDB, compliance evaluation against the six
+      complete crypto inventory and CMDB, compliance evaluation against the
       free frameworks, CBOM generation and CycloneDX export, RBAC, local users
       and invitations, audit logging, RLS tenant isolation, the mTLS service
       mesh, and the sensor and agent source.
@@ -67,6 +67,7 @@ docs:
   billing_portal:      enterprise/features/billing-and-subscriptions.md
   custom_branding:     enterprise/features/custom-branding.md
   cmdb_sync:           core/features/cmdb-integrations.md
+  connector_netbox:    enterprise/integrations/netbox.md
   siem_export:         enterprise/features/siem-export.md
   ot_active_probing:   null   # see no_self_service below
   ot_primary_lens:     null   # see no_self_service below

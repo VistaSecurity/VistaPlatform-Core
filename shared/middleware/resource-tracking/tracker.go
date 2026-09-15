@@ -1,9 +1,9 @@
 package resourcetracking
 
 import (
-	"bytes"
 	"io"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -82,19 +82,36 @@ func (t *Tracker) Middleware() gin.HandlerFunc {
 		}
 		c.Writer = writer
 
-		// Capture request body size
-		requestSize := int64(0)
+		// Count the request body as the HANDLER reads it. Do not read it here.
+		//
+		// This used to io.ReadAll the body and hand the handler a NopCloser
+		// over the buffer. It runs as a global r.Use() ahead of every handler
+		// in six services — auth, admin, cbom, compliance-engine,
+		// inventory-service and sensor-manager — so every downstream
+		// http.MaxBytesReader was already too late: the SBOM upload's 32 MiB
+		// cap, the catalogue bundle's, /ask's and draft-controls' were all
+		// applied to a body that was already resident, and the real bound was
+		// the edge's 100 MiB per concurrent request.
+		//
+		// The audit middleware had the identical bug and the identical excuse
+		// ("capture the request body if needed"); fixing only that one left
+		// this one holding the door open, which is the shape of a fix that
+		// compiles, passes its test and does nothing in production.
+		//
+		// A counting wrapper measures the same quantity without holding it: the
+		// handler's own MaxBytesReader wraps THIS, so a refused upload is
+		// counted as the few bytes it actually cost rather than as the whole
+		// body somebody offered — which is also the more honest number for a
+		// usage meter.
+		counter := &countingBody{rc: c.Request.Body}
 		if c.Request.Body != nil {
-			bodyBytes, err := io.ReadAll(c.Request.Body)
-			if err == nil {
-				requestSize = int64(len(bodyBytes))
-				// Restore the request body
-				c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-			}
+			c.Request.Body = counter
 		}
 
 		// Process the request
 		c.Next()
+
+		requestSize := counter.count()
 
 		// Calculate metrics
 		duration := time.Since(start)
@@ -241,3 +258,40 @@ func Middleware(config *Config) gin.HandlerFunc {
 	tracker := NewTracker(config, nil)
 	return tracker.Middleware()
 }
+
+// countingBody tallies the bytes something pulls out of a request body without
+// holding any of them.
+//
+// It is deliberately transparent: Read and Close forward to the wrapped
+// ReadCloser and return its errors unchanged, so an http.MaxBytesReader a
+// handler wraps around this still trips at exactly its own cap, and a client
+// disconnect still surfaces as the error it is. A nil wrapped body counts zero
+// and reads EOF, which is what a GET has.
+//
+// count is read after c.Next() returns, but the tally is atomic anyway: a
+// handler is free to hand the body to a goroutine of its own, and a racing read
+// of a plain int64 is a race whether or not anyone has written one yet.
+type countingBody struct {
+	rc io.ReadCloser
+	n  int64
+}
+
+func (b *countingBody) Read(p []byte) (int, error) {
+	if b.rc == nil {
+		return 0, io.EOF
+	}
+	n, err := b.rc.Read(p)
+	if n > 0 {
+		atomic.AddInt64(&b.n, int64(n))
+	}
+	return n, err
+}
+
+func (b *countingBody) Close() error {
+	if b.rc == nil {
+		return nil
+	}
+	return b.rc.Close()
+}
+
+func (b *countingBody) count() int64 { return atomic.LoadInt64(&b.n) }
