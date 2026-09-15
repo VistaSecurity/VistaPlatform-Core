@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-09-14T10:13:53Z",
-  "generated_date": "2026-09-14",
+  "generated_at": "2026-09-15T09:43:09Z",
+  "generated_date": "2026-09-15",
   "registry": "ghcr.io/vistasecurity",
   "tag": "latest",
-  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/34831987394",
+  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/34953911767",
   "scanner": "trivy",
   "scope": {
     "severities": [
@@ -14,15 +14,20 @@
   },
   "totals": {
     "images_expected": 18,
-    "images_scanned": 17,
-    "images_not_scanned": 1,
+    "images_scanned": 18,
+    "images_not_scanned": 0,
     "critical": 0,
     "high": 6
   },
-  "not_scanned": [
-    "admin-service"
-  ],
+  "not_scanned": [],
   "images": [
+    {
+      "image": "admin-service",
+      "ref": "ghcr.io/vistasecurity/admin-service:latest",
+      "critical": 0,
+      "high": 0,
+      "findings": []
+    },
     {
       "image": "admin-ui",
       "ref": "ghcr.io/vistasecurity/admin-ui:latest",
@@ -53,7 +58,7 @@
           "package": "google.golang.org/grpc",
           "installed": "v1.82.1",
           "fixed": "1.82.2, 1.83.2, 1.85.0-dev.0.20260825072537-93e31b48545e",
-          "title": "gRPC-Go xDS servers: Denial of Service (DoS) via crash due to missing `:authority` and `Host` headers",
+          "title": "gRPC-Go is the Go language implementation of gRPC. Prior to 1.82.2 and ...",
           "target": "usr/bin/caddy"
         }
       ]
@@ -193,7 +198,7 @@
           "package": "google.golang.org/grpc",
           "installed": "v1.82.1",
           "fixed": "1.82.2, 1.83.2, 1.85.0-dev.0.20260825072537-93e31b48545e",
-          "title": "gRPC-Go xDS servers: Denial of Service (DoS) via crash due to missing `:authority` and `Host` headers",
+          "title": "gRPC-Go is the Go language implementation of gRPC. Prior to 1.82.2 and ...",
           "target": "usr/bin/caddy"
         }
       ]
