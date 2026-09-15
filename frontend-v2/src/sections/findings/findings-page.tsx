@@ -29,7 +29,7 @@ import { GroupBand, EmptyState, CatChip, ColLabel, Loading } from './bits';
 import { WorkflowActions } from './workflow';
 import { RemediationSection } from './remediation-draft';
 import { useBatchEvaluate, useCryptoRisks, useFindingsList, useFrameworkContext } from './queries';
-import { assetOf, catOf, findingCitation, isOpenWf, issueLabel, sevLevel, sevRank, subjectContext, targetLabel, wfOf, WF_COLOR, WF_LABEL, type ComplianceFinding, type ControlRef, type CryptoRisk } from './model';
+import { assetOf, catOf, findingCitation, isOpenWf, issueLabel, parseSeverityFilter, segOwnsSeverityAxis, sevLevel, sevRank, subjectContext, targetLabel, wfOf, WF_COLOR, WF_LABEL, type ComplianceFinding, type ControlRef, type CryptoRisk } from './model';
 import { classLabel } from '../inventory/asset-shape';
 import { DEFAULT_FINDINGS_LENS, isFindingsLens } from './lenses';
 import { FINDING_PRODUCERS } from '@vistasecurity/primitives/findings';
@@ -100,12 +100,45 @@ export function FindingsPage() {
     prm.delete('subject_id');
     return prm;
   }, { replace: true });
+
+  // The SEVERITY filter, in the URL and applied by the SERVER.
+  //
+  // The Dashboard's "Critical findings" tile links here through it. That tile
+  // counts one rung of the ladder and used to link at the bare lens, so clicking
+  // "40 critical findings" landed on a page listing every severity with nothing
+  // saying which forty were meant — the failure dashboard-metrics.ts names for
+  // the sibling tiles ("a tile that counts a subset must link to that subset")
+  // and could not avoid here until this parameter existed.
+  //
+  // Server-side, like the subject filter and the search box and for the same
+  // reason: this list is capped at five pages, so narrowing it in the browser
+  // would under-report a tenant whose Criticals sit past the cap.
+  //
+  // parseSeverityFilter, not params.get: an unrecognized rung would match
+  // nothing server-side and render an empty page indistinguishable from a clean
+  // estate. An unparseable value is treated as absent, banner included.
+  const severityF = parseSeverityFilter(params.get('severity'));
+  const clearSeverity = () => setParams((prm) => {
+    prm.delete('severity');
+    return prm;
+  }, { replace: true });
   const setProducerF = (key: string) => setParams((prm) => {
     if (key === 'All') prm.delete('producer'); else prm.set('producer', key);
     return prm;
   }, { replace: true });
 
   const [seg, setSeg] = useState<'open' | 'crit' | 'mine' | 'unassigned'>('open');
+  // `Critical + High` and `?severity=` are the SAME axis under two controls, so
+  // picking the chip drops the URL filter rather than intersecting with it.
+  // Left to intersect, arriving from the Dashboard's Critical tile and then
+  // clicking a chip labelled "Critical + High" would show Criticals only — a
+  // control that reads as applied and is not, which is the failure this page
+  // keeps being fixed for. The other three chips are workflow/assignee
+  // controls and leave the severity filter alone.
+  const selectSeg = (k: 'open' | 'crit' | 'mine' | 'unassigned') => {
+    setSeg(k);
+    if (segOwnsSeverityAxis(k) && severityF) clearSeverity();
+  };
   const [catF, setCatF] = useState('All');
   // Seeded from `?q=`, so a link that cannot name a single subject — a
   // catalogue row is installed on N assets and the producers write one finding
@@ -140,7 +173,7 @@ export function FindingsPage() {
   // The server applies the producer filter, so `total` and the facet counts
   // describe the same set the rows come from. Filtering client-side instead
   // would be correct only until a tenant exceeded the page cap.
-  const listQ = useFindingsList(findingsLens, producerF === 'All' ? undefined : producerF, subject, dq);
+  const listQ = useFindingsList(findingsLens, producerF === 'All' ? undefined : producerF, subject, dq, severityF ?? undefined);
   // The #H-4b fallback that used to resolve names for published-but-unlicensed
   // frameworks is gone with the finding leak it existed to make legible: the
   // backend now gates findings to activated frameworks (licensedFindingScopeSQL),
@@ -442,12 +475,12 @@ export function FindingsPage() {
           {findingsLens ? 'Platform findings' : 'Crypto findings'}
         </Pill>
         {!findingsLens && ([['open', 'Open'], ['crit', 'Critical + High']] as const).map(([k, l]) => (
-          <button key={k} onClick={() => setSeg(k)} className={'chip' + (seg === k ? ' active' : '')}>
+          <button key={k} onClick={() => selectSeg(k)} className={'chip' + (seg === k ? ' active' : '')}>
             {l}<span className="mono" style={{ marginLeft: 5, opacity: 0.7 }}>{counts[k]}</span>
           </button>
         ))}
         {findingsLens && ([['open', 'Open'], ['crit', 'Critical + High'], ['mine', 'Mine'], ['unassigned', 'Unassigned']] as const).map(([k, l]) => (
-          <button key={k} onClick={() => setSeg(k)} className={'chip' + (seg === k ? ' active' : '')}>
+          <button key={k} onClick={() => selectSeg(k)} className={'chip' + (seg === k ? ' active' : '')}>
             {l}<span className="mono" style={{ marginLeft: 5, opacity: 0.7 }}>{cCounts[k]}</span>
           </button>
         ))}
@@ -521,6 +554,24 @@ export function FindingsPage() {
           </span>
           <button className="ui-btn sm" style={{ marginLeft: 'auto' }} onClick={clearSubject}>
             Show all findings
+          </button>
+        </div>
+      )}
+
+      {/* The severity filter, said out loud — same rule as the subject banner
+          above. This one almost always arrives from a LINK (the Dashboard's
+          "Critical findings" tile), so it is a narrowing the reader never chose
+          and has no other way to see: the producer chips and the seg chips all
+          still render, and without this the page looks like the whole stream
+          with a suspiciously short list. Both a label and a way out. */}
+      {severityF && (
+        <div data-testid="findings-severity-filter" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 24px', borderBottom: '1px solid var(--app-border)', fontSize: 12, color: 'var(--app-t2)', background: 'var(--app-panel2)' }}>
+          <Icon name="filter" size={13} style={{ flex: 'none', color: 'var(--accent)' }} />
+          <span>
+            Showing <strong>{sevLevel(severityF)}</strong> findings only.
+          </span>
+          <button className="ui-btn sm" style={{ marginLeft: 'auto' }} onClick={clearSeverity}>
+            Show all severities
           </button>
         </div>
       )}

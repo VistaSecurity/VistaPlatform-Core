@@ -3506,12 +3506,18 @@ ON CONFLICT (code) DO NOTHING;
 -- ── Part 1: new algorithms ──────────────────────────────────────────────────
 
 -- EdDSA signatures (SSH host/user keys, TLS 1.3 certs, code signing)
+--
+-- Ed25519 is NOT seeded here. The SSH block above already carries it as
+-- 'Ed25519' (the RFC 8410 / crypto/x509 spelling), and this block used to add
+-- a second row spelled 'ED25519'. `algorithms.code` is unique only
+-- case-sensitively, so both rows existed at once, and every lookup in the
+-- platform is case-insensitive (the crypto producer's UPPER(code), the
+-- classifier's lower-cased map, the key producer's ILIKE) — which of the two
+-- answered was whichever the scan returned last. Part 5 below merges the
+-- duplicate away; do not re-add it.
 INSERT INTO algorithms (code, category, name, description, strength, deprecation_status, risk_score,
     recommended_alternatives, migration_guidance, compliance_mappings, is_standard,
     algorithm_family, primitive, oid, crypto_functions, classical_security_level, nist_quantum_security_level, curve) VALUES
-('ED25519', 'signature', 'Ed25519', 'Edwards-curve Digital Signature Algorithm over Curve25519 (RFC 8032). Widely used for SSH host/user keys, TLS 1.3 certificates and code signing.', 'strong', 'current', 15,
-    ARRAY['ML-DSA-65'], 'Strong classical signature; not quantum-resistant. Plan migration to ML-DSA (FIPS 204) for post-quantum assurance.', '{"NIST": "approved", "FIPS": "186-5"}'::jsonb, true,
-    'EdDSA', 'signature', '1.3.101.112', ARRAY['keygen','sign','verify'], 128, 0, 'Ed25519'),
 ('ED448', 'signature', 'Ed448', 'Edwards-curve Digital Signature Algorithm over Curve448 (RFC 8032). Higher security margin than Ed25519.', 'strong', 'current', 12,
     ARRAY['ML-DSA-87'], 'Strong classical signature; not quantum-resistant. Plan migration to ML-DSA (FIPS 204).', '{"NIST": "approved", "FIPS": "186-5"}'::jsonb, true,
     'EdDSA', 'signature', '1.3.101.113', ARRAY['keygen','sign','verify'], 224, 0, 'Ed448')
@@ -3725,6 +3731,122 @@ EXCEPTION WHEN foreign_key_violation THEN
            description = 'Cipher Block Chaining is a block-cipher MODE, not an algorithm. Retained only because existing rows reference it; it carries no assessment of its own — the cipher and the cipher suite do.'
      WHERE code = 'CBC';
 END $$;
+
+-- ============================================================================
+-- ALGORITHM CATALOGUE — Part 5: the public-key families a certificate names
+-- ============================================================================
+-- Re-runnable. A certificate's `public_key_algorithm` is the bare family name
+-- as crypto/x509 spells it — "RSA", "ECDSA", "Ed25519", "DSA" — and the crypto
+-- finding producer resolves it against `algorithms.code` to decide whether the
+-- certificate's key is Shor-breakable (NIST IR 8547) and how the catalogue
+-- rates it. RSA resolves through its sized rows (RSA-2048 …), DSA and Ed25519
+-- through their bare rows. ECDSA had NO bare row: the catalogue carried the
+-- signature+hash pairings (ECDSA-SHA256/384/512, ECDSA-SHA1) and the SSH host
+-- key names (ecdsa-sha2-nistp*), none of which is an assessment of an EC public
+-- key as such — a P-256 key can sign with SHA-384 — so an ECDSA certificate
+-- resolved to nothing, was left UNCLASSIFIED and raised no pqc_vulnerable
+-- finding at all. On the RC-verification tenant that was 16 RSA certificates
+-- with 16 findings beside 6 ECDSA certificates with none, and the same six keys
+-- in the key inventory with no algorithm (the key producer looks the same code
+-- up). ECDSA is on the same NIST IR 8547 deprecation clock as RSA.
+--
+-- This is the bare family row, the counterpart of `DSA`: an assessment of the
+-- algorithm itself (FIPS 186-5 approved; strong; every curve of it
+-- Shor-breakable), true of an ECDSA key on any curve. The curve's size is
+-- judged separately by the key-size floor (SP 800-131A), the way RSA's modulus
+-- is, and classical_security_level is left NULL because the curve sets it, not
+-- the code. The OID is id-ecPublicKey — the SubjectPublicKeyInfo algorithm
+-- identifier an EC certificate actually carries — not any of the per-hash
+-- signature OIDs.
+--
+-- Side effect, deliberate: the cipher-suite parsers emit "ECDSA" as the
+-- signature component of every TLS_ECDHE_ECDSA_* suite, and with no exact row
+-- that component substring-matched every ECDSA-* row, was called ambiguous and
+-- left unlinked. It now links here.
+INSERT INTO algorithms (code, category, name, description, strength, deprecation_status, risk_score,
+    recommended_alternatives, migration_guidance, compliance_mappings, is_standard,
+    algorithm_family, primitive, oid, crypto_functions, nist_quantum_security_level) VALUES
+('ECDSA', 'signature', 'ECDSA', 'Elliptic Curve Digital Signature Algorithm (FIPS 186-5), independent of curve and hash. The public-key algorithm of an EC certificate (id-ecPublicKey) and the authentication half of the TLS_ECDHE_ECDSA_* suites.', 'strong', 'current', 15,
+    ARRAY['ML-DSA-65'], 'Strong classical signature on an approved curve of at least 224 bits; not quantum-resistant — Shor breaks every curve (NIST IR 8547: deprecated after 2030, disallowed after 2035). Plan migration to ML-DSA (FIPS 204).', '{"NIST": "approved", "FIPS": "186-5", "PCI-DSS": "compliant"}'::jsonb, true,
+    'ECDSA', 'signature', '1.2.840.10045.2.1', ARRAY['keygen','sign','verify'], 0)
+ON CONFLICT (code) DO NOTHING;
+
+-- Keys the key producer wrote before the row existed carry no algorithm. The
+-- producer's upsert only fills algorithm_id on the next observation of the same
+-- certificate, so backfill the ones already there. Runs as the table owner
+-- (crypto_user), which RLS does not bind, so this reaches every tenant's rows.
+UPDATE keys
+   SET algorithm_id = (SELECT id FROM algorithms WHERE code = 'ECDSA')
+ WHERE algorithm_id IS NULL
+   AND UPPER(key_type) IN ('ECDSA', 'EC');
+
+-- Ed25519: ONE row, spelled 'Ed25519'.
+--
+-- Two rows existed — 'Ed25519' (the SSH block's protocol-independent row, risk
+-- 10, no OID) and 'ED25519' (Part 1's, risk 15, OID 1.3.101.112). The unique
+-- constraint on `code` is case-sensitive; every lookup is not. The crypto
+-- producer keys its map by UPPER(code) and kept whichever row the scan returned
+-- last, the classifier keys its map by lower-case code the same way, and the
+-- key producer's `ILIKE ... ORDER BY code LIMIT 1` picked by collation — three
+-- readers, and none could say which of two different risk scores an Ed25519
+-- certificate would get. The kept spelling is the one crypto/x509 and RFC 8410
+-- use and the one the key producer names; it keeps its risk score (10, in line
+-- with ssh-ed25519) and takes over the retired row's OID, alternatives and
+-- guidance. The retired row's references are re-pointed before it is deleted,
+-- because keys.algorithm_id and crypto_applications.algorithm_id have no ON
+-- DELETE action and a bare DELETE would fail — silently, since the seed runs
+-- without ON_ERROR_STOP — and leave the duplicate in place.
+UPDATE algorithms SET
+    oid = COALESCE(oid, '1.3.101.112'),
+    recommended_alternatives = CASE WHEN COALESCE(array_length(recommended_alternatives, 1), 0) = 0 THEN ARRAY['ML-DSA-65'] ELSE recommended_alternatives END,
+    migration_guidance = COALESCE(migration_guidance, 'Strong classical signature; not quantum-resistant. Plan migration to ML-DSA (FIPS 204) for post-quantum assurance.'),
+    compliance_mappings = COALESCE(compliance_mappings, '{}'::jsonb) || '{"FIPS": "186-5"}'::jsonb,
+    crypto_functions = CASE WHEN crypto_functions @> ARRAY['keygen'] THEN crypto_functions ELSE ARRAY['keygen'] || COALESCE(crypto_functions, ARRAY['sign','verify']) END,
+    nist_quantum_security_level = COALESCE(nist_quantum_security_level, 0)
+WHERE code = 'Ed25519';
+
+-- BEGIN: ed25519-dedupe (the block a test executes verbatim; keep the markers)
+DO $$
+DECLARE
+    keep uuid;
+    retire uuid;
+BEGIN
+    SELECT id INTO keep   FROM algorithms WHERE code = 'Ed25519';
+    SELECT id INTO retire FROM algorithms WHERE code = 'ED25519';
+    IF keep IS NULL OR retire IS NULL THEN
+        RETURN;
+    END IF;
+
+    -- Junctions with a uniqueness constraint over algorithm_id: drop the
+    -- retired row's link where the kept row is already linked, then move the
+    -- rest.
+    DELETE FROM crypto_implementation_algorithms r
+     WHERE r.algorithm_id = retire
+       AND EXISTS (SELECT 1 FROM crypto_implementation_algorithms k
+                    WHERE k.crypto_implementation_id = r.crypto_implementation_id
+                      AND k.algorithm_type = r.algorithm_type
+                      AND k.algorithm_id = keep);
+    UPDATE crypto_implementation_algorithms SET algorithm_id = keep WHERE algorithm_id = retire;
+
+    DELETE FROM library_provided_algorithms r
+     WHERE r.algorithm_id = retire
+       AND EXISTS (SELECT 1 FROM library_provided_algorithms k
+                    WHERE k.library_id = r.library_id AND k.algorithm_id = keep);
+    UPDATE library_provided_algorithms SET algorithm_id = keep WHERE algorithm_id = retire;
+
+    -- Plain references.
+    UPDATE keys SET algorithm_id = keep WHERE algorithm_id = retire;
+    UPDATE keys SET secured_by_algorithm_id = keep WHERE secured_by_algorithm_id = retire;
+    UPDATE crypto_applications SET algorithm_id = keep WHERE algorithm_id = retire;
+    UPDATE kms_keys SET algorithm_id = keep WHERE algorithm_id = retire;
+    UPDATE ssh_keys SET algorithm_id = keep WHERE algorithm_id = retire;
+    UPDATE database_encryption_states SET encryption_algorithm_id = keep WHERE encryption_algorithm_id = retire;
+    UPDATE database_encryption_states SET password_algorithm_id = keep WHERE password_algorithm_id = retire;
+    UPDATE database_encryption_states SET ssl_algorithm_id = keep WHERE ssl_algorithm_id = retire;
+
+    DELETE FROM algorithms WHERE id = retire;
+END $$;
+-- END: ed25519-dedupe
 
 
 -- =================================================================

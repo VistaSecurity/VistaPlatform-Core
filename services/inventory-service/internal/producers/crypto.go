@@ -56,9 +56,12 @@ import (
 // clean; it has not been judged. It raises no finding — and it also does not,
 // on its own, make its asset "assessed by crypto". Coverage is claimed only for
 // an asset where something actually resolved: at least one catalogue component
-// on one of its configurations, or a certificate carrying enough to measure.
-// Marking generously is the failure mode here, because an over-claimed asset
-// reads "assessed clean" and is silent about it.
+// on one of its configurations, a certificate or key carrying enough to
+// measure, or a subject this pass CLASSIFIED for post-quantum vulnerability
+// (that finding feeds risk, so the asset must not be scored by a producer whose
+// coverage record says it never looked). Marking generously is the failure mode
+// here, because an over-claimed asset reads "assessed clean" and is silent
+// about it.
 type CryptoProducer struct {
 	repo   *pgidentity.Repository
 	writer *producer.Writer
@@ -91,10 +94,11 @@ type CryptoRun struct {
 	Keys           int
 	// Assessed is how many assets the pass claimed coverage of, and
 	// Unassessable how many it read but could not judge — no catalogue
-	// component on any configuration and no measurable certificate. The two are
-	// reported separately because "this tenant has no crypto risk" and "nothing
-	// about this tenant's crypto could be assessed" are different answers and
-	// only one of them is reassuring.
+	// component on any configuration, and no certificate or key that could
+	// either be scored or classified. The two are reported separately because
+	// "this tenant has no crypto risk" and "nothing about this tenant's crypto
+	// could be assessed" are different answers and only one of them is
+	// reassuring.
 	Assessed      int
 	Unassessable  int
 	PQCVulnerable int
@@ -138,6 +142,13 @@ type certSubject struct {
 	keyBits   int
 	sigAlg    string
 	catalogue []catalogueHit
+
+	// keyFamily is the taxonomy of the PUBLIC KEY's family, resolved from
+	// `algorithms.algorithm_family` independently of the rows above. It answers
+	// "is this key classically asymmetric?" for a key whose size or spelling
+	// the catalogue carries no row for, and it feeds NOTHING but the PQC
+	// classification — see [familyTaxonomy].
+	keyFamily familyTaxonomy
 }
 
 // keySubject is one row of the cryptographic-key inventory and the catalogue
@@ -164,27 +175,47 @@ type keySubject struct {
 	sizeBits int
 
 	// The catalogue row keys.algorithm_id points at. Empty code means the key
-	// resolved to nothing: UNCLASSIFIED, never assumed safe, no finding, and no
-	// coverage claimed for it.
+	// resolved to nothing — which for the key inventory is the COMMON case, not
+	// an exotic one: key_producer.go resolves an RSA key through its sized code
+	// and leaves an unsized one unresolved, and the bare "ECDSA" it stores for
+	// an EC key matches no catalogue code at all. Unresolved means UNSCORED and
+	// unclassified by the row, never assumed safe.
 	catalogue catalogueHit
+
+	// family is the taxonomy of the key's own family, resolved independently of
+	// the row above, for exactly the certificate case: a key nothing could size
+	// or spell is still RSA, and RSA is still Shor-breakable. See
+	// [familyTaxonomy].
+	family familyTaxonomy
 }
 
 // pqcVulnerableCode names the key's classical asymmetric algorithm, or "".
 //
-// Same denylist as the configuration and certificate classifiers —
-// cryptoassess.QuantumVulnerablePrimitives, which is a DENYLIST on purpose
-// (pqc_readiness.go: an allowlist silently treats everything it forgot as
-// needing migration, and the previous {ae, hash, mac} allowlist misclassified
-// plain AES). A key whose algorithm resolves to no catalogue row, or to one with
-// no primitive, is unclassified and raises nothing.
+// Two resolutions, in order, and the second is the point of it:
+//
+//  1. the catalogue ROW `keys.algorithm_id` points at, under the denylist in
+//     [primitiveIsQuantumVulnerable];
+//  2. failing that, the key's own FAMILY, under the same denylist.
+//
+// The fallback exists because a missing row is the normal case here rather than
+// a curiosity. key_producer.go resolves an RSA key through its sized code
+// (RSA-2048), so an RSA key whose modulus the catalogue does not carry — or
+// whose size could not be read at all — points at nothing; and the bare
+// "ECDSA" it stores for an EC key matches no catalogue code, because the
+// catalogue spells ECDSA only in hash-named variants. Both are unmistakably
+// Shor-breakable, and before the family fallback both raised nothing.
+//
+// Row FIRST, so a key that resolved cites the row it resolved to and the
+// evidence keeps naming the precise algorithm wherever one is known.
 func (k keySubject) pqcVulnerableCode() string {
-	if k.catalogue.Code == "" || k.catalogue.IsPQC || k.catalogue.Primitive == "" {
-		return ""
-	}
-	for _, vuln := range cryptoassess.QuantumVulnerablePrimitives {
-		if k.catalogue.Primitive == vuln {
+	if k.catalogue.Code != "" {
+		if !k.catalogue.IsPQC && primitiveIsQuantumVulnerable(k.catalogue.Primitive) {
 			return k.catalogue.Code
 		}
+		return ""
+	}
+	if k.family.Vulnerable {
+		return k.family.Family
 	}
 	return ""
 }
@@ -193,6 +224,11 @@ func (k keySubject) pqcVulnerableCode() string {
 // is whether its algorithm resolved to a catalogue row. A key whose algorithm
 // is a string nothing recognises contributes NO coverage: "we could not tell"
 // must not be recorded as "we checked".
+//
+// A family verdict is deliberately NOT measurable. Knowing a key is RSA is not
+// knowing what its modulus is worth, and the key inventory has no score of its
+// own to offer besides. Where a family verdict does raise a pqc_vulnerable
+// finding, coverage follows the finding rather than this — see judge.
 func (k keySubject) measurable() bool { return k.catalogue.Code != "" }
 
 func (k keySubject) evidence(code string) map[string]any {
@@ -218,6 +254,86 @@ type catalogueHit struct {
 	DeprecationStatus string `json:"deprecation_status"`
 	Primitive         string `json:"primitive"`
 	IsPQC             bool   `json:"is_pqc"`
+
+	// Category is `algorithms.category`, read but NOT published in the
+	// evidence: it is used to decide whether a bare family row may answer for
+	// a certified public key (see sizedPublicKeyCode and the fallback in
+	// resolveCertificateAlgorithms), and the evidence shape is what the
+	// Findings inspector renders, so it stays as it was.
+	Category string `json:"-"`
+}
+
+// catalogueCategoryKeyExchange is the `algorithms.category` of a row that
+// assesses a NEGOTIATED key-exchange mechanism rather than a certified key.
+//
+// The bare `RSA`, `DH` and `ECDH` rows all carry it, and all three are named
+// for the mechanism ("RSA key transport (static)", "Diffie-Hellman (static)")
+// — they are the rows a TLS_* suite links in the key_exchange role, and none
+// of them is an assessment of a certificate's public key. The bare `DSA` row,
+// by contrast, is category `signature`: it assesses the algorithm itself
+// (signature generation withdrawn in FIPS 186-5), which is a true statement
+// about a DSA public key of any size.
+const catalogueCategoryKeyExchange = "key_exchange"
+
+// certFieldPublicKey is the `catalogueHit.Field` of a row a certificate's
+// PUBLIC KEY resolved to, as opposed to its signature algorithm. The
+// certificate's evidence already spells it this way, and the PQC classifier
+// has to tell the two apart: a family verdict answers for a key the catalogue
+// could not size or spell, and must not fire when the key resolved on its own.
+const certFieldPublicKey = "public_key_algorithm"
+
+// familyTaxonomy is what the catalogue knows about an algorithm FAMILY, as
+// opposed to what it knows about the one row a particular spelling resolved to.
+//
+// It exists because those are two different questions and only one of them can
+// be answered by an exact-code lookup. "How risky is this key?" is a property
+// of the SIZE, and the catalogue answers it with a sized row or not at all —
+// RSA-1536 and RSA-8192 have no row, and borrowing the bare `RSA` row is the
+// key-transport mis-assessment sizedPublicKeyCode exists to stop. "Is this key
+// Shor-breakable?" is a property of the FAMILY, is true of RSA at every
+// modulus and of ECDSA on every curve, and the catalogue already states it on
+// every sized row in `algorithm_family` + `primitive`.
+//
+// Deriving both from the same row conflated them: after the sizing fix an
+// RSA-8192 certificate raised no pqc_vulnerable finding at all, and an ECDSA
+// certificate never had — `public_key_algorithm` is the bare string "ECDSA"
+// and the catalogue carries no bare `ECDSA` code, only ECDSA-SHA256 and its
+// siblings. Both dropped out of the migration queue for want of a row, not for
+// want of a judgement.
+//
+// A family verdict is NOT a score. It contributes nothing to
+// [certSubject.assess] and cannot make a certificate `measurable` — "we know
+// this is RSA" is not "we know what this modulus is worth", and recording it as
+// a measurement would claim an assessment that did not happen. It does count as
+// coverage where a pqc_vulnerable finding is raised from it, because that
+// finding feeds risk: see the coverage rule in judge.
+type familyTaxonomy struct {
+	// Family is `algorithms.algorithm_family`, in the catalogue's own spelling
+	// — it is what the finding cites.
+	Family string
+	// Vulnerable is whether some non-PQC row in the family carries a
+	// Shor-breakable primitive. Same precedence as
+	// [cryptoassess.PQCClassCTE]'s `vulnerable`, over the same denylist: ANY
+	// such row makes the family classically asymmetric.
+	Vulnerable bool
+}
+
+// primitiveIsQuantumVulnerable applies the denylist, and is the only place any
+// classifier in this file does.
+//
+// A DENYLIST, not an allowlist, for the reason `pqc_readiness.go` records: an
+// allowlist silently treats everything it forgot as needing migration, and the
+// previous {ae, hash, mac} allowlist misclassified plain AES128 and AES256.
+func primitiveIsQuantumVulnerable(primitive string) bool {
+	if primitive == "" {
+		return false
+	}
+	for _, vuln := range cryptoassess.QuantumVulnerablePrimitives {
+		if primitive == vuln {
+			return true
+		}
+	}
+	return false
 }
 
 // Run executes one pass over one tenant.
@@ -386,7 +502,10 @@ func (p *CryptoProducer) read(ctx context.Context, tenantID uuid.UUID) ([]config
 		// The catalogue resolution is an exact match on `algorithms.code`, in
 		// upper case, against the raw string and against
 		// cryptoparse.NormalizeComponentCode's fold of it — the first two steps
-		// AlgorithmService.ClassifyAlgorithm takes, over the same table. Its
+		// AlgorithmService.ClassifyAlgorithm takes, over the same table — except
+		// for a finite-field public key, which resolves through its SIZED code
+		// (`RSA-2048`) first and falls back to the bare row only when that row
+		// is not a key-exchange mechanism; see sizedPublicKeyCode. Its
 		// third step (unambiguous substring) is deliberately NOT reproduced:
 		// "md5WithRSAEncryption" matches both MD5 and RSA, which that rule calls
 		// ambiguous and declines to resolve, and a certificate signed with MD5
@@ -515,7 +634,16 @@ func (p *CryptoProducer) read(ctx context.Context, tenantID uuid.UUID) ([]config
 		}
 
 		certs, err = p.resolveCertificateAlgorithms(ctx, tx, certs)
-		return err
+		if err != nil {
+			return err
+		}
+		// The FAMILY taxonomy, for certificates and keys together — a second
+		// resolution over the same catalogue, deliberately not folded into the
+		// first. What a family says and what a sized row says are different
+		// statements about different subjects, and deriving both from one row
+		// is what left an RSA-8192 certificate and every ECDSA one out of the
+		// quantum-migration queue.
+		return p.resolveFamilyTaxonomy(ctx, tx, certs, keys)
 	})
 	if err != nil {
 		return nil, nil, nil, err
@@ -541,7 +669,13 @@ func (p *CryptoProducer) resolveCertificateAlgorithms(ctx context.Context, tx *s
 		}
 	}
 	for _, c := range certs {
+		// Both spellings for a sized family: the sized code answers, and the
+		// bare row is still needed because it is the fallback for a family the
+		// catalogue does not size (DSA) — see the resolution loop below.
 		add(c.keyAlg)
+		if sized := sizedPublicKeyCode(c.keyAlg, c.keyBits); sized != "" {
+			needles[sized] = true
+		}
 		add(c.sigAlg)
 	}
 	if len(needles) == 0 {
@@ -552,9 +686,17 @@ func (p *CryptoProducer) resolveCertificateAlgorithms(ctx context.Context, tx *s
 		list = append(list, n)
 	}
 
+	// Keyed by UPPER(code), so the catalogue must be case-unique: `code` is
+	// UNIQUE only case-sensitively, and two rows folding to one key would leave
+	// whichever the scan returned last as the verdict. 'Ed25519' and 'ED25519'
+	// were exactly that — different risk scores, and nothing to say which one
+	// an Ed25519 certificate got — until seed.sql merged them; the catalogue
+	// consistency test (TestIntegration_AlgorithmCatalogue_IsInternallyConsistent)
+	// now fails on any such pair.
 	rows, err := tx.QueryContext(ctx, `
 		SELECT UPPER(code), code, COALESCE(risk_score, 0), COALESCE(strength, ''),
-		       COALESCE(deprecation_status, ''), COALESCE(primitive, ''), COALESCE(is_pqc, false)
+		       COALESCE(deprecation_status, ''), COALESCE(primitive, ''), COALESCE(is_pqc, false),
+		       COALESCE(category, '')
 		FROM algorithms
 		WHERE UPPER(code) = ANY($1::text[])`, pq.Array(list))
 	if err != nil {
@@ -566,7 +708,7 @@ func (p *CryptoProducer) resolveCertificateAlgorithms(ctx context.Context, tx *s
 	for rows.Next() {
 		var upper string
 		var h catalogueHit
-		if err := rows.Scan(&upper, &h.Code, &h.RiskScore, &h.Strength, &h.DeprecationStatus, &h.Primitive, &h.IsPQC); err != nil {
+		if err := rows.Scan(&upper, &h.Code, &h.RiskScore, &h.Strength, &h.DeprecationStatus, &h.Primitive, &h.IsPQC, &h.Category); err != nil {
 			return nil, fmt.Errorf("scan algorithm: %w", err)
 		}
 		byCode[upper] = h
@@ -592,7 +734,26 @@ func (p *CryptoProducer) resolveCertificateAlgorithms(ctx context.Context, tx *s
 	}
 
 	for i := range certs {
-		if h, ok := lookup("public_key_algorithm", certs[i].keyAlg); ok {
+		if sized := sizedPublicKeyCode(certs[i].keyAlg, certs[i].keyBits); sized != "" {
+			// The sized row when the catalogue carries one. See
+			// sizedPublicKeyCode for why the bare row is usually the wrong
+			// answer for a sized family.
+			if h, ok := byCode[sized]; ok {
+				h.Field, h.Observed = certFieldPublicKey, certs[i].keyAlg
+				certs[i].catalogue = append(certs[i].catalogue, h)
+			} else if h, ok := lookup(certFieldPublicKey, certs[i].keyAlg); ok && h.Category != catalogueCategoryKeyExchange {
+				// No sized row: the bare family row answers, UNLESS it is a
+				// key-exchange row — which is the one this change exists to
+				// stop borrowing. The catalogue sizes RSA (RSA-1024 …
+				// RSA-4096) and does not size DSA, so in practice this is the
+				// DSA path: `DSA` is a `signature` row that assesses the
+				// algorithm itself (withdrawn for signing in FIPS 186-5) and
+				// is true of a DSA key of ANY size, while an uncatalogued RSA
+				// size still gets no verdict for its key because the only row
+				// left is the static key-transport one.
+				certs[i].catalogue = append(certs[i].catalogue, h)
+			}
+		} else if h, ok := lookup(certFieldPublicKey, certs[i].keyAlg); ok {
 			certs[i].catalogue = append(certs[i].catalogue, h)
 		}
 		if h, ok := lookup("signature_algorithm", certs[i].sigAlg); ok {
@@ -600,6 +761,143 @@ func (p *CryptoProducer) resolveCertificateAlgorithms(ctx context.Context, tx *s
 		}
 	}
 	return certs, nil
+}
+
+// sizedPublicKeyCode is the catalogue code a certificate's public key resolves
+// through when its family is measured by modulus size, or "" when the bare
+// family name is the right lookup.
+//
+// A certificate's `public_key_algorithm` is a bare family name — "RSA", as
+// crypto/x509 spells it — and the catalogue row with that exact code is
+// `RSA key transport (static)`: the TLS key-EXCHANGE assessment (weak,
+// deprecated, risk 70; the row a TLS_RSA_WITH_* suite links in the
+// key_exchange role). It is not an assessment of an RSA public key at all.
+// Resolving the bare string against it scored EVERY RSA certificate 70,
+// whatever its modulus: an RSA-4096 root CA read as High, and because every
+// host chains to its CA, so did every host in the estate — the RC-verification
+// dataset reported 20/20 assets High with 18 of them carrying nothing above Low
+// in their own configurations.
+//
+// The catalogue already holds the rows that DO assess a public key —
+// RSA-1024 / 2048 / 3072 / 4096 — and key_producer.go's algorithmCodeForKey
+// already resolves the key inventory through them. This is the same rule
+// applied to the certificate. For a finite-field family the size IS the
+// security parameter (SP 800-131A), so a sized code is the first code asked
+// for.
+//
+// When the catalogue has no row for that size, the bare family row is the
+// fallback — but only when it is not a key-exchange row, which is the
+// discrimination the resolution loop makes and the reason this function is not
+// the whole rule. The catalogue sizes RSA and does NOT size DSA, so the two
+// halves land where they should: an uncatalogued RSA size (RSA-1536,
+// RSA-8192) gets no catalogue verdict for its key, because the only row left
+// is the static key-transport one, while a DSA key of any size keeps the bare
+// `DSA` row — a `signature` row that assesses the algorithm itself (signature
+// generation withdrawn in FIPS 186-5) and is therefore a true statement about
+// the key. Dropping it as well took a DSA-2048 certificate from High to no
+// finding at all.
+//
+// For the uncatalogued RSA sizes the key-size floor in assess() still judges
+// the modulus, so a below-floor key is reported either way, and an
+// uncatalogued healthy size is assessed clean rather than lent a verdict from
+// another row. The key producer leaves RSA-1536 unclassified for the same
+// reason.
+//
+// Elliptic-curve and post-quantum keys are not sized this way (256-bit EC is a
+// curve, not a modulus) and keep the bare lookup. That lookup must have a row
+// to land on: `ECDSA` and `Ed25519` are bare `signature` rows in the catalogue
+// precisely so that it does. Before the `ECDSA` row existed the catalogue held
+// only the signature+hash pairings (ECDSA-SHA256 …) and the SSH host-key names,
+// none of which is an assessment of an EC public key as such, and an ECDSA
+// certificate resolved to nothing — unclassified, and silently out of the
+// quantum-migration queue while every RSA certificate beside it was in.
+func sizedPublicKeyCode(keyAlg string, bits int) string {
+	if bits <= 0 || cryptoparse.KeyAlgorithmFamily(keyAlg) != cryptoparse.KexFamilyFiniteField {
+		return ""
+	}
+	return fmt.Sprintf("%s-%d", strings.ToUpper(strings.TrimSpace(keyAlg)), bits)
+}
+
+// resolveFamilyTaxonomy answers, for every public-key family named by a
+// certificate or a key in this run, whether that FAMILY is classically
+// asymmetric — in ONE query for the whole run, like the code lookup above.
+//
+// The question is deliberately not "which row does this string resolve to".
+// That is resolveCertificateAlgorithms' question, it is the one that decides the
+// SCORE, and it is answered by a code that has to exist. This one is answered by
+// the taxonomy the catalogue already carries on every sized row
+// (`algorithm_family` + `primitive`), so it survives a size the catalogue does
+// not carry (RSA-1536, RSA-8192) and a spelling it does not have (the bare
+// "ECDSA" every EC certificate stores). See [familyTaxonomy] for why the two
+// must not be derived from the same row.
+//
+// The verdict is the SAME expression [cryptoassess.PQCClassCTE] uses for a
+// configuration — `bool_or(NOT is_pqc AND primitive = ANY(denylist))` over the
+// same denylist — with the grouping moved from the configuration to the family.
+// Same precedence, too: any classical asymmetric row in the family makes the
+// family classical. Hybrids do not collide with it because the catalogue gives
+// them their own family (`Hybrid-KEM`), so a family is either wholly classical
+// or wholly not.
+//
+// Matching is on the family name exactly, upper-cased: `public_key_algorithm`
+// and `keys.key_type` are family names as crypto/x509 spells them ("RSA",
+// "ECDSA", "DSA"), and `algorithm_family` is the same vocabulary. A name with
+// no family in the catalogue simply gets no verdict — unclassified, never
+// assumed safe.
+func (p *CryptoProducer) resolveFamilyTaxonomy(ctx context.Context, tx *sql.Tx, certs []certSubject, keys []keySubject) error {
+	needles := map[string]bool{}
+	for _, c := range certs {
+		if n := strings.ToUpper(strings.TrimSpace(c.keyAlg)); n != "" {
+			needles[n] = true
+		}
+	}
+	for _, k := range keys {
+		if n := strings.ToUpper(strings.TrimSpace(k.keyType)); n != "" {
+			needles[n] = true
+		}
+	}
+	if len(needles) == 0 {
+		return nil
+	}
+	list := make([]string, 0, len(needles))
+	for n := range needles {
+		list = append(list, n)
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT UPPER(algorithm_family),
+		       MIN(algorithm_family),
+		       COALESCE(bool_or(NOT COALESCE(is_pqc, false) AND primitive = ANY($2::text[])), false)
+		  FROM algorithms
+		 WHERE algorithm_family IS NOT NULL AND algorithm_family <> ''
+		   AND UPPER(algorithm_family) = ANY($1::text[])
+		 GROUP BY UPPER(algorithm_family)`,
+		pq.Array(list), pq.Array(cryptoassess.QuantumVulnerablePrimitives))
+	if err != nil {
+		return fmt.Errorf("resolve algorithm families: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	byFamily := map[string]familyTaxonomy{}
+	for rows.Next() {
+		var upper string
+		var fam familyTaxonomy
+		if err := rows.Scan(&upper, &fam.Family, &fam.Vulnerable); err != nil {
+			return fmt.Errorf("scan algorithm family: %w", err)
+		}
+		byFamily[upper] = fam
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for i := range certs {
+		certs[i].keyFamily = byFamily[strings.ToUpper(strings.TrimSpace(certs[i].keyAlg))]
+	}
+	for i := range keys {
+		keys[i].family = byFamily[strings.ToUpper(strings.TrimSpace(keys[i].keyType))]
+	}
+	return nil
 }
 
 // plannedCrypto is one finding the judge phase decided on.
@@ -663,9 +961,20 @@ func (p *CryptoProducer) judge(configs []configSubject, certs []certSubject, key
 
 	for _, c := range certs {
 		score, factors, measurable := c.assess()
+		codes := c.pqcVulnerableCodes()
+		// Coverage follows the FINDINGS, not just the score. `measurable` is
+		// assess()'s answer and stays assess()'s answer — a family verdict adds
+		// nothing to it, because knowing a key is RSA is not knowing what its
+		// modulus is worth. But a pqc_vulnerable finding feeds risk (score 40,
+		// `feeds_risk: true` in the registry), and raising one against an asset
+		// this producer's coverage record says it never looked at is the exact
+		// pair certSubject.assetIDs exists to keep honest: a non-zero number
+		// beside "not assessed". So a certificate that was classified is
+		// covered whether or not it could be scored.
+		covered := measurable || len(codes) > 0
 		for _, assetID := range c.assetIDs {
 			seenAsset[assetID] = true
-			if measurable {
+			if covered {
 				assessed[assetID] = true
 			}
 		}
@@ -682,7 +991,7 @@ func (p *CryptoProducer) judge(configs []configSubject, certs []certSubject, key
 				},
 			})
 		}
-		if codes := c.pqcVulnerableCodes(); len(codes) > 0 {
+		if len(codes) > 0 {
 			run.PQCVulnerable++
 			planned = append(planned, plannedCrypto{
 				finding: pqcFinding(
@@ -698,13 +1007,17 @@ func (p *CryptoProducer) judge(configs []configSubject, certs []certSubject, key
 	}
 
 	for _, k := range keys {
+		code := k.pqcVulnerableCode()
+		// Same rule as for a certificate above: a key classified only by its
+		// family is not measurable, but the finding it raises feeds risk, so the
+		// assets it raises are covered.
+		covered := k.measurable() || code != ""
 		for _, assetID := range k.assetIDs {
 			seenAsset[assetID] = true
-			if k.measurable() {
+			if covered {
 				assessed[assetID] = true
 			}
 		}
-		code := k.pqcVulnerableCode()
 		if code == "" {
 			continue
 		}
@@ -826,23 +1139,56 @@ func (c certSubject) assess() (score int, factors []string, measurable bool) {
 // pqcVulnerableCodes names the certificate's classical asymmetric algorithms,
 // or nothing.
 //
-// Same denylist as the configuration classifier — `cryptoassess`
-// .QuantumVulnerablePrimitives — applied to the catalogue rows the
-// certificate's own algorithm strings resolved to. A certificate whose
-// algorithm resolves to nothing is UNCLASSIFIED, never assumed safe, and raises
-// no finding.
+// The denylist is `cryptoassess.QuantumVulnerablePrimitives` throughout (see
+// [primitiveIsQuantumVulnerable]); what changes is WHAT it is applied to. Two
+// resolutions, and the certificate's public key is the reason there are two:
+//
+//  1. every catalogue ROW the certificate's algorithm strings resolved to —
+//     the sized public-key row and the signature row;
+//  2. for the public key ALONE, and only when no row of its own answered, the
+//     FAMILY taxonomy in [familyTaxonomy].
+//
+// (2) is not a widening of the denylist, it is a different subject: a family
+// rather than a row. It exists because a key can fail to resolve for two
+// reasons that have nothing to do with quantum resistance. Its SIZE may be one
+// the catalogue does not carry — RSA-1536, RSA-8192 — where borrowing the bare
+// `RSA` row is the key-transport mis-assessment sizedPublicKeyCode exists to
+// stop; or its SPELLING may be one the catalogue does not have. Neither is a
+// reason to leave an RSA or ECDSA key out of the migration queue.
+//
+// The gate is on the KEY having resolved, not on `out` being empty. A
+// certificate whose signature row resolved but whose key did not has learned
+// nothing about its key from that row — the signature is the ISSUER's
+// algorithm, not the subject's — so the family still answers for the key. The
+// other way round, a key that resolved cites its own row and the family stays
+// silent, which is why an RSA-4096 or DSA certificate still cites exactly one
+// algorithm.
+//
+// Each code once. Both of a certificate's algorithm strings can resolve to the
+// same row — an Ed25519 certificate's public_key_algorithm AND its
+// signature_algorithm are both "Ed25519" — and the evidence names algorithms,
+// not fields. The family verdict is deduped against the same set, so a family
+// whose name a row already cited is not repeated.
+//
+// A certificate whose key resolves to neither a row nor a family is
+// UNCLASSIFIED, never assumed safe, and raises no finding.
 func (c certSubject) pqcVulnerableCodes() []string {
 	var out []string
+	seen := map[string]bool{}
+	keyResolved := false
 	for _, h := range c.catalogue {
-		if h.IsPQC || h.Primitive == "" {
+		if h.Field == certFieldPublicKey {
+			keyResolved = true
+		}
+		if h.IsPQC || !primitiveIsQuantumVulnerable(h.Primitive) || seen[h.Code] {
 			continue
 		}
-		for _, vuln := range cryptoassess.QuantumVulnerablePrimitives {
-			if h.Primitive == vuln {
-				out = append(out, h.Code)
-				break
-			}
-		}
+		out = append(out, h.Code)
+		seen[h.Code] = true
+	}
+	if !keyResolved && c.keyFamily.Vulnerable && !seen[c.keyFamily.Family] {
+		out = append(out, c.keyFamily.Family)
+		seen[c.keyFamily.Family] = true
 	}
 	return out
 }

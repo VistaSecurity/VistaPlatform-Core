@@ -615,6 +615,13 @@ func TestIntegration_MergeProposal_MovesEveryReferrer(t *testing.T) {
 		appID, tenant, observation, "vol-"+appID.String()); err != nil {
 		t.Fatalf("insert crypto application: %v", err)
 	}
+	classHistoryID := uuid.New()
+	if _, err := db.Exec(`
+		INSERT INTO asset_class_history (id, tenant_id, asset_id, from_class_key, to_class_key, source)
+		VALUES ($1,$2,$3,'unknown','hardware.computer.server','classifier')`,
+		classHistoryID, tenant, observation); err != nil {
+		t.Fatalf("insert asset class history: %v", err)
+	}
 
 	if _, err := svc.Accept(ctx, tenant, proposalID, survivor, actor); err != nil {
 		t.Fatalf("accept: %v", err)
@@ -630,6 +637,7 @@ func TestIntegration_MergeProposal_MovesEveryReferrer(t *testing.T) {
 		{"device_jobs", "asset_id", "id", jobID},
 		{"database_encryption_states", "asset_id", "id", encID},
 		{"crypto_applications", "asset_id", "id", appID},
+		{"asset_class_history", "asset_id", "id", classHistoryID},
 	} {
 		var owner *uuid.UUID
 		if err := db.QueryRow(

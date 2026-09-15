@@ -258,11 +258,13 @@ describe('the links out', () => {
   });
 
   // The lens a software link lands on has to be one that reads the FINDINGS
-  // table. The Findings page's default lens is `severity`, which reads the
-  // crypto-risk stream and ignores subject_type/subject_id/producer/q entirely
-  // — so a link without a lens rendered an unfiltered crypto list under a
-  // banner reading "Showing findings on one software install only": a page that
-  // says it is filtered and is not. Asserted against the page's own lens
+  // table. The crypto-risk lenses ignore subject_type/subject_id/producer/q
+  // entirely — so while the page default was `severity`, a link without a lens
+  // rendered an unfiltered crypto list under a banner reading "Showing findings
+  // on one software install only": a page that says it is filtered and is not.
+  // The default is findings-scoped now; these links stay explicit anyway,
+  // because a default is a thing that changes. Asserted against the page's own
+  // lens
   // registry rather than the literal string, so a lens rename cannot leave this
   // passing while the link breaks.
   //

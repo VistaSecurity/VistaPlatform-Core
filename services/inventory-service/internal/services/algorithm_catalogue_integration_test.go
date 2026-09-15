@@ -29,8 +29,14 @@ var mustClassify = []string{
 	"AES128", "AES256", "3DES", "DES", "RC4", "ChaCha20", "NULL",
 	// Hashes (SHA-2, SHA-3, legacy)
 	"SHA256", "SHA384", "SHA512", "SHA1", "MD5", "SHA3-256", "SHA3-512",
-	// Classical signatures
-	"RSA-SHA256", "RSA-SHA512", "ECDSA-SHA256", "ECDSA-SHA384", "ED25519", "DSA", "RSA-MD5",
+	// Classical signatures. The bare family rows — ECDSA, Ed25519, DSA — are
+	// what a certificate's public_key_algorithm resolves to (crypto/x509
+	// spelling) and what the key producer looks up; without one an EC
+	// certificate is unclassified and raises no pqc_vulnerable finding.
+	// 'Ed25519' is the one spelling of that row: a second, 'ED25519', once
+	// coexisted with it (the code UNIQUE is case-sensitive, every lookup is
+	// not) and seed.sql Part 5 merges it away.
+	"RSA-SHA256", "RSA-SHA512", "ECDSA-SHA256", "ECDSA-SHA384", "ECDSA", "Ed25519", "DSA", "RSA-MD5",
 	// Classical key exchange
 	"RSA-2048", "RSA-4096", "DH-2048", "ECDHE", "X25519", "X448", "CURVE25519",
 	// The key-exchange vocabulary the cipher-suite parsers emit. The static
@@ -83,6 +89,14 @@ func TestIntegration_AlgorithmCatalogue_IsInternallyConsistent(t *testing.T) {
 			`SELECT code||' ('||strength||')' FROM algorithms WHERE deprecation_status='obsolete' AND strength <> 'weak'`},
 		{"is_pqc row not marked quantum-resistant in metadata",
 			`SELECT code FROM algorithms WHERE is_pqc AND COALESCE(metadata->>'quantum_resistance','') <> 'true'`},
+		// `algorithms.code` is UNIQUE case-sensitively and every reader is
+		// case-insensitive: the crypto producer keys its lookup by UPPER(code),
+		// this service's classifier by lower(code), the key producer uses ILIKE.
+		// Two codes that fold to one string are two verdicts for one algorithm,
+		// and which one answers is whichever row the scan returned last.
+		// 'Ed25519' / 'ED25519' were exactly that until seed.sql Part 5.
+		{"codes that collide under case folding (two rows, one lookup key)",
+			`SELECT string_agg(code, ' / ' ORDER BY code) FROM algorithms GROUP BY UPPER(code) HAVING count(*) > 1`},
 	}
 
 	for _, c := range checks {

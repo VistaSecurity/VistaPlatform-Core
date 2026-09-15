@@ -214,10 +214,24 @@ export function useFindingsList(
    * cap is reached far less often and never silently.
    */
   search?: string,
+  /**
+   * One rung of the severity ladder, sent to the SERVER.
+   *
+   * This is what the Dashboard's "Critical findings" tile links through
+   * (`?severity=critical`), and it is server-side for the same reason the
+   * subject filter and the search box are: this hook stops at
+   * FINDINGS_PAGE_CAP pages, so narrowing the returned array instead would
+   * under-report a tenant whose Criticals sit past the cap — a tile reading
+   * "40 critical findings" opening a page that shows twelve. It also keeps
+   * `total` and `producerCounts` describing the same set as the rows, because
+   * the server applies all three under one predicate.
+   */
+  severity?: string,
 ) {
   const q = (search ?? '').trim();
+  const sev = (severity ?? '').trim().toLowerCase();
   return useQuery({
-    queryKey: ['findings', 'list', producer ?? 'all', subject ? `${subject.subjectType}:${subject.subjectId}` : 'all-subjects', q || 'all-text'],
+    queryKey: ['findings', 'list', producer ?? 'all', subject ? `${subject.subjectType}:${subject.subjectId}` : 'all-subjects', q || 'all-text', sev || 'all-severities'],
     enabled,
     queryFn: async () => {
       const all: ComplianceFinding[] = [];
@@ -234,6 +248,7 @@ export function useFindingsList(
             // an empty page under a link that promised N findings.
             ...(subject ? { subject_type: subject.subjectType, subject_id: subject.subjectId } : {}),
             ...(q ? { q } : {}),
+            ...(sev ? { severity: sev } : {}),
           } },
         });
         if (error || !data) throw new Error('Failed to load findings');

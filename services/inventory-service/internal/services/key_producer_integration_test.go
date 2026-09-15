@@ -14,6 +14,10 @@ package services
 // test-integration-db).
 
 import (
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -184,5 +188,106 @@ func TestIntegration_KeyProducer_DedupsSameKeyAcrossAssets(t *testing.T) {
 	}
 	if keys[0].DeploymentCount == nil || *keys[0].DeploymentCount != 2 {
 		t.Errorf("deployment_count = %v, want 2 (used by both assets)", keys[0].DeploymentCount)
+	}
+}
+
+// selfSignedECCert returns a real self-signed certificate over the given
+// elliptic-curve key (ECDSA P-256 or Ed25519) as PEM. The key type string is
+// what x509.PublicKeyAlgorithm.String() reports for it, which is what the
+// certificate extraction hands the key producer.
+func selfSignedECCert(t *testing.T, cn string, priv crypto.Signer) (pemStr, keyType string) {
+	t.Helper()
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(3),
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, priv.Public(), priv)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+	parsed, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse certificate: %v", err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})), parsed.PublicKeyAlgorithm.String()
+}
+
+// An elliptic-curve public key resolves to its catalogue row — `ECDSA` for an
+// EC key on any curve, `Ed25519` for an Ed25519 key — so the Keys lens shows an
+// algorithm for it.
+//
+// algorithmCodeForKey already asked the catalogue for "ECDSA"; the catalogue
+// had no such row (only the ECDSA-<hash> pairings and the SSH host-key names),
+// so every EC key in the inventory carried algorithm_id NULL — six of six on
+// the RC-verification tenant — and the same missing row left the certificate
+// with no pqc_vulnerable finding. Ed25519 resolved, but to whichever of two
+// case-variant rows the `ILIKE … LIMIT 1` happened to pick.
+//
+// Mutation-checked: removing the `ECDSA` INSERT from seed.sql Part 5 leaves
+// the ECDSA key's algorithm_ref nil; returning "" from algorithmCodeForKey for
+// "ECDSA" does the same.
+func TestIntegration_KeyProducer_ECKeysResolveTheirCatalogueRow(t *testing.T) {
+	ecdsaKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate P-256 key: %v", err)
+	}
+	_, edKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate Ed25519 key: %v", err)
+	}
+
+	cases := []struct {
+		name     string
+		priv     crypto.Signer
+		bits     int
+		wantCode string
+	}{
+		{"ecdsa-p256", ecdsaKey, 256, "ECDSA"},
+		{"ed25519", edKey, 256, "Ed25519"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, db, tenant := newKeysSvc(t)
+			_, implID := insertAssetAndImpl(t, db, tenant)
+
+			cn := tc.name + ".example"
+			pemStr, keyType := selfSignedECCert(t, cn, tc.priv)
+			cert := &models.Certificate{ID: uuid.New(), TenantID: tenant, CertificateState: "active", CommonName: &cn}
+			data := models.CertificateData{
+				PublicKeyAlgorithm: keyType,
+				PublicKeySize:      tc.bits,
+				CertificatePEM:     pemStr,
+				KeyUsage:           []string{"DigitalSignature"},
+				NotBefore:          time.Now().Add(-time.Hour),
+				NotAfter:           time.Now().Add(24 * time.Hour),
+			}
+
+			svc.produceKeyFromCertificate(tenant, implID, cert, data)
+
+			keys, err := svc.ListKeys(tenant)
+			if err != nil {
+				t.Fatalf("ListKeys: %v", err)
+			}
+			if len(keys) != 1 {
+				t.Fatalf("producer wrote %d keys, want 1", len(keys))
+			}
+			k := keys[0]
+			if k.KeyType != keyType {
+				t.Errorf("key_type = %q, want %q", k.KeyType, keyType)
+			}
+			if k.AlgorithmRef == nil || *k.AlgorithmRef == "" {
+				t.Fatalf("algorithm_ref not resolved: the catalogue must carry a bare %q row for a %s key to have an algorithm", tc.wantCode, keyType)
+			}
+			var code string
+			if err := db.QueryRow(`SELECT a.code FROM keys k JOIN algorithms a ON a.id = k.algorithm_id WHERE k.id = $1`, k.ID).Scan(&code); err != nil {
+				t.Fatalf("read the key's catalogue code: %v", err)
+			}
+			if code != tc.wantCode {
+				t.Errorf("key resolved to catalogue row %q, want %q", code, tc.wantCode)
+			}
+		})
 	}
 }

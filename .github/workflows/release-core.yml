@@ -233,7 +233,19 @@ jobs:
       # public/INSTALL.md and docsv4 SENSOR_REGISTRATION.md tell customers to verify
       # with. Moving to a bundle is a change to a published contract and needs the
       # docs changed with it — see the 0.10.0/0.10.1 release failures.
-      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159  # v3.9.2
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5  # v3.10.1
+        with:
+          # Pin the cosign BINARY, not just the action. Without this the
+          # version comes from the action's default, which floats with the
+          # action: v3.9.2 installed cosign v2.5.3, v3.10.1 installs v2.6.1.
+          # So an installer bump silently changed which cosign signs a
+          # release — in the workflow whose signatures customers verify.
+          # release-customer.yml has pinned for this reason for months;
+          # this file did not, and dependabot is what surfaced it.
+          # Stay on the v2 line: cosign v3 deleted --output-signature and
+          # --output-certificate, which the checksum signing below needs
+          # (scripts/test-cosign-bundle-format.mjs enforces that).
+          cosign-release: 'v2.6.1'
 
       # Keyless: the signing identity is this workflow's OIDC token, so what a
       # verifier checks is "built by this workflow in this repo", not "signed by
@@ -309,7 +321,19 @@ jobs:
       # public/INSTALL.md and docsv4 SENSOR_REGISTRATION.md tell customers to verify
       # with. Moving to a bundle is a change to a published contract and needs the
       # docs changed with it — see the 0.10.0/0.10.1 release failures.
-      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159  # v3.9.2
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5  # v3.10.1
+        with:
+          # Pin the cosign BINARY, not just the action. Without this the
+          # version comes from the action's default, which floats with the
+          # action: v3.9.2 installed cosign v2.5.3, v3.10.1 installs v2.6.1.
+          # So an installer bump silently changed which cosign signs a
+          # release — in the workflow whose signatures customers verify.
+          # release-customer.yml has pinned for this reason for months;
+          # this file did not, and dependabot is what surfaced it.
+          # Stay on the v2 line: cosign v3 deleted --output-signature and
+          # --output-certificate, which the checksum signing below needs
+          # (scripts/test-cosign-bundle-format.mjs enforces that).
+          cosign-release: 'v2.6.1'
       - name: Sign the chart
         env:
           COSIGN_EXPERIMENTAL: '1'
@@ -471,7 +495,19 @@ jobs:
       # public/INSTALL.md and docsv4 SENSOR_REGISTRATION.md tell customers to verify
       # with. Moving to a bundle is a change to a published contract and needs the
       # docs changed with it — see the 0.10.0/0.10.1 release failures.
-      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159  # v3.9.2
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5  # v3.10.1
+        with:
+          # Pin the cosign BINARY, not just the action. Without this the
+          # version comes from the action's default, which floats with the
+          # action: v3.9.2 installed cosign v2.5.3, v3.10.1 installs v2.6.1.
+          # So an installer bump silently changed which cosign signs a
+          # release — in the workflow whose signatures customers verify.
+          # release-customer.yml has pinned for this reason for months;
+          # this file did not, and dependabot is what surfaced it.
+          # Stay on the v2 line: cosign v3 deleted --output-signature and
+          # --output-certificate, which the checksum signing below needs
+          # (scripts/test-cosign-bundle-format.mjs enforces that).
+          cosign-release: 'v2.6.1'
 
       - name: Sign the checksums
         # --new-bundle-format=false is load-bearing, not legacy cruft. cosign v4

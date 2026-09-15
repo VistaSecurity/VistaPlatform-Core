@@ -27,10 +27,54 @@ export type DashboardPqcMetric = {
   unclassified: number;
 };
 
-// The dashboard's critical-finding count comes from compliance-engine, while
-// /risk-compliance/findings defaults to the crypto-risk lens. Keep the route
-// explicit so click-through lands in the same finding universe it counted.
-export const DASHBOARD_COMPLIANCE_FINDINGS_ROUTE = '/risk-compliance/findings?lens=framework';
+// The "Critical findings" tile counts EVERY producer, so it links at the lens
+// that shows every producer.
+//
+// It reads /findings/statistics.all_producer_severity_counts.critical, whose
+// query is findingListWhere with no filters — literally the WHERE behind GET
+// /findings (services/compliance-engine/internal/services/findings_service.go,
+// allProducerSeverityWhere). So the count and this destination read ONE row
+// universe by construction, not by two people agreeing about which producers
+// and which frameworks are in it.
+//
+// One universe is not one number, and the tile applies two narrowings to it that
+// this route has to carry — "a tile that counts a subset must link to that
+// subset", the rule stated below for the sibling tiles.
+//
+//   - SEVERITY. The tile counts the Critical rung, so the route names it.
+//     `?severity=critical` is read by findings-page.tsx and applied by the
+//     SERVER (the page caps at five pages of 200, so narrowing in the browser
+//     would under-report a large tenant), and rendered as a clearable banner so
+//     a filter the reader never chose is one they can see and undo.
+//
+//   - WORKFLOW. The page opens on its `Open` chip, which hides RESOLVED and
+//     SUPPRESSED rows (isOpenWf, sections/findings/model.ts), so the ROLLUP
+//     excludes them too — allProducerSeverityWhere sets FindingListFilters
+//     .WorkflowOpen, which splices the registry's own definition of open
+//     (shared/findings.WorkflowOpenSQL). Nothing in the URL, because it is the
+//     page's default rather than a narrowing of it.
+//
+// Both were documented caveats before v1.0.0 rather than fixed: the tile counted
+// every ACTIVE row whatever its workflow status, so a tenant who suppressed a
+// Critical end-of-life finding with a reason kept seeing it counted on an
+// attention tile and did not find it on the page the tile sent them to.
+//
+// It used to read `severity_counts`, which is scoped
+// `producer = 'compliance' AND kind = 'control_noncompliant'` under the
+// licensed-framework gate: failed controls on activated frameworks, nothing
+// from `eol`, `vulnerability`, `configuration`, `hygiene`, `drift` or the
+// crypto producer. A tenant whose only Criticals were end-of-life findings read
+// "0 critical findings" here while Risk & Compliance → Findings showed them —
+// the H-2 divergence again, one producer later. Widening the COUNT was the fix
+// rather than narrowing the LABEL, because the product's position is that
+// findings are one stream (docsv4/core/features/findings.md, "One list, several
+// producers"), and a dashboard that silently means "compliance only" is the
+// shape this page keeps being wrong in.
+//
+// Written out even though it is the page default today: a default is a thing
+// that changes, and a tile's link has to survive it. FINDINGS_SUBJECT_LENS
+// names the same lens for the same reason.
+export const DASHBOARD_CRITICAL_FINDINGS_ROUTE = '/risk-compliance/findings?lens=producer&severity=critical';
 
 // A tile that counts a subset must link to that subset. Both of these used to
 // link at `/inventory?lens=infrastructure` — a retired lens key that redirects

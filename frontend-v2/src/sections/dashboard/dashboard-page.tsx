@@ -4,7 +4,7 @@ import { clients } from '../../lib/clients';
 import { Icon, LevelBar, LevelDot, MiniBar, RiskGauge, levelFromScore, riskColor, LEVEL_MIN } from '../../components/ui';
 import { PostureTrendChart } from '../../components/posture-trend-chart';
 import {
-  DASHBOARD_COMPLIANCE_FINDINGS_ROUTE, DASHBOARD_HIGH_RISK_ASSETS_ROUTE, DASHBOARD_UNSCORED_ASSETS_ROUTE,
+  DASHBOARD_CRITICAL_FINDINGS_ROUTE, DASHBOARD_HIGH_RISK_ASSETS_ROUTE, DASHBOARD_UNSCORED_ASSETS_ROUTE,
   getDashboardPqcMetric, getDiscoveryFleetMetric,
 } from './dashboard-metrics';
 import { fetchDashboardSensors, fetchDashboardDeviceAgents, fetchDashboardTicketStats } from './dashboard-queries';
@@ -58,7 +58,10 @@ function useRollups() {
     queryFn: async () => {
       const { data, error } = await clients.compliance.GET('/findings/statistics', {});
       if (error || !data) throw new Error('Failed to load finding statistics');
-      return data.severity_counts;
+      // all_producer_severity_counts, NOT severity_counts: the latter is the
+      // compliance producer's corner of the table (failed controls on activated
+      // frameworks). See DASHBOARD_CRITICAL_FINDINGS_ROUTE.
+      return data.all_producer_severity_counts;
     },
   });
   const expiring = useQuery({
@@ -103,6 +106,11 @@ export function DashboardPage() {
   // risk_summary.critical_findings (crypto-implementation risk_score >= 90
   // count), which answers a different question and could disagree with what
   // clicking through to the Findings page actually shows.
+  //
+  // Every PRODUCER, not only `compliance`. The tile below says "all producers"
+  // and this is what makes that true: an end-of-life or vulnerability Critical
+  // is a critical finding, and counting only failed framework controls made the
+  // Dashboard read 0 while the Findings page listed them.
   const crit = findingsSeverity.data?.critical ?? 0;
   const crypto = s?.total_crypto ?? 0;
   const unknown = s?.unknown_risk ?? 0;
@@ -165,7 +173,7 @@ export function DashboardPage() {
   // B-28: `error` lets the tile itself say "couldn't load" instead of a count
   // that is really an unthrown fetch failure wearing a zero.
   const attention = [
-    { id: 'crit', count: crit, label: 'Critical findings', sub: 'across all assets', icon: 'circle-alert', tone: RED, route: DASHBOARD_COMPLIANCE_FINDINGS_ROUTE, error: findingsSeverity.isError },
+    { id: 'crit', count: crit, label: 'Critical findings', sub: 'all producers', icon: 'circle-alert', tone: RED, route: DASHBOARD_CRITICAL_FINDINGS_ROUTE, error: findingsSeverity.isError },
     { id: 'high', count: high, label: 'High-risk assets', sub: `risk score ≥ ${LEVEL_MIN.High}`, icon: 'server', tone: 'var(--danger-soft)', route: DASHBOARD_HIGH_RISK_ASSETS_ROUTE, error: false },
     { id: 'exp', count: expSoon, label: 'Certs expiring', sub: 'within 30 days', icon: 'file-badge', tone: ORANGE, route: '/inventory?lens=certificate', error: expiring.isError },
     { id: 'unk', count: unknown, label: 'Unscored assets', sub: 'no risk signal yet', icon: 'search', tone: 'var(--warn)', route: DASHBOARD_UNSCORED_ASSETS_ROUTE, error: false },
@@ -350,7 +358,7 @@ export function DashboardPage() {
             }
             stats={[['Assets', total.toLocaleString(), null], ['Unscored', String(unknown), null]]} />
           <Connector />
-          <Stage icon="shield-check" accent="var(--accent)" title="Risk & Compliance" hero={crit.toLocaleString()} heroColor="var(--danger-soft)" caption="critical findings" onClick={() => nav(DASHBOARD_COMPLIANCE_FINDINGS_ROUTE)}
+          <Stage icon="shield-check" accent="var(--accent)" title="Risk & Compliance" hero={crit.toLocaleString()} heroColor="var(--danger-soft)" caption="critical findings" onClick={() => nav(DASHBOARD_CRITICAL_FINDINGS_ROUTE)}
             viz={
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', fontSize: 11, color: 'var(--app-t3)' }}>
                 <LevelDot level="High" size={7} />{high} high-risk assets in scope

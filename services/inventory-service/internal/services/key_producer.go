@@ -189,13 +189,34 @@ func mapCertStateToKeyState(certState string) string {
 // algorithmCodeForKey returns the algorithms.code to look up for a given public
 // key type/size (e.g. RSA-2048), or "" when there's no useful match. Matching is
 // case-insensitive (ILIKE) at the call site; "" simply matches nothing.
+//
+// A miss is not a failure. `keys.algorithm_id` is a LEFT JOIN on the read side,
+// and the `crypto` producer classifies an unresolved key by its family instead
+// (crypto.go, keySubject.pqcVulnerableCode) — so a key with no row is unscored
+// and still in the quantum-migration queue, which is the honest pair. Borrowing
+// a row that is about something else is the failure.
 func algorithmCodeForKey(keyType string, sizeBits int) string {
 	switch strings.ToUpper(keyType) {
 	case "RSA":
 		if sizeBits > 0 {
 			return fmt.Sprintf("RSA-%d", sizeBits)
 		}
-		return "RSA"
+		// NOT "RSA". The catalogue row with that exact code is `RSA key
+		// transport (static)`: the TLS key-EXCHANGE assessment (weak,
+		// deprecated, risk 70 — the row a TLS_RSA_WITH_* suite links in the
+		// key_exchange role), not an assessment of an RSA public key at all.
+		// Linking an unsized key to it puts the Keys lens's Algorithm column on
+		// a statement about forward secrecy and rates the key 70 whatever its
+		// modulus. This is the same mis-resolution fixed on the
+		// certificate path (see sizedPublicKeyCode in
+		// inventory-service/internal/producers/crypto.go), which survived here
+		// for keys whose size could not be read.
+		//
+		// Only the sized rows (RSA-512 … RSA-4096) assess a public key, so
+		// without a size there is no row to resolve to. For a finite-field
+		// family the size IS the security parameter (SP 800-131A); there is
+		// nothing to say about the modulus of a key whose modulus is unknown.
+		return ""
 	case "ECDSA", "EC":
 		return "ECDSA"
 	case "ED25519":

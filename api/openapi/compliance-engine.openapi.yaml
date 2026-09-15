@@ -4218,6 +4218,7 @@ components:
         - suppressed_findings
         - resurfaced_findings
         - severity_counts
+        - all_producer_severity_counts
       properties:
         total_findings:
           type: integer
@@ -4242,9 +4243,40 @@ components:
             - $ref: "#/components/schemas/SeverityCounts"
           description: >-
             ACTIVE findings by severity, tenant-wide (no control-join, no
-            limit) — read off the same materialized findings as the Findings
-            page, so a dashboard tile built from severity_counts.critical
-            agrees with the Findings page.
+            limit), scoped to the COMPLIANCE producer: failed controls on
+            frameworks the tenant has activated. Nothing from eol,
+            vulnerability, configuration, hygiene, drift or crypto is in it —
+            a surface that says "findings" without qualification wants
+            all_producer_severity_counts instead.
+
+
+            CONTRACT-ONLY as of v1.0.0: nothing in the shipped UI reads this
+            field. The Dashboard tile was its only consumer and moved to
+            all_producer_severity_counts. It is kept because removing a
+            published response field is a breaking change, and because the
+            compliance-only question is a real one — but it is unverified by
+            any screen, so treat a change in its behaviour as unobserved rather
+            than as caught by the product.
+
+
+            Note the two are NOT the same query narrowed: this one counts every
+            ACTIVE compliance row whatever its workflow_status, while
+            all_producer_severity_counts counts only OPEN ones.
+        all_producer_severity_counts:
+          allOf:
+            - $ref: "#/components/schemas/SeverityCounts"
+          description: >-
+            OPEN findings by severity across EVERY producer, tenant-wide — the
+            same set GET /findings returns under `workflow_status` not in
+            (RESOLVED, SUPPRESSED), under the same visibility rule. This is the
+            unqualified "critical findings" number; the Dashboard tile reads it.
+
+
+            "Open", not merely ACTIVE, because the tile is an attention surface
+            that links to a page opening on its Open filter. Counting a finding
+            the tenant suppressed with a reason meant the number never fell when
+            they triaged, and the row driving it was the one row the destination
+            would not show.
     FindingListResponse:
       type: object
       additionalProperties: false

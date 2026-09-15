@@ -12,6 +12,7 @@ package handlers
 // stub — no database.
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -158,17 +159,46 @@ const fUUID = "11111111-1111-1111-1111-111111111111"
 
 func TestContract_GetFindingStatistics_200(t *testing.T) {
 	sv := loadSpec(t)
+	// The two severity rollups carry DIFFERENT numbers here on purpose. They
+	// answer different questions — severity_counts is the compliance producer on
+	// activated frameworks, all_producer_severity_counts is every producer — and
+	// the Dashboard reads the second. Seeded identically, a handler that
+	// serialized one field twice would conform to the schema and pass, which is
+	// the same "it compiles, it validates, it is wrong" shape as counting the
+	// wrong producers in the first place.
 	eng := newFindingsEngine(&stubFindingsStore{stats: &services.FindingStatistics{
 		TotalFindings: 10, ActiveFindings: 7, InactiveFindings: 2, ArchivedFindings: 1,
 		NewFindings: 4, NotifiedFindings: 2, ResolvedFindings: 3, SuppressedFindings: 1,
-		ResurfacedFindings: 0,
-		SeverityCounts:     services.SeverityCounts{Critical: 4, High: 3, Medium: 2, Low: 1},
+		ResurfacedFindings:        0,
+		SeverityCounts:            services.SeverityCounts{Critical: 4, High: 3, Medium: 2, Low: 1},
+		AllProducerSeverityCounts: services.SeverityCounts{Critical: 9, High: 8, Medium: 7, Low: 6},
 	}})
 	w := do(eng, http.MethodGet, cBase+"/findings/statistics", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "FindingStatistics", w.Body.Bytes())
+
+	// Schema conformance is shape, not wiring. Assert the VALUES reached the
+	// right JSON names, so the field the Dashboard tile reads is the field the
+	// service computed across every producer.
+	var got struct {
+		SeverityCounts            services.SeverityCounts `json:"severity_counts"`
+		AllProducerSeverityCounts services.SeverityCounts `json:"all_producer_severity_counts"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode statistics body: %v; body=%s", err, w.Body.String())
+	}
+	if got.SeverityCounts.Critical != 4 {
+		t.Errorf("severity_counts.critical = %d, want 4 — the compliance-scoped rollup",
+			got.SeverityCounts.Critical)
+	}
+	if got.AllProducerSeverityCounts.Critical != 9 {
+		t.Errorf("all_producer_severity_counts.critical = %d, want 9. The Dashboard's "+
+			"\"Critical findings\" tile reads this field; serving it the compliance-scoped "+
+			"number is the H-2 divergence the field exists to close.",
+			got.AllProducerSeverityCounts.Critical)
+	}
 }
 
 func TestContract_GetFindingsByControl_200(t *testing.T) {
@@ -601,5 +631,49 @@ func TestContract_ListFindings_200_unmatchableSearchIsAnAnswerNotAnError(t *test
 	sv.assertConforms(t, "FindingListResponse", w.Body.Bytes())
 	if svc.lastFilters == nil || svc.lastFilters.Search != "%%%" {
 		t.Fatalf("Search = %q, want the literal %%%%%% — the handler must not strip or interpret wildcards", svc.lastFilters.Search)
+	}
+}
+
+// ── the `severity` parameter ────────────────────────────────────────────────
+//
+// `severity` has been in the spec and in the handler for as long as the list
+// has, and nothing exercised it: the page narrowed severity in the browser, so
+// a handler that dropped the parameter cost nothing. It became load-bearing
+// when the Dashboard's "Critical findings" tile started linking through
+// `?severity=critical` — the page now renders a banner saying "Showing Critical
+// findings only", and if the parameter stops reaching the service the banner is
+// a claim about a narrowing that is not applied, over a list of every severity.
+//
+// The predicate itself is proven against a database in
+// services/findings_tile_link_set_integration_test.go. This is the WIRING
+// between the URL the tile links to and that predicate, which no assertion
+// about either half can see.
+
+func TestContract_ListFindings_200_severityFilterReachesTheService(t *testing.T) {
+	sv := loadSpec(t)
+	svc := &stubFindingsStore{producerCounts: map[string]int{"eol": 2}}
+	w := do(newFindingsEngine(svc), http.MethodGet, cBase+"/findings?severity=critical", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "FindingListResponse", w.Body.Bytes())
+	if svc.lastFilters == nil || svc.lastFilters.Severity != "critical" {
+		t.Fatalf("the severity filter did not reach the service (%+v). The Dashboard's critical tile links "+
+			"through `?severity=critical`; a handler that drops it serves every severity under a banner "+
+			"that says Critical only.", svc.lastFilters)
+	}
+}
+
+// And the other polarity: no `severity=` must leave the filter EMPTY. A
+// severity defaulted in here would narrow a page nobody narrowed — the bare
+// /risk-compliance/findings link, and every bookmark of it, showing one rung.
+func TestContract_ListFindings_200_noSeverityLeavesTheFilterEmpty(t *testing.T) {
+	svc := &stubFindingsStore{producerCounts: map[string]int{}}
+	w := do(newFindingsEngine(svc), http.MethodGet, cBase+"/findings", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if svc.lastFilters == nil || svc.lastFilters.Severity != "" {
+		t.Fatalf("Severity = %q with no severity= in the request", svc.lastFilters.Severity)
 	}
 }

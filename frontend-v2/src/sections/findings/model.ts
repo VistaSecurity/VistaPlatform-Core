@@ -158,6 +158,59 @@ export function sevLevel(s: string | undefined): string {
   }
 }
 
+/**
+ * The severity rungs a `?severity=` URL filter may name, in the lowercase
+ * spelling the endpoint's `severity` parameter takes.
+ *
+ * The Dashboard's "Critical findings" tile links through this
+ * (DASHBOARD_CRITICAL_FINDINGS_ROUTE), because a tile that counts a subset must
+ * link to that subset — the rule dashboard-metrics.ts already states for the
+ * High-risk assets tile and could not honour here until the page had a severity
+ * parameter to carry.
+ *
+ * `info` is omitted deliberately: nothing links to it and the ladder's bottom
+ * rung is not a thing anyone narrows to on purpose.
+ */
+export const SEVERITY_FILTER_VALUES = ['critical', 'high', 'medium', 'low'] as const;
+export type SeverityFilterValue = (typeof SEVERITY_FILTER_VALUES)[number];
+
+/**
+ * Read a `?severity=` value, or null when it names no rung.
+ *
+ * Validated rather than forwarded, because an unrecognized value would reach the
+ * server, match nothing and render an empty page that reads exactly like "this
+ * organization has no findings". An unparseable filter is treated as absent —
+ * the page shows everything and shows NO filter banner, so what is on screen and
+ * what the page claims to be showing still agree.
+ *
+ * Accepts `med` for Medium for the same reason sevLevel does.
+ */
+export function parseSeverityFilter(raw: string | null | undefined): SeverityFilterValue | null {
+  const v = (raw ?? '').trim().toLowerCase();
+  const canonical = v === 'med' ? 'medium' : v;
+  return (SEVERITY_FILTER_VALUES as readonly string[]).includes(canonical)
+    ? (canonical as SeverityFilterValue)
+    : null;
+}
+
+/**
+ * Does this toolbar chip control the SEVERITY axis?
+ *
+ * The Findings page has two severity controls — the `?severity=` URL filter the
+ * Dashboard's Critical tile links through, and the local "Critical + High" chip
+ * — and they are one axis, so picking the chip drops the URL filter rather than
+ * intersecting with it. Left to intersect, arriving from the tile and then
+ * clicking a chip labelled "Critical + High" shows Criticals only: a control
+ * that reads as applied and is not.
+ *
+ * A function rather than an inline `k === 'crit'` so the rule is testable on its
+ * own. The other chips are workflow/assignee controls and leave severity alone.
+ */
+export const SEVERITY_AXIS_SEGS = ['crit'] as const;
+export function segOwnsSeverityAxis(seg: string): boolean {
+  return (SEVERITY_AXIS_SEGS as readonly string[]).includes(seg);
+}
+
 const SEV_RANK: Record<string, number> = { Critical: 0, High: 1, Medium: 2, Low: 3, Informational: 4 };
 export const sevRank = (lvl: string) => SEV_RANK[lvl] ?? 4;
 

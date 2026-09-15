@@ -489,3 +489,68 @@ func TestPassiveHostObservationIsASensorSource(t *testing.T) {
 		t.Error("a `source:sensor` rule did not match a sensor crypto finding")
 	}
 }
+
+// An actively enriched TLS discovery is `source:sensor` too. The sensor's TLS
+// enricher stamps these "active_enrichment" — the rows that carry the
+// certificate chain and the protocol version it measured — and normaliseSource
+// did not know the value, so the empty string made `source` absent and every
+// `source:sensor` segment rule skipped them. Same silent shape as the passive
+// host observation above: a queue that fills instead of draining. Surfaced by
+// rc-verify's data path on v1.0.0-rc.2 (20 hosts, all pending on auto-approve
+// segments).
+//
+// Mutation check: remove "active_enrichment" from normaliseSource's sensor
+// case and this fails.
+func TestActiveEnrichmentIsASensorSource(t *testing.T) {
+	rule := ruleWithQuery("source:sensor", true)
+	ev := NewRuleEvaluator()
+	cls := &Classification{Ownership: "internal", Type: "private"}
+
+	obs := Discovery{
+		Metadata: []byte(`{"discovery_method":"active_enrichment"}`),
+	}.WithKind(KindCrypto)
+
+	match, err := ev.EvaluateRule(rule, obs, cls)
+	if err != nil {
+		t.Fatalf("evaluating a source rule against an enrichment discovery: %v", err)
+	}
+	if !match {
+		t.Error("a `source:sensor` rule did not match an active_enrichment discovery; segment auto-approval skips every actively enriched TLS row")
+	}
+	if got, known := normaliseSource("active_enrichment"); !known || got != "sensor" {
+		t.Errorf("normaliseSource(active_enrichment) = %q (known=%v), want sensor", got, known)
+	}
+}
+
+// A PCAP-uploaded discovery is `source:sensor` too, and this is the third
+// instance of one bug: pcap-processor stamps "pcap_upload" (processor.go, six
+// sites) while normaliseSource spelled only the bare "pcap". Unrecognised, the
+// value yields the empty string — absent, not "sensor" — so a `source:sensor`
+// segment rule set to auto-approve silently skipped every discovery from an
+// uploaded capture. Every other consumer of the value pairs the two spellings
+// (host_observation_ingest.go:356, asset_identity.go:802,
+// asset_service.go's discoveryMethodByProducerString); this was the one that
+// did not.
+//
+// Mutation check: remove "pcap_upload" from normaliseSource's sensor case and
+// this fails.
+func TestPcapUploadIsASensorSource(t *testing.T) {
+	rule := ruleWithQuery("source:sensor", true)
+	ev := NewRuleEvaluator()
+	cls := &Classification{Ownership: "internal", Type: "private"}
+
+	obs := Discovery{
+		Metadata: []byte(`{"discovery_method":"pcap_upload"}`),
+	}.WithKind(KindCrypto)
+
+	match, err := ev.EvaluateRule(rule, obs, cls)
+	if err != nil {
+		t.Fatalf("evaluating a source rule against a pcap discovery: %v", err)
+	}
+	if !match {
+		t.Error("a `source:sensor` rule did not match a pcap_upload discovery; segment auto-approval skips every uploaded capture")
+	}
+	if got, known := normaliseSource("pcap_upload"); !known || got != "sensor" {
+		t.Errorf("normaliseSource(pcap_upload) = %q (known=%v), want sensor", got, known)
+	}
+}

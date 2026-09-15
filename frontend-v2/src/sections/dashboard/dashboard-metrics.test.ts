@@ -1,16 +1,118 @@
 import { describe, expect, it } from 'vitest';
 import { check, defaultOptions, newRegistryCatalog, CVSS_LADDER, withLadder } from '@vistasecurity/primitives/query';
 import {
-  DASHBOARD_COMPLIANCE_FINDINGS_ROUTE, DASHBOARD_HIGH_RISK_ASSETS_ROUTE, DASHBOARD_HIGH_RISK_QUERY,
+  DASHBOARD_CRITICAL_FINDINGS_ROUTE, DASHBOARD_HIGH_RISK_ASSETS_ROUTE, DASHBOARD_HIGH_RISK_QUERY,
   DASHBOARD_UNSCORED_ASSETS_ROUTE, DASHBOARD_UNSCORED_QUERY,
   getDashboardPqcMetric, getDiscoveryFleetMetric, isAgentRow,
 } from './dashboard-metrics';
+import { readFileSync } from 'node:fs';
+import { FINDINGS_SUBJECT_LENS, isFindingsLens } from '../findings/lenses';
+import { parseSeverityFilter, segOwnsSeverityAxis, SEVERITY_FILTER_VALUES } from '../findings/model';
 import { queryToFacets } from '../inventory/facet-query';
 import { INVENTORY_LENSES } from '../inventory/lenses';
 
 describe('dashboard findings links', () => {
-  it('deep-links compliance-derived finding counts to the compliance lens', () => {
-    expect(DASHBOARD_COMPLIANCE_FINDINGS_ROUTE).toBe('/risk-compliance/findings?lens=framework');
+  // This pin was `?lens=framework` while the tile counted only the compliance
+  // producer. The COUNT was widened (it reads
+  // /findings/statistics.all_producer_severity_counts now, so an end-of-life
+  // Critical is a critical finding on the Dashboard as well as on the Findings
+  // page), so the link had to widen with it — a tile that counts every producer
+  // and lands on a page grouped by framework CONTROL sends the user somewhere
+  // its number cannot be found.
+  it('deep-links the critical count to the lens that shows every producer', () => {
+    expect(DASHBOARD_CRITICAL_FINDINGS_ROUTE).toBe('/risk-compliance/findings?lens=producer&severity=critical');
+  });
+
+  // The severity axis. The tile counts ONE RUNG of the ladder, and the page it
+  // opens lists every severity — so without this parameter, clicking
+  // "40 critical findings" landed on a list of several hundred rows with
+  // nothing saying which forty were meant. That is the same failure the
+  // High-risk assets tile was fixed for below ("a tile that counts a subset
+  // must link to that subset"); it survived here only because the findings page
+  // had no severity parameter to carry.
+  //
+  // Asserted on the PARSED parameter rather than the string, and against the
+  // page's own vocabulary rather than the literal 'critical', so a rename of the
+  // rung fails here instead of silently producing a filter that matches nothing.
+  it('carries the severity rung the tile counts, in a spelling the page accepts', () => {
+    const severity = new URLSearchParams(DASHBOARD_CRITICAL_FINDINGS_ROUTE.split('?')[1]).get('severity');
+    expect(severity).toBe('critical');
+    expect(parseSeverityFilter(severity)).toBe('critical');
+    // Both polarities: parseSeverityFilter returns null for anything it does not
+    // recognize, so an assertion that only checked "not null" would pass on a
+    // route carrying a rung the page then ignores.
+    expect(parseSeverityFilter('crit')).toBeNull();
+    expect(SEVERITY_FILTER_VALUES).toContain('critical');
+  });
+
+  // The other half of the same contract, and the half a route-only assertion
+  // cannot see: the page has to READ the parameter and send it to the SERVER.
+  //
+  // Server-side is load-bearing, not a style preference. useFindingsList stops
+  // at FINDINGS_PAGE_CAP pages, so a severity narrowing applied to the returned
+  // array would under-report any tenant whose Criticals sit past the cap — the
+  // tile would say 40 and the page would show twelve, which is the divergence
+  // this whole pairing exists to prevent, arriving from the opposite direction.
+  it('is read by the findings page and applied by the server', () => {
+    const page = readFileSync(new URL('../findings/findings-page.tsx', import.meta.url), 'utf8');
+    // read from the URL, through the validator
+    expect(page).toMatch(/parseSeverityFilter\(params\.get\('severity'\)\)/);
+    // handed to the list query rather than used to filter its result
+    expect(page).toMatch(/useFindingsList\([^)]*severityF/);
+    // and visible + clearable, because a filter arriving from a link is one the
+    // reader never chose
+    expect(page).toContain('findings-severity-filter');
+    // The button must be WIRED, not merely present. `/clearSeverity/` matched
+    // the function's own declaration, so unhooking it from the banner left this
+    // green — the inert-check failure this repository keeps re-finding, caught
+    // by mutation-testing this very assertion.
+    expect(page).toMatch(/onClick=\{clearSeverity\}/);
+    // and it must actually drop the parameter rather than set it to something
+    expect(page).toMatch(/clearSeverity = \(\) => setParams\(\(prm\) => \{\s*prm\.delete\('severity'\);/);
+
+    const queries = readFileSync(new URL('../findings/queries.ts', import.meta.url), 'utf8');
+    // sent as a query PARAMETER on the request, not applied to `all`
+    expect(queries).toMatch(/severity: sev/);
+  });
+
+  // `?severity=` and the page's own "Critical + High" chip are the SAME axis
+  // under two controls, so they must not intersect: arriving from this tile and
+  // then clicking a chip labelled "Critical + High" would otherwise show
+  // Criticals only — a control that reads as applied and is not, which is the
+  // failure the subject and severity banners both exist to prevent.
+  it('resolves its severity filter against the page own severity chip', () => {
+    // The RULE, exercised for real rather than read off the source: only the
+    // severity chip owns this axis, and both polarities are asserted because a
+    // predicate that returns true for everything would drop the URL filter on
+    // every chip click, and one that returns false for everything is the
+    // intersecting behaviour this prevents.
+    expect(segOwnsSeverityAxis('crit')).toBe(true);
+    expect(segOwnsSeverityAxis('open')).toBe(false);
+    expect(segOwnsSeverityAxis('mine')).toBe(false);
+    expect(segOwnsSeverityAxis('unassigned')).toBe(false);
+
+    // The WIRING, which a unit test of the rule cannot see. Anchored at `if (`
+    // on purpose: an un-anchored match still succeeded with the call disabled
+    // behind `if (false && …)`, which is how this assertion first shipped inert.
+    const page = readFileSync(new URL('../findings/findings-page.tsx', import.meta.url), 'utf8');
+    expect(page).toMatch(/if \(segOwnsSeverityAxis\(k\) && severityF\) clearSeverity\(\);/);
+    // Every seg chip goes through selectSeg, so the rule cannot be bypassed by
+    // one of the two chip rows still calling setSeg directly.
+    expect(page).not.toMatch(/onClick=\{\(\) => setSeg\(/);
+    expect(page).toMatch(/onClick=\{\(\) => selectSeg\(k\)\}/);
+  });
+
+  it('names the every-producer lens structurally, not by a string that happens to match', () => {
+    const lens = new URLSearchParams(DASHBOARD_CRITICAL_FINDINGS_ROUTE.split('?')[1]).get('lens');
+    // The registry's own name for "the findings-scoped lens that shows every
+    // producer's rows without a framework in the way".
+    expect(lens).toBe(FINDINGS_SUBJECT_LENS);
+    expect(isFindingsLens(lens!)).toBe(true);
+    // Both polarities. `framework` and `control` are findings-scoped too, so
+    // isFindingsLens alone accepts the lens this tile used to point at — the
+    // assertion that catches a revert has to name them.
+    expect(lens).not.toBe('framework');
+    expect(lens).not.toBe('control');
   });
 });
 

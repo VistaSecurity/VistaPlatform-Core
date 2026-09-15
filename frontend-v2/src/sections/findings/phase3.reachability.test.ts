@@ -212,7 +212,10 @@ describe('the Findings search box', () => {
   const page = read('findings-page.tsx');
 
   it('sends the term to the list query', () => {
-    expect(page).toMatch(/useFindingsList\([^)]*dq\)/);
+    // `dq` among the hook's arguments, not necessarily last — the call gained a
+    // severity argument after it. Still positional, so a \b-bounded match is
+    // what distinguishes it from `dqSomething`.
+    expect(page).toMatch(/useFindingsList\([^)]*\bdq\b/);
   });
 
   it('debounces it, so typing is not one request per keystroke', () => {

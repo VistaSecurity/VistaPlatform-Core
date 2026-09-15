@@ -35,7 +35,28 @@ package findings
 // different question.
 func OpenSQL(alias string) string {
 	return "(" + alias + ".detection_state = 'ACTIVE'" +
-		" AND " + alias + ".workflow_status NOT IN ('RESOLVED', 'SUPPRESSED'))"
+		" AND " + WorkflowOpenSQL(alias) + ")"
+}
+
+// WorkflowOpenSQL is the WORKFLOW half of OpenSQL on its own: has anybody dealt
+// with this finding? It exists for the one reader that already constrains
+// `detection_state` separately and would otherwise have to re-spell this half —
+// findingListWhere in compliance-engine, which builds the Findings page's WHERE,
+// the per-producer facet tally and the Dashboard's "Critical findings" rollup
+// from one expression.
+//
+// Split out rather than copied, and OpenSQL is COMPOSED from it rather than the
+// two being written side by side, so TestOpenSQL_IsOpenQueryInSQL still pins the
+// whole predicate to the generated OpenQuery: a change to the registry's
+// definition of "open" that is not mirrored here fails the build. A second
+// hand-written `NOT IN ('RESOLVED', 'SUPPRESSED')` is exactly how the tile and
+// the page it links to came to count different sets in the first place.
+//
+// Not a complete definition of "open" by itself. A caller that does not
+// otherwise scope `detection_state` wants OpenSQL — this half alone counts
+// findings that have since gone away.
+func WorkflowOpenSQL(alias string) string {
+	return alias + ".workflow_status NOT IN ('RESOLVED', 'SUPPRESSED')"
 }
 
 // ConfigurationAssetSQL is the ONE expression that resolves the asset a crypto

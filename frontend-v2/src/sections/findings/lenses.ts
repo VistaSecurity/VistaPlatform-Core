@@ -47,7 +47,7 @@ export const SCOPE_LABEL: Record<FindingsLens['scope'], string> = {
 /** The order the rail groups the lenses in. */
 export const SCOPE_ORDER: readonly FindingsLens['scope'][] = ['findings', 'crypto'];
 
-export const DEFAULT_FINDINGS_LENS = 'severity';
+export const DEFAULT_FINDINGS_LENS = 'producer';
 
 /**
  * The lens a key names, or the default.
@@ -68,12 +68,14 @@ export const isFindingsLens = (key: string): boolean =>
  * The lens a deep link carrying a SUBJECT or PRODUCER filter must land on.
  *
  * `subject_type`/`subject_id`, `producer` and `q` are read only by the
- * findings-scoped lenses; the page's default (`severity`) reads the crypto-risk
- * stream, which ignores all three. A link without a lens therefore rendered an
- * unfiltered crypto list under a banner claiming it was narrowed to one
- * subject — a page that says it is filtered and is not. `producer` is the one
- * findings-scoped lens that shows every producer's rows without a framework in
- * the way, so it is the destination for every such link.
+ * findings-scoped lenses; the crypto lenses read a different data set that
+ * ignores all three. A link without a lens landed on the page default, which
+ * was `severity` — so it rendered an unfiltered crypto list under a banner
+ * claiming it was narrowed to one subject: a page that says it is filtered and
+ * is not. The default is findings-scoped now, but these links stay explicit,
+ * because a default is a thing that changes and the filter has to survive it.
+ * `producer` is the one findings-scoped lens that shows every producer's rows
+ * without a framework in the way, so it is the destination for every such link.
  *
  * Named here rather than written out at each call site so the link builders and
  * the tests that pin them share ONE answer, and `isFindingsLens` can be asserted

@@ -411,15 +411,42 @@ stays suppressed — you muted the condition, not that particular sighting of it
 
 ## Where to find them
 
+- **Dashboard → Critical findings** — how many **open** findings are Critical
+  right now, from every producer, across every asset. "Open" here means the same
+  thing it means everywhere else in the product: still detected, and not yet
+  Resolved or Suppressed. Clicking the tile opens the findings list on **By
+  Producer**, filtered to Critical — so the rows you land on are the ones the
+  number counted, and a banner across the top says **Showing Critical findings
+  only** with a **Show all severities** button when you want the rest.
+
+  Three things about this tile have been corrected. It counted only failed
+  framework controls until v1.0.0, so an organization whose Criticals were all
+  end-of-life or vulnerability findings read "0" here and saw them on the
+  Findings page. Since then it has also stopped counting findings you had
+  already suppressed or resolved — that number did not fall when you triaged,
+  and the finding behind it was one the Findings page would not show you,
+  because it opens with its **Open** filter on. Suppressing a Critical with a
+  reason now takes it off this tile. And the tile's link now carries the
+  Critical narrowing, so you land on the rows it counted rather than on the
+  whole list.
+
+  The page's **Critical + High** filter is the same control as the tile's
+  Critical narrowing, so clicking it replaces the Critical-only view rather than
+  intersecting with it — that is how you widen from the tile to see the High
+  findings too. It is also how you get a suppressed finding back on screen: the
+  Findings page has no separate **Suppressed** filter, so anything you muted is
+  hidden only by the **Open** chip. Switch to **Critical + High** and every
+  Critical and High comes back whatever its status, each row labelled **New**,
+  **Notified**, **Resolved** or **Suppressed**.
 - **Risk & Compliance → Findings** — every open finding for your organization,
   from every producer. This is where you triage: assign an owner, change status,
   suppress with a reason, or raise a ticket.
 
-  The lens picker chooses how they are grouped. **By Producer** shows all of
-  them, banded by who judged what; **By Framework** and **By Control** group
-  compliance findings by the control they failed, and show only those — an
-  end-of-life finding has no control, so there is nowhere on those two lenses to
-  put it. The producer chips along the top filter any of the three, and each one
+  The lens picker chooses how they are grouped. The page opens on **By
+  Producer**, which shows all of them, banded by who judged what; **By
+  Framework** and **By Control** group compliance findings by the control they
+  failed, and show only those — an end-of-life finding has no control, so there
+  is nowhere on those two lenses to put it. The producer chips along the top filter any of the three, and each one
   carries its own count so you can see at a glance which producer is raising
   what.
 
@@ -439,6 +466,13 @@ stays suppressed — you muted the condition, not that particular sighting of it
   A link can carry the search: `?q=openssl` on this page opens it already
   filtered. That is what the software surfaces use when a product is installed
   on too many assets to name a single one.
+
+  A link can also carry a **severity**: `?severity=critical` (or `high`,
+  `medium`, `low`) opens the page showing that rung only, with a banner saying
+  so and a button to clear it. The Dashboard's Critical findings tile uses this.
+  Both filters are applied by the server, so the producer chip counts and the
+  total beside them describe the same set as the rows — they stay true however
+  many findings your organization has.
 - **Inventory → any asset → Overview** — the risk score, the one finding it came
   from, and which producers have evaluated the asset.
 - **Inventory → any asset → Findings** — the open findings on one asset and on

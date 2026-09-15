@@ -426,10 +426,32 @@ func (s *FindingsService) GetFindingsByAsset(tenantID, assetID uuid.UUID) ([]mod
 
 // FindingListFilters narrows ListFindings. Zero values mean "no filter".
 type FindingListFilters struct {
-	WorkflowStatus string     // NEW / NOTIFIED / RESOLVED / SUPPRESSED (case-insensitive)
-	Severity       string     // info / low / medium / high / critical (any spelling; normalized)
-	AssignedTo     *uuid.UUID // findings assigned to this user
-	Unassigned     bool       // findings with no assignee (ignored when AssignedTo is set)
+	WorkflowStatus string // NEW / NOTIFIED / RESOLVED / SUPPRESSED (case-insensitive)
+	// WorkflowOpen narrows to findings nobody has dealt with yet — the house
+	// definition of open, `workflow_status NOT IN ('RESOLVED', 'SUPPRESSED')`,
+	// spliced from sharedfindings.WorkflowOpenSQL so it is the registry's
+	// definition rather than a third spelling of it.
+	//
+	// It is what the Dashboard's "Critical findings" tile counts. The tile is an
+	// ATTENTION surface, and a Critical the tenant suppressed with a reason
+	// ("accepted, compensating control") is work they have already done: counting
+	// it forever meant the number never went down when they triaged, and the
+	// page the tile links to opens on its Open chip, which hides exactly these
+	// rows — so the one row driving the number was the one row the destination
+	// would not show. Documented as a caveat before v1.0.0; now closed.
+	//
+	// A filter rather than a hard-coded narrowing of the rollup, so the page's
+	// Open chip and the tile's number come from ONE predicate. Two hand-written
+	// WHEREs over the same table is how `has_findings` came to report a number
+	// the page it led to did not show.
+	//
+	// Composes with WorkflowStatus rather than replacing it: an explicit
+	// `workflow_status=SUPPRESSED` still means that, and asking for both is an
+	// empty page by construction rather than a contradiction this has to resolve.
+	WorkflowOpen bool
+	Severity     string     // info / low / medium / high / critical (any spelling; normalized)
+	AssignedTo   *uuid.UUID // findings assigned to this user
+	Unassigned   bool       // findings with no assignee (ignored when AssignedTo is set)
 	// Producer is a registry producer key — `eol`, `vulnerability`,
 	// `compliance`, … Empty means EVERY producer, which is this page's default.
 	// The handler validates it against the generated registry, so a typo is a
@@ -520,6 +542,11 @@ func findingListWhere(tenantID uuid.UUID, filters FindingListFilters, includePro
 		args = append(args, filters.Producer)
 		idx++
 	}
+	if filters.WorkflowOpen {
+		// Spliced, not written out — see FindingListFilters.WorkflowOpen. No
+		// placeholder: the vocabulary is a generated constant, not user input.
+		where = append(where, sharedfindings.WorkflowOpenSQL("cf"))
+	}
 	if filters.WorkflowStatus != "" {
 		where = append(where, fmt.Sprintf("UPPER(cf.workflow_status) = UPPER($%d)", idx))
 		args = append(args, filters.WorkflowStatus)
@@ -606,6 +633,60 @@ func findingListWhere(tenantID uuid.UUID, filters FindingListFilters, includePro
 		idx++
 	}
 	return where, args, idx
+}
+
+// allProducerSeverityWhere is the scope behind
+// FindingStatistics.AllProducerSeverityCounts: every producer's OPEN findings,
+// under the same visibility rule the Findings page applies.
+//
+// It is findingListWhere, deliberately — an unfiltered list and an unqualified
+// count are the same question asked twice, and the only way to keep them
+// answering it the same way is to build them from one expression. A second
+// hand-written WHERE here is exactly how the `has_findings` facet came to report
+// a number the page it led to did not show.
+//
+// WorkflowOpen is the ONE filter it sets, and it is set because the Dashboard
+// tile this feeds links to a page that opens on its Open chip. Counting every
+// ACTIVE row whatever its workflow status meant a tenant who suppressed a
+// Critical end-of-life finding with a reason kept seeing it on an attention tile
+// and could not find it at the destination — the tile's number and its link
+// disagreeing about one row, which is the H-2 shape one axis over. The producer
+// axis was widened to match the label in; this is the workflow axis
+// narrowed to match the link.
+//
+// It is NOT a severity narrowing. The rollup returns the whole ladder and the
+// tile reads one rung off it, so the other rungs stay available to any future
+// reader; the tile carries its own rung in DASHBOARD_CRITICAL_FINDINGS_ROUTE
+// instead (frontend-v2/src/sections/dashboard/dashboard-metrics.ts).
+func allProducerSeverityWhere(tenantID uuid.UUID) (string, []interface{}) {
+	where, args, _ := findingListWhere(tenantID, FindingListFilters{WorkflowOpen: true}, false)
+	return strings.Join(where, " AND "), args
+}
+
+// scanSeverityCounts folds a `severity, count` result set onto the ladder.
+//
+// Shared by both severity rollups so the two cannot come to disagree about
+// which rung a row lands on — the failure the single severityRankSQL ladder
+// exists to prevent, in its Go half.
+func scanSeverityCounts(rows *sql.Rows, into *SeverityCounts) error {
+	for rows.Next() {
+		var severity string
+		var count int
+		if err := rows.Scan(&severity, &count); err != nil {
+			return fmt.Errorf("failed to scan severity count: %w", err)
+		}
+		switch severity {
+		case SeverityCritical:
+			into.Critical = count
+		case SeverityHigh:
+			into.High = count
+		case SeverityMedium:
+			into.Medium = count
+		case SeverityLow:
+			into.Low = count
+		}
+	}
+	return rows.Err()
 }
 
 // ListFindings returns a page of the tenant's ACTIVE findings from EVERY
@@ -1073,7 +1154,34 @@ type FindingStatistics struct {
 	// agrees with the Findings page instead of inventory-service's
 	// crypto-implementation-risk-score-derived "critical findings" count
 	// (H-2: the two used to read from unrelated tables and disagree).
+	//
+	// COMPLIANCE-scoped, and that is the whole of what it means: failed controls
+	// on frameworks the tenant has activated. Nothing from `eol`,
+	// `vulnerability`, `configuration`, `hygiene`, `drift` or `crypto` is in it.
+	// It is the number for a surface that is ABOUT framework compliance —
+	// anything that says "findings" without qualification wants the field below.
 	SeverityCounts SeverityCounts `json:"severity_counts"`
+	// AllProducerSeverityCounts tallies ACTIVE findings by severity across EVERY
+	// producer — the same set Risk & Compliance -> Findings shows on its default
+	// (By Producer) lens, under the same visibility rule.
+	//
+	// It exists because the Dashboard's "Critical findings" tile read
+	// SeverityCounts while labelling itself "across all assets", so a tenant
+	// whose only Criticals were end-of-life or vulnerability findings read
+	// "0 critical findings" on the Dashboard and saw them on the Findings page:
+	// the H-2 divergence again, one producer later. The product's position is
+	// that findings are ONE stream (docsv4/core/features/findings.md, "One list,
+	// several producers"), so an unqualified count has to span it.
+	//
+	// Built from findingListWhere (allProducerSeverityWhere) rather than written
+	// out, so the tile and the page it links to cannot drift into counting
+	// different sets.
+	//
+	// OPEN findings: `detection_state = 'ACTIVE'` AND the workflow half of the
+	// registry's definition of open, so a finding the tenant resolved or
+	// suppressed is not counted. Unlike SeverityCounts below, which counts every
+	// ACTIVE compliance row whatever its workflow status.
+	AllProducerSeverityCounts SeverityCounts `json:"all_producer_severity_counts"`
 }
 
 // GetFindingStatistics returns aggregated statistics for findings
@@ -1081,10 +1189,12 @@ func (s *FindingsService) GetFindingStatistics(tenantID uuid.UUID) (*FindingStat
 	stats := &FindingStatistics{}
 
 	// Get counts by detection state
-	// All four rollups carry the licensed scope (see licensedFindingScopeSQL):
-	// these counts drive the Dashboard's severity tiles, and an unactivated
-	// framework's findings used to land there — a tenant whose single activated
-	// framework had zero Criticals still read "5 Critical" on the Dashboard.
+	// All four rollups below carry the licensed scope (see
+	// licensedFindingScopeSQL) — an unactivated framework's findings used to
+	// reach the Dashboard through them, so a tenant whose single activated
+	// framework had zero Criticals still read "5 Critical" there. The Dashboard
+	// reads AllProducerSeverityCounts now, which carries the same gate on its
+	// compliance rows; these four remain the compliance-scoped answer.
 	query := `
 		SELECT
 			detection_state,
@@ -1130,6 +1240,19 @@ func (s *FindingsService) GetFindingStatistics(tenantID uuid.UUID) (*FindingStat
 		  AND detection_state = 'ACTIVE'
 		  AND ` + complianceProducerScope("cf") + `
 		  AND ` + licensedFindingScopeSQL("cf", "$1") + `
+		GROUP BY severity
+	`
+	// The same tally across EVERY producer — what an unqualified "critical
+	// findings" number means. Its scope comes from findingListWhere, so it is
+	// the Findings page's own WHERE with no filters applied rather than a second
+	// hand-written copy of it.
+	allProducerWhere, allProducerArgs := allProducerSeverityWhere(tenantID)
+	allProducerSeverityQuery := `
+		SELECT
+			severity,
+			COUNT(*) as count
+		FROM findings cf
+		WHERE ` + allProducerWhere + `
 		GROUP BY severity
 	`
 
@@ -1190,25 +1313,17 @@ func (s *FindingsService) GetFindingStatistics(tenantID uuid.UUID) (*FindingStat
 			return fmt.Errorf("failed to get severity counts: %w", err)
 		}
 		defer func() { _ = sevRows.Close() }()
-		for sevRows.Next() {
-			var severity string
-			var count int
-			if err := sevRows.Scan(&severity, &count); err != nil {
-				return fmt.Errorf("failed to scan severity count: %w", err)
-			}
-			switch severity {
-			case SeverityCritical:
-				stats.SeverityCounts.Critical = count
-			case SeverityHigh:
-				stats.SeverityCounts.High = count
-			case SeverityMedium:
-				stats.SeverityCounts.Medium = count
-			case SeverityLow:
-				stats.SeverityCounts.Low = count
-			}
-		}
-		if err := sevRows.Err(); err != nil {
+		if err := scanSeverityCounts(sevRows, &stats.SeverityCounts); err != nil {
 			return fmt.Errorf("failed to get severity counts: %w", err)
+		}
+
+		allSevRows, err := tx.QueryContext(context.Background(), allProducerSeverityQuery, allProducerArgs...)
+		if err != nil {
+			return fmt.Errorf("failed to get all-producer severity counts: %w", err)
+		}
+		defer func() { _ = allSevRows.Close() }()
+		if err := scanSeverityCounts(allSevRows, &stats.AllProducerSeverityCounts); err != nil {
+			return fmt.Errorf("failed to get all-producer severity counts: %w", err)
 		}
 
 		if err := tx.QueryRowContext(context.Background(), resurfacedQuery, tenantID).Scan(&stats.ResurfacedFindings); err != nil {

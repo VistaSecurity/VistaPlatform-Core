@@ -69,14 +69,9 @@ export function alertSubjectHref(a: AlertSubject): string | null {
       return `/inventory/assets/${encodeURIComponent(id)}`;
     case 'software_install':
     case 'crypto_configuration':
-      // FINDINGS_SUBJECT_LENS is not decoration. The Findings page's DEFAULT lens is
-      // `severity`, which reads the CRYPTO-RISK stream — a different data set
-      // that knows nothing about `subject_type`/`subject_id`. A link without a
-      // lens therefore lands on an unfiltered crypto list under a banner
-      // reading "Showing findings on one software install only": a page that
-      // says it is filtered and is not. `producer` is the one findings-scoped
-      // lens that shows every producer's rows, so the subject filter the link
-      // carries is the filter the reader sees applied.
+      // FINDINGS_SUBJECT_LENS is not decoration: subject filters are honoured
+      // only by findings-scoped lenses. Keep the URL explicit so this link
+      // cannot drift onto the crypto-risk stream if the page default changes.
       return `/risk-compliance/findings?lens=${FINDINGS_SUBJECT_LENS}&subject_type=${encodeURIComponent(a.subject_type)}&subject_id=${encodeURIComponent(id)}`;
     case 'control':
       return `/risk-compliance/findings?lens=control&control=${encodeURIComponent(id)}`;

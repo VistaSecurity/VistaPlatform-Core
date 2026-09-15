@@ -71,10 +71,11 @@ describe('alertSubjectText', () => {
 });
 
 // The lens a subject link lands on has to be one that reads the FINDINGS table.
-// The Findings page's default lens is `severity`, which reads the crypto-risk
-// stream instead and ignores subject_type/subject_id entirely — so a link
-// without a lens renders an unfiltered crypto list under a banner reading
-// "Showing findings on one software install only". Asserted against the page's
+// The crypto-risk lenses ignore subject_type/subject_id entirely — so while the
+// page default was `severity`, a link without a lens rendered an unfiltered
+// crypto list under a banner reading "Showing findings on one software install
+// only". The default is findings-scoped now; the links stay explicit anyway,
+// because a default is a thing that changes. Asserted against the page's
 // own lens registry rather than against the literal string, so a lens rename
 // cannot leave this passing while the link breaks.
 describe('a subject link lands on a lens that can honour it', () => {

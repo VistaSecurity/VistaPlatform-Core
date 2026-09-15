@@ -9,17 +9,43 @@ package services
 // therefore the first one anything can upgrade FROM.
 //
 // A comment saying "re-arm this at core-v1.0.0" is a reminder nobody receives.
-// This is a tripwire: the day a `core-v1.*` tag exists in the repository, the
-// constant being 0 becomes a failing test with the reason attached.
+// This is a tripwire: the day a FINAL `core-v1.Y.Z` tag exists in the
+// repository, the constant being 0 becomes a failing test with the reason
+// attached.
+//
+// Release CANDIDATES do not arm it. `core-v1.0.0-rc.1` is not a release anyone
+// runs and then upgrades away from — it exists so we can install it, look at
+// it and throw it away — so there is no prior shape for the upgrade test to
+// start from, and firing on one is the over-strict polarity of this guard:
+// a red suite on main that says "re-arm me" when there is nothing yet to
+// upgrade from. It stayed invisible for exactly as long as it took someone to
+// run the suite in a checkout WITH tags; CI clones without them.
 //
 // It is deliberately CHEAP — one `git tag` call, no database — so it runs in the
 // ordinary unit suite rather than waiting for a nightly.
 
 import (
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+// finalV1Tags keeps the released core-v1 tags and drops prereleases. Split out
+// from the test so the decision itself is testable without a repository whose
+// tags say what the case needs — asserting that the filter EXISTS would not
+// tell you it is right.
+var finalV1Tag = regexp.MustCompile(`^core-v1\.[0-9]+\.[0-9]+$`)
+
+func finalV1Tags(tags []string) []string {
+	var out []string
+	for _, t := range tags {
+		if finalV1Tag.MatchString(t) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
 
 func TestUpgradePathGuardIsArmedOnceV1Exists(t *testing.T) {
 	out, err := exec.Command("git", "tag", "--list", "core-v1.*").Output()
@@ -29,7 +55,7 @@ func TestUpgradePathGuardIsArmedOnceV1Exists(t *testing.T) {
 		// absence is noise.
 		t.Skipf("cannot list git tags (%v); the tripwire needs a checkout with tags", err)
 	}
-	tags := strings.Fields(strings.TrimSpace(string(out)))
+	tags := finalV1Tags(strings.Fields(strings.TrimSpace(string(out))))
 	if len(tags) == 0 {
 		if upgradeFromTagCount != 0 {
 			// Armed early. Harmless, and worth knowing about.
@@ -49,5 +75,29 @@ func TestUpgradePathGuardIsArmedOnceV1Exists(t *testing.T) {
 			"double-apply is structurally blind to that class, because both of its passes build "+
 			"today's shape.\n\n"+
 			"Set upgradeFromTagCount to 2 (ADR-0007 D2.5).", strings.Join(tags, ", "))
+	}
+}
+
+// Both polarities of the filter, because the tripwire's whole value is firing
+// at the right moment: a release candidate must not arm it, and a final
+// release must.
+func TestFinalV1TagsIgnoresCandidates(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		tags []string
+		want []string
+	}{
+		{"candidates alone do not arm it", []string{"core-v1.0.0-rc.1", "core-v1.0.0-rc.2"}, nil},
+		{"the final release arms it", []string{"core-v1.0.0-rc.2", "core-v1.0.0"}, []string{"core-v1.0.0"}},
+		{"a later patch arms it", []string{"core-v1.2.3"}, []string{"core-v1.2.3"}},
+		{"a v2 tag is not this tripwire's business", []string{"core-v2.0.0"}, nil},
+		{"a commercial tag is not a core tag", []string{"v1.0.0"}, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := finalV1Tags(c.tags)
+			if strings.Join(got, ",") != strings.Join(c.want, ",") {
+				t.Errorf("finalV1Tags(%v) = %v, want %v", c.tags, got, c.want)
+			}
+		})
 	}
 }

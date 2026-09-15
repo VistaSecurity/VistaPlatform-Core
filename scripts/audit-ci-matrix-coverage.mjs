@@ -32,6 +32,7 @@
 // tree (must PASS).
 import fs from 'fs-extra';
 import path from 'path';
+import YAML from 'yaml';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -225,6 +226,74 @@ export function auditJsPackageCoverage({
   return { errors, notes, packages };
 }
 
+// ── Fork gate ────────────────────────────────────────────────────────────────
+// Every job in the PR gate runs on a SELF-HOSTED runner, and those runners hold
+// the docker socket, the Harbor-trusted CA and the cluster kubeconfigs. The one
+// thing keeping a fork's pull-request code off them is the `if:` on
+// detect-changes; every other job inherits it only by declaring
+// `needs: [detect-changes]`. A job that forgets the `needs:` is not a slow
+// build, it is the door left open — and it reads as perfectly normal YAML, so
+// nothing but this audit notices.
+//
+// Mutation-test any change: delete the `needs:` from one job (must FAIL),
+// weaken detect-changes' own `if:` (must FAIL), clean tree (must PASS).
+export const FORK_GATE_WORKFLOW = '.github/workflows/ci.yml';
+export const FORK_GATE_JOB = 'detect-changes';
+
+/** Job name → { needs, if } for the top-level `jobs:` map of a workflow. */
+export function workflowJobs(file, rootDir = root) {
+  const abs = path.join(rootDir, file);
+  if (!fs.existsSync(abs)) return null;
+  const doc = YAML.parse(fs.readFileSync(abs, 'utf8'));
+  const jobs = doc && doc.jobs;
+  if (!jobs || typeof jobs !== 'object') return null;
+  const out = new Map();
+  for (const [name, job] of Object.entries(jobs)) {
+    const needs = job && job.needs;
+    out.set(name, {
+      needs: needs === undefined || needs === null ? [] : Array.isArray(needs) ? needs : [needs],
+      if: job && job.if ? String(job.if) : '',
+    });
+  }
+  return out;
+}
+
+export function auditForkGate({ rootDir = root, workflowFile = FORK_GATE_WORKFLOW, gateJob = FORK_GATE_JOB } = {}) {
+  const errors = [];
+  const notes = [];
+
+  const jobs = workflowJobs(workflowFile, rootDir);
+  if (jobs === null) {
+    errors.push(`${workflowFile}: no top-level \`jobs:\` map could be parsed — the fork gate cannot be audited, and an audit that finds nothing passes vacuously.`);
+    return { errors, notes, jobs: [] };
+  }
+  const gate = jobs.get(gateJob);
+  if (!gate) {
+    errors.push(`${workflowFile}: there is no \`${gateJob}\` job — the fork gate every other job depends on is gone.`);
+    return { errors, notes, jobs: [...jobs.keys()] };
+  }
+  if (!/pull_request/.test(gate.if) || !/head\.repo\.full_name/.test(gate.if)) {
+    errors.push(
+      `${workflowFile}: the \`${gateJob}\` job no longer refuses pull requests from forks ` +
+        `(its \`if:\` must compare github.event.pull_request.head.repo.full_name with github.repository). ` +
+        `Every other job inherits that check through \`needs:\`; without it they all run a fork's code on self-hosted runners.`
+    );
+  }
+  for (const [name, job] of jobs) {
+    if (name === gateJob) continue;
+    if (!job.needs.includes(gateJob)) {
+      errors.push(
+        `${workflowFile}: job "${name}" does not declare \`needs: [${gateJob}]\`, so it runs a fork's ` +
+          `pull-request code on a self-hosted runner that holds the docker socket and the cluster ` +
+          `kubeconfigs. Add the \`needs:\` even when the job uses none of its outputs.`
+      );
+    }
+  }
+
+  notes.push(`  fork gate ${jobs.size - 1} job(s) behind ${gateJob} in ${workflowFile}`);
+  return { errors, notes, jobs: [...jobs.keys()] };
+}
+
 export function auditCiMatrixCoverage({
   rootDir = root,
   workflows = MATRIX_WORKFLOWS,
@@ -282,10 +351,11 @@ export function main(argv = process.argv) {
   const strict = argv.includes('--strict');
   const go = auditCiMatrixCoverage();
   const js = auditJsPackageCoverage();
-  const errors = [...go.errors, ...js.errors];
-  const notes = [...go.notes, ...js.notes];
+  const fork = auditForkGate();
+  const errors = [...go.errors, ...js.errors, ...fork.errors];
+  const notes = [...go.notes, ...js.notes, ...fork.notes];
 
-  console.log('CI matrix coverage audit (every shipping Go module and buildable JS package must be in CI)');
+  console.log('CI matrix coverage audit (every shipping Go module and buildable JS package must be in CI, behind the fork gate)');
   notes.forEach((n) => console.log(n));
 
   if (errors.length) {
@@ -296,7 +366,7 @@ export function main(argv = process.argv) {
     process.exit(strict ? 1 : 0);
   }
 
-  console.log('✅ ci-matrix coverage: every shipping module and buildable JS package is built before release.');
+  console.log('✅ ci-matrix coverage: every shipping module and buildable JS package is built before release, and every PR-gate job sits behind the fork gate.');
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {

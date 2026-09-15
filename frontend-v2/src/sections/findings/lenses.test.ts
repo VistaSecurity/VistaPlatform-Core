@@ -21,6 +21,11 @@ describe('the Findings lens registry', () => {
     expect(isFindingsLens('producer')).toBe(true);
   });
 
+  it('defaults the nav home to the full platform-finding stream', () => {
+    expect(DEFAULT_FINDINGS_LENS).toBe('producer');
+    expect(findFindingsLens(null).scope).toBe('findings');
+  });
+
   it('keeps the framework and control lenses on the findings stream too', () => {
     expect(isFindingsLens('framework')).toBe(true);
     expect(isFindingsLens('control')).toBe(true);

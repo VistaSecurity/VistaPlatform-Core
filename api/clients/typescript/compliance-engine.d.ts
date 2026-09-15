@@ -1985,8 +1985,20 @@ export interface components {
             resolved_findings: number;
             suppressed_findings: number;
             resurfaced_findings: number;
-            /** @description ACTIVE findings by severity, tenant-wide (no control-join, no limit) — read off the same materialized findings as the Findings page, so a dashboard tile built from severity_counts.critical agrees with the Findings page. */
+            /**
+             * @description ACTIVE findings by severity, tenant-wide (no control-join, no limit), scoped to the COMPLIANCE producer: failed controls on frameworks the tenant has activated. Nothing from eol, vulnerability, configuration, hygiene, drift or crypto is in it — a surface that says "findings" without qualification wants all_producer_severity_counts instead.
+             *
+             *     CONTRACT-ONLY as of v1.0.0: nothing in the shipped UI reads this field. The Dashboard tile was its only consumer and moved to all_producer_severity_counts. It is kept because removing a published response field is a breaking change, and because the compliance-only question is a real one — but it is unverified by any screen, so treat a change in its behaviour as unobserved rather than as caught by the product.
+             *
+             *     Note the two are NOT the same query narrowed: this one counts every ACTIVE compliance row whatever its workflow_status, while all_producer_severity_counts counts only OPEN ones.
+             */
             severity_counts: components["schemas"]["SeverityCounts"];
+            /**
+             * @description OPEN findings by severity across EVERY producer, tenant-wide — the same set GET /findings returns under `workflow_status` not in (RESOLVED, SUPPRESSED), under the same visibility rule. This is the unqualified "critical findings" number; the Dashboard tile reads it.
+             *
+             *     "Open", not merely ACTIVE, because the tile is an attention surface that links to a page opening on its Open filter. Counting a finding the tenant suppressed with a reason meant the number never fell when they triaged, and the row driving it was the one row the destination would not show.
+             */
+            all_producer_severity_counts: components["schemas"]["SeverityCounts"];
         };
         /** @description CURRENT list envelope for GET /findings — `{ "findings": [...], "total": N, "page": P, "page_size": S, "producer_counts": {...} }`. `total` is the unpaginated count. On an empty/nil result `findings` can serialize as JSON null, so it is typed as a nullable array. Each finding carries the joined `asset` object when the owning asset exists and is not deleted. */
         FindingListResponse: {

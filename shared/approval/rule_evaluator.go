@@ -218,7 +218,25 @@ func normaliseSource(v string) (string, bool) {
 		// arriving, with nothing anywhere saying so. What distinguishes a host
 		// observation from a crypto finding is `kind`, not `source`: both come
 		// from the sensor.
-		"passive_host_observation":
+		"passive_host_observation",
+		// The sensor's TLS enricher stamps its active probe results
+		// "active_enrichment" (sensor/internal/enrichment/tls_enricher.go).
+		// Unrecognised here it yielded the empty string — absent — and every
+		// `source:sensor` segment rule silently skipped exactly the
+		// discoveries that carry the certificate chain and the measured
+		// protocol version. Found by rc-verify's data path: 41 discoveries,
+		// 20 assets, all pending approval on segments set to auto-approve.
+		"active_enrichment",
+		// pcap-processor stamps "pcap_upload", never the bare "pcap" this
+		// case already spelled (services/pcap-processor/internal/processor/
+		// processor.go, six sites). Every other consumer of the value handles
+		// BOTH spellings — host_observation_ingest.go, asset_identity.go and
+		// asset_service.go's producer map each pair them explicitly — and this
+		// was the one place that did not, so a `source:sensor` rule skipped
+		// every PCAP-uploaded discovery in exactly the same silence as the two
+		// cases above. Found by reviewing that fix rather than by a queue that
+		// filled, which is the only reason it is not a third incident.
+		"pcap_upload":
 		return "sensor", true
 	case "device_interrogation", "interrogation":
 		return "interrogation", true
