@@ -67,6 +67,21 @@ const ADMIN_ONLY_TOKEN = '__ADMIN_HOST_ONLY__';
 const PRIORITY_ADMIN_PLANE = 900;
 const PRIORITY_ADMIN_PLANE_EXCEPTION = 950;
 
+// The per-service health carve-out must outrank the admin-plane routes, not sit
+// under them at 150. tenant-health-service is listed in admin_plane.prefixes as
+// a WHOLE service (`/tenant-health-service/`), so the 900-priority pair captured
+// /api/v1/tenant-health-service/health too: denied on the tenant host, and on
+// the admin host routed to the backend WITHOUT rewrite-<svc>-health, so the
+// backend saw the un-rewritten path and 404'd. Every other backend's health
+// worked only because only SUB-paths of those services are admin-plane.
+//
+// Health carries no tenant data and no cross-tenant data — it is the same
+// read on every install — so serving it on both hosts for a whole-service
+// admin-plane entry is the same posture every other service already has.
+// Same tier as the public exceptions: nothing in public_exceptions contains a
+// `/health` path, so the two never contend.
+const PRIORITY_SERVICE_HEALTH = PRIORITY_ADMIN_PLANE_EXCEPTION;
+
 async function main() {
   const root = path.resolve(__dirname, '..');
   const registryPath = path.resolve(root, 'standards', 'service-registry.yaml');
@@ -364,7 +379,8 @@ const brandingChain = (svcName) => [
 //   100  main v1 / v2 PathPrefix
 //   110  cluster-sensor /api/v1/discovery PathPrefix
 //   120  branding / WebSocket
-//   150  exact-path /api/v1/<svc>/health
+//   950  exact-path /api/v1/<svc>/health (above the admin plane's 900; see
+//        PRIORITY_SERVICE_HEALTH)
 //   200  exact-path /api/v[12]/auth-service/auth/sso/providers
 //        discovery import PathRegexp
 //   300  admin-service status (cross-service to monitoring)
@@ -387,14 +403,16 @@ function buildApiRoutes(services) {
     const isAuth = svc.name === 'auth-service';
     const base = isAuth ? authChain(svc.name) : apiChain(svc.name);
 
-    // v1 health (priority 150 to beat v1 main's 100; same string length
-    // would otherwise tie and let the catch-all win).
+    // v1 health. Priority PRIORITY_SERVICE_HEALTH (950) rather than 150: it has
+    // to beat v1 main's 100 AND the admin-plane pair at 900, which otherwise
+    // swallows the health path of any service listed in admin_plane.prefixes as
+    // a whole service. See the constant's comment.
     routes.push(
       makeRoute(
         `Path(\`/api/v1${svc.route_prefix}/health\`)`,
         svc.name,
         [`rewrite-${svc.name}-health`, 'retry'],
-        { priority: 150 }
+        { priority: PRIORITY_SERVICE_HEALTH }
       )
     );
 

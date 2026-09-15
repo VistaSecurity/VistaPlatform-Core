@@ -50,7 +50,7 @@ http:
       middlewares:
         - rewrite-auth-service-api-v1-health
         - retry
-      priority: 150
+      priority: 950
     auth_sso_providers_v1:
       rule: Path(`/api/v1/auth-service/auth/sso/providers`)
       entryPoints: *a1
@@ -89,7 +89,7 @@ http:
       middlewares:
         - rewrite-inventory-service-api-v1-health
         - retry
-      priority: 150
+      priority: 950
     inventory_discovery_import_v1:
       rule: PathPrefix(`/api/v1/inventory-service/discovery/jobs/`) &&
         PathRegexp(`^/api/v1/inventory-service/discovery/jobs/[^/]+/import$`)
@@ -124,7 +124,7 @@ http:
       middlewares:
         - rewrite-compliance-engine-api-v1-health
         - retry
-      priority: 150
+      priority: 950
     cbom_service_v1:
       rule: PathPrefix(`/api/v1/cbom-service/`)
       entryPoints: *a1
@@ -145,7 +145,7 @@ http:
       middlewares:
         - rewrite-cbom-service-api-v1-health
         - retry
-      priority: 150
+      priority: 950
     sensor_manager_v1:
       rule: PathPrefix(`/api/v1/sensor-manager/`)
       entryPoints: *a1
@@ -166,7 +166,7 @@ http:
       middlewares:
         - rewrite-sensor-manager-api-v1-health
         - retry
-      priority: 150
+      priority: 950
     cluster_sensor_service_v1:
       rule: PathPrefix(`/api/v1/cluster-sensor-service/`)
       entryPoints: *a1
@@ -187,7 +187,7 @@ http:
       middlewares:
         - rewrite-cluster-sensor-service-api-v1-health
         - retry
-      priority: 150
+      priority: 950
     discovery_import_v1:
       rule: PathPrefix(`/api/v1/discovery/jobs/`) && PathRegexp(`^/api/v1/discovery/jobs/[^/]+/import$`)
       entryPoints: *a1
@@ -220,7 +220,7 @@ http:
       middlewares:
         - rewrite-admin-service-api-v1-health
         - retry
-      priority: 150
+      priority: 950
     monitoring_service_v1:
       rule: PathPrefix(`/api/v1/monitoring-service/`)
       entryPoints: *a1
@@ -241,7 +241,7 @@ http:
       middlewares:
         - rewrite-monitoring-service-api-v1-health
         - retry
-      priority: 150
+      priority: 950
     resource_tracker_service_v1:
       rule: PathPrefix(`/api/v1/resource-tracker-service/`)
       entryPoints: *a1
@@ -262,7 +262,7 @@ http:
       middlewares:
         - rewrite-resource-tracker-service-api-v1-health
         - retry
-      priority: 150
+      priority: 950
     tenant_health_service_v1:
       rule: PathPrefix(`/api/v1/tenant-health-service/`)
       entryPoints: *a1
@@ -283,7 +283,7 @@ http:
       middlewares:
         - rewrite-tenant-health-service-api-v1-health
         - retry
-      priority: 150
+      priority: 950
     device_interrogation_service_v1:
       rule: PathPrefix(`/api/v1/device-interrogation-service/`)
       entryPoints: *a1
@@ -304,7 +304,7 @@ http:
       middlewares:
         - rewrite-device-interrogation-service-api-v1-health
         - retry
-      priority: 150
+      priority: 950
     audit_service_v1:
       rule: PathPrefix(`/api/v1/audit-service/`)
       entryPoints: *a1
@@ -325,7 +325,7 @@ http:
       middlewares:
         - rewrite-audit-service-api-v1-health
         - retry
-      priority: 150
+      priority: 950
     notification_service_v1:
       rule: PathPrefix(`/api/v1/notification-service/`)
       entryPoints: *a1
@@ -346,7 +346,7 @@ http:
       middlewares:
         - rewrite-notification-service-api-v1-health
         - retry
-      priority: 150
+      priority: 950
     discovery_processor_service_v1:
       rule: PathPrefix(`/api/v1/discovery-processor-service/`)
       entryPoints: *a1
@@ -367,7 +367,7 @@ http:
       middlewares:
         - rewrite-discovery-processor-service-api-v1-health
         - retry
-      priority: 150
+      priority: 950
     mcp_service_v1:
       rule: PathPrefix(`/api/v1/mcp-service/`)
       entryPoints: *a1
@@ -388,7 +388,7 @@ http:
       middlewares:
         - rewrite-mcp-service-api-v1-health
         - retry
-      priority: 150
+      priority: 950
     pcap_processor_v1:
       rule: PathPrefix(`/api/v1/pcap-processor/`)
       entryPoints: *a1
@@ -409,7 +409,7 @@ http:
       middlewares:
         - rewrite-pcap-processor-api-v1-health
         - retry
-      priority: 150
+      priority: 950
     inventory_discovery_import_v2:
       rule: PathPrefix(`/api/v2/inventory-service/discovery/jobs/`) &&
         PathRegexp(`^/api/v2/inventory-service/discovery/jobs/[^/]+/import$`)

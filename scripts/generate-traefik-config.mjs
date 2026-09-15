@@ -469,6 +469,13 @@ async function main() {
   let routerPriority = 100; // Base priority; higher = more specific
   const adminPlanePriority = 900;
   const adminPlaneExceptionPriority = 950;
+  // The per-service health carve-out has to outrank the admin-plane routers, not
+  // sit at 150 below them: a service listed WHOLE in admin_plane.prefixes (e.g.
+  // `/tenant-health-service/`) otherwise has its /health captured by the 900
+  // pair — denied on the tenant host, and un-rewritten (so 404) on the admin
+  // host. Health carries no tenant data, so it belongs on both hosts like every
+  // other service's. Mirrors PRIORITY_SERVICE_HEALTH in generate-k8s-ingress.mjs.
+  const serviceHealthPriority = adminPlaneExceptionPriority;
 
   // TLS-aware entrypoints and router TLS config
   const routerEntryPoints = useTLS ? ['web', 'websecure'] : ['web'];
@@ -530,7 +537,8 @@ async function main() {
       entryPoints: routerEntryPoints,
       service: `${svcKey}_health`,
       middlewares: [healthRewriteName, ...healthMiddlewares],
-      priority: routerPriority + 50, // Higher than general route
+      // Higher than the general route AND than the admin-plane routers.
+      priority: serviceHealthPriority,
     };
 
     // -- Special cases --

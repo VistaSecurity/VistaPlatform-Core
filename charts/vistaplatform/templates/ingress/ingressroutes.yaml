@@ -1799,7 +1799,7 @@ spec:
   routes:
     - match: {{ $apiHost }} && (Path(`/api/v1/auth-service/health`))
       kind: Rule
-      priority: 150
+      priority: 950
       services:
         - name: auth-service
           {{- if $.Values.serviceMtls.enabled }}
@@ -1938,7 +1938,7 @@ spec:
         - name: v2-to-v1-auth-service
     - match: {{ $apiHost }} && (Path(`/api/v1/inventory-service/health`))
       kind: Rule
-      priority: 150
+      priority: 950
       services:
         - name: inventory-service
           {{- if $.Values.serviceMtls.enabled }}
@@ -2037,7 +2037,7 @@ spec:
         - name: retry
     - match: {{ $apiHost }} && (Path(`/api/v1/compliance-engine/health`))
       kind: Rule
-      priority: 150
+      priority: 950
       services:
         - name: compliance-engine
           {{- if $.Values.serviceMtls.enabled }}
@@ -2095,7 +2095,7 @@ spec:
         - name: v2-to-v1-compliance-engine
     - match: {{ $apiHost }} && (Path(`/api/v1/cbom-service/health`))
       kind: Rule
-      priority: 150
+      priority: 950
       services:
         - name: cbom-service
           {{- if $.Values.serviceMtls.enabled }}
@@ -2153,7 +2153,7 @@ spec:
         - name: v2-to-v1-cbom-service
     - match: {{ $apiHost }} && (Path(`/api/v1/sensor-manager/health`))
       kind: Rule
-      priority: 150
+      priority: 950
       services:
         - name: sensor-manager
           {{- if $.Values.serviceMtls.enabled }}
@@ -2211,7 +2211,7 @@ spec:
         - name: v2-to-v1-sensor-manager
     - match: {{ $apiHost }} && (Path(`/api/v1/cluster-sensor-service/health`))
       kind: Rule
-      priority: 150
+      priority: 950
       services:
         - name: cluster-sensor-service
           {{- if $.Values.serviceMtls.enabled }}
@@ -2311,7 +2311,7 @@ spec:
         - name: v2-to-v1-cluster-sensor-service
     - match: {{ $apiHost }} && (Path(`/api/v1/admin-service/health`))
       kind: Rule
-      priority: 150
+      priority: 950
       services:
         - name: admin-service
           {{- if $.Values.serviceMtls.enabled }}
@@ -2369,7 +2369,7 @@ spec:
         - name: v2-to-v1-admin-service
     - match: {{ $apiHost }} && (Path(`/api/v1/monitoring-service/health`))
       kind: Rule
-      priority: 150
+      priority: 950
       services:
         - name: monitoring-service
           {{- if $.Values.serviceMtls.enabled }}
@@ -2470,7 +2470,7 @@ spec:
         - name: v2-to-v1-monitoring-service
     - match: {{ $apiHost }} && (Path(`/api/v1/resource-tracker-service/health`))
       kind: Rule
-      priority: 150
+      priority: 950
       services:
         - name: resource-tracker-service
           {{- if $.Values.serviceMtls.enabled }}
@@ -2528,7 +2528,7 @@ spec:
         - name: v2-to-v1-resource-tracker-service
     - match: {{ $apiHost }} && (Path(`/api/v1/tenant-health-service/health`))
       kind: Rule
-      priority: 150
+      priority: 950
       services:
         - name: tenant-health-service
           {{- if $.Values.serviceMtls.enabled }}
@@ -2586,7 +2586,7 @@ spec:
         - name: v2-to-v1-tenant-health-service
     - match: {{ $apiHost }} && (Path(`/api/v1/device-interrogation-service/health`))
       kind: Rule
-      priority: 150
+      priority: 950
       services:
         - name: device-interrogation-service
           {{- if $.Values.serviceMtls.enabled }}
@@ -2644,7 +2644,7 @@ spec:
         - name: v2-to-v1-device-interrogation-service
     - match: {{ $apiHost }} && (Path(`/api/v1/audit-service/health`))
       kind: Rule
-      priority: 150
+      priority: 950
       services:
         - name: audit-service
           {{- if $.Values.serviceMtls.enabled }}
@@ -2702,7 +2702,7 @@ spec:
         - name: v2-to-v1-audit-service
     - match: {{ $apiHost }} && (Path(`/api/v1/notification-service/health`))
       kind: Rule
-      priority: 150
+      priority: 950
       services:
         - name: notification-service
           {{- if $.Values.serviceMtls.enabled }}
@@ -2760,7 +2760,7 @@ spec:
         - name: v2-to-v1-notification-service
     - match: {{ $apiHost }} && (Path(`/api/v1/discovery-processor-service/health`))
       kind: Rule
-      priority: 150
+      priority: 950
       services:
         - name: discovery-processor-service
           {{- if $.Values.serviceMtls.enabled }}
@@ -2818,7 +2818,7 @@ spec:
         - name: v2-to-v1-discovery-processor-service
     - match: {{ $apiHost }} && (Path(`/api/v1/mcp-service/health`))
       kind: Rule
-      priority: 150
+      priority: 950
       services:
         - name: mcp-service
           {{- if $.Values.serviceMtls.enabled }}
@@ -2876,7 +2876,7 @@ spec:
         - name: v2-to-v1-mcp-service
     - match: {{ $apiHost }} && (Path(`/api/v1/pcap-processor/health`))
       kind: Rule
-      priority: 150
+      priority: 950
       services:
         - name: pcap-processor
           {{- if $.Values.serviceMtls.enabled }}
