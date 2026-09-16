@@ -4,7 +4,7 @@ render_macros: false
 
 # Secrets Management Guide
 
-This guide covers how secrets are managed in the Crypto Inventory Platform, including the encryption master key for platform integrations.
+This guide covers how secrets are managed in Vista Platform, including the encryption master key for platform integrations.
 
 ## Overview
 
@@ -18,25 +18,23 @@ The platform uses various secrets for different purposes:
 
 ### Automatic Secret Generation
 
-The development scripts automatically generate and manage secrets:
-
-#### `session-init.sh` (Development)
-
-This script automatically generates `ENCRYPTION_MASTER_KEY` if not set:
+`./scripts/bootstrap-env.sh` generates every secret a fresh checkout needs,
+`ENCRYPTION_MASTER_KEY` included, into a new `.env`:
 
 ```bash
-# Script checks if ENCRYPTION_MASTER_KEY is set
-if [[ -z "${ENCRYPTION_MASTER_KEY:-}" ]]; then
-    # Generates a secure key using openssl
-    ENCRYPTION_MASTER_KEY=$(openssl rand -base64 32)
-    export ENCRYPTION_MASTER_KEY
-fi
+./scripts/bootstrap-env.sh
 ```
 
 **What it does:**
-- Generates a secure base64-encoded 32-byte key
-- Exports it for the current session
-- Sets a default if `openssl` is not available
+- Copies `env.example` to `.env`, then replaces every value that still matches
+  its published placeholder (`dev-master-key-change-in-production` for
+  `ENCRYPTION_MASTER_KEY`, and similarly for `JWT_SECRET`,
+  `INTERNAL_AUTH_SECRET`, and the datastore passwords) with a fresh
+  cryptographically random value, alphanumeric so it survives being embedded
+  in a connection string
+- Never overwrites an existing `.env` — delete it first if you need to rotate
+- Only rewrites values that still match their placeholder exactly, so it's
+  safe to re-run against a partially hand-edited file
 
 **Where it's used:**
 - `admin-service` for encrypting integration credentials
@@ -71,93 +69,30 @@ admin-service:
 
 > **Security Note (Mar 2026 audit):** Dev default fallbacks were removed from all certificate generation scripts and the auth service. Always set `ENCRYPTION_MASTER_KEY`, `JWT_SECRET`, and `INTERNAL_AUTH_SECRET` to strong random values. Generate with: `openssl rand -hex 32`
 
-## Production Environment
+## Production Environment (Helm chart)
 
-### `generate-prod-env.sh` (Production)
+Production runs the Helm chart, not a `.env` file — see the
+[production checklist](../deployment/production-checklist.md). The chart
+handles `ENCRYPTION_MASTER_KEY` (and the other platform secrets — JWT signing
+key, internal-auth HMAC secret) one of two ways:
 
-This script automatically generates `ENCRYPTION_MASTER_KEY` for production:
+- **Chart-generated (default).** If you don't supply
+  `platform.existingSecretName`, the chart generates the platform Secret on
+  first install and keeps it — every subsequent `helm upgrade` reads the
+  existing Secret back rather than regenerating it.
+- **Operator-supplied (recommended for anything you'd call real).** Create the
+  Kubernetes `Secret` yourself, out of band, and reference it via
+  `platform.existingSecretName` in `values.yaml`. This is what lets you source
+  `ENCRYPTION_MASTER_KEY` from whatever your organization already uses —
+  a `SealedSecret`, the External Secrets Operator pulling from AWS Secrets
+  Manager or HashiCorp Vault, or a plain `kubectl create secret generic`
+  against a value you generated with `openssl rand -base64 32`.
 
-```bash
-# Generates secure key
-ENCRYPTION_MASTER_KEY=$(openssl rand -base64 32)
-```
-
-**What it does:**
-- Generates a secure random key
-- Adds it to `.env.prod` with documentation comments
-- Includes warnings about using key management services
-
-### `deploy-aws.sh` (Production)
-
-This script validates that `ENCRYPTION_MASTER_KEY` is set:
-
-```bash
-if [[ -z "${ENCRYPTION_MASTER_KEY:-}" ]]; then
-    warn "ENCRYPTION_MASTER_KEY not set in .env.prod"
-    warn "Platform integration management will be disabled"
-    warn "For production, use AWS KMS or similar key management service"
-fi
-```
-
-**What it does:**
-- Validates key is present before deployment
-- Warns if key is missing (does not block deployment)
-- Provides guidance on using key management services
-
-### Production Best Practices
-
-#### Option 1: AWS KMS (Recommended)
-
-**Setup:**
-1. Create a KMS key in AWS:
-```bash
-aws kms create-key --description "Platform Integrations Encryption Key"
-```
-
-2. Store the key ID in AWS Systems Manager Parameter Store:
-```bash
-aws ssm put-parameter \
-  --name "/crypto-inventory/encryption-master-key-id" \
-  --value "<key-id>" \
-  --type "String"
-```
-
-3. Update `deploy-aws.sh` to fetch the key:
-```bash
-# Fetch key from KMS via Systems Manager
-KEY_ID=$(aws ssm get-parameter --name "/crypto-inventory/encryption-master-key-id" --query "Parameter.Value" --output text)
-ENCRYPTION_MASTER_KEY=$(aws kms decrypt --ciphertext-blob fileb://encrypted_key.bin --key-id $KEY_ID --query Plaintext --output text)
-```
-
-#### Option 2: HashiCorp Vault
-
-**Setup:**
-1. Store the key in Vault:
-```bash
-vault kv put secret/crypto-inventory encryption_master_key="<key>"
-```
-
-2. Update deployment scripts to fetch from Vault:
-```bash
-ENCRYPTION_MASTER_KEY=$(vault kv get -field=encryption_master_key secret/crypto-inventory)
-```
-
-#### Option 3: AWS Secrets Manager
-
-**Setup:**
-1. Store the key in Secrets Manager:
-```bash
-aws secretsmanager create-secret \
-  --name crypto-inventory/encryption-master-key \
-  --secret-string "<key>"
-```
-
-2. Update deployment scripts to fetch from Secrets Manager:
-```bash
-ENCRYPTION_MASTER_KEY=$(aws secretsmanager get-secret-value \
-  --secret-id crypto-inventory/encryption-master-key \
-  --query SecretString --output text)
-```
+**Never rotate `ENCRYPTION_MASTER_KEY` on a live deployment.** Whichever way
+you manage the Secret, changing its value after you have live integrations
+makes every credential encrypted under the old key permanently undecryptable
+— see [Cannot Decrypt Existing Credentials](#cannot-decrypt-existing-credentials)
+below.
 
 ## Platform Integration Credentials
 
@@ -222,9 +157,10 @@ When moving to a 3rd party secrets management service:
 **Problem**: `ENCRYPTION_MASTER_KEY` is not set.
 
 **Solution**:
-1. Development: Run `session-init.sh` (automatically generates key)
-2. Production: Set `ENCRYPTION_MASTER_KEY` in `.env.prod` or key management service
-3. Restart `admin-service` container
+1. Development: Run `./scripts/bootstrap-env.sh` (automatically generates key)
+2. Production: Verify `platform.existingSecretName` (or the chart-generated
+   Secret) actually contains `encryption-master-key`
+3. Restart the `admin-service` pod/container
 
 ### "Failed to encrypt config" Error
 
@@ -259,7 +195,7 @@ When moving to a 3rd party secrets management service:
 ## Related Documentation
 
 - [Platform Integrations Setup](../configuration/platform-integrations.md) - Detailed integration configuration guide
-- [Security Architecture](architecture.md) - Overall security design
+- [Service-mesh mTLS](service-mesh-mtls.md) - Overall internal-transport security design
 - AWS Cost Explorer Setup - AWS-specific integration setup
 
 ## Future Enhancements

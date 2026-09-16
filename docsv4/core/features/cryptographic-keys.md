@@ -1,8 +1,5 @@
 # Cryptographic Keys
 
-**Version:** 1.0
-**Last Updated:** 2026-06-20
-
 The Keys lens gives you a single, searchable inventory of every cryptographic
 key discovered across your environment — their algorithms, sizes, lifecycle
 state, and where each one is actually used.
@@ -73,6 +70,28 @@ invisible.
 
 ---
 
+## Keys in the quantum-migration queue
+
+A key whose algorithm is breakable by a large quantum computer — RSA, ECDSA,
+EdDSA, Diffie-Hellman and their relatives — raises a **quantum-vulnerable**
+finding **against the key itself**, not against some asset that happens to use
+it.
+
+That matters for how the queue reads. The finding is titled with what the key is
+and how big — *"RSA 2048-bit key"* — rather than with a hostname or a
+fingerprint, because a migration is a job about *algorithms*: one 2048-bit RSA
+key used by forty services is one thing to replace, not forty. The key's own
+record is the link out of the finding, and **Used by** on that record is how you
+find the forty.
+
+Every such finding cites the same authority — NIST IR 8547, which deprecates
+classical asymmetric primitives after 2030 and disallows them after 2035 — so
+the queue says *who* set the deadline rather than asserting one.
+
+A key whose algorithm the platform cannot resolve is left **unclassified**,
+never assumed safe. Unclassified and safe look the same on a chart and mean
+opposite things, so they are kept apart.
+
 ## Common uses
 
 - **Key-length policy audits.** Filter or export the lens to find keys below an
@@ -82,9 +101,14 @@ invisible.
   non-active state.
 - **Blast-radius analysis.** From a weak or compromised key, use **Used by** to
   see exactly which assets depend on it before remediating.
+- **Quantum migration.** Work the quantum-vulnerable findings as a list of
+  algorithms to retire, and use **Used by** on each key to size the job.
 
 ---
 
 ## Related
 
+- [Inventory and lenses](./inventory-and-lenses.md) — the Keys lens among the rest
 - [Certificate Chain Management](./certificate-chain-management.md)
+- [Findings](./findings.md) — how findings are grouped, triaged and worked
+- [Algorithm reference](./algorithm-reference.md) — the catalogue every assessment cites

@@ -15,7 +15,7 @@ render_macros: false
 
 ## Overview
 
-This guide explains how database schema is managed for the crypto inventory platform across different deployment environments, including Docker Compose, EC2, EKS, and RDS.
+This guide explains how database schema is managed for Vista Platform across different deployment environments, including Docker Compose and Kubernetes (EKS/RDS).
 
 ## Schema & Seed Management Pattern
 
@@ -96,7 +96,7 @@ Demo data seeding uses an **event-driven approach** to generate compliance findi
 - **Smoke** (`DEPLOY_ENV=smoke`): Only if `--with-demo` flag is used
 - **Production** (`DEPLOY_ENV=production`): Demo findings generation is skipped
 
-For more details, see `scripts/database/README.md` and `docsv4/development/data-seeding.md`.
+For more details, see `scripts/database/README.md`.
 
 ## Deployment Environments
 
@@ -131,20 +131,13 @@ docker exec crypto-postgres psql -U crypto_user -d crypto_inventory \
 
 **Note:** The consolidated schema uses `CREATE TABLE IF NOT EXISTS` and similar idempotent statements, so it's safe to run on existing databases. All schema changes should be made to `schema.sql` directly.
 
-### EC2-Smoke / Production (Docker Compose)
+### Docker Compose "production-style" stack
 
-**New Databases (Automatic):**
-
-Schema is automatically applied via the consolidated `schema.sql` file:
-
-```yaml
-volumes:
-  - ./scripts/database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
-```
-
-**Existing Deployments (Manual):**
-
-For existing production databases, apply the consolidated schema:
+A production-style Compose stack (`docker-compose.prod.yml` — not part of the
+public distribution; production installs use the Helm chart, covered under
+EKS/Kubernetes below) applies schema the same way as local dev: mounted at
+`/docker-entrypoint-initdb.d/01-schema.sql` on first startup, or manually for
+an existing database:
 
 ```bash
 # Apply full schema (idempotent - safe for existing databases)

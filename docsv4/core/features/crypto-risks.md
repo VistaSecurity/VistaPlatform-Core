@@ -1,329 +1,69 @@
-# Crypto Risks Dashboard
+# Crypto Risks
 
-**Version:** 2.0  
-**Last Updated:** 2026-04-07
+Crypto risks are the weaknesses in the cryptography your estate is actually
+negotiating: an obsolete protocol version, a broken cipher, a certificate that
+cannot be trusted, a key too small for the job.
 
-The Crypto Risks Dashboard provides a focused view of cryptographic weaknesses across your network, with detailed remediation guidance to help you prioritize and fix security issues.
+**Where:** **Risk & Compliance → Findings**. There is no separate Crypto Risks
+page. Findings covers two different sets of results under the same chrome, and
+the lens rail groups them so you always know which you are looking at:
 
----
+| Group | Lenses | What it reads |
+|---|---|---|
+| **Platform findings** | By Producer · By Framework · By Control | The one findings table — compliance, end-of-life, vulnerability and every other producer |
+| **Crypto findings** | By Severity · By Asset · By Category · By Date Observed | The crypto-risk stream described on this page |
 
-## Overview
+The two are genuinely different data sets, which is why the counts jump when you
+switch between the groups. That is not a miscount: an organization can have four
+open compliance findings and nineteen crypto risks at the same time.
 
-The Crypto Risks feature enables security teams to:
+## The four crypto lenses
 
-- Identify critical cryptographic weaknesses at a glance
-- Prioritize remediation based on severity
-- Get detailed, actionable remediation guidance
-- **Create tickets directly from risks** for tracking and assignment
-- Track remediation progress via the Remediation Progress dashboard
-- Monitor PQC (Post-Quantum Cryptography) migration readiness
-- Export risk data for reporting and compliance
+**By Severity** groups risks into Critical, High, Medium, Low and Informational
+and shows the distribution across each group.
 
-**Location:** Risk & Compliance page → Crypto Risks tab
+**By Asset** groups them by the host they were found on, which is how you
+remediate — everything wrong with one box, fixed in one change window.
 
----
+**By Category** groups by what kind of weakness it is:
 
-## Key Features
+| Category | What it covers |
+|---|---|
+| **Protocol** | Obsolete TLS/SSL versions, and SSH servers still speaking (or falling back to) SSH-1 |
+| **Algorithm** | Weak or deprecated cipher suites and hash algorithms |
+| **Certificate** | Certificate problems — expiry, weak signatures, validation failures |
+| **Key size** | Keys below the accepted floor for their algorithm |
 
-### Severity-Based Summary
+**By Date Observed** is a flat list, newest first, for "what changed this week".
 
-The dashboard displays summary cards showing the count of risks by severity:
+## Working a risk
 
-| Severity | Score | Description | Examples |
-|----------|-------|-------------|----------|
-| **Critical** | 90–100 | Immediate action required | SSLv2, SSLv3, RC4, DES, MD5 signatures |
-| **High** | 70–89 | High priority remediation | TLS 1.0, TLS 1.1, 3DES, SHA-1, RSA-1024 |
-| **Medium** | 40–69 | Medium priority | Expiring certificates, weak key sizes |
-| **Low** | 1–39 | Low priority | Minor configuration improvements |
-| **Informational** | 0 | Not assessed — we did not recognise the cryptography in use | — |
+Each row shows the asset, the category, the issue, the **current value** that is
+wrong (the thing to change), and when it was last observed. Above the list are a
+search box and a severity filter; when a severity filter is active the page says
+so in a banner rather than quietly narrowing the list.
 
-Severity is derived from the risk score using the CVSS qualitative severity
-bands; see [Risk Score Calculation](#risk-score-calculation) below for where the
-score itself comes from.
+Click a row to open the **inspector**, which carries the detail and the actions:
 
-Click on any severity card to filter the detailed risk list by that severity.
+- **What is wrong and what to do about it** — the algorithm involved, its
+  assessment, and the catalogue's migration guidance and recommended
+  alternatives.
+- **Create ticket** — opens a pre-filled ticket. It links the specific crypto
+  configuration (`crypto_implementation_id`) and the asset, so the ticket tracks
+  exactly this risk on exactly this service rather than "TLS on that box
+  somewhere". Tickets appear in **Remediation → Queue**. The button needs the
+  **Update compliance** permission; read-only users do not see it.
 
-### Category Breakdown
+**Add to plan** and **Override control** are compliance-finding actions and are
+not offered on a crypto risk — a crypto risk has no control to except. To group
+crypto work into a migration plan, build the plan under **Remediation → Plans**.
 
-Risks are categorized by type:
+**Export** produces a CSV of *the view you are looking at* — the current lens,
+the current filters, the current search — with the asset, category, issue,
+current value, severity, protocol, version and observation date. It does not
+quietly export a different, wider dataset.
 
-- **Protocol Issues**: Outdated TLS/SSL protocol versions, and SSH servers still speaking (or falling back to) the obsolete SSH-1 protocol
-- **Algorithm Issues**: Weak or deprecated cipher suites and hash algorithms
-- **Certificate Issues**: Certificate-related problems (expiration, weak signatures)
-- **Key Size Issues**: Insufficient key lengths
-
-### Fast-Path Detection
-
-The platform performs **fast-path weak crypto detection** during asset import, identifying issues immediately:
-
-1. **Protocol Detection**: Flags SSLv2, SSLv3, TLS 1.0, TLS 1.1, SSH v1
-2. **Cipher Detection**: Flags RC4, DES, 3DES cipher suites
-3. **Hash Detection**: Flags MD5, SHA-1 hash algorithms
-4. **Key Size Detection**: Flags RSA/DSA keys under 2048 bits
-
-This ensures new discoveries are immediately assessed for cryptographic weaknesses.
-
----
-
-## Remediation Guidance
-
-### Remediation Panel
-
-Click on any risk row to open the Remediation Panel, which provides:
-
-1. **Risk Score**: Overall risk assessment (0-100)
-2. **Affected Item**: Asset and protocol details
-3. **Recommendations**: Detailed breakdown of each issue with:
-   - Algorithm code and description
-   - Step-by-step remediation instructions
-   - Recommended alternative technologies
-   - Severity assessment
-
-### Algorithm Taxonomy Integration
-
-Remediation guidance is sourced from the **Algorithm Taxonomy**, a database of:
-
-- Cryptographic algorithms with strength ratings
-- Deprecation status and timelines
-- NIST and industry compliance mappings
-- Recommended migration paths
-- Post-Quantum Cryptography (PQC) alternatives
-
-**Quantum vulnerability is classified by algorithm family, not by exact
-catalogue match.** RSA at any key size and ECDSA on any curve are both
-Shor-breakable and are flagged as needing PQC migration even when the
-catalogue has no row sized to your exact key — key size changes how risky
-that key is scored *today*, not whether it eventually needs to move off
-classical asymmetric cryptography. This applies to certificates and to
-standalone keys (the Inventory Keys lens) alike.
-
-### Example Remediation Guidance
-
-| Algorithm | Issue | Guidance |
-|-----------|-------|----------|
-| TLSv1.0 | Outdated protocol | Upgrade to TLS 1.2 or higher. Ensure all clients and servers support modern TLS versions. |
-| TLSv1.1 | Outdated protocol | Upgrade to TLS 1.2 or higher. Ensure all clients and servers support modern TLS versions. |
-| SSLv3 | Broken protocol | Disable SSLv3 immediately. This protocol is cryptographically broken and highly vulnerable. |
-| RC4 | Weak cipher | Disable RC4 cipher suites. RC4 is cryptographically broken and should not be used. |
-| DES/3DES | Weak cipher | Disable DES/3DES cipher suites. These ciphers are considered weak and vulnerable to attacks. |
-| MD5 | Weak hash | Migrate from MD5 to SHA-256 or SHA-512 for all hashing purposes. MD5 is cryptographically broken. |
-| SHA-1 | Weak hash | Migrate from SHA-1 to SHA-256 or SHA-512 for all hashing and digital signature purposes. |
-| RSA-1024 | Weak key | Increase RSA key size to at least 2048 bits, preferably 3072 or 4096 bits. |
-
----
-
-## User Interface
-
-### Page Layout
-
-The Crypto Risks page consists of:
-
-1. **Header**: Page title, refresh button
-2. **Summary Cards**: Severity-based risk counts (clickable for filtering)
-3. **Filter Bar**: Dropdown filters for severity and category
-4. **Risk Table**: Detailed list of cryptographic risks with:
-   - Asset information (hostname, IP, port)
-   - Protocol and cipher suite
-   - Issue description
-   - Severity badge
-   - Last verified timestamp
-5. **Pagination**: Navigate through large result sets
-6. **Remediation Panel**: Slide-over panel with detailed guidance
-
-### Ticket Integration
-
-Each risk row includes an **Action** column with ticket controls:
-- **Create Ticket** (blue button): Opens a pre-filled ticket creation modal with risk details
-- **View Ticket** (green button): Opens the existing ticket for this risk
-
-Tickets link back to the specific `crypto_implementation_id`, enabling precise tracking of which risks are being remediated. Created tickets appear in **Remediation → Queue** and are tracked in the Remediation Progress dashboard.
-
-### Risk Table Columns
-
-| Column | Description |
-|--------|-------------|
-| **Asset** | Hostname or IP address of affected asset |
-| **Issue** | Description of the cryptographic weakness |
-| **Severity** | Risk severity (Critical, High, Medium, Low) |
-| **Last Verified** | When the configuration was last verified |
-| **Action** | Create or view remediation ticket |
-
-### Filtering
-
-- **Severity Filter**: All, Critical, High, Medium, Low, Informational
-- **Category Filter**: All, Protocol, Algorithm, Certificate, Key Size
-- **Search**: Search by hostname, IP, protocol, or cipher suite
-
----
-
-## API Endpoints
-
-### Get Crypto Risks Summary
-
-```
-GET /api/v1/inventory-service/crypto-risks/summary
-```
-
-Returns aggregated counts by severity.
-
-**Response:**
-```json
-{
-  "summary": {
-    "critical": 10,
-    "high": 25,
-    "medium": 50,
-    "low": 15,
-    "informational": 5,
-    "total_assets_affected": 80
-  }
-}
-```
-
-### List Crypto Risks
-
-```
-GET /api/v1/inventory-service/crypto-risks
-```
-
-**Query Parameters:**
-- `severity` (optional): critical, high, medium, low, informational, all
-- `category` (optional): protocol, algorithm, certificate, key_size, all
-- `page` (optional): Page number (default: 1)
-- `page_size` (optional): Items per page (default: 10)
-
-**Response:**
-```json
-{
-  "risks": [
-    {
-      "id": "impl-uuid",
-      "tenant_id": "tenant-uuid",
-      "asset_id": "asset-uuid",
-      "protocol": "TLS",
-      "protocol_version": "TLSv1.0",
-      "cipher_suite": "TLS_RSA_WITH_RC4_128_SHA",
-      "risk_score": 80,
-      "compliance_status": {
-        "weak_protocol_version": "Outdated TLS protocol version: TLSv1.0"
-      },
-      "Metadata": {
-        "asset_hostname": "webserver.example.com",
-        "asset_ip_address": "192.168.1.100",
-        "asset_port": 443
-      }
-    }
-  ],
-  "pagination": {
-    "page": 1,
-    "page_size": 10,
-    "total": 100,
-    "total_pages": 10,
-    "has_next": true,
-    "has_prev": false
-  }
-}
-```
-
-### Get Remediation Guidance
-
-```
-GET /api/v1/inventory-service/crypto-implementations/:id/remediation
-```
-
-Returns remediation guidance for a specific crypto implementation.
-
-**Response:**
-```json
-{
-  "remediation_guidance": {
-    "crypto_implementation_id": "impl-uuid",
-    "recommendations": [
-      {
-        "algorithm_code": "TLSv1.0",
-        "description": "Upgrade to TLS 1.2 or higher...",
-        "recommended_action": "Follow the migration guidance...",
-        "severity": "High",
-        "alternatives": ["TLSv1.2", "TLSv1.3"]
-      }
-    ]
-  }
-}
-```
-
-### Get Algorithm Remediation
-
-```
-GET /api/v1/inventory-service/remediation/algorithm/:code
-```
-
-Returns remediation guidance for a specific algorithm by code.
-
----
-
-## Use Cases
-
-### Security Audit
-
-**Scenario**: Conduct a security audit of cryptographic configurations.
-
-**Steps**:
-1. Navigate to **Crypto Risks**
-2. Review summary cards for overall risk posture
-3. Click **Critical** to see the most urgent issues
-4. Click on each risk to view remediation guidance
-5. Export to CSV for audit documentation
-
-### Compliance Remediation
-
-**Scenario**: Remediate all TLS 1.0/1.1 usage for PCI-DSS compliance.
-
-**Steps**:
-1. Navigate to **Crypto Risks**
-2. Filter by **Category**: Protocol
-3. Review all protocol-related risks
-4. Click on each risk to get specific remediation steps
-5. Track remediation progress by re-running discovery
-
-### Risk Prioritization
-
-**Scenario**: Prioritize cryptographic weaknesses for remediation sprint.
-
-**Steps**:
-1. Navigate to **Crypto Risks**
-2. Note the counts in severity cards
-3. Filter by **Critical** first
-4. Review affected assets and remediation complexity
-5. Export filtered list for sprint planning
-
----
-
-## Best Practices
-
-### Regular Monitoring
-
-1. **Daily Review**: Check Critical and High severity counts daily
-2. **Weekly Trending**: Compare week-over-week risk counts
-3. **Monthly Reporting**: Export and archive monthly risk summaries
-
-### Remediation Workflow
-
-1. **Prioritize by Severity**: Address Critical issues first
-2. **Group by Asset**: Remediate all issues on an asset together
-3. **Test Changes**: Verify configurations after remediation
-4. **Re-scan**: Run discovery to confirm fixes
-
-### Integration with Compliance
-
-1. **Map to Frameworks**: Correlate risks with compliance control failures
-2. **Document Evidence**: Export remediation evidence for auditors
-3. **Track Progress**: Use compliance workspace alongside crypto risks
-
----
-
-## Technical Details
-
-### Risk Score Calculation
+## Where the number comes from
 
 Risk scores run 0–100 and come from the **algorithm catalogue** — the same
 assessments you can read yourself under
@@ -345,7 +85,8 @@ algorithm was *used* rather than on the algorithm itself:
 
 - **Key size** — an RSA key below the NIST SP 800-131A 2048-bit floor is flagged
   regardless of the algorithm's own rating.
-- **Certificate lifecycle** — expiry and validity problems are their own findings.
+- **Certificate lifecycle** — expiry and validity problems are their own
+  findings.
 
 A score of **0 means "not assessed"** — we did not recognise the cryptography in
 use — which is deliberately different from "assessed and found safe". Those
@@ -365,6 +106,23 @@ One case leaves the number alone on purpose: a discovery that recognised
 *nothing* about a configuration does not overwrite an earlier verdict with a 0.
 It has no opinion to record, and silently replacing a real score with "not
 assessed" would hide a risk you had already been shown.
+
+### Severity bands
+
+A score becomes a severity using the **CVSS qualitative severity ratings** (the
+standard 0.0–10.0 scale, ×10):
+
+| Severity | Score | Examples |
+|----------|-------|----------|
+| **Critical** | 90–100 | SSLv2, SSLv3, RC4, DES, MD5 signatures |
+| **High** | 70–89 | TLS 1.0, TLS 1.1, 3DES, SHA-1, RSA-1024 |
+| **Medium** | 40–69 | Expiring certificates, weak key sizes |
+| **Low** | 1–39 | Minor configuration improvements |
+| **Informational** | 0 | Not assessed — the cryptography in use was not recognised |
+
+The same bands are used everywhere a risk level appears — the badges in
+Inventory, the risk facet filter, the dashboard distribution, the counts here —
+so a given score always reads the same way, whichever screen you are on.
 
 ### Seeing why a configuration scored what it did
 
@@ -399,6 +157,16 @@ Two honest-answer cases to expect:
   per-algorithm catalogue cannot express — chiefly key size — rather than
   implying the component list is the whole story.
 
+### Quantum vulnerability is decided by family
+
+RSA at any key size and ECDSA on any curve are both breakable by a sufficiently
+large quantum computer, and are flagged as needing post-quantum migration even
+when the catalogue has no row sized to your exact key. Key size changes how
+risky that key is *today*, not whether it eventually has to move off classical
+asymmetric cryptography. This applies to certificates and to standalone keys
+(**Inventory → Keys**) alike, and the framework that scores it is
+[Post-Quantum Readiness](./compliance-frameworks.md#post-quantum-readiness).
+
 ### How SSH services are scored
 
 SSH configurations are scored from the same catalogue as TLS, but SSH tells us
@@ -432,65 +200,46 @@ Algorithms are named exactly as SSH names them on the wire (`ssh-ed25519`,
 `curve25519-sha256`, `aes256-gcm@openssh.com`, `hmac-sha2-256-etm@openssh.com`),
 so a finding can be pasted straight into an `sshd_config` audit.
 
-### Severity Bands
+## When a risk appears, and when it goes away
 
-A score becomes a severity using the **CVSS qualitative severity ratings**
-(the standard 0.0–10.0 scale, ×10):
+Risks are re-derived as the inventory changes: when an asset is discovered, when
+a configuration changes, when a discovery job completes, and when compliance
+re-evaluates. Fix the service and the next observation of it re-scores the
+configuration — there is nothing to mark resolved by hand.
 
-| Severity | Score |
-|----------|-------|
-| **Critical** | 90–100 |
-| **High** | 70–89 |
-| **Medium** | 40–69 |
-| **Low** | 1–39 |
-| **Informational** | 0 (not assessed) |
+A first assessment happens at ingest, so a newly discovered service is scored
+immediately rather than waiting for a later pass: obsolete protocols, broken
+ciphers, weak hashes and undersized keys are all recognised on the way in.
 
-The same bands are used everywhere a risk level appears — the badges in
-Inventory, the risk facet filter, the dashboard distribution, and the summary
-counts — so a given score always reads the same way, whichever screen you are
-on.
+## Example remediation guidance
 
-### Data Sources
+| Algorithm | Issue | Guidance |
+|-----------|-------|----------|
+| TLSv1.0 / TLSv1.1 | Outdated protocol | Move to TLS 1.2 or higher; check every client that still needs the old version first |
+| SSLv3 | Broken protocol | Disable immediately — cryptographically broken |
+| RC4 | Weak cipher | Disable RC4 cipher suites entirely |
+| DES / 3DES | Weak cipher | Disable; replace with AES-GCM |
+| MD5 | Weak hash | Migrate to SHA-256 or SHA-512 |
+| SHA-1 | Weak hash | Migrate to SHA-256 or SHA-512 for hashing and signatures |
+| RSA-1024 | Weak key | Re-key at 2048 bits minimum, 3072 or 4096 preferred |
 
-Risk data is aggregated from:
+The inspector shows the catalogue's own guidance for whatever it found, which is
+always more specific than this table.
 
-- **algorithms** table: the authoritative strength, deprecation status and risk score for each algorithm — this is what drives the score
-- **crypto_implementations** table: Protocol, cipher, key details
-- **crypto_implementation_algorithms**: which catalogue algorithms each configuration actually uses
-- **assets** table: asset context — class, environment, owner, site
+## API
 
-### Event-Driven Updates
+| Endpoint | Returns |
+|---|---|
+| `GET /api/v1/inventory-service/crypto-risks` | The risk list, filterable by `severity` and `category`, paginated |
+| `GET /api/v1/inventory-service/crypto-risks/summary` | Counts by severity, and how many assets are affected |
+| `GET /api/v1/inventory-service/crypto-implementations/{id}/remediation` | The guidance for one crypto configuration |
+| `GET /api/v1/inventory-service/remediation/algorithm/{code}` | The guidance for one algorithm |
 
-Risks are automatically updated when:
+## Related
 
-- New assets are discovered
-- Asset configurations change
-- Discovery jobs complete
-- Compliance engine re-evaluates
-
----
-
-## Remediation Progress Dashboard
-
-The **Remediation** tab (on the same Risk & Compliance page) replaced the former remediation queue with a progress-oriented dashboard. It provides:
-
-- **Summary cards**: Open tickets, resolved (30d), overdue, avg resolution time
-- **Trend chart**: 30-day bar chart of tickets opened vs. resolved (recharts)
-- **PQC Migration Progress**: Stacked progress bar showing PQC-ready, quantum-safe symmetric, and needs-migration percentages with a per-family breakdown table
-- **Category breakdown**: Per-category (compliance, certificate, remediation, etc.) open/resolved counts with links to **Remediation → Queue**
-
-Data sources:
-- `GET /api/v1/compliance-engine/tickets/progress` — ticket trends and summary
-- `GET /api/v1/inventory-service/pqc/progress` — PQC readiness metrics from `crypto_implementation_algorithms` junction table
-
-## Related Features
-
-- [Inventory & Lenses](./inventory-and-lenses.md) - Comprehensive asset and certificate view
-- [Compliance Frameworks](./compliance-frameworks.md) - Framework-based compliance assessment
-- [Discovery](./discovery.md) - Asset discovery and configuration collection
-- [Algorithm Reference](./algorithm-reference.md) - Algorithm taxonomy and recommendations
-- [Remediation](./remediation.md) - Alerts, the ticket Queue, and migration Plans
-
----
-
-**Last Updated:** 2026-04-07
+- [Findings](./findings.md) — the page this lives on, and what the other lenses show
+- [Algorithm Reference](./algorithm-reference.md) — every assessment, readable
+- [Compliance Frameworks](./compliance-frameworks.md) — framework-scored posture, including Post-Quantum Readiness
+- [Remediation](./remediation.md) — Alerts, the ticket Queue, and migration Plans
+- [Inventory & Lenses](./inventory-and-lenses.md) — where the configurations themselves live
+- [Discovery](./discovery.md) — how a configuration gets observed in the first place

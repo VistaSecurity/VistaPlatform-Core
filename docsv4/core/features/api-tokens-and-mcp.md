@@ -152,6 +152,17 @@ any time from the same page. After revocation, in-flight sessions may keep
 working for up to 15 minutes (the lifetime of the short-lived internal
 credential), then fail.
 
+## A 1.0.0 change if you parse tool output
+
+Finding-shaped answers changed shape in 1.0.0, along with the rest of the
+platform's finding API: a finding now names its **subject** rather than an
+asset (`subject_id` / `subject_type`, not `asset_id` / `asset_type` —
+`subject_type` is `asset` or `certificate`), and **severity is one lowercase
+ladder** — `info` / `low` / `medium` / `high` / `critical` — rather than the
+old `Low` / `Med` / `High` / `Critical`. If your assistant or a script stores
+or re-parses raw tool output rather than just reading it back to you in
+English, update for the new field names and values.
+
 ## Security model
 
 - Connections are scoped to **your tenant and your role** — no other tenant's

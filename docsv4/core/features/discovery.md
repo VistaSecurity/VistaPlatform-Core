@@ -15,12 +15,12 @@ Discovery allows tenants to:
 - **Auto-approve discoveries** on network segments with auto-approve enabled — the only rule that skips the approval queue
 - Link assets to parent devices (one device → many assets)
 
-**Unified Processing Pipeline:**
-Every discovery source — discovery jobs, sensors and cloud discovery — flows
-through the same `sensor_discoveries` pipeline. The `discovery-processor-service`
-classifies each discovery, evaluates the auto-approval rules and creates the
-asset as `monitoring` or `pending_approval`. Nothing is imported from a browser,
-and no client chooses an asset's approval status.
+**One pipeline.** Discovery jobs, sensors, cloud integrations, interrogated
+devices, uploaded captures and host inventories all flow through the same
+processing path: each discovery is placed into a network segment, the
+auto-approval rules are evaluated, and the asset is created as `monitoring` or
+`pending_approval`. Nothing is imported from a browser, and no client chooses an
+asset's approval status.
 
 **One auto-approval rule.** An asset is auto-approved only when it is on a
 network segment you defined with auto-approve enabled (Settings →
@@ -28,7 +28,13 @@ Infrastructure). That is the whole rule, and it applies to every path into
 inventory — scans, sensors, cloud, manual creation, spreadsheet import and CMDB
 pull. See [Asset Approval](./asset-approval.md).
 
-**Deployable sensor efficiency:** Tenant administrators can set an **observation rest period** (default one hour) so passive sensors do not re-send the same endpoint observation on every connection. Configure under **Organization Settings → Infrastructure → Sensor Configuration**. The setting is exposed to sensors as `dedup_ttl_minutes` in the discovery capabilities and as part of the tenant capture defaults.
+**Observation rest period.** A passive sensor does not re-send the same
+observation on every connection it sees; it rests for **one hour** between
+repeats of the same sighting. That default is **not adjustable from the console
+today** — no page exposes it, including the sensor's own Control tab. It can be
+changed through the API (`dedup_ttl_minutes`), either on one sensor's
+configuration or as the organization-wide capture default, and the sensor
+applies the new value on its next check-in.
 
 ## Workflow
 
@@ -36,7 +42,7 @@ pull. See [Asset Approval](./asset-approval.md).
 
 Create a discovery job with target networks, protocols, and ports, OR interrogate devices/cloud resources.
 
-**UI:** Navigate to Assets → Discover Assets
+**UI:** **Discovery → Command Center → Discover assets**
 
 **API:** `POST /api/v2/inventory-service/discovery/jobs` (network scanning)
 **API:** `POST /api/v2/device-interrogation-service/devices/:id/interrogate` (device interrogation)
@@ -64,7 +70,9 @@ Create a discovery job with target networks, protocols, and ports, OR interrogat
 
 Monitor discovery job status and progress.
 
-**UI:** Discovery job status is displayed with real-time updates
+**UI:** **Discovery → Discovery Jobs** lists every run with its status; click a
+row for the run's detail. **Discovery → Job Logs** carries the same detail for
+interrogation runs.
 
 **API:** `GET /api/v2/inventory-service/discovery/jobs/:id`
 
@@ -80,7 +88,7 @@ Monitor discovery job status and progress.
 Review what the job found. The findings are already on their way to inventory —
 this step is a record of the run, not a decision point.
 
-**UI:** Results table shows:
+**UI:** The wizard's results step shows:
 - Hostname
 - IP Address
 - Port
@@ -99,7 +107,7 @@ server-side.
 
 The two numbers are reported separately on purpose. **Found** is what the scan
 saw. The split is what reached your inventory. They can differ: connections to
-external third parties are recorded under **Inventory → Connections** rather than
+external third parties are recorded under **Inventory → 3rd Party** rather than
 as assets, a finding with no resolvable address cannot be anchored to one, and
 processing is asynchronous, so a count may still be settling when the scan
 finishes.
@@ -108,7 +116,7 @@ finishes.
 
 Review and approve/deny discovered assets.
 
-**UI:** Assets appear in "Pending Approval" section
+**UI:** **Discovery → Approvals**
 
 **API:**
 - `POST /api/v2/inventory-service/assets/approve` - Approve assets
@@ -119,36 +127,47 @@ Review and approve/deny discovered assets.
 2. `monitoring` - After approval
 3. `denied` - After denial (suppressed from rediscovery)
 
-## Unified Discovery Processing
+## How a discovery reaches your inventory
 
-All discoveries (sensor and cloud) are **automatically processed** by the `discovery-processor-service` through a unified pipeline:
+Every source — a scan you ran, a sensor watching a segment, a cloud integration,
+an interrogated device, an uploaded capture, a host inventory — lands in the same
+queue and is processed the same way. Nothing is imported from a browser, and no
+client gets to choose an asset's approval status.
 
-### Sensor Discoveries
-1. **Sensor Submission**: Sensors submit discoveries to `sensor-manager`
-2. **Storage**: Discoveries stored in `sensor_discoveries` table
+1. **The finding is recorded.** Sensors submit continuously; jobs submit when
+   they finish.
+2. **It is placed.** The address is matched against the network segments you
+   have defined, which is what decides the asset's segment and whether an
+   auto-approval rule applies.
+3. **The asset is created** as either `monitoring` (auto-approved) or
+   `pending_approval`.
+4. **Certificates are built out.** Findings carrying certificate data become
+   certificate records with their chain linked, and the leaf is attached to the
+   crypto configuration it was seen on. Cloud-discovered certificates keep their
+   provider metadata.
+5. **Compliance catches up.** Findings are re-evaluated against your activated
+   frameworks as the inventory changes.
 
-### Cloud Discoveries
-1. **Cloud API Discovery**: Device-interrogation-service discovers cloud resources via provider APIs
-2. **TLS Handshake**: For publicly accessible endpoints, the service performs a TLS handshake to extract the full certificate chain (leaf + intermediates), negotiated TLS version, cipher suite, and ALPN protocol
-3. **Certificate Enrichment**: For AWS resources, handshake-discovered certificates are enriched with ACM metadata (ARN, certificate type, renewal eligibility, validation status)
-4. **Storage**: Discoveries (including certificate arrays and `handshake_verified` flag) written to `sensor_discoveries` table (unified pipeline)
+A missed batch is picked up on the next pass, so a brief outage delays results
+rather than losing them.
 
-### Automatic Processing (Both Sources)
-5. **Automatic Processing**: `discovery-processor-service` polls for unprocessed batches from `sensor_discoveries`
-6. **Network Classification**: Discoveries classified by network space
-7. **Auto-Approval Evaluation**: Auto-approval rules evaluated based on network space
-8. **Asset Creation**: Assets created with appropriate status (`monitoring` or `pending_approval`)
-9. **Certificate Creation**: For findings containing certificate data, `inventory-service` creates `certificates` records (with `data_source = 'cloud_api'` for cloud discoveries), builds chain linkage, and links the leaf certificate to the `crypto_implementation`
-10. **Compliance Integration**: Compliance findings automatically generated via events
+**What cloud discovery adds.** For publicly reachable cloud endpoints the
+platform performs a real TLS handshake, so a cloud-discovered asset carries the
+same certificate detail a sensor would have seen — the full chain, the negotiated
+version, the cipher suite — rather than API metadata alone. Private endpoints
+that cannot be reached fall back to API metadata, and say so.
 
-**Benefits:**
-- No manual intervention required for sensor or cloud discoveries
-- Automatic processing within seconds
-- Network space-based auto-approval for all discovery sources
-- Unified approval workflow - cloud and sensor discoveries appear together in Discovery Approvals modal
-- Full certificate chain extraction for cloud resources via TLS handshake, achieving parity with sensor-based discoveries
-- Cloud-specific metadata enrichment (e.g., ACM ARN, renewal status) preserved on certificate records
-- Resilient (missed batches automatically picked up)
+## Host inventory
+
+A discovery agent can also describe a **host** rather than interrogate a device:
+its operating system, hardware, installed software, listening sockets and
+certificate stores — locally on the machine the agent runs on, or remotely over
+SSH as a queued job. A listening socket the host itself reports is the only
+evidence that ties a service to that machine, and it finds the loopback-only and
+firewalled services no scan can reach.
+
+It is off by default, and the resulting host waits in **Discovery → Approvals**
+like any other discovery. See [Host Inventory](./host-inventory.md).
 
 ## What discovery records
 
@@ -258,29 +277,13 @@ how many devices a sensor has seen this way over the selected period, and how
 many observations it had to shed. A non-zero shed count means the segment is
 busier than the sensor is sized for, and some devices on it may be missing.
 
-## Integration with Cluster Sensor Service
+## Segment classification
 
-Discovery jobs are processed by the `cluster-sensor-service`:
-
-1. **Job Creation**: `inventory-service` creates job and sends to `cluster-sensor-service`
-2. **Job Processing**: `cluster-sensor-service` distributes work to available sensors
-3. **Result Collection**: Sensors submit findings to `cluster-sensor-service`
-4. **Result Retrieval**: `inventory-service` retrieves results from `cluster-sensor-service`
-5. **Ingestion**: `cluster-sensor-service` also mirrors every finding into the
-   `sensor_discoveries` queue, where `discovery-processor-service` classifies it,
-   evaluates the auto-approval rules and materializes the asset
-
-## Network Space Classification
-
-Discovered assets can be automatically classified into network spaces based on IP address matching:
-
-**UI:** Network Spaces → Classify Assets
-
-**API:** `POST /api/v2/inventory-service/network-spaces/classify-assets`
-
-Assets are matched to network spaces based on:
-- IP address falls within network space CIDR ranges
-- Network space priority (if multiple matches)
+A discovered asset is placed into one of the **network segments** you have
+defined, by matching its address against each segment's ranges. The segment is
+what auto-approval rules read, and what the inventory facets on. Segments are
+maintained under **Settings → Infrastructure → Network Segments**; see
+[Operational Context](./operational-context.md).
 
 ## Discovery Job Management
 
@@ -317,7 +320,7 @@ See [Asset Lifecycle Management](./asset-lifecycle-management.md) for more detai
 
 1. **Start Small**: Begin with small target ranges to test discovery
 2. **Review Results**: Check the results step's split — what was found versus what reached inventory
-3. **Network Spaces**: Set up network spaces before discovery for automatic classification
+3. **Network segments**: Define your segments before discovering, so assets are placed — and auto-approved — correctly from the first run
 4. **Approval Workflow**: Use approval workflow for production environments
 5. **Scheduled Discovery**: Set up recurring discovery jobs for continuous monitoring
 6. **Re-validation**: Periodically re-validate existing assets to keep inventory current
@@ -341,11 +344,14 @@ See [Asset Lifecycle Management](./asset-lifecycle-management.md) for more detai
 
 ## Troubleshooting
 
-### Job Stuck in "Running" Status
+### Job stuck in "Running"
 
-- Check sensor health: `GET /api/v2/sensor-manager/sensors/:id/health`
-- Retry job: `POST /api/v2/inventory-service/discovery/jobs/:id/rerun`
-- Check cluster-sensor-service logs
+- Check the sensor's **Health** tab (**Discovery → Sensors & Agents →** the
+  sensor) — a sensor that stopped heartbeating cannot finish the work it was
+  given
+- Retry or cancel the job from **Discovery → Discovery Jobs**
+- The run's own detail, including any processing errors, is on **Discovery → Job
+  Logs**
 
 ### No Results Returned
 
@@ -358,14 +364,17 @@ See [Asset Lifecycle Management](./asset-lifecycle-management.md) for more detai
 
 - Check **Discovery → Approvals** first: unless the address is on a network
   segment with auto-approve enabled, the asset is waiting there by design
-- Connections to external third parties are recorded under **Inventory →
-  Connections**, not as assets
+- Connections to external third parties are recorded under **Inventory → 3rd
+  Party**, not as assets
 - Findings with no resolvable IP address cannot be turned into an asset
 - Processing is asynchronous — the results step reports how many are still being
   processed
 
 ## Related Documentation
 
-- [Network Spaces Feature](./network-spaces.md) - Network space management
-- [Asset Approval Feature](./asset-approval.md) - Asset approval workflow
-- [Asset Lifecycle Management](./asset-lifecycle-management.md) - Stale asset detection and management
+- [Asset Approval](./asset-approval.md) — the approval queue and its rules
+- [Asset Lifecycle Management](./asset-lifecycle-management.md) — stale assets and what happens to them
+- [Host Inventory](./host-inventory.md) — describing a host rather than scanning it
+- [Sensor & Agent Registration](./SENSOR_REGISTRATION.md) — deploying what does the discovering
+- [PCAP Ingestion](./pcap-ingestion.md) — a capture file as a discovery source
+- [Operational Context](./operational-context.md) — locations and network segments

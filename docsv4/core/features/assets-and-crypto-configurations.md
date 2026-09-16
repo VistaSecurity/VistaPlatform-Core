@@ -210,7 +210,7 @@ Your Data Center / Cloud Environment
 - Query AWS/Azure/GCP APIs for infrastructure
 - Extract SSL/TLS policies from cloud configuration (ALBs, App Services, etc.)
 - Perform TLS handshake with public endpoints (if reachable)
-- Create device → asset → crypto configuration
+- Create the asset and its crypto configuration
 
 **What it captures:**
 - Cloud-configured SSL policies
@@ -231,14 +231,17 @@ Your Data Center / Cloud Environment
 - Device-specific settings
 
 ### 4. Manual Entry
-- User manually documents assets
-- User specifies crypto configurations
-- Creates implementation records in system
+- You record an asset you already know about, from **Inventory → All assets → New asset**
+- You upload a certificate PEM, from **Inventory → Certificates → Upload cert**
+- Both are matched against existing inventory rather than blindly inserted, so typing in a host a sensor already found updates that asset instead of creating a second one
 
 **What it captures:**
-- User-provided configuration details
-- Documentation of known crypto settings
-- Lower confidence score (manual vs automated)
+- The class, identifiers, attributes and business context you type
+- The certificate's own contents, read out of the PEM rather than taken on trust
+
+A crypto configuration is never typed in by hand — it is what was measured on an
+endpoint, so it only ever comes from one of the three discovery paths above. See
+[Adding assets manually](./adding-assets-manually.md).
 
 ## Assets WITHOUT Crypto Configurations
 
@@ -412,6 +415,8 @@ A: Risk scores adjust as threat intelligence evolves, certificate expiration app
 
 ## Related Documentation
 
-- **User Interface**: See [Tenant User Guide → Crypto Inventory](../guides/tenant-user-guide.md#crypto-inventory) for UI walkthrough
+- **The screens themselves**: [Inventory and lenses](./inventory-and-lenses.md) — the asset list, the lenses, the asset page and its tabs
+- **Adding one by hand**: [Adding assets manually](./adding-assets-manually.md)
+- **A walkthrough**: [Tenant User Guide → Inventory](../guides/tenant-user-guide.md#inventory)
 - **Discovery Setup**: See [Discovery Guide](./discovery.md) for configuring asset discovery
 - **Compliance**: See [Compliance Frameworks](./compliance-frameworks.md) for compliance evaluation

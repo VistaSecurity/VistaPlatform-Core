@@ -6,7 +6,7 @@ render_macros: false
 
 ## Overview
 
-The Crypto Inventory Platform uses mTLS (mutual TLS) for secure communication between:
+Vista Platform uses mTLS (mutual TLS) for secure communication between:
 1. **Sensors and the control plane** - Sensor-to-service authentication
 2. **Platform services** - Service-to-service authentication (all backend services)
 
@@ -607,7 +607,7 @@ This creates certificates for all services:
 - `auth-service`
 - `inventory-service`
 - `compliance-engine`
-- `report-generator`
+- `cbom-service`
 - `sensor-manager`
 - `cluster-sensor-service`
 - `admin-service`
@@ -618,7 +618,9 @@ This creates certificates for all services:
 - `audit-service`
 - `notification-service`
 - `discovery-processor-service`
-- `api-gateway` (client certificate for backend connections)
+- `pcap-processor`
+- `mcp-service`
+- `api-gateway` (client certificate for backend connections; Docker Compose only — the Helm chart has no gateway pod)
 
 Certificates are stored in:
 - Database: `platform_service_certificates` table
@@ -653,7 +655,22 @@ docker compose up -d postgres
 2. Service certificates are generated for all services
 3. Certificates are mounted into containers via docker-compose.yml
 
-#### Production Environment
+#### Kubernetes (Helm chart) — production
+
+**You don't run the scripts above for a chart deployment.** The chart's
+`serviceMtls` toggle (on by default) provisions and rotates every service
+certificate itself, from a cert-manager-issued Platform CA — see
+[Service-mesh mTLS](./service-mesh-mtls.md) for the full toggle set, staging
+guidance across upgrades, and the Postgres/NATS TLS options that build on it.
+The manual `generate-service-ca.sh` / `generate-service-certificates.sh` flow
+above and the `service-certs/{service}/` directory it produces are a **Docker
+Compose** mechanism only.
+
+#### Docker Compose "production-style" stack
+
+If you're running a production-style Compose stack rather than the Helm chart
+(see [production checklist](../deployment/production-checklist.md) for why
+that's not the recommended path for a real deployment):
 
 1. **Generate Certificates**:
    ```bash
@@ -666,11 +683,7 @@ docker compose up -d postgres
    - Store in encrypted storage
    - Never commit to version control
 
-3. **Mount Certificates**:
-   - Update docker-compose.prod.yml with certificate volume mounts
-   - Ensure certificates are available at container startup
-
-4. **Set Permissions**:
+3. **Set Permissions**:
    ```bash
    find service-certs -type d -exec chmod 755 {} \;
    find service-certs -type f -name "*.pem" -exec chmod 600 {} \;

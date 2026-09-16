@@ -29,7 +29,6 @@ organization.
 - [Service-mesh mTLS](./security/service-mesh-mtls.md) — staging internal mTLS across upgrades, managed-Postgres/NATS notes
 - [Database Migrations](./deployment/database-migrations.md)
 - [Device Agent Deployment](./deployment/device-agent-deployment.md)
-- [Managed vs In-Cluster Postgres/Redis](./deployment/managed-vs-in-cluster.md)
 
 ### Operations
 - [Platform Admin Guide](./platform-admin-guide.md) — Complete operations reference
@@ -46,13 +45,12 @@ organization.
 ### Monitoring
 - [Monitoring Setup](./monitoring/setup.md)
 - [Log Management](./monitoring/log-management.md)
-- [Compliance Engine Alerts](./monitoring/compliance-engine-alerts.md)
 
 ### Security
-- [Security Architecture](./security/architecture.md)
 - [Certificate Management](./security/certificates.md)
 - [Secrets Management](./security/secrets-management.md)
 - [Bootstrap Certificates](./security/bootstrap-certificates.md)
+- [Running with an internal CA](./security/internal-ca.md)
 
 ### Configuration
 - [Platform Integrations](./configuration/platform-integrations.md) — AWS, Azure, GCP, SaaS CMDB integrations
@@ -61,4 +59,3 @@ organization.
 ### Troubleshooting
 - [Common Issues](./troubleshooting/common-issues.md)
 - [Asset Approval Workflow Issues](./troubleshooting/asset-approval-workflow-issues.md)
-- [Runbooks](troubleshooting/runbooks/) — Recovery and gateway runbooks

@@ -14,7 +14,7 @@ The platform uses Docker Compose for service orchestration. Services are defined
 
 All services are registered in `standards/service-registry.yaml`. The registry is the **single source of truth** for service configuration.
 
-**⚠️ CRITICAL**: Never edit `docker-compose.yml` or `docker-compose.prod.yml` directly. Always edit the service registry and run `make registry-first` to regenerate.
+**⚠️ CRITICAL**: Never hand-edit `docker-compose.yml` directly. Always edit the service registry and run `make registry-first` to regenerate.
 
 ## Development / Local Evaluation (Docker Compose)
 
@@ -44,7 +44,7 @@ docker compose up -d auth-service inventory-service compliance-engine \
   cbom-service sensor-manager admin-service cluster-sensor-service \
   monitoring-service resource-tracker-service tenant-health-service \
   device-interrogation-service audit-service notification-service \
-  discovery-processor-service
+  discovery-processor-service pcap-processor mcp-service
 
 # 4. Start API gateway (before frontend so UIs can reach the API)
 docker compose up -d api-gateway

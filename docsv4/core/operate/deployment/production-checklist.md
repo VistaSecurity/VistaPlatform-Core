@@ -4,197 +4,227 @@ render_macros: false
 
 # Production Deployment Checklist
 
-Comprehensive checklist for deploying the Crypto Inventory Platform to production.
+Vista Platform ships as a **Helm chart** — production installs run on Kubernetes,
+against the chart at `oci://ghcr.io/vistasecurity/vistaplatform`. This checklist
+covers the pre-flight, the install itself, and post-install verification for a
+real deployment. Docker Compose (the top-level `docker compose up -d` path) is
+for trying the product on a laptop, not for running it — see
+[Try it](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/INSTALL.md#try-it)
+in `INSTALL.md`. There is no `docker-compose.prod.yml` in the public
+distribution; it isn't part of how anyone is meant to run this in production.
+
+For a smaller, single-VM run-through of the same chart (useful for evaluation or
+staging before a real cluster), see
+[Evaluate it](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/INSTALL.md#evaluate-it)
+in `INSTALL.md`.
 
 ## Pre-Deployment
 
-### Environment Setup
+### Cluster prerequisites the chart does not install
 
-- [ ] Generate a `.env` with real secrets: `./scripts/bootstrap-env.sh` (see [INSTALL.md](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/INSTALL.md) — the environment generators referenced by older revisions of this checklist, `generate-prod-env.mjs` and `generate-ec2-smoke-env.mjs`, are internal tooling and are not part of this repository)
-- [ ] Review and update the environment file with production values
-- [ ] Verify all secrets are secure and randomized
-- [ ] Verify `JWT_SECRET` is NOT the dev default (`dev-secret-key-change-in-production`) — auth-service will refuse to start
-- [ ] Verify `INTERNAL_AUTH_SECRET` is NOT the dev default — required for HMAC-signed service-to-service authentication
-- [ ] Verify `ENCRYPTION_MASTER_KEY` is set — certificate generation scripts will fail without it
-- [ ] Set `ENV=production` so runtime secret validation is enforced
-- [ ] Configure domain names (api.example.com, app.example.com, admin.example.com)
-- [ ] Set up DNS records pointing to EC2 instance or ALB
+- **cert-manager** — required by default. It issues the per-service certificates
+  for encrypted internal transport (`serviceMtls`, on by default) and, with
+  `tls.mode: certManager`, the browser-facing certificate too. The install stops
+  with a clear error if its CRDs are absent. Only optional if you turn all three
+  of `serviceMtls.enabled`, `datastores.postgres.tls.enabled` and
+  `datastores.nats.tls.enabled` off — not recommended for a real deployment.
+- **Stakater Reloader** — required whenever `serviceMtls` is on (the default). It
+  restarts pods when a certificate rotates. Nothing fails at install time
+  without it; internal mTLS quietly breaks at the first renewal, ~60 days in.
+- **Traefik**, with its CRDs. The chart creates `IngressRoute` and `Middleware`
+  *resources*; it does not install the controller or the CRDs that define them.
+- **A StorageClass** for the PostgreSQL, InfluxDB, and upload volumes.
 
-> **Secrets Configuration**: All secrets are now externalized into `.env` (see `env.example` at the repository root for the full list of required variables). `INTERNAL_AUTH_SECRET` is required for HMAC-signed service-to-service authentication and must be a strong, randomly generated value. Docker Compose uses `${VAR:?error}` syntax to fail fast if required secrets are missing -- if a service fails to start, check that all variables listed in `env.example` are defined in your `.env` file.
+Full detail on the internal-mTLS options — what each toggle covers, how to stage
+them across upgrades, and how to run against a managed PostgreSQL — is in
+[Service-mesh mTLS](../security/service-mesh-mtls.md). If your edge certificate
+comes from an internal or corporate CA rather than a public issuer, see
+[Running with an internal CA](../security/internal-ca.md) for the supported way
+to make in-cluster callers trust it.
 
-### Infrastructure
+### `values.yaml`
 
-- [ ] Provision EC2 instance (recommended: t3.large or larger)
-- [ ] Configure Security Groups (ports 80, 443, 22)
-- [ ] Set up Application Load Balancer (ALB) with ACM certificate
-- [ ] Configure Route 53 DNS
-- [ ] Set up S3 bucket for artifact storage (optional)
-- [ ] Configure IAM roles for AWS services (if using AWS integrations)
+- [ ] Set `tls.dnsName` and `tls.adminDnsName` — where users reach the web UI/API
+      and the admin console.
+- [ ] Set `tls.issuerRef` to a cert-manager `ClusterIssuer` you already have (for
+      `tls.mode: certManager`), or configure your own certificate path.
+- [ ] Create `platform.existingSecretName` yourself, out of band, and name it in
+      values — otherwise the chart generates platform secrets on first install
+      and keeps them. Either way, treat `ENCRYPTION_MASTER_KEY` the way you'd
+      treat a database encryption key: if it changes, every stored integration
+      credential encrypted under the old key becomes permanently undecryptable.
+      The chart reads the existing Secret back on upgrade rather than
+      regenerating it, but only if you haven't overridden that behavior.
+- [ ] Size the node(s) for roughly double your steady-state CPU **request**
+      during upgrades if you're running a single-node cluster — see
+      "Single-node clusters" below.
 
-### Database
+### Optional prerequisites
 
-- [ ] Provision PostgreSQL database (RDS or self-hosted)
-- [ ] Configure database backups
-- [ ] Set up database connection pooling
-- [ ] Verify database schema is up to date
-  ```bash
-  # Schema is automatically applied on new databases via schema.sql
-  # For existing databases, apply schema updates:
-  docker compose -f docker-compose.prod.yml exec -T postgres \
-    psql -U crypto_user -d crypto_inventory -f scripts/database/schema.sql
-  ```
-- [ ] Verify RLS is active — schema.sql enables RLS on all tenant-scoped tables. Services must call `set_tenant_context()` before tenant queries
-- [ ] Configure `DATABASE_URL` with `sslmode=require` or `sslmode=verify-full` for encrypted connections
-- [ ] Verify seed.sql admin passwords have been changed from defaults
-- [ ] Generate bootstrap certificates for platform services
-  ```bash
-  # Generate platform bootstrap CA (one-time, if not exists)
-  ./scripts/generate-bootstrap-ca.sh
-  
-  # Generate bootstrap certificates for platform services
-  ./scripts/generate-bootstrap-certificates.sh
-  
-  # Certificates are stored in ./bootstrap-certs/ directory
-  # Ensure certificates are mounted in docker-compose.prod.yml
-  # See docsv4/operations/security/bootstrap-certificates.md for details
-  ```
+- [ ] **A model provider**, if you want AI-assisted seams (finding
+      explanations, remediation drafting, EOL gap-filling proposals) to use a
+      real model instead of the rule-based default every one of them falls
+      back to. See [Connecting a model provider](../configuration/ai-provider.md)
+      — nothing here blocks an install; every AI capability works without it.
+- [ ] **The offline End-of-life/Vulnerability bundle**, for an air-gapped
+      install with no route to endoflife.date/NVD/OSV. See
+      [Air-gapped installs: the offline bundle](../catalogs.md#air-gapped-installs-the-offline-bundle).
 
-### SSL/TLS
 
-- [ ] Configure ACM certificate in ALB (recommended)
-- [ ] Or configure Let's Encrypt on EC2
-- [ ] Verify HTTPS redirect works
-- [ ] Test SSL certificate validity
+### Legal documents
 
-## Deployment Steps
+- [ ] Replace the Terms of Service and Privacy Policy templates. The chart
+      ships **templates** — real structure with `[BRACKETED]` blanks and a
+      banner saying they are not legally binding — and every user is asked to
+      accept them at sign-up. See [Legal documents for operators](../legal/README.md).
 
-### 1. Build Production Images
+## Deployment
 
 ```bash
-# Build all services
-docker compose -f docker-compose.prod.yml build
-
-# Or build specific service
-docker compose -f docker-compose.prod.yml build auth-service
+helm install vista oci://ghcr.io/vistasecurity/vistaplatform \
+  --namespace vista --create-namespace \
+  --values values.yaml
 ```
 
-### 2. Start Infrastructure
+A minimal production `values.yaml`:
 
-```bash
-# Start database, Redis, NATS
-docker compose -f docker-compose.prod.yml up -d postgres redis nats
+```yaml
+tls:
+  mode: certManager           # a real certificate, renewed automatically
+  dnsName: vista.example.com  # where users reach the web UI and API
+  adminDnsName: admin.vista.example.com
+  issuerRef:
+    name: letsencrypt-prod    # a cert-manager ClusterIssuer you already have
+    kind: ClusterIssuer
+
+platform:
+  # Recommended: create this Secret yourself, out of band, and name it here.
+  # Otherwise the chart generates these on first install and keeps them.
+  existingSecretName: vista-platform-secrets
 ```
 
-### 3. Verify Database Schema
-
-```bash
-# For new databases: Schema auto-applies via schema.sql on first startup
-# For existing databases: Apply schema updates (idempotent)
-docker compose -f docker-compose.prod.yml exec -T postgres \
-  psql -U crypto_user -d crypto_inventory -f scripts/database/schema.sql
-```
-
-### 4. Start Services
-
-```bash
-# Start all services (includes notification-service)
-docker compose -f docker-compose.prod.yml up -d
-
-# Or start specific services
-docker compose -f docker-compose.prod.yml up -d auth-service inventory-service notification-service
-```
-
-**Note:** The `notification-service` is included in the service registry and will be started automatically. Ensure it has access to:
-- PostgreSQL database
-- `ENCRYPTION_MASTER_KEY` environment variable (for email config decryption)
-- `NOTIFICATION_SERVICE_URL` environment variable (for other services to call it)
-
-### 5. Start API Gateway
-
-```bash
-# Start Traefik gateway
-docker compose -f docker-compose.prod.yml up -d api-gateway
-```
-
-### 6. Start Frontend
-
-```bash
-# Start web-ui and admin-ui
-docker compose -f docker-compose.prod.yml up -d web-ui admin-ui
-```
+There is no separate "start infrastructure, then services, then gateway"
+sequence to run by hand — `helm install` reconciles everything (Postgres,
+Redis, NATS, InfluxDB, every backend, both frontends, and the schema-migration
+and seed-data Jobs) in dependency order, and `--wait` returns once every pod is
+ready. Give the first install a few minutes: it's applying the schema, seeding
+reference data, and pulling ~18 images.
 
 ## Post-Deployment
 
 ### Verification
 
-- [ ] Verify all services are healthy (including notification-service on port 8097)
-  ```bash
-  curl https://api.example.com/health
-  curl http://localhost:8097/health  # Notification service
-  ```
-- [ ] Test API Gateway routing (v1 and v2; v2 available at `/api/v2/inventory-service/`, `/api/v2/health`, and v2 pass-through for other services)
-- [ ] Verify frontend applications load
-- [ ] Test authentication flow
-- [ ] Verify database connections
-- [ ] Check service logs for errors
-- [ ] Test notification channels (Slack, Email, Webhook, PagerDuty)
-- [ ] Verify notification service can receive alerts from other services
-- [ ] Check notification history is being recorded
-- [ ] Verify the MCP service is healthy (port 8100) and requires `INTERNAL_AUTH_SECRET`
-  ```bash
-  curl http://localhost:8100/health  # MCP service (read-only AI integration)
-  ```
-  The MCP endpoint (`/api/v1/mcp-service/mcp`) requires a tenant API token; an
-  unauthenticated request must return `401`. See
-  MCP Service architecture.
+- [ ] All pods are ready:
+      ```bash
+      kubectl -n vista get pods
+      ```
+- [ ] The web UI and admin UI load at `tls.dnsName` / `tls.adminDnsName`
+- [ ] Sign in with a seeded platform administrator and complete the mandatory
+      password rotation (see the [Platform Admin Guide](../platform-admin-guide.md#first-sign-in-mandatory-password-rotation))
+- [ ] A backend answers on its plaintext health port (used for probes; mTLS is
+      not required against it even when `serviceMtls.enabled` is on):
+      ```bash
+      kubectl -n vista exec deploy/auth-service -- wget -qO- http://localhost:8080/health
+      ```
+- [ ] The MCP service is healthy and requires `INTERNAL_AUTH_SECRET`/a tenant
+      API token — an unauthenticated request to `/api/v1/mcp-service/mcp` must
+      return `401`.
+- [ ] Test your configured notification channels (Settings → Notification
+      Delivery) and confirm delivery history records the attempt.
+
+### Verify what you're running
+
+Every Core image and the chart are cosign-signed with the signing identity
+*being* the release workflow — see
+[Verifying what you're running](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/INSTALL.md#verifying-what-youre-running)
+in `INSTALL.md` for the `cosign verify` commands. `helm install` prints the
+verify command for the chart version you installed at the end of its run.
 
 ### Monitoring
 
-- [ ] Set up monitoring alerts
-- [ ] Configure log aggregation
-- [ ] Set up uptime monitoring
-- [ ] Configure error tracking
+- [ ] Configure monitoring alert thresholds and notification channels — see
+      [Monitoring Setup](../monitoring/setup.md)
+- [ ] Set up log aggregation for your cluster's logging stack
+- [ ] Set up uptime monitoring against the public hostname
 
 ### Security
 
-- [ ] Verify HTTPS is enforced
+- [ ] Verify HTTPS is enforced end to end (browser → ingress)
 - [ ] Test authentication and authorization
-- [ ] Verify CORS configuration
-- [ ] Check security headers
-- [ ] Review access logs
+- [ ] Review the [Security & Trust → Dashboard](../platform-admin-guide.md#security--trust) posture view
+
+## Upgrading
+
+`ENCRYPTION_MASTER_KEY` encrypts stored integration credentials — see
+[Secrets Management](../security/secrets-management.md). The chart reads the
+existing Secret back on upgrade rather than generating a new one.
+
+**Use `--reset-then-reuse-values` for a cross-version upgrade, not
+`--reuse-values`.** `--reuse-values` carries every previous release's
+user-supplied value forward verbatim — including any per-service
+`backends.<svc>.image.tag` override you set for a one-off hotfix — which then
+silently pins that service to the OLD image even though the chart version (and
+every other service) moved forward. `helm upgrade` reports success either way.
+`--reset-then-reuse-values` resets to the new chart's defaults first, then
+reapplies only the values you still have set in your `-f`/`--set` flags, which
+is what you want when moving to a new chart version. Reserve plain
+`--reuse-values` for a same-version re-run (e.g. rolling a single service's tag
+by hand). The chart's `NOTES.txt` repeats this on every `helm upgrade`.
+
+**`pg_dump` before every upgrade.** The chart re-applies `scripts/database/schema.sql`
+on every `helm upgrade`; `NOTES.txt` reminds you of this on every run. There is
+no backup tooling shipped with the chart.
+
+### Single-node clusters
+
+A default `helm upgrade` rolls every backend with a rolling-update strategy, so
+old and new pods briefly coexist — on a one-node cluster that can surge pod CPU
+*requests* past what the node has to give, which can leave a recreated
+`postgres-0` unable to schedule and every backend's init container hanging
+waiting on it. Size the node for roughly double your steady-state CPU request
+during upgrades, or set `strategy: Recreate` on the backends you can afford
+brief downtime on (the chart already does this for `pcap-processor`). A wedged
+upgrade recovers with `helm rollback`.
 
 ## Common Issues
 
-### Services Not Starting
+### Pods not starting
 
-- Check Docker logs: `docker compose -f docker-compose.prod.yml logs <service>`
-- Verify environment variables are set
-- Check database connectivity
-- Verify port availability
+- Check logs: `kubectl -n vista logs deployment/<service>`
+- Verify the chart's prerequisites (cert-manager, Reloader, a StorageClass) are
+  actually installed and healthy
+- Check `kubectl -n vista get pvc` for volumes stuck `Pending`
 
-### Database Connection Errors
+### Database connection errors
 
-- Verify `DATABASE_URL` is correct
-- Check database is accessible from EC2
-- Verify database user permissions
-- Check firewall rules
+- Verify `kubectl -n vista get pods` shows `postgres-0` `Running`/`Ready`
+- Check `datastores.postgres.tls.enabled` matches whether `serviceMtls.enabled`
+  is on — the datastore TLS toggles require the mesh toggle
+- Check firewall/security-group rules if using a managed PostgreSQL instead of
+  the chart's in-cluster instance — set `datastores.postgres.enabled: false`
+  and provide a `database-url` key in your platform secret, per the comments
+  above the `datastores:` block in `values.yaml`
 
-### Frontend Not Loading
+### Frontend not loading
 
-- Verify API Gateway URL is correct
-- Check CORS configuration
-- Verify frontend build completed successfully
-- Check browser console for errors
+- Verify `tls.dnsName` / `tls.adminDnsName` resolve to your ingress controller
+- Check the Traefik `IngressRoute`/`Middleware` resources the chart created:
+  `kubectl -n vista get ingressroute,middleware`
+- Check browser console for CORS or certificate errors
 
-## Rollback Procedure
+## Rollback
 
-1. Stop services: `docker compose -f docker-compose.prod.yml down`
-2. Restore database backup if needed
-3. Revert to previous image versions
-4. Restart services with previous configuration
+```bash
+helm rollback vista --namespace vista
+```
+
+Restore your `pg_dump` backup if the upgrade already wrote schema changes you
+need to undo — `helm rollback` reverts the release's Kubernetes objects, not
+data already written to the database.
 
 ## Related Documentation
 
-- [Database Migrations](./database-migrations.md) - Migration procedures
-- [Startup and Shutdown Procedures](../startup-shutdown.md) - Service lifecycle management
-- [Notification Provider Integration Guide](../operations/notification-providers.md) - Third-party integration setup
+- [Database Migrations](./database-migrations.md) — the schema-apply model (no migration runner)
+- [Startup and Shutdown Procedures](../startup-shutdown.md) — service lifecycle management
+- [Notification Provider Integration Guide](../operations/notification-providers.md) — third-party integration setup
+- [Container Runtime Images](../container-runtime-images.md) — every image this deployment runs

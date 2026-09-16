@@ -2,16 +2,29 @@
 
 ## Overview
 
-PCAP ingestion allows tenants to upload packet capture files (.pcap and .pcapng) through the web UI for offline cryptographic analysis. Extracted discoveries feed into the same discovery pipeline as live sensors, so they land in your inventory alongside everything else.
+Upload a packet capture (`.pcap` or `.pcapng`) and the platform extracts what
+the traffic in it reveals about cryptography. Extracted discoveries feed into the
+same pipeline as live sensors, so they land in your inventory alongside
+everything else.
 
 PCAP analysis is **narrower than a live sensor**. A sensor sees a connection as it happens and can probe the endpoint; a capture file is whatever bytes someone recorded. The table below is the honest list of what a capture yields today — see [Limits](#limits) for what it does not.
 
-## User Workflow
+## Uploading a capture
 
-1. Navigate to **Operations > PCAP Upload** in the web UI
-2. Drag and drop a `.pcap` or `.pcapng` file (or click to browse)
-3. Monitor upload progress and processing status
-4. View extracted discoveries in the Inventory
+1. Go to **Discovery → Sources → PCAP Upload**.
+2. Drop a `.pcap` or `.pcapng` file onto the dropzone, or click **Choose file**.
+3. The upload appears under **Recent uploads** on the same page, with its
+   processing status.
+4. What it found reaches your inventory the same way a sensor's findings do —
+   see [Where the discoveries go](#where-the-discoveries-go).
+
+Uploading needs the **Upload PCAP files** permission (`pcap.upload`); without it
+the dropzone says so instead of accepting a file.
+
+Uploaded captures are decoded for **host announcements** as well as handshakes,
+which often makes a capture the only practical way to inventory a segment that
+cannot host a sensor. See
+[Passive host observation](./discovery.md#passive-host-observation).
 
 ## What Data Is Extracted
 
@@ -39,21 +52,27 @@ These are properties of packet captures, not gaps we plan to close:
 
 Not extracted from PCAP today: ALPN, JA3/JA4 fingerprints, SSH key exchange / encryption / MAC algorithm lists, STARTTLS upgrades, and IKE/IPsec. Live sensors cover several of these.
 
+## Where the discoveries go
+
+Discoveries from a capture are treated as **sensor** discoveries by the approval
+rules, so a network segment you have set to auto-approve admits them
+automatically; everything else waits in **Discovery → Approvals** like any other
+discovery. (This was not always true — captures used to pile up in Approvals on
+segments that should have admitted them.)
+
+**Confidence is graded, not flat.** A host announcement from a replayed capture
+scores exactly what the same announcement scores from a live sensor: how
+*directly* the device stated its own identity. A switch advertising itself over
+LLDP is worth more than an address seen in a DNS answer, and an auto-approval
+rule that filters on confidence therefore behaves the same way on a replay as it
+does live.
+
 ## What Is NOT Stored
 
 - Raw packet payloads are never persisted
 - Application-layer data (HTTP bodies, email content, etc.) is not inspected
 - Temporary PCAP files are deleted immediately after processing
 - Only cryptographic metadata (protocol versions, cipher suites, certificates) is retained
-
-## Architecture
-
-```
-Web UI → sensor-manager (upload, validate, store) → NATS → pcap-processor (parse) → discoveries
-```
-
-- **sensor-manager**: Accepts uploads, validates file format and size, creates job records, publishes NATS events
-- **pcap-processor**: Subscribes to NATS, opens pcap files with libpcap, reassembles TLS handshakes per connection, and submits discoveries back through the standard pipeline
 
 ## File Format Support
 
@@ -62,19 +81,24 @@ Web UI → sensor-manager (upload, validate, store) → NATS → pcap-processor 
 
 ## Size Limits
 
-The maximum upload size is configurable by platform administrators:
-
 - **Default**: 500 MB
-- **Setting**: `pcap_max_upload_size_mb` in Admin UI > Settings > API & Limits
 - **Hard cap**: 5,000 MB (5 GB)
+
+The limit is a **platform-wide setting** (`pcap_max_upload_size_mb`) that the
+operator of your deployment changes through the platform settings API. There is
+no console page for it today — ask your platform administrator if you need a
+larger capture accepted.
 
 ## Permissions
 
-| Permission | Description | Default Roles |
-|------------|-------------|---------------|
-| `pcap.upload` | Upload PCAP files | billing_admin, tenant_admin, security_admin |
-| `pcap.read` | View upload jobs and results | All roles except api_user |
-| `pcap.delete` | Delete upload job records | billing_admin, tenant_admin, security_admin |
+| Permission | What it allows | Built-in roles that have it |
+|------------|----------------|-----------------------------|
+| `pcap.upload` | Upload captures | Tenant Administrator, Security Administrator |
+| `pcap.read` | See upload jobs and their results | Tenant Administrator, Security Administrator, Viewer, API User |
+| `pcap.delete` | Delete upload job records | Tenant Administrator, Security Administrator |
+
+Custom roles can carry any of these; see
+[Roles & Permissions](./roles-and-permissions.md).
 
 ## API Endpoints
 
@@ -88,8 +112,7 @@ The maximum upload size is configurable by platform administrators:
 ## Security Considerations
 
 - File magic bytes are validated server-side (not just file extension)
-- UUID filenames prevent path traversal attacks
-- Tenant-scoped temporary directories provide isolation
+- Uploads are stored under generated names, in per-organization directories
 - Concurrent processing is limited (default: 4 jobs) to prevent resource exhaustion
 - Processing timeout (default: 5 minutes) prevents runaway jobs
 - Row-level security ensures tenants only see their own jobs
@@ -105,11 +128,13 @@ pending → processing → completed
 
 ## Processing Details
 
-- Each uploaded file is assigned a UUID and stored temporarily
-- The pcap-processor service uses `pcap.OpenOffline()` from gopacket/libpcap
-- TLS handshake bytes are reassembled per connection and per direction, so certificate messages that span several packets are parsed correctly
-- Discoveries are created with `discovery_method = "pcap_upload"` to distinguish from live capture and active probing
-- Results flow through the normal discovery pipeline (discovery-processor → inventory-service)
+- Each uploaded file is stored under a generated name and deleted as soon as it
+  has been processed
+- TLS handshake bytes are reassembled per connection and per direction, so
+  certificate messages that span several packets are parsed correctly
+- Discoveries are recorded with a discovery method of `pcap_upload`, so you can
+  always tell a replay from a live capture or an active probe
+- Everything then flows through the normal discovery pipeline
 
 ### Memory bounds
 
@@ -121,3 +146,9 @@ So that an unusual capture (a port scan, a DDoS trace) cannot exhaust the proces
 | Concurrently tracked TLS connections | 8,192 | Additional connections are skipped |
 
 Anything skipped for these reasons is counted and written to the job's processing log, so a partial result is never presented as a complete one.
+
+## Related
+
+- [Discovery](./discovery.md) — the pipeline a capture's findings join
+- [Sensor & Agent Registration](./SENSOR_REGISTRATION.md) — the live alternative
+- [Asset Approval](./asset-approval.md) — where the discoveries wait, and what admits them

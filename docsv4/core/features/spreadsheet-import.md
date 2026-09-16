@@ -29,7 +29,7 @@ Vista Platform in one step:
 
 ## Where to find it
 
-- **Operations → Discovery → Command Center → Import from spreadsheet** — for either
+- **Discovery → Command Center → Import from spreadsheet** — for either
   target (network segments or infrastructure assets).
 - **Settings → Network Segments → Import** — a shortcut that imports straight into your
   network-segment registry.

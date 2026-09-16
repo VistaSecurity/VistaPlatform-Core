@@ -19,14 +19,16 @@ The Device Interrogation service enables you to:
 - Network connectivity to target devices (for on-premises)
 - Cloud credentials with read access (for cloud discovery)
 
-## Cloud Integrations
+## Cloud
 
-### Adding a Cloud Integration
+### Connecting a cloud account
 
-1. Navigate to **Discovery > Cloud Integrations**
-2. Click **Add Integration**
-3. Select the cloud provider (AWS, Azure, or GCP)
-4. Enter the required credentials:
+1. Go to **Discovery → Cloud**.
+2. Click **Connect integration**.
+3. Pick the provider (AWS, Azure or GCP) and give the connection a **name**, and
+   optionally an account id, a default **region**, an environment and a
+   description.
+4. Enter the credentials:
 
 #### AWS
 - **Name**: A descriptive name for this integration
@@ -46,25 +48,35 @@ The Device Interrogation service enables you to:
 - **Project ID**: GCP project ID
 - **Service Account JSON**: The service account key JSON file
 
-5. Click **Save** to create the integration
-6. Use **Test Connection** to verify the credentials work
+5. Click **Connect**.
+6. Use the row's **Test connection** action to check the credentials work.
 
-### Discovering Cloud Resources
+Editing a connection later leaves the stored secrets alone unless you type new
+ones.
 
-1. From the Cloud Integrations page, click **Discover** on an integration
-2. Select the resource types to discover:
-   - **AWS**: ALB / NLB / Classic ELB, API Gateway, CloudFront, KMS keys, S3 encryption, RDS encryption
-   - **Azure**: Application Gateway, Load Balancer, Key Vault keys, Storage account encryption, SQL Database (TDE)
-   - **GCP**: HTTPS Load Balancer, SSL Proxy, Cloud KMS keys, Cloud Storage encryption, Cloud SQL encryption
-3. Select regions or resource groups to scan
-4. Click **Start Discovery**
-5. Monitor progress in the **Interrogation Jobs** page
+### Running a cloud discovery
+
+1. On **Discovery → Cloud**, use the connection's **Run discovery now** action.
+2. Choose the resource types. They start all selected; clear the ones you do not
+   want:
+   - **AWS**: ALB / NLB / Classic ELB, API Gateway, CloudFront, KMS keys, S3
+     encryption, RDS encryption
+   - **Azure**: Application Gateway, Load Balancer, Key Vault keys, Storage
+     account encryption, SQL Database (TDE)
+   - **GCP**: HTTPS Load Balancer, SSL Proxy, Cloud KMS keys, Cloud Storage
+     encryption, Cloud SQL encryption
+3. Choose the **regions**, where the selected types are regional at all. Some —
+   S3 buckets and CloudFront distributions, for instance — are listed
+   account-wide, and the modal marks those rather than offering a region filter
+   that would do nothing.
+4. Start the run, and watch it on **Discovery → Discovery Jobs**.
 
 ### Cloud Discovery Results
 
 After a cloud discovery job completes, discovered cloud resources are **automatically processed** through the unified discovery pipeline:
 
-1. **Automatic Processing**: Cloud discoveries are written to the `sensor_discoveries` table and processed by the `discovery-processor-service`, using the same pipeline as sensor discoveries.
+1. **Automatic processing**: cloud discoveries go through exactly the same
+   pipeline as sensor discoveries. There is nothing to import.
 
 2. **Certificate Extraction**: For publicly accessible cloud resources (e.g., internet-facing load balancers, CloudFront distributions, API Gateways), the platform performs a **TLS handshake** to extract the full certificate chain. This means cloud-discovered assets include the same certificate detail as sensor-discovered assets:
    - Full certificate chain (leaf + intermediates)
@@ -75,115 +87,122 @@ After a cloud discovery job completes, discovered cloud resources are **automati
 
    **Note:** Private/internal endpoints that are not publicly reachable will still have their devices and crypto configurations created with API-only metadata, but without a full certificate record.
 
-3. **Discovery Approvals**: Discovered cloud resources automatically appear in the **Discovery Approvals modal** (accessible from the Assets page). You don't need to manually import cloud discovery results. The **Certs** column shows how many certificates were discovered for each asset.
+3. **Approvals**: what was discovered waits on **Discovery → Approvals**, unless
+   its segment auto-approves it. Approvals is a page of its own — the queue is
+   shared by every source, and the **source** facet is how you narrow it to what
+   came from the cloud.
 
-4. **Approval Workflow**: Review and approve cloud-discovered assets just like sensor-discovered assets:
-   - Navigate to **Assets** → Click **Discovery Approvals** button
-   - Filter by source to see **Cloud Discovery** entries
-   - Review asset details and approve or deny
-
-5. **Processing Time**: Cloud discoveries typically appear in the Discovery Approvals modal within a few minutes after the discovery job completes, depending on the number of resources discovered.
-
-**Note**: Cloud discoveries use the same approval workflow as sensor discoveries. All discovered assets (whether from sensors or cloud APIs) flow through the unified pipeline and appear together in the Discovery Approvals modal.
+4. **Processing time**: expect the assets to appear within a few minutes of the
+   run finishing, depending on how much was discovered.
 
 ### Viewing Cloud-Discovered Certificates
 
 After cloud-discovered assets are approved into inventory:
 
-- **Certificate List**: Navigate to **Inventory > Certificates**. Cloud-discovered certificates display a **Cloud API** badge indicating they were discovered via cloud integration.
+- **Certificate list**: **Inventory → Certificates**. Cloud-discovered
+  certificates carry a **Cloud API** badge.
 - **Certificate Details**: Click a cloud certificate to see standard details plus a **Cloud Provider Details** section showing ACM ARN, renewal eligibility, and validation status (AWS) when available.
-- **Asset Details**: Click an asset to see its linked certificates with expiry status indicators.
-- **Crypto Configuration Details**: The Certificates tab shows full certificate details with chain visualization and a badge indicating whether the certificate was verified via TLS handshake or obtained from API metadata only.
+- **Asset detail**: open the asset to see its certificates with expiry status.
+- **Crypto configuration details**: the asset's **Cryptography** tab shows the
+  full certificate detail and whether it was verified by a real TLS handshake or
+  taken from API metadata alone.
 
 ## Network Devices
 
-### Adding a Network Device with Auto-Discovery
+Devices live on **Discovery → Devices**. The page lists the assets you have
+given the platform credentials for, with the management address, the asset's
+class, which interrogator handles it, its firmware, when it was last
+interrogated, and its connection status.
 
-The platform now features **automatic device discovery** that simplifies device onboarding by automatically retrieving device information.
+### Discovering and adding a device
 
-1. Navigate to **Discovery > Devices**
-2. Click **Add Device**
-3. Fill in the **simplified form** with just 4 fields:
-   - **Device Type**: Select manufacturer (UniFi, Cisco, F5, Fortinet, Palo Alto)
-   - **Management URL**: Web management interface URL (e.g., `https://192.168.1.1`)
-   - **Username**: Device admin username
-   - **Password**: Device admin password
-4. Click **Add Device**
-5. The system will:
-   - Connect to the device and authenticate
-   - Automatically discover: model, serial number, firmware version, hostname, IP address, MAC address
-   - Create the device with all discovered information populated
-   - Encrypt and securely store your credentials
+Give the platform four things and it asks the device for the rest.
 
-**Benefits:**
-- **80% less data entry** - Only 4 fields instead of 10+
-- **No typos** - Device information pulled directly from the device
-- **Faster onboarding** - Complete in seconds
-- **Secure** - Credentials encrypted at rest
+1. Go to **Discovery → Devices** and click **Discover & add**.
+2. Fill in the **device type** (F5, Palo Alto, Cisco, Fortinet, UniFi or other),
+   the **management URL**, and a **username** and **password**.
+3. Click **Discover & add**.
 
-**Supported for Auto-Discovery:**
-- ✅ **UniFi**: UDM, UDR, USG, UniFi Network Controllers (fully functional)
-- 🔧 **Other vendors**: Basic information (auto-discovery coming soon)
+The platform connects, authenticates, asks the device's own API what it is, and
+creates the record with the model, serial number, firmware version, host name
+and addresses it learned. Your credentials are encrypted at rest.
 
-**Note:** For devices without auto-discovery support, you can still add them manually with all fields.
+Auto-discovery is most complete on UniFi (UDM, UDR, USG and Network
+Controllers); other vendors return the basics.
 
-### Interrogating Devices
+### Adding a device manually
 
-#### Single Device
-1. From the device list, click the **Interrogate** button
-2. A job will be created and you can track its progress
+For anything without auto-discovery support, click **Add device** instead and
+fill in what you know: device type, host name, IP address, management URL,
+vendor, model, serial, firmware, and the credentials. **Skip TLS verification**
+is there for devices with self-signed management certificates. Anything you
+leave blank an interrogation can fill in later.
 
-#### Bulk Interrogation
-1. Select multiple devices using the checkboxes
-2. Click **Bulk Interrogate**
-3. Review the selected devices
-4. Click **Start Interrogation**
+### Interrogating
 
-### Device Health Monitoring
+Each row carries its own actions:
 
-Each device shows its connection status:
-- **Connected**: Device is reachable and responding
-- **Error**: Last interrogation failed
-- **Unknown**: Device hasn't been tested yet
+| Action | What it does |
+|---|---|
+| **Interrogate** | Queues a run against that device |
+| **Test connection** | Checks reachability and credentials, and reports the result |
+| **Edit management settings** | Changes the address, credentials or TLS option |
+| **Open this asset's page** | Goes to the asset in Inventory |
+| **Stop managing this asset** | Removes the management configuration and its credentials. The asset stays. |
 
-Click on a device to view:
-- **Overview**: Basic device information and status
-- **Interrogation History**: Past interrogation jobs and results
-- **Discovered Assets**: Cryptographic assets found on this device
-- **Health Metrics**: Success rates and response times over time
+There is **no bulk interrogate** — interrogation is queued one device at a time.
+For repeating work, use a schedule (below).
+
+An asset discovered through a cloud API has no management credentials and is not
+interrogable; its row says so rather than offering a button that would fail.
+
+### Connection status
+
+| Status | Meaning |
+|---|---|
+| **Connected** | Reachable and responding |
+| **Error** | The last attempt failed — hover the status for the reason |
+| **Testing** | A connection test is in flight |
+| **Unknown** | Nothing has tried yet |
+
+There is no per-device detail panel: a device *is* an asset, so its history,
+endpoints, certificates and findings are on **the asset's own page**, which the
+row links to. Run history is on **Discovery → Discovery Jobs** and **Job Logs**.
 
 ## Scheduled Interrogations
 
-### Creating a Schedule
+### Creating a schedule
 
-1. Navigate to **Discovery > Scheduled Scans**
-2. Click **Create Schedule**
-3. Configure the schedule:
-   - **Name**: Descriptive name for the schedule
-   - **Target**: Select a device or cloud integration
-   - **Schedule**: Choose a preset or enter a custom cron expression
-4. Click **Save**
+1. Go to **Discovery → Scheduled Scans** and click **New schedule**.
+2. Give it a **name** and an optional description.
+3. Pick the **target** — a device, or a cloud integration. The target is fixed
+   once the schedule exists; to point at something else, make a new schedule.
+4. Enter a **cron expression** — a standard five-field cron, for example
+   `0 2 * * *` for 02:00 daily. There is no preset picker; the field is the
+   expression itself.
+5. Save.
 
-### Schedule Options
+Common cadences, if you want them to hand:
 
-| Preset | Cron Expression | Description |
-|--------|----------------|-------------|
-| Hourly | `0 * * * *` | Every hour at minute 0 |
-| Daily | `0 0 * * *` | Every day at midnight |
-| Weekly | `0 0 * * 0` | Every Sunday at midnight |
-| Monthly | `0 0 1 * *` | First day of each month at midnight |
+| Cadence | Expression |
+|---|---|
+| Every hour, on the hour | `0 * * * *` |
+| Daily at midnight | `0 0 * * *` |
+| Weekly, Sunday midnight | `0 0 * * 0` |
+| Monthly, 1st at midnight | `0 0 1 * *` |
 
-### Managing Schedules
+### Managing schedules
 
-- **Enable/Disable**: Toggle schedules on or off
-- **Trigger Now**: Run a schedule immediately
-- **View History**: See past executions and results
+A schedule can be **enabled or disabled** (it runs on its cadence only while
+enabled), edited, triggered immediately, and deleted. Its runs appear with
+everything else on **Discovery → Discovery Jobs**.
 
-## Interrogation Jobs
+## Jobs
 
-### Monitoring Jobs
+### Monitoring jobs
 
-The **Interrogation Jobs** page shows all running and completed jobs:
+**Discovery → Discovery Jobs** lists every run with its status, and offers
+**Retry** and **Cancel** on the rows where those apply:
 
 | Status | Description |
 |--------|-------------|
@@ -228,26 +247,27 @@ never had its own handshake measured — so its cryptographic posture is
 *unknown*, not clean. Interrogating a controller commonly returns both kinds:
 the controller itself is measured, the devices it manages are inventoried.
 
-### Cancelling Jobs
+### Cancelling a job
 
-For running jobs, click **Cancel** to stop execution. Note that some operations may not be interruptible.
+Use the row's **Cancel** action on a running job. Some operations are not
+interruptible and will finish anyway.
 
-## Discovery Approval Workflow
+## The approval queue
 
-Discovered assets go through an approval workflow before being added to your inventory:
+Discovered assets wait on **Discovery → Approvals** — a page, not a button on
+some other page — unless the network segment they landed in auto-approves them.
 
-1. **Discovered**: Assets appear in the Discovery Approvals queue
-2. **Review**: Examine the discovered cryptographic configuration
-3. **Approve/Reject**: Accept assets into inventory or reject them
+The queue is shared by everything that proposes something: discovered assets,
+imported rows, assets declared by an uploaded SBOM, records pulled from a CMDB,
+merge proposals from the identification engine, class proposals from a
+classifier, and anything the AI assistant suggested. The **source** facet is how
+you narrow it, and every source states plainly what kind of claim it is making —
+a serial read off a device is not the same claim as a classifier's guess.
 
-### Filtering by Source
+Approving accepts the asset into your inventory. Rejecting suppresses it from
+being proposed again. Full detail: [Asset Approval](../features/asset-approval.md).
 
-The Discovery Approvals page can filter by source:
-- **Sensor**: Assets discovered by network sensors
-- **Device Interrogation**: Assets from network device interrogation
-- **Cloud Discovery**: Assets from cloud provider integrations
-
-## Best Practices
+## Practices worth adopting
 
 ### Security
 
@@ -285,9 +305,9 @@ matter: those are encrypted at rest and are never returned by any API.
 
 ### Performance
 
-- **Stagger Schedules**: Avoid running all interrogations at the same time
-- **Use Regions/Resource Groups**: Limit discovery scope for faster results
-- **Bulk Operations**: Use bulk interrogation for multiple devices instead of individual jobs
+- **Stagger schedules** so every interrogation does not fire at the same minute
+- **Narrow a cloud run** to the resource types and regions you care about — a
+  full sweep of everything costs API calls on the provider's side too
 
 ### Maintenance
 
@@ -314,9 +334,19 @@ matter: those are encrypted at rest and are never returned by any API.
 - Check network connectivity
 - Verify the device is not overloaded
 
-### Getting Help
+#### "Timed out" or "below the auto-accept threshold"
 
-If you encounter issues not covered here:
-1. Check the device's health metrics for patterns
-2. Review job error messages for specific issues
-3. Contact your platform administrator
+See
+[Device auto-discovery troubleshooting](./device-auto-discovery-troubleshooting.md),
+which covers the failures that look like nothing happened.
+
+### Getting help
+
+If you hit something this page does not cover:
+
+1. Open the run on **Discovery → Job Logs** and read its **Outcome** and
+   **Processing errors** — a job that "completed" can still have materialized
+   nothing, and that is where it says so.
+2. Check **Discovery → Approvals** before concluding an asset is missing.
+3. Contact your platform administrator with the job's id and the error it
+   recorded.

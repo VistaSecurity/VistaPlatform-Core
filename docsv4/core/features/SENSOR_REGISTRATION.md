@@ -1,209 +1,120 @@
-# Enhanced Sensor Registration & Management Guide
+# Sensor & Agent Registration
 
 > **Looking for the binary?** The canonical download instructions — the
 > OS/arch table, the GitHub Releases link, and how to verify what you
 > downloaded — live in
 > [Downloads in INSTALL.md](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/INSTALL.md#downloads).
-> This page repeats the sensor-specific parts of that (the exact asset name
-> pattern, the installer script) inline for convenience.
+> This page repeats the sensor-specific parts of that inline for convenience.
 
-## Overview
+Everything on this page happens under **Discovery → Sensors & Agents**.
 
-The Vista Platform provides a comprehensive sensor registration and management system that enables administrators to easily deploy and manage network sensors at scale. The enhanced system features simplified registration workflows, mTLS security, binary downloads, and full sensor lifecycle management.
+## The two things you can register
 
-## Key Features
+| | **Network sensor** | **Device interrogation agent** |
+|---|---|---|
+| What it does | Watches traffic on the interfaces you give it, passively | Waits for work and logs in to devices to ask them questions |
+| Deployed on | A host with a mirror / SPAN port onto the segment you care about | Any host that can reach the devices you want interrogated |
+| Reports | Cryptographic sessions, host observations, health | Job results, and optionally an inventory of its own host |
 
-- **Simplified Registration**: Minimal fields required (name, IP address, optional description)
-- **Recent Registration History**: View and manage recent registrations with details
-- **mTLS Security**: Automatic certificate generation and validation
-- **Cross-Platform Downloads**: Pre-built binaries for Linux, Windows, and macOS
-- **Full Sensor Management**: Interface management, configuration updates, certificate regeneration
-- **Real-time Status**: Live sensor status and health monitoring
-- **System Sensors**: Platform-provided sensors that automatically appear in every tenant's sensor list
+Both are registered from the same button and appear on the same page, in two
+tables — because a sensor row and an agent row answer different questions. A
+sensor has a segment and an "assets found" count; an agent has a profile, an
+address inventory and a job history.
 
-## Architecture
+### Platform sensors
 
-The enhanced sensor registration system consists of:
+Every organization also has **platform-managed** rows it did not deploy: a
+platform discovery sensor and a platform interrogation agent. They are your
+workspace's handle to shared in-cluster services, and they carry your results
+into your inventory.
 
-- **Enhanced UI Components**: Simplified modals with registration history
-- **mTLS Certificate Management**: Automatic CA and sensor certificate generation
-- **Cross-platform Binaries**: Signed GitHub Release assets per OS/architecture
-- **Sensor Management APIs**: Full lifecycle management endpoints
-- **Real-time Updates**: Live status and configuration management
-- **System Sensors**: Platform-provided sensors with automated health synchronization
-- **Bootstrap mTLS Certificates**: Secure mTLS certificate-based authentication for platform sensor registration
+- They show a lock instead of a delete button, and the platform refuses a delete
+  request whether or not the button was shown. Removing one would not stop the
+  shared service — it would quietly cut your interrogation and scheduled-scan
+  results off from your inventory.
+- They report no health, no commands, no configuration and no certificate, so
+  their detail panel shows only **Overview** and **Discoveries**.
+- Discovery counts and activity are still yours alone; the row is per-workspace
+  even though the service behind it is shared.
 
-## System Sensors
+## Registering
 
-Every tenant automatically has access to two **System Sensors** that are provided by the platform:
+1. Go to **Discovery → Sensors & Agents** and click **Register sensor or
+   agent**. (You need the **Create sensors** permission; without it the button
+   is not shown.)
+2. Pick the **registration type** — *Network sensor* or *Device interrogation
+   agent*.
+3. Fill in the few fields there are: a **name** (an *agent label* for an agent),
+   the **IP address** the thing will register from, and optionally **tags** and
+   a **description**.
+4. Click **Register sensor** / **Register agent**.
 
-### Platform Discovery Sensor
-- **ID**: `550e8400-e29b-41d4-a716-446655440001`
-- **Purpose**: Network discovery operations across the platform
-- **Service**: Backed by `cluster-sensor-service`
+The confirmation screen gives you:
 
-### Platform Device Interrogation Agent
-- **ID**: `550e8400-e29b-41d4-a716-446655440002`
-- **Purpose**: Device interrogation and data collection
-- **Service**: Backed by `device-interrogation-service`
+- the **registration code**, with a copy button;
+- the **installation command** for Linux and for Windows, pre-filled with the
+  code, the address and the name (for an agent, the equivalent **enrollment
+  steps**);
+- the **platform CA fingerprint**, when your platform needs one — see
+  [Trusting a privately-signed platform](#trusting-a-privately-signed-platform).
 
-### How System Sensors Work
+Registration codes are **single-use** and **time-limited** (60 minutes by
+default). A code that has already enrolled something is refused permanently.
 
-1. **Automatic Provisioning**: System sensor records are automatically created in the `sensors` table for each tenant via database triggers and seed data
-2. **Health Synchronization**: The `sensor-manager` runs a background service that periodically checks the health of platform services and updates the system sensor status/heartbeat
-3. **Tenant-Specific Data**: Discovery counts and activities are filtered by tenant, so each tenant sees only their own data
-4. **Shared Resources**: The underlying platform services are shared, but each tenant has their own sensor record for viewing and tracking
+### Pending registrations
 
-### UI Differentiation
+Anything registered but not yet connected appears in a **Pending registrations**
+list at the bottom of the page, with the name, address, profile and code. Each
+row offers:
 
-System sensors are visually distinguished in the Sensor Management UI:
-- **Blue/Indigo Background**: System sensor rows have a distinct background color
-- **"System" Type Badge**: Instead of "network" or "endpoint", system sensors show a "System" badge
-- **No Delete Button**: System sensors cannot be deleted by tenants. The API enforces
-  this too — a delete against a platform-managed sensor (or the platform interrogation
-  agent) is refused with `403`, not merely hidden in the UI. The row is the tenant's
-  handle to a shared in-cluster service; removing it would silently stop interrogation
-  and scheduled-scan results reaching that tenant's inventory while the service kept
-  running for everyone else.
-- **Platform Banner**: The sensor details view shows a banner indicating it's a platform-managed sensor
-- **Hidden Certificate Info**: Certificate details are hidden as system sensors use platform-level authentication
+- **Command** (or **Enroll**, for an agent) — reopens the install command or the
+  enrollment steps;
+- **delete** — drops the pending registration if you no longer need it.
 
-## Enhanced Registration Workflow
+The list hides itself entirely when there is nothing pending. While a
+registration is open, its status reads as one of:
 
-### 1. Simplified Registration Process
+| Status | Meaning |
+|---|---|
+| Not connected | Nothing has checked in with this code yet |
+| Registered | It enrolled, and the first data has not arrived |
+| Connected | It is checking in and sending data |
+| Expired | The code timed out — mint a new one |
 
-The new registration process requires only essential information:
+## Installing
 
-1. **Navigate to Sensor Management** page
-2. **Click "Register New Sensor"** (opens modal)
-3. **Fill minimal required fields**:
-   - **Name**: Human-readable sensor name (required)
-   - **IP Address**: Expected IP address for validation (required)
-   - **Description**: Optional description
-4. **Click "Generate Registration Key"**
+Installing needs two things together: the platform-specific **binary** and the
+matching installer script (`install-sensor.sh` on Linux and macOS,
+`install-sensor.ps1` on Windows).
 
-The system automatically:
-- Sets default profile (`datacenter_host`)
-- Generates unique registration key
-- Creates pending registration with 60-minute expiration
-- Shows registration in recent history
+**Getting the binary.** Either download the `crypto-sensor-<os>-<arch>-<version>`
+asset — for example `crypto-sensor-linux-amd64-v1.0.0` — from the GitHub Release
+matching your platform version, or build it from a source checkout
+(`make build-sensor` for the current platform, `make sensor-all-platforms` for
+every supported target). The platform does **not** serve sensor binaries over
+HTTP: no service anywhere has a download endpoint, for tenants or for platform
+administrators.
 
-### 2. Registration Details & Downloads
+Supported targets are Linux (x86_64, ARM64), Windows (x86_64, 386) and macOS
+(x86_64, Apple Silicon). The installer script for a release is published
+alongside the binaries.
 
-After key generation, the **Registration Details Modal** provides:
-
-#### Registration Information
-- **Registration Key**: Copy-to-clipboard functionality
-- **Status**: Pending/Used/Expired with visual indicators
-- **Created/Expires**: Timestamps with timezone
-- **Profile**: Deployment profile information
-
-#### Installation Commands
-- **Registration Key**: Copy-to-clipboard command showing the key, expected IP,
-  and sensor name to pass to the installer
-- **Copy Commands**: One-click copy to clipboard
-
-#### Getting the Sensor Binary
-The registration modal does not serve the binary itself — get it one of two ways
-(see "Getting the Sensor Binary" below for the full instructions):
-
-- **GitHub Release** (recommended): every Vista Platform release publishes
-  pre-built binaries for Linux (x86_64, ARM64), Windows (x86_64, 386), and
-  macOS (x86_64, Apple Silicon) — named `crypto-sensor-<os>-<arch>-<version>`
-  (e.g. `crypto-sensor-linux-amd64-v0.5.5`), so a downloaded binary states its
-  release on disk — as assets
-  on the matching GitHub Release, alongside a signed `SHA256SUMS`.
-- **Build from source**: `make build-sensor` (current platform) or
-  `make sensor-all-platforms` (all supported targets).
-
-#### mTLS Certificates (CSR-Based Flow)
-- **Secure Generation**: Sensor generates private key locally and creates Certificate Signing Request (CSR)
-- **Platform Signing**: Platform signs CSR and returns only the certificate (private key never leaves sensor)
-- **Automatic Rotation**: Sensors automatically rotate certificates when expiring within 30 days
-- **Certificate Management**: View certificate status, expiration, and revocation in the Certificates tab
-
-### 3. Pending Registrations Section
-
-The **Sensor Management** page now prominently displays a **Pending Registrations** section at the top of the main content area:
-
-- **Immediate Visibility**: All pending registrations are displayed as cards above the sensor filters
-- **Visual Distinction**: Yellow/amber background highlights pending items requiring attention
-- **Quick Actions**: Each card provides:
-  - **View Guide**: Opens the installation guide with registration-specific details
-  - **Delete**: Remove pending registration if no longer needed
-- **Expiration Countdown**: Real-time display of time remaining before expiration
-- **Auto-Hide**: Section automatically hides when no pending registrations exist
-
-### 4. Recent Registrations Management
-
-The enhanced registration modal includes a **Recent Registrations** panel:
-
-- **Status Indicators**: Visual status (pending/used/expired)
-- **Quick Details**: Name, IP, description, timestamps
-- **Details Button**: Opens full registration details modal
-- **Real-time Updates**: Status updates as registrations are used
-
-### 5. Accessing Installation Instructions
-
-Installation instructions are accessible from multiple entry points:
-
-1. **Installation Guide Button**: Located in the sensor management page header, next to the "Register new" button
-   - Opens a generic installation guide modal
-   - Platform selection (Linux, Windows, macOS)
-   - Generic installation commands for interactive setup
-   - Platform-specific prerequisites
-
-2. **Pending Registration Cards**: Click "View Guide" on any pending registration card
-   - Opens installation guide with registration-specific details
-   - Pre-filled registration key and IP address
-   - Installation commands ready to copy
-
-3. **Registration Details Modal**: After generating a registration key
-   - Full installation instructions
-   - Registration-specific commands, pre-filled with the key, IP, and name
-   - mTLS certificate information
-
-Neither the modal nor the guide serves the binary — see "Getting the Sensor
-Binary" below.
-
-### 6. Sensor Installation
-
-Installing a sensor needs two things together: the platform-specific
-**binary**, and the `install-sensor.sh` (Linux/macOS) or `install-sensor.ps1`
-(Windows) installer script tracked in this repository at `scripts/`.
-
-#### Getting the Sensor Binary
-- **From a GitHub Release** (recommended): download the
-  `crypto-sensor-<os>-<arch>-<version>` asset matching your platform — e.g.
-  `crypto-sensor-linux-amd64-v0.5.5` — from the release matching your installed
-  version, and verify it against that release's signed `SHA256SUMS` (see
-  "Verifying the binary" below).
-- **Build it yourself**: `make build-sensor` from a checkout of this
-  repository (or `make sensor-all-platforms` to build every supported
-  target).
-
-Then get the matching installer script — clone this repository, or download
-`scripts/install-sensor.sh` / `scripts/install-sensor.ps1` directly for the
-tag you installed — and place it alongside the binary.
-
-#### Running the Installer
-The **Registration Details Modal** and the **Pending Registration** card build
-the exact command for you, pre-filled with the registration key, expected IP,
-and sensor name:
+**Running the installer.** The confirmation screen and the pending-registration
+row both build the exact command:
 
 ```bash
-sudo ./install-sensor.sh --url https://<your-vista-host> --key REG-tenant-20260420-A7B3C9 --ip 192.168.1.100 --name sensor-dc01
+sudo ./install-sensor.sh --url https://<your-platform-host> --key <registration-code> --ip 10.0.0.50 --name sensor-dc01
 ```
+
 ```powershell
-.\install-sensor.ps1 -Url https://<your-vista-host> -Key REG-tenant-20260420-A7B3C9 -IP 192.168.1.100 -Name sensor-dc01
+.\install-sensor.ps1 -Url https://<your-platform-host> -Key <registration-code> -IP 10.0.0.50 -Name sensor-dc01
 ```
 
-The installer places the binary, drives the CSR-based mTLS enrollment
-described below, and registers it as a service.
+The installer places the binary, drives the certificate enrollment described
+below, and registers it as a service.
 
-#### Verifying the Binary
-Every release publishes a `SHA256SUMS` file alongside the binaries, signed
-with cosign (keyless OIDC — no key to trust):
+**Verifying what you downloaded.** Every release publishes a `SHA256SUMS` file
+alongside the binaries, signed with cosign (keyless — there is no key to trust):
 
 ```bash
 cosign verify-blob SHA256SUMS \
@@ -213,187 +124,116 @@ cosign verify-blob SHA256SUMS \
 sha256sum -c SHA256SUMS
 ```
 
-## Enhanced Sensor Management
+The most common install failure is mixing a binary and an installer script from
+two different releases. Use the pair from one release.
 
-### Interfaces & Config Tab
+## What a sensor's detail panel shows
 
-The new **Interfaces & Config** tab provides comprehensive sensor management:
+Click any sensor row to open its panel. It has four tabs.
 
-#### Network Interfaces Management
-- **Current Interfaces**: List all configured interfaces with remove buttons
-- **Add Interface**: Input field to add new network interfaces
-- **Real-time Updates**: Immediate interface list updates
-- **Validation**: Interface name validation and error handling
+### Overview
 
-#### Sensor Configuration
-- **Profile Selection**: Choose deployment profile (datacenter_host, cloud_instance, etc.)
-- **Description Editor**: Update sensor description
-- **Tags Management**: Checkbox grid for common tags
-- **Update Configuration**: Save all changes with validation
+Status, last heartbeat (which becomes *last seen* once the sensor goes offline),
+reporting interval, version, IP address, every address the host holds when there
+is more than one, whether the deployment is air-gapped, uptime, the monitored
+interfaces, the description and the tags.
 
-#### Certificate Management (Certificates Tab)
-The new **Certificates** tab provides comprehensive certificate management:
-- **Certificate Status**: View certificate expiration, revocation status, and details
-- **Automatic Rotation**: Sensors automatically rotate certificates when expiring within 30 days
-- **Manual Rotation**: Request manual rotation (sensor-initiated)
-- **Certificate Revocation**: Revoke certificates with reason tracking
-- **CSR-Based Security**: Information about secure certificate generation flow
+**The certificate lives here too**, as a card at the bottom: its state (Active /
+Expiring soon / Expired / Revoked), days remaining, serial, issue and expiry
+dates, a **Download** button for the certificate itself, and — with **Full sensor
+management** (`sensors.manage`) — **Revoke**, which requires a reason and takes effect
+immediately. There is no separate certificates tab.
 
-## API Endpoints
+### Discoveries
 
-### Enhanced Registration Endpoints
+The most recent things this sensor found: protocol, destination, port,
+confidence and timestamp.
 
-#### Create Pending Sensor (Simplified)
-```http
-POST /api/v1/sensor-manager/sensors/pending
-Content-Type: application/json
+### Health
 
-{
-  "name": "sensor-dc01",
-  "ip_address": "192.168.1.100",
-  "description": "Main datacenter sensor"
-}
-```
+Current metrics — uptime, memory, packets captured, discoveries in the last
+interval, and discoveries in total — with a history table underneath over 1 hour,
+24 hours or 7 days.
 
-#### Register Sensor (CSR-Based mTLS)
-```http
-POST /api/v1/sensor-manager/sensors/register
-Content-Type: application/json
+Two metrics that exist in the data are deliberately **not** shown here: a CPU
+figure that is an estimate rather than a measurement, and an error count that is
+always zero. A number that looks like an answer and is not is worse than a blank.
 
-{
-  "registration_key": "REG-...",
-  "name": "sensor-dc01",
-  "platform": "linux",
-  "version": "0.5.1",
-  "profile": "datacenter_host",
-  "network_interfaces": ["eth0"],
-  "ip_address": "192.168.1.100",
-  "description": "Main datacenter sensor",
-  "csr": "-----BEGIN CERTIFICATE REQUEST-----\n...",
-  "sensor_id": "550e8400-e29b-41d4-a716-446655440000"
-}
-```
+#### Host observations
 
-> `version` is the sensor binary's build-stamped release version (set via
-> `-ldflags "-X main.Version=..."` by the release workflow and the Makefile's
-> `AGENT_VERSION`). A binary built from source without stamping reports `dev`.
-> The platform records it per sensor and the UI shows it in
-> Discovery → Sensors & Agents.
+When the sensor is reporting them, this tab also shows what it has seen of hosts
+announcing themselves on the wire — devices that never open a connection the
+crypto pipeline watches. Three tiles:
 
-**Response (CSR-Based Flow):**
-```json
-{
-  "sensor_id": "550e8400-e29b-41d4-a716-446655440000",
-  "client_cert": "-----BEGIN CERTIFICATE-----\n...",
-  "server_ca_cert": "-----BEGIN CERTIFICATE-----\n...",
-  "certificate_expires_at": "2026-04-27T10:30:00Z",
-  "config": {
-    "control_plane_url": "https://crypto-inventory.company.com",
-    "reporting_interval": 30,
-    "features": {
-      "tls_analysis": true,
-      "ssh_analysis": true,
-      "certificate_analysis": true,
-      "active_probing": true,
-      "network_discovery": true
-    }
-  }
-}
-```
+| Tile | What it means |
+|---|---|
+| **Hosts seen** | Devices observed over the selected range |
+| **Shed** | Observations the sensor dropped rather than sending |
+| **Accumulating now** | Subjects currently being gathered up, waiting to be sent |
 
-**Note**: The `client_key` is NOT included in the response - it remains on the sensor host and is never transmitted to the platform.
+**A non-zero shed count is actionable.** It means the segment is busier than the
+sensor is sized for, and devices on it may be missing from your inventory
+entirely. Give the sensor more resources, or narrow the interfaces it monitors.
 
-### There is no binary-download API
+Two honesty notes worth understanding:
 
-The platform does not serve sensor binaries over HTTP at all — no service has a
-download endpoint, for tenants or for platform admins. The two supported ways to
-get the binary are the signed GitHub Release asset and `make build-sensor`,
-both described in "Getting the Sensor Binary" above.
+- **The block is absent, not zeroed, when the sensor is not reporting these
+  counters** — an older build, or the feature switched off. "Not running" and
+  "running and seeing nothing" must not look the same.
+- **The figures are a difference across the range**, because the sensor's
+  underlying counters only ever count up. If the sensor restarted inside the
+  range, the range's own figure is not knowable, so the tiles say *since
+  restart* and show the running total instead of quietly under-reporting.
 
-### Sensor Management Endpoints
+Each observation becomes a pending asset in **Discovery → Approvals**. What one
+looks like there — and why it can be so sparse — is covered in
+[Discovery](./discovery.md#passive-host-observation).
 
-#### Update Network Interfaces
-```http
-PUT /api/v1/sensor-manager/sensors/{sensor_id}/interfaces
-Content-Type: application/json
+### Control
 
-{
-  "add": ["eth1", "wlan0"],
-  "remove": ["eth0"]
-}
-```
+Configuration and commands, for users with the **Update sensors** permission
+(`sensors.update`).
 
-#### Update Sensor Configuration
-```http
-PUT /api/v1/sensor-manager/sensors/{sensor_id}/config
-Content-Type: application/json
+**Network interfaces.** Tick the interfaces the sensor should monitor and click
+**Save NICs** to send the change — nothing is queued until you do. **Detect**
+asks the sensor to report what the host actually has; an interface you typed in
+by hand that the host has not reported is flagged *not detected on host* rather
+than silently accepted.
 
-{
-  "profile": "cloud_instance",
-  "description": "Updated description",
-  "tags": ["production", "cloud"]
-}
-```
+**Configuration.** Air-gapped or connected, description, tags.
 
-#### Rotate Certificate (CSR-Based)
-```http
-POST /api/v1/sensor-manager/sensors/{sensor_id}/certificates/rotate
-Content-Type: application/json
+**Reporting interval.** See [below](#changing-a-sensors-reporting-interval).
 
-{
-  "csr": "-----BEGIN CERTIFICATE REQUEST-----\n..."
-}
-```
+**Commands.** Queue an action for the sensor to pick up on its next check-in:
+restart, clear cache, update interfaces, list interfaces, export logs, update
+config. Command types the sensor does not genuinely act on are not offered.
 
-**Response:**
-```json
-{
-  "sensor_id": "550e8400-e29b-41d4-a716-446655440000",
-  "client_cert": "-----BEGIN CERTIFICATE-----\n...",
-  "server_ca_cert": "-----BEGIN CERTIFICATE-----\n...",
-  "certificate_expires_at": "2026-04-27T10:30:00Z",
-  "message": "Certificate rotated successfully"
-}
-```
+## Host inventory (agents)
 
-#### Revoke Certificate
-```http
-POST /api/v1/sensor-manager/sensors/{sensor_id}/certificates/revoke
-Content-Type: application/json
+A device interrogation agent can also inventory a **host** — its own, on a
+timer, or another over SSH as a queued job. It is off by default. An agent that
+has reported one shows a *"Last host inventory: 2h ago — 412 packages, 18
+listeners"* line on its row here.
 
-{
-  "reason": "compromised"
-}
-```
+See [Host Inventory](./host-inventory.md) for what is collected, how to turn it
+on, and where the result lands.
 
-**Response:**
-```json
-{
-  "message": "Certificate revoked successfully",
-  "sensor_id": "550e8400-e29b-41d4-a716-446655440000"
-}
-```
+## Certificates and trust
 
-#### Get Certificate Status
-```http
-GET /api/v1/sensor-manager/sensors/{sensor_id}/certificates
-```
+### How a sensor gets its certificate
 
-**Response:**
-```json
-{
-  "sensor_id": "550e8400-e29b-41d4-a716-446655440000",
-  "certificate_pem": "-----BEGIN CERTIFICATE-----\n...",
-  "serial_number": "1234567890",
-  "issued_at": "2026-04-28T10:30:00Z",
-  "expires_at": "2026-04-27T10:30:00Z",
-  "revoked_at": null
-}
-```
+The sensor generates its private key **on its own host** and sends only a
+certificate signing request. The platform signs it and returns the certificate;
+the private key never crosses the network and the platform never holds it.
 
-## Security Features
+- Each organization has its own long-lived certificate authority.
+- Sensors rotate automatically when their certificate is within 30 days of
+  expiry.
+- Revoking a certificate takes effect immediately; the sensor must re-register
+  to get a new one.
+- All sensor-to-platform communication is mutually authenticated.
 
-### Trusting a Privately-Signed Platform (Trust Bootstrap)
+### Trusting a privately-signed platform
 
 A self-hosted platform commonly serves its edge certificate from an internal CA
 that the agent's host does not trust. Registration is itself an HTTPS call, so
@@ -401,11 +241,10 @@ without a trust anchor it fails certificate verification before a sensor can
 enroll. Agents resolve this the way SSH resolves an unknown host key — an
 explicit, one-time decision — and **never** by skipping verification.
 
-**Interactive install.** The interactive installer — which is what running
-`crypto-sensor` or `device-agent` with no arguments does on an unconfigured
-host, and what `--interactive` forces on a configured one — detects the
-untrusted certificate during the connectivity check, then shows the CA the
-platform presents and asks:
+**Interactive install.** The interactive installer — which is what running the
+sensor or agent with no arguments does on an unconfigured host, and what
+`--interactive` forces on a configured one — detects the untrusted certificate
+during the connectivity check, then shows the CA the platform presents and asks:
 
 ```
 ⚠️  The platform's certificate is not signed by any CA this host trusts.
@@ -420,9 +259,9 @@ platform presents and asks:
 Trust this CA for this agent? (y/N):
 ```
 
-Accepting writes the CA to `<dataPath>/certs/platform-ca.crt` and records
-`security.serverCACertPath` in the agent's config. Declining cancels setup; the
-agent will not connect to a platform it cannot verify.
+Accepting writes the CA into the agent's own data directory and records it in
+the agent's configuration. Declining cancels setup; the agent will not connect
+to a platform it cannot verify.
 
 The anchor you approve verifies **enrollment** — the connection that matters
 most, because it happens before the agent has any other way to know who it is
@@ -431,14 +270,12 @@ talking to. It then keeps verifying every connection afterwards.
 Registration additionally returns the platform's own CA, and the agent **adds**
 it to its trust pool rather than replacing what you approved. Both are kept, and
 that is deliberate: the CA you approved is what signs the ordinary endpoint,
-while the one returned at registration signs the mTLS passthrough listener that
-exists only when `agentMtls` is enabled. Which of the two an agent ends up
-talking to is a deployment choice, so it carries both and verifies against
-whichever applies. The second CA is safe to trust because it arrives over the
-connection the first one just authenticated.
-
-So the file on disk after enrollment may contain more certificates than you
-approved, but never fewer. Verification is never disabled in either phase.
+while the one returned at registration signs the mutually-authenticated listener
+that exists only in some deployments. Which of the two an agent ends up talking
+to is a deployment choice, so it carries both and verifies against whichever
+applies. The file on disk after enrollment may therefore contain more
+certificates than you approved, but never fewer. Verification is never disabled
+in either phase.
 
 **Unattended install.** A scripted install cannot answer a prompt, so pass the
 expected fingerprint instead:
@@ -469,7 +306,7 @@ openssl s_client -showcerts -connect <platform-host>:443 </dev/null 2>/dev/null 
 **Why the comparison is the whole point.** This is trust-on-first-use: an
 attacker positioned at the moment of enrollment could present their own CA and
 the prompt would happily offer it for approval. Reading the expected value from
-the web UI — a separate, authenticated session — is what closes that gap. An
+the console — a separate, authenticated session — is what closes that gap. An
 approval given without comparing provides no protection at all.
 
 If the agent shows a fingerprint that does not match, stop. Either the CA was
@@ -497,7 +334,7 @@ agent refuses and tells you what it found instead:
 This is not a trust decision you can make differently — no CA you approve can
 rescue a name mismatch, because hostname verification runs first. Approving one
 anyway would produce an agent that reports a completed security step and then
-fails every connection, which is exactly what used to happen.
+fails every connection.
 
 The usual cause is the one named: the platform's TLS secret is missing or
 misnamed, so its ingress controller falls back to its own self-issued
@@ -508,109 +345,79 @@ server is serving the right certificate.
 
 **When none of this applies.** A platform with a publicly-trusted certificate
 verifies against the host's system trust store and the prompt never appears.
-Installing the internal CA into the host trust store
-(`/usr/local/share/ca-certificates/` + `update-ca-certificates` on Linux) has
-the same effect.
+Installing the internal CA into the host's own trust store has the same effect.
 
-### Enhanced mTLS Security (CSR-Based Flow)
-- **Secure Certificate Generation**: Sensors generate private keys locally and never transmit them to the platform
-- **CSR-Based Issuance**: Certificates issued via Certificate Signing Requests (CSR)
-- **Persistent Tenant CA**: Each tenant has a persistent Certificate Authority (10-year validity)
-- **Comprehensive Validation**: Certificate chain validation, expiration checks, and revocation status
-- **Automatic Rotation**: Sensors automatically rotate certificates when expiring within 30 days
-- **Secure Communication**: All sensor-to-control-plane communication encrypted with mTLS
+## Registration security
 
-### IP Address Validation
-- **Registration Key Binding**: Keys bound to specific IP addresses
-- **Network Validation**: Sensors must register from expected IP
-- **Subnet Support**: Flexible IP validation for dynamic environments
+- **Codes are bound to an address.** A sensor must register from the address the
+  code names.
+- **Codes are single-use and expire.** Default 60 minutes; the platform-wide
+  limits are 5–1440 minutes and a cap on how many registrations may be pending
+  at once.
+- **The organization comes from the code, not from the request.** A registering
+  sensor inherits the organization the code was minted in; nothing it sends can
+  change that, and row-level security enforces the isolation underneath.
 
-### Key Management
-- **Time-Limited Keys**: Configurable expiration (default: 60 minutes)
-- **Single-Use Keys**: Keys marked as "used" after successful registration
-- **Tenant Isolation**: 
-  - Keys are tenant-specific and isolated
-  - Registration key lookup retrieves tenant_id from database (source of truth)
-  - Sensor inherits tenant_id from registration key, not from request
-  - Database-level Row Level Security (RLS) enforces tenant isolation
+## Permissions
 
-## Build System & Artifacts
+| Action | Permission |
+|---|---|
+| Register a sensor or agent, delete a pending registration | `sensors.create` / `sensors.delete` |
+| Change monitored interfaces, configuration, reporting interval | `sensors.update` |
+| Revoke or regenerate a certificate | `sensors.manage` |
+| Delete a sensor | `sensors.delete` |
+| Delete a discovery agent | `discovery.manage` |
 
-### Cross-Platform Build Targets
+## Changing a sensor's reporting interval
 
-`.github/workflows/release-core.yml` builds the sensor for every supported
-platform on every release (Linux x86_64/ARM64, Windows x86_64/386, macOS
-x86_64/Apple Silicon) and attaches the binaries to the GitHub Release. The
-same targets are available locally:
+The **reporting interval** is how often a sensor sends discovered data to the
+platform. It is set on the sensor at install time, reported up, and shown on the
+sensor's **Overview** tab.
 
-```bash
-# Build for all platforms
-make sensor-all-platforms
+To change it from the console:
 
-# Build for specific platforms
-make sensor-linux-amd64
-make sensor-linux-arm64
-make sensor-windows-amd64
-make sensor-windows-386
-make sensor-darwin-amd64
-make sensor-darwin-arm64
+1. Go to **Discovery → Sensors & Agents** and click the sensor.
+2. Open the **Control** tab → **Reporting interval**.
+3. Pick a value — **30 seconds, 1 / 5 / 15 / 30 minutes, or 1 / 2 / 4 / 8 / 12 /
+   24 hours** — and click **Apply**.
 
-# Current platform only
-make build-sensor
-```
+The change is **queued as a command** and takes effect the next time the sensor
+checks in, so an offline sensor picks it up when it reconnects. Once applied,
+the sensor reports the new interval back and the Overview tab updates. The value
+is saved on the sensor, so it survives restarts.
 
-The sensor is CGO-linked against libpcap, so Linux and macOS builds run
-natively per-platform rather than cross-compiling; Windows is CGO-free and
-cross-compiles from Linux.
+**Choosing a value:** shorter intervals surface discoveries faster but generate
+more traffic and platform load; longer intervals suit low-change or
+bandwidth-constrained environments. For large fleets, standardising on a few
+intervals keeps load predictable.
 
-### Build Output
+## API
 
-`make sensor-<platform>` places the binary at `bin/crypto-sensor-<os>-<arch>`
-(or `bin/crypto-sensor-<os>-<arch>.exe` on Windows) and additionally copies it,
-already bundled with the matching `install-sensor.sh` / `.ps1`, into
-`artifacts/sensor/<os>/<arch>/`:
+Registration and management are available over the API for automation.
 
-```
-artifacts/sensor/
-├── linux/
-│   ├── amd64/{crypto-sensor,install-sensor.sh}     # Linux x86_64
-│   └── arm64/{crypto-sensor,install-sensor.sh}     # Linux ARM64
-├── windows/
-│   ├── amd64/{crypto-sensor.exe,install-sensor.ps1}
-│   └── 386/{crypto-sensor.exe,install-sensor.ps1}
-└── darwin/
-    ├── amd64/{crypto-sensor,install-sensor.sh}     # macOS x86_64
-    └── arm64/{crypto-sensor,install-sensor.sh}     # macOS ARM64
-```
+| Method | Path | What it does |
+|---|---|---|
+| `POST` | `/api/v1/sensor-manager/sensors/pending` | Mint a registration code |
+| `POST` | `/api/v1/sensor-manager/sensors/register` | Enroll, with a certificate signing request |
+| `PUT` | `/api/v1/sensor-manager/sensors/{id}/interfaces` | Change monitored interfaces (`add` / `remove`) |
+| `PUT` | `/api/v1/sensor-manager/sensors/{id}/config` | Air-gapped flag, description, tags, reporting interval |
+| `POST` | `/api/v1/sensor-manager/sensors/{id}/commands` | Queue a command |
+| `GET` | `/api/v1/sensor-manager/sensors/{id}/health` | Latest health metrics |
+| `GET` | `/api/v1/sensor-manager/sensors/{id}/certificates` | Certificate status |
+| `POST` | `/api/v1/sensor-manager/sensors/{id}/certificates/rotate` | Rotate, with a new signing request |
+| `POST` | `/api/v1/sensor-manager/sensors/{id}/certificates/revoke` | Revoke, with a reason |
+| `GET` / `PUT` | `/api/v1/sensor-manager/admin/settings` | Registration-code expiry, pending cap, address validation |
 
-This directory is a local build convenience only — nothing serves it over
-HTTP. See [`artifacts/README.md`](../../../artifacts/README.md).
+The registration response returns the signed certificate and the platform CA.
+It never contains a private key — that stays on the sensor's host and is never
+transmitted.
+
+A sensor reports the version it was built as. A binary built from source without
+a stamped version reports `dev`; the console shows whatever it reported.
 
 ## Troubleshooting
 
-### Enhanced Debugging
-
-#### Registration Issues
-1. **Check Recent Registrations**: View status in the enhanced modal
-2. **Validate Registration Key**: Use the details modal to verify key status
-3. **Confirm the Binary and Installer Match**: The `install-sensor.sh`/`.ps1`
-   version should match the binary's — mixing versions from different releases
-   is the most common install failure
-4. **Check Certificate Generation**: Ensure mTLS certificates are created
-
-#### Sensor Management Issues
-1. **Interface Management**: Verify interface names and permissions
-2. **Configuration Updates**: Check for validation errors
-3. **Certificate Regeneration**: Monitor certificate expiration and rotation
-4. **Real-time Status**: Use the enhanced UI for live status monitoring
-
-### Common Solutions
-
-#### "Registration key not found"
-- **Cause**: Key expired or doesn't exist
-- **Solution**: Generate new key using enhanced modal
-
-#### The sensor is running but nothing appears in the platform
+### The sensor is running but nothing appears in the platform
 
 A sensor that could not register can capture traffic but cannot submit any of
 it. Check the sensor's log for its startup line — it reports which state it is
@@ -622,13 +429,13 @@ in, and repeats the warning every 10 minutes while the problem persists:
 
 There are two shapes of this, and the log distinguishes them:
 
-- **The control plane was unreachable.** The sensor keeps retrying on its own,
+- **The platform was unreachable.** The sensor keeps retrying on its own,
   starting 30 seconds out and backing off to a 15-minute ceiling. No restart is
   needed — once the platform is reachable again the sensor registers and logs
-  `✅ Registration succeeded on retry`. This is the expected behaviour when a
-  sensor is installed before the platform is ready, or while it restarts.
+  `✅ Registration succeeded on retry`. This is expected when a sensor is
+  installed before the platform is ready, or while it restarts.
 
-- **The registration key was rejected.** The sensor refuses to start and says
+- **The registration code was rejected.** The sensor refuses to start and says
   so, quoting the platform's own reason:
 
   ```
@@ -636,116 +443,49 @@ There are two shapes of this, and the log distinguishes them:
      {"error":"Registration key has already been used"}
   ```
 
-  Retrying cannot resolve this. Registration keys are single-use, so a key that
-  has already enrolled a sensor is refused permanently. Generate a new one
+  Retrying cannot resolve this. Registration codes are single-use, so a code
+  that has already enrolled a sensor is refused permanently. Mint a new one
   (**Discovery → Sensors & Agents → Register sensor or agent**), put it in the
   sensor's config, and start it again.
 
-#### "The server ... is presenting a certificate for ..."
-- **Cause**: The platform's TLS certificate is not valid for the hostname you
-  pointed the agent at — most often because its TLS secret is missing and its
-  ingress controller is serving a self-issued placeholder
-- **Solution**: Fix the platform's certificate, then run setup again. Trusting
-  the CA behind the placeholder cannot help; see [Trusting a Privately-Signed
-  Platform](#trusting-a-privately-signed-platform-trust-bootstrap)
+### "Registration key not found"
 
-#### "Certificate validation failed"
-- **Cause**: Certificate CN mismatch, expired, revoked, or chain validation failure
-- **Solution**: Check certificate status in Certificates tab, rotate if needed
+The code expired or never existed. Mint a new one and re-run the installer.
 
-#### "Certificate has expired"
-- **Cause**: Certificate past expiration date
-- **Solution**: Sensor should automatically rotate, or manually trigger rotation
+### "The server … is presenting a certificate for …"
 
-#### "Certificate has been revoked"
-- **Cause**: Certificate was revoked by administrator
-- **Solution**: Sensor must re-register to obtain new certificate
+The platform's TLS certificate is not valid for the hostname you pointed the
+agent at — most often because its TLS secret is missing and its ingress
+controller is serving a self-issued placeholder. Fix the platform's certificate,
+then run setup again. Trusting the CA behind the placeholder cannot help; see
+[Trusting a privately-signed platform](#trusting-a-privately-signed-platform).
 
-#### "Can't find a binary for my platform"
-- **Cause**: The GitHub Release for the installed version doesn't cover your
-  OS/architecture, or you're looking for a download endpoint that no longer
-  exists on the platform
-- **Solution**: Check the Release's assets for `crypto-sensor-<os>-<arch>-<version>`, or
-  build it yourself with `make sensor-<platform>` / `make sensor-all-platforms`
+### "Certificate validation failed" / "Certificate has expired"
 
-## Configuration
+Check the certificate card on the sensor's **Overview** tab. A sensor rotates
+automatically inside 30 days of expiry; one that has been offline long enough to
+expire needs to re-register.
 
-### Enhanced Admin Settings
+### "Certificate has been revoked"
 
-| Setting | Description | Range | Default |
-|---------|-------------|-------|---------|
-| `key_expiration_minutes` | Registration key expiration time | 5-1440 | 60 |
-| `max_pending_sensors` | Maximum pending registrations | 1-1000 | 50 |
-| `require_ip_validation` | Enable IP address validation | true/false | true |
-| `mtls_enabled` | Enable mTLS certificate generation | true/false | true |
-| `certificate_expiry_days` | Certificate validity period | 30-365 | 365 |
+Revocation is final for that certificate. The sensor must re-register to obtain
+a new one.
 
-### Environment Variables
+### "Can't find a binary for my platform"
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `CERTIFICATE_CA_PATH` | CA certificate storage path | `/app/certs/ca` |
-| `CERTIFICATE_EXPIRY_DAYS` | Certificate validity period | `365` |
+Check the Release's assets for `crypto-sensor-<os>-<arch>-<version>`, or build it
+yourself. There is no download endpoint on the platform to look for.
 
-## Best Practices
+### A sensor shows online but its counts are not moving
 
-### Enhanced Security
-- **Regular Certificate Rotation**: Rotate certificates annually or when compromised
-- **Monitor Registration Attempts**: Track failed registration attempts
-- **Use Strong Keys**: Generate cryptographically secure registration keys
-- **Network Segmentation**: Isolate sensor networks from management networks
+Check the **Health** tab's history over 24 hours. Packets captured flat at zero
+usually means the monitored interfaces are wrong for where the traffic is — use
+**Control → Detect** to see what the host actually has.
 
-### Operational Excellence
-- **Use Descriptive Names**: Clear, consistent sensor naming conventions
-- **Tag Management**: Organize sensors with meaningful tags
-- **Monitor Interface Changes**: Track network interface modifications
-- **Document Configurations**: Maintain configuration documentation
+## Related
 
-### Performance Optimization
-- **Batch Operations**: Use bulk interface updates when possible
-- **Efficient Downloads**: Cache binary artifacts for faster deployments
-- **Connection Pooling**: Optimize sensor-to-control-plane connections
-- **Resource Monitoring**: Monitor sensor resource usage and health
-
-## Support & Resources
-
-### Documentation
-- **API Reference**: Complete endpoint documentation
-- **Certificate Management**: mTLS setup and troubleshooting
-- **Build System**: Cross-platform compilation guide
-- **Deployment Guide**: Production deployment best practices
-
-### Community & Support
-- **Internal Wiki**: [Company Wiki](https://wiki.company.com/crypto-inventory)
-- **GitHub Issues**: [Issue Tracker](https://github.com/company/crypto-inventory/issues)
-- **Slack Channel**: #crypto-inventory-support
-- **Email Support**: crypto-inventory-support@company.com
-
-### Training & Onboarding
-- **Video Tutorials**: Enhanced UI walkthrough videos
-- **Hands-on Labs**: Interactive sensor deployment exercises
-- **Certification Program**: Platform administration certification
-- **Best Practices Guide**: Production deployment guidelines
-
-## Changing a Sensor's Reporting Interval
-
-The **reporting interval** is how often a sensor sends discovered data to the
-platform. It's configured on the sensor at install time, reported up to the
-control plane, and shown on each sensor's **Overview** tab ("Reporting interval").
-
-To change it from the console (requires the **Manage sensors** permission):
-
-1. Go to **Discovery → Sensors & Agents** and click the sensor.
-2. Open the **Control** tab → **Reporting interval**.
-3. Pick a value from the menu — **30 seconds, 1 / 5 / 15 / 30 minutes, or 1 / 2 /
-   4 / 8 / 12 / 24 hours** — and click **Apply**.
-
-The change is **queued as a command** and takes effect the next time the sensor
-checks in (so an offline sensor picks it up when it reconnects). Once applied,
-the sensor reports the new interval back and the Overview tab updates. The new
-value is saved on the sensor, so it persists across restarts.
-
-**Choosing a value:** shorter intervals surface discoveries faster but generate
-more traffic and platform load; longer intervals are better for low-change or
-bandwidth-constrained environments. For large fleets, standardizing on a few
-intervals keeps load predictable.
+- [Host Inventory](./host-inventory.md) — what an agent can collect about a host
+- [Discovery](./discovery.md) — what sensors find, and where it goes
+- [Device Interrogation](./device-interrogation.md) — what agents do with a job
+- [Device Agent Deployment](../operate/deployment/device-agent-deployment.md) — installing and running the agent
+- [PCAP Ingestion](./pcap-ingestion.md) — inventorying a segment that cannot host a sensor

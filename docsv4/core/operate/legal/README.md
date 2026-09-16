@@ -120,5 +120,6 @@ platform does not expire data on its own.
 - [Data Processing Agreement template](./data-processing-agreement.md)
 - [Production checklist](../deployment/production-checklist.md) — the operational
   half of going live
-- [Security architecture](../security/architecture.md) — the substantiation
+- [Service-mesh mTLS](../security/service-mesh-mtls.md) and
+  [Certificate management](../security/certificates.md) — the substantiation
   behind the technical measures listed in the DPA's Annex II

@@ -92,9 +92,9 @@ Event types follow a consistent naming pattern: `{resource}.{action}`
 
 ## Event Categories
 
-Every event carries one category, and it is the value the **Category** filter
-on the activity log matches against. These are the categories the platform
-records:
+Every event carries one category. It is matched by the Audit page's search box
+and by the export endpoint's `event_category` filter. These are the categories
+the platform records:
 
 | Category | Covers |
 |----------|--------|
@@ -179,11 +179,11 @@ Events are automatically tagged with relevant compliance frameworks to simplify 
 ### Using Compliance Tags
 
 **Filtering by Framework**
-1. Navigate to Activity Logs
-2. Click **Advanced Query**
-3. Select compliance tags
-4. Choose frameworks: soc2, iso27001, gdpr, hipaa, pci_dss
-5. Run query
+
+Compliance tags are not one of the three controls on the Audit page. To pull the
+events carrying a given tag, use the audit API's `compliance_tag` filter (see
+[Getting events out](#getting-events-out)) with one of `soc2`, `iso27001`,
+`gdpr`, `hipaa`, `pci_dss`.
 
 **Generating Compliance Reports**
 1. Select framework
@@ -196,65 +196,87 @@ Events are automatically tagged with relevant compliance frameworks to simplify 
 
 ### Viewing Logs
 
-**Basic Viewing**
-1. Navigate to **Settings → Activity Logs**
-2. Logs displayed in reverse chronological order
-3. Use date range filter to focus on specific period
-4. Default: Last 7 days
+Open the **profile chip** at the bottom of the left rail → **Organization
+Settings** → **Audit**. Reading the trail needs the **audit read** permission:
+Tenant Administrator, Security Administrator and Viewer have it by default;
+Billing Admin and API User do not.
 
-**Filtering Logs**
-- **Date Range**: Select preset or custom range
-- **Event Type**: Pick specific event types
-- **Event Category**: Filter by category
-- **Status**: Success or failure only
-- **Search**: Free-text search across all fields
+Events are listed newest first, with four columns:
 
-**Advanced Filtering**
-1. Click **Advanced Query** button
-2. Add multiple filter conditions
-3. Combine with AND/OR logic
-4. Save query for reuse
-5. Export filtered results
+| Column | What it shows |
+|---|---|
+| **Actor** | The member's email, or *System* for platform-initiated events. |
+| **Action** | What was done. A failed attempt is marked *· failed* and shown in red. |
+| **Target** | The resource type and id, falling back to the event category. |
+| **When** | How long ago it happened. |
+
+Three controls narrow the list:
+
+- a **search** box, matching across actor, action, event type, event category,
+  resource type and resource id;
+- an **actor** selector, built from the actors present in the loaded events;
+- a **window** — last 24 hours, last 7 days, or last 30 days (the default).
+
+**The controls narrow what is already on screen, not what is fetched.** The page
+loads the most recent events and tells you how many of the total it is showing
+("Showing the 100 most recent of 4,812 events"). On a busy trail, a 30-day
+window can therefore show less than 30 days' worth. To reach further back, use
+the API below.
+
+There is **no advanced query builder** and **no saved queries** on this page.
+
+### Getting events out
+
+**There is no export control on the Audit page in this release.** The audit
+service exposes an export endpoint instead, which you can call with a personal
+API token (**My Profile → API Tokens**):
+
+```
+GET /api/v1/audit-service/activity-logs/export?format=csv
+GET /api/v1/audit-service/activity-logs/export?format=json
+```
+
+`format` accepts `csv` or `json` and defaults to `json`. A tenant user's request
+is always scoped to their own organization, whatever else is passed.
+
+The same request accepts filters, which is how you reach further back than the
+page can show:
+
+| Parameter | Notes |
+|---|---|
+| `start_date`, `end_date` | RFC 3339 timestamps. The usual way to bound an export. |
+| `event_type`, `event_category`, `action` | Repeatable — pass the parameter more than once for several values. |
+| `user_id`, `user_type` | Narrow to one member, or to human vs. system actors. |
+| `resource_type`, `resource_id` | Narrow to one kind of resource, or one resource. |
+| `compliance_tag` | Repeatable. `soc2`, `iso27001`, `gdpr`, `hipaa`, `pci_dss`. |
+| `success` | `true` or `false` — failures only, or successes only. |
+
+**One request returns at most 10,000 events.** Bound long periods with
+`start_date` / `end_date` and pull them in chunks rather than asking for a year
+at once.
+
+**The two formats do not carry the same detail.** CSV is a flat fourteen-column
+table — id, occurred at, tenant id, user id, user type, user email, event type,
+event category, action, resource type, resource id, success, error message,
+compliance tags. **JSON carries the whole record**, including the fields CSV has
+no column for: `changed_fields`, `old_values`, `new_values`, `ip_address` and
+`user_agent`. If you are investigating *what changed* rather than *what
+happened*, ask for JSON.
+
 
 ### Searching Logs
 
-**Quick Search**
-Use the search box for simple queries:
-- User email: `john@example.com`
-- Resource ID: `asset-12345`
-- Event type: `asset.created`
-- IP address: `192.168.1.1`
+Use the page's search box for a quick look — it matches a substring against the
+actor, action, event type, event category, resource type and resource id of the
+events already loaded. Examples:
 
-**Advanced Search**
-Build complex queries with multiple criteria:
-1. Event types: Select multiple types
-2. Users: Filter by specific users
-3. Resources: Filter by resource type or ID
-4. Compliance: Filter by compliance tags
-5. Date ranges: Precise time windows
+- a member's email address
+- an event type such as `asset.created`
+- a resource id you are tracing
 
-### Exporting Logs
-
-**CSV Export**
-1. Apply desired filters
-2. Click **Export → CSV**
-3. Opens in spreadsheet software
-4. Good for manual analysis
-5. Contains all visible columns
-
-**JSON Export**
-1. Apply desired filters
-2. Click **Export → JSON**
-3. Machine-readable format
-4. Good for programmatic processing
-5. Includes all metadata
-
-**Export Tips**
-- Export filters are applied
-- Large exports may take time
-- Maximum 10,000 events per export
-- Use date ranges to limit size
-- Schedule reports for regular exports
+For anything the box cannot express — a precise time window, a compliance tag, a
+success/failure split, or more history than the page holds — use the export
+endpoint's filters above.
 
 ---
 
@@ -265,10 +287,11 @@ Build complex queries with multiple criteria:
 **Scenario**: Multiple failed login attempts detected
 
 1. **Initial Investigation**
-   - Navigate to Activity Logs
-   - Filter by event type: `user.login.failed`
-   - Set date range to recent period
-   - Look for patterns (same user, same IP, time clustering)
+   - Open **Settings → Audit**
+   - Search for `user.login.failed`
+   - Narrow the window to the period in question
+   - Look for patterns (same user, time clustering). Source addresses are not a
+     column on the page — pull a JSON export if you need them
 
 2. **Identify Affected Accounts**
    - Note user emails with failures
@@ -329,15 +352,14 @@ Build complex queries with multiple criteria:
 **Scenario**: Unexpected data changes detected
 
 1. **Initial Review**
-   - Navigate to Activity Logs
-   - Filter by event type: `*.updated` or `*.deleted`
-   - Focus on relevant resource types
+   - Open **Settings → Audit**
+   - Search for the resource type, or for `updated` / `deleted`
    - Identify when changes occurred
 
 2. **Change Details**
-   - Click on log entry
-   - Review **changed_fields**
-   - Compare **old_values** vs **new_values**
+   - The page shows *that* something changed, not *what* changed. For the field
+     detail, take a **JSON export** bounded to the window you identified
+   - Review **changed_fields**, and compare **old_values** with **new_values**
    - Check who made changes
 
 3. **Context Gathering**
@@ -369,18 +391,19 @@ Build complex queries with multiple criteria:
    - Identify relevant event types
    - List specific compliance requirements
 
-2. **Generate Activity Report**
-   - Navigate to Activity Logs
-   - Click Advanced Query
-   - Select compliance tag: `soc2`
-   - Set date range to audit period
-   - Export as CSV or JSON
+2. **Pull the events**
+   - Call the export endpoint with `compliance_tag=soc2` and `start_date` /
+     `end_date` set to the audit period (see
+     [Getting events out](#getting-events-out))
+   - A twelve-month period will exceed the 10,000-event cap; pull it month by
+     month and keep each response
 
 3. **Evidence Collection**
-   - Filter for access control events
-   - Export user authentication logs
-   - Collect configuration change logs
-   - Gather backup and recovery events
+   - Repeat the export for access-control and authentication events
+     (`event_category=authentication`)
+   - Collect configuration-change events the same way
+   - Keep the raw responses: they are the evidence, and re-pulling later gives a
+     different window
 
 4. **Analysis**
    - Review for anomalies
@@ -390,21 +413,22 @@ Build complex queries with multiple criteria:
 
 5. **Reporting**
    - Generate the framework report and deliver it to the compliance team
-   - Maintain historical reports
+   - Maintain historical reports — the platform keeps the trail, not your
+     assembled evidence packages
 
 ### GDPR Compliance Reporting
 
 1. **Data Access Logging**
-   - Filter for events with `gdpr` tag
-   - Focus on personal data access
-   - Export user data access logs
+   - Export with `compliance_tag=gdpr`, or `event_category=data` for access and
+     export events specifically
    - Document access purposes
 
 2. **Data Subject Requests**
-   - Search for specific user activity
-   - Generate user activity timeline
-   - Export complete user history
-   - Include all personal data access
+   - For everything the platform holds *about* one member, use **Settings →
+     People & Access → Members → Export this member's data** — it is built for
+     exactly this request and states inside what it leaves out. See
+     [Tenant Admin Guide → People & Access](./tenant-admin-guide.md#people--access)
+   - For that member's activity specifically, export with their `user_id`
 
 3. **Data Retention**
    - Configure retention policies
@@ -413,7 +437,7 @@ Build complex queries with multiple criteria:
    - Implement automated deletion
 
 4. **Regular Reporting**
-   - Schedule monthly GDPR reports
+   - Take the export monthly — there is no console control that does it for you
    - Review data access patterns
    - Monitor for unauthorized access
    - Report to Data Protection Officer
@@ -452,7 +476,7 @@ Build complex queries with multiple criteria:
 ### Regular Monitoring
 
 **Daily**
-- Review Alerts Dashboard
+- Review the alert inbox under **Remediation → Alerts**
 - Check for failed authentication attempts
 - Monitor critical resource changes
 
@@ -512,7 +536,8 @@ Build complex queries with multiple criteria:
 **Proactive Approach**
 - Review compliance tags quarterly
 - Update retention policies annually
-- Test report generation regularly
+- Take a test export before you need a real one, so you find out about the
+  10,000-event cap on your own schedule rather than an auditor's
 - Maintain audit readiness
 
 **Documentation**
@@ -522,10 +547,11 @@ Build complex queries with multiple criteria:
 - Version control policies
 
 **Automation**
-- Set up automatic exports
-- Configure retention policies
-- Automate evidence collection
+- Script the export endpoint against a personal API token rather than repeating
+  the pull by hand — the console has no scheduler for it
+- Configure retention policies so the trail still holds the period you will be
+  asked about
 
 ---
 
-**Last Updated:** 2026-09-12
+**Last Updated:** 2026-09-16

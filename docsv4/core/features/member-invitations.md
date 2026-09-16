@@ -18,6 +18,20 @@ copyable **invite link** — handy if your email relay is still being set up or 
 message is slow to arrive. Anyone with that link can accept *as the invited email
 address*, so treat it like a password.
 
+### If the role list won't load
+
+Inviting someone needs the **Create tenant users** permission, but *listing the
+roles to choose from* needs **Manage users** — and a custom role can hold one
+without the other. When that happens the dialog says so plainly:
+
+> Roles could not be loaded — listing them needs the Manage users permission. Ask
+> a Tenant Administrator to send this invitation, or to grant it.
+
+The role selector is disabled and **Send invitation** will not submit. This is
+deliberate: an invitation sent with the wrong role looks exactly like a
+successful one, so the dialog refuses rather than quietly defaulting to Viewer.
+The same message appears on **Change role** for the same reason.
+
 ## What the invitee sees
 
 Opening the accept link shows a page that confirms the email they're joining as,

@@ -33,12 +33,36 @@ What that changes, in practice:
 - **A newly discovered asset waits in Approvals**, exactly like a sensor
   discovery. It appears on the Devices page immediately and you can interrogate
   it straight away; its cryptographic findings reach Inventory once the asset is
-  approved (or automatically, if a tenant auto-approval rule covers it).
-- **"Delete" stops managing the device; it does not delete the host.** Removing a
-  device removes its management configuration and its stored credentials, and
-  takes it off this page. The asset stays in Inventory with its endpoints,
-  certificates and history intact — the host did not stop existing because you
-  stopped managing it. To remove the asset itself, use Inventory.
+  approved (or automatically, if an auto-approval rule covers its segment).
+- **"Stop managing" is not "delete".** The row action is **Stop managing this
+  asset**, and that is exactly what it does: it removes the management
+  configuration and the stored credentials, and takes the row off this page. The
+  asset stays in Inventory with its endpoints, certificates, findings and
+  history intact — the host did not stop existing because you stopped managing
+  it, and you can manage it again at any time. Deleting an *asset* is an
+  inventory action and lives on the asset's own page.
+
+### What sits between interrogation and your inventory
+
+An interrogation does not write to your inventory directly. Everything it
+returns goes through the **identification engine** first, which asks one
+question: is this thing already in the inventory?
+
+It answers from the identifiers the run produced — a serial number, a management
+address, a hardware address, a name — in a fixed order of trust, and scores how
+confident the match is. What happens next depends on your **auto-accept
+threshold** (**Settings → Policies → Identification rules**):
+
+- **Above the threshold**, the match is accepted without you, and the audit
+  trail records the score that let it through.
+- **Below it**, the proposal waits in **Discovery → Approvals** as a merge
+  proposal, next to the pending assets.
+- **Two things are never auto-accepted at any score** — see
+  [Asset Approval](./asset-approval.md).
+
+This is why a device you add may quietly attach to an asset you already had, and
+why a neighbour a device told us about can turn up as a *proposal* rather than as
+a new asset.
 
 ## Use Cases
 
@@ -67,17 +91,18 @@ Extract cryptographic settings from network security devices:
 
 ## Workflow
 
-### 1. Add Device with Auto-Discovery (Recommended)
+### 1. Discover and add a device (recommended)
 
-**NEW:** The platform now supports automatic device discovery for simplified onboarding.
+The quickest way to onboard a device: give the platform four things and it asks
+the device for the rest.
 
-**UI:** Navigate to Discovery → Devices → Add Device
+**UI:** **Discovery → Devices → Discover & add**
 
 **API:** `POST /api/v1/device-interrogation-service/devices/discover-and-create`
 
-**Required Information (Only 4 fields!):**
+**What you supply:**
 - Device type (manufacturer: UniFi, Cisco, F5, Fortinet, Palo Alto)
-- Management URL (e.g., `https://192.168.1.1`)
+- Management URL (e.g., `https://10.0.0.1`)
 - Username (device admin)
 - Password (device admin)
 
@@ -94,52 +119,50 @@ Extract cryptographic settings from network security devices:
 - ✅ **UniFi (Fully Functional)**: UDM, UDR, USG, UniFi Network Controllers
 - 🔧 **Other Vendors**: Framework in place, returns basic vendor info
 
-**Process:**
-1. User enters 4 fields
-2. Platform connects and authenticates to device
-3. Platform queries device API for information
-4. Device created with all discovered information
-5. Credentials encrypted and stored securely
+The platform connects, authenticates, asks the device's own API what it is, and
+creates the record with everything it learned. The credentials are encrypted at
+rest.
 
-### 2. Register Device Manually (Alternative)
+### 2. Add a device manually (alternative)
 
-For devices without auto-discovery support, register manually with all details.
+For devices without auto-discovery support, add them with the details you
+already have.
 
-Register a network device or cloud integration with the platform.
-
-**UI:** Navigate to Devices → Add Device
+**UI:** **Discovery → Devices → Add device**
 
 **API:** `POST /api/v1/device-interrogation-service/devices`
 
-**Required Information:**
-- Device type (f5, cisco_router, aws_alb, etc.)
-- Management URL or IP address
-- Credential reference (links to `platform_integrations`)
+**What it takes:** a device type, a way to reach it (hostname, IP address or
+management URL), the credentials, and optionally vendor, model, serial and
+firmware. Anything you leave blank an interrogation can fill in later.
 
-### 2. Configure Credentials
+### 3. Credentials
 
-Store encrypted credentials in platform integrations.
+**A network device carries its own credentials.** You enter the username and
+password on the device itself, in the Add device / Discover & add form, and they
+are encrypted at rest. There is no separate integration record to create and
+link.
 
-**UI:** Navigate to Settings → Integrations → Add Integration
+**Cloud providers are the exception.** A cloud integration holds the credential
+for a whole account or subscription, and is created under **Discovery → Cloud →
+Connect integration**:
 
-**Supported Types:**
 - AWS: Access Key ID, Secret Access Key
 - Azure: Service Principal (Client ID, Client Secret, Tenant ID)
 - GCP: Service Account JSON key
-- Network Devices: Username/Password, API keys
 
-### 3. Create Interrogation Job
+### 4. Create an interrogation job
 
 Create a job to interrogate a device or discover cloud resources.
 
-**UI:** Navigate to Devices → Select Device → Interrogate
+**UI:** **Discovery → Devices →** the row's **Interrogate** button
 
 **API:** `POST /api/v1/device-interrogation-service/devices/:id/interrogate`
 
 **For Cloud Discovery:**
 - `POST /api/v1/device-interrogation-service/cloud/discover`
 
-### 4. Review Results
+### 5. Review results
 
 Review discovered cryptographic configurations and assets.
 
@@ -153,9 +176,12 @@ Review discovered cryptographic configurations and assets.
 - Device identity (vendor, model, firmware version, serial number)
 - Service identification hints
 
-### 5. Import to Inventory
+### 6. Where it lands
 
-Imported assets appear in the inventory with `discovery_method` set to `device_interrogation` or `cloud_api`.
+There is no import step. Results reach the inventory through the pipeline
+described above — the asset is either auto-approved by its segment's rule or
+waiting in **Discovery → Approvals** — and carry a discovery method of
+`device_interrogation` or `cloud_api` so you can tell where they came from.
 
 ## What is collected
 
@@ -317,30 +343,32 @@ what is it talking to" without a second tool.
 - **Cloud KMS**: key inventory (algorithm, state, rotation, protection level)
 - **At-rest**: Cloud Storage and Cloud SQL encryption (Google-managed vs CMEK)
 
-## Agent Deployment
+## When the platform cannot reach the device
 
-### On-Premises Network Devices
+Devices on a network the platform cannot reach are interrogated by a **discovery
+agent** you deploy on a host that can. Register it from **Discovery → Sensors &
+Agents → Register sensor or agent** (see
+[Sensor & Agent Registration](./SENSOR_REGISTRATION.md)), and installation is
+covered in the
+[device agent deployment guide](../operate/deployment/device-agent-deployment.md).
 
-For devices that cannot be reached from the cloud platform, deploy the device-agent binary:
+Once running, the agent:
 
-1. **Download Agent**: Download the device-agent binary for your platform
-2. **Register Agent**: `./device-agent -register`
-3. **Configure**: Set `PLATFORM_URL` and `REGISTRATION_KEY`
-4. **Start Agent**: `./device-agent`
+- polls the platform for work — it opens no inbound ports;
+- receives the credentials for one job, encrypted for that agent and that job,
+  and decrypts them in memory only;
+- performs the interrogation, including a TLS deep scan (version enumeration,
+  full certificate chain, validation) and SSH metadata from management
+  interfaces;
+- reports the device's identity back, so vendor, model, firmware and serial stay
+  current;
+- keeps no credentials on disk.
 
-The agent will:
-- Poll the platform for jobs
-- Receive AES-256-GCM encrypted credentials per-job
-- Execute device interrogation with enriched data collection
-- Perform TLS deep scan (version enumeration, full cert chain extraction, validation)
-- Collect SSH metadata from management interfaces
-- Extract device identity (vendor, model, firmware, serial) and auto-update platform
-- Submit enriched results back to platform
-- Never store credentials locally
+The same agent can also [inventory a host](./host-inventory.md) rather than
+interrogate a device.
 
-### Cloud Resources
-
-Cloud resources are interrogated directly by the platform service using cloud provider APIs. No agent deployment required.
+**Cloud resources need no agent.** They are reached directly over the provider's
+API from the platform.
 
 ## Security Considerations
 
@@ -379,28 +407,7 @@ Device interrogation results integrate with the existing discovery system:
   and a declared value are both kept, with the human's answer winning for the
   fields a person is the authority on
 
-## Implementation Status
-
-### ✅ Completed (AWS, Fortinet, F5, Palo Alto, Cisco, UniFi)
-- **Device CRUD operations** - Full device lifecycle management
-- **Agent registration and job management** - Agent framework complete
-- **AWS cloud resource discovery** - ALB, ELB, NLB, API Gateway, CloudFront with TLS handshake
-- **AWS crypto configuration extraction** - SSL policies, full certificate chains, TLS versions, cipher suites
-- **TLS handshake service** - Live certificate chain extraction from cloud endpoints with ACM metadata enrichment
-- **Fortinet device interrogation** - SSL VPN, IPSec, certificates with detailed crypto extraction
-- **F5 BigIP device interrogation** - Virtual servers, SSL profiles (client/server), certificate key chains
-- **Palo Alto device interrogation** - SSL decrypt profiles, security rules with SSL settings
-- **Cisco device interrogation** - Crypto maps, IPSec tunnels, ISAKMP/IKE/IKEv2 SAs, WebVPN/SSL, SSH host-key fingerprint
-- **UniFi device interrogation** - Controller TLS configs, site device configurations, VPN settings
-- **Database interrogation (PostgreSQL/MySQL)** - in-transit TLS, at-rest encryption, password hashing, risk score
-- **Generic SNMP and HTTP/TLS probers** - SNMP v2c device identity; REST cert endpoint + direct TLS handshake
-- **Discovery job integration** - Seamless integration with existing discovery workflow
-- **Devices ARE assets** - a device is an asset with management configured, so
-  there is no linking step and no second record to reconcile
-- **Error handling** - Connection status tracking and error management
-- **Device agent support** - All device types supported in downloadable agent binary
-
-### ✅ Implemented Cloud Providers
+## Cloud coverage
 
 All three clouds cover three resource families — TLS front ends, key-management inventory, and at-rest encryption (object storage + managed SQL):
 
@@ -412,6 +419,7 @@ Per-cloud resource types, request parameters, and IAM/RBAC are documented in the
 
 ## Related Documentation
 
-- [Platform Integrations](../operate/configuration/platform-integrations.md)
 - [Discovery Feature](./discovery.md)
-- [Infrastructure Assets vs Crypto Configurations](./network-assets-vs-crypto-implementations.md)
+- [Assets and Crypto Configurations](./assets-and-crypto-configurations.md)
+- [Host Inventory](./host-inventory.md) — the same agent, describing a host instead of a device
+- [Asset Approval](./asset-approval.md) — the queue, and the auto-accept threshold

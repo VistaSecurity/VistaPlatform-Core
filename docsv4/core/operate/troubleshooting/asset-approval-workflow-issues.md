@@ -248,7 +248,7 @@ swallowed behind a 200, so it is worth recognising.
 
 - [Asset Approval](../../features/asset-approval.md) — the feature, from the
   user's side.
-- [Infrastructure Assets and Crypto Configurations](../../features/network-assets-vs-crypto-implementations.md)
+- [Infrastructure Assets and Crypto Configurations](../../features/assets-and-crypto-configurations.md)
   — assets, endpoints, classes and what hangs off which.
 - [Database Migrations](../deployment/database-migrations.md) — there is no
   separate migration file; schema changes live in `scripts/database/schema.sql`.

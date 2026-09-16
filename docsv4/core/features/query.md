@@ -26,7 +26,7 @@ class:server environment:production
 …which the platform will rewrite as `class:server and environment:production`,
 because that is the same thing said plainly.
 
-## The ten things you will actually use
+## The handful you will actually use
 
 | Want | Write |
 |---|---|
@@ -39,6 +39,7 @@ because that is the same thing said plainly.
 | One exact class | `class=server` |
 | Starts with | `hostname:web-*` |
 | Something the thing has | `endpoint:(port:443)` · `cert:(not_after < now+30d)` |
+| Who proposed it | `proposed_by:matcher` — the machine proposer behind a suggestion |
 | Just search | `payroll` — looks at names, hostnames, identifiers and tags |
 
 Group with parentheses when you need to: `(a or b) and c`.
@@ -71,6 +72,15 @@ keeps those apart on purpose — see below.
 endpoint:(port in (23, 161, 512, 513))
 ```
 Plaintext management protocols exposed.
+
+```
+proposed_by:matcher
+```
+Everything one particular machine proposer argued for — here, the identity
+matcher, which is to say the open merge proposals. `proposed_by:` asks "which
+machine decided this?", where `source:` asks "what *kind* of thing decided it".
+Use `source:inferred` for everything a model proposed; use `proposed_by:` when
+you want one proposer's work, and a curated rule's id works there too.
 
 ## Three things worth knowing
 

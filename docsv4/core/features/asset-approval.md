@@ -214,6 +214,8 @@ Three things the score deliberately does **not** do:
 
 Under **Settings → Policies → Identification rules** you can set an
 **auto-accept threshold**: a score at or above it is accepted without asking you.
+That page also explains which identifier decides a match in the first place —
+see [Asset Classes & Identification Rules](./asset-classes.md).
 
 The default is **Never**, and that is not a low bar — it is off. No score
 bypasses it.
@@ -577,4 +579,4 @@ Filter assets by approval status:
 ## Related Documentation
 
 - [Discovery Feature](./discovery.md) - Discovery job workflow
-- [Network Spaces Feature](./network-spaces.md) - Asset classification
+- [Operational Context](./operational-context.md) - Network segments, which decide ownership and auto-approval

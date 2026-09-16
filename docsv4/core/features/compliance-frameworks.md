@@ -17,7 +17,7 @@ Compliance frameworks define:
 
 Platform admins can create and fully author compliance frameworks — framework metadata, controls, and per-control measurement rules — directly in the admin app.
 
-**UI:** Admin UI → Catalog → Frameworks (create a draft, expand it to add controls, use **Rules** on a control to author measurement rules, then **Publish**)
+**Where:** the operations console, **Catalog → Frameworks** — create a draft, expand it to add controls, use **Rules** on a control to author its measurement rules, then **Publish**.
 
 **API:** `POST /api/v1/compliance-engine/admin/frameworks`
 
@@ -32,14 +32,14 @@ Platform admins can create and fully author compliance frameworks — framework 
 
 Publish frameworks for tenant use:
 
-**UI:** Click "Publish" on framework
+**Where:** the **Publish** action on the framework's row. **Unpublish (archive)** takes it back out of circulation.
 
 **API:** `POST /api/v1/compliance-engine/admin/frameworks/:id/publish`
 
 **Publishing:**
 - Changes status from `draft` to `published`
 - Makes framework available to all tenants
-- Tenants can view and copy published frameworks
+- Tenants can browse it and activate it
 
 ### Framework Management
 
@@ -54,7 +54,7 @@ Publish frameworks for tenant use:
 
 Tenants browse published frameworks and **activate** the ones relevant to them. There is **no per-framework billing** — evaluation is the product, so activating a framework simply makes it evaluable against your inventory.
 
-**UI:** Web UI → Settings → Policies → Compliance Frameworks
+**Where:** **Settings → Policies → Compliance Frameworks**
 
 **API:** `GET /api/v1/compliance-engine/frameworks/available` (the internal subscribe/activate endpoints retain "subscribe" naming for compatibility; the UI says "Activate"/"Deactivate")
 
@@ -196,12 +196,10 @@ Each measurement type includes validation metadata:
 
 1. **Create Framework**: Create framework in draft status
 2. **Add Controls**: Define compliance controls
-3. **Add Measurements**: Define how each control is measured
-   - **Option A**: Use measurement templates for common rules (recommended)
-   - **Option B**: Create custom measurements with validation guardrails
-   - The UI will guide you with filtered options and validation
-4. **Test Framework**: Run test compliance checks
-5. **Publish Framework**: Make available to tenants
+3. **Add Measurements**: Define how each control is measured, using the rule
+   builder — it filters the rule types and operators to the ones the measurement
+   type accepts, so an impossible rule cannot be saved
+4. **Publish Framework**: Make it available to tenants
 
 ### Tenant Workflow
 
@@ -260,105 +258,49 @@ The system includes built-in validation to prevent configuration errors:
   - Displays validation errors in real-time
   - Groups measurements by category for easier selection
 
-## Measurement Templates
+## Measurement templates
 
-Measurement templates provide pre-configured measurement rules that can be quickly applied to controls.
+A **measurement template** is a pre-configured measurement rule — a measurement
+type, a rule type and a ready-made predicate — kept so the same rule does not
+have to be rebuilt by hand on every control that needs it. The platform ships a
+set covering the rules almost every framework wants:
 
-### Using Templates
+| Template | What it asserts |
+|---|---|
+| TLS 1.2+ required | The negotiated version is not TLS 1.0 or 1.1 |
+| Certificate expiration warning | At least 30 days of validity remain |
+| Minimum RSA key size 2048 bits | Keys are 2048 bits or larger |
+| SHA-256+ hash required | The hash is not SHA-1 or MD5 |
+| Strong key exchange required | Key exchange is ECDHE or DHE, not static RSA |
+| Strong symmetric encryption | The cipher is not 3DES, DES or RC4 |
+| Perfect forward secrecy required | PFS is present |
 
-**UI:** When adding a measurement to a control, select a template from the dropdown to auto-populate the form.
+Each carries the frameworks it is relevant to (SOC 2, PCI-DSS, NIST, ISO 27001)
+and a category (TLS, certificate, cipher), and is versioned so a change is
+visible rather than silent.
 
-**API:** `POST /api/v1/compliance-engine/admin/templates/:id/apply`
+> **Templates are an API capability, not a console one.** There is no template
+> picker in the rule builder and no page for managing templates — the rule
+> builder is where rules are authored, by hand, with the guardrails described
+> above. Templates are reachable through
+> `/api/v1/compliance-engine/admin/templates` (list, create, update, delete, and
+> `…/{id}/apply` to apply one to a control) for automation. A console surface for
+> them has not been built.
 
-**Template Features:**
-- Pre-configured predicates for common compliance rules
-- Framework tags for filtering (e.g., SOC2, PCI-DSS)
-- Category organization (tls, certificate, cipher)
-- Version tracking for template changes
+## Saved assessments: not a console feature
 
-**Available Templates:**
-- TLS 1.2+ Required - Pattern rule excluding TLS 1.0/1.1
-- Certificate Expiration Warning - Threshold rule for 30-day warning
-- Minimum RSA Key Size 2048 bits - Threshold rule for key size
-- PFS Required - Presence rule for Perfect Forward Secrecy
-- SHA256+ Hash Required - Pattern rule excluding SHA1/MD5
-- Strong Key Exchange Only - Pattern rule requiring ECDHE/DHE
-- Strong Symmetric Encryption - Pattern rule excluding weak ciphers
+The platform has an API for **saved assessments** (a framework plus a set of
+filters, saved and reloaded) and for **assessment-scoped overrides**. **Neither
+has a page in the console.** Older documentation described a workspace for
+building and reloading assessments; no such page exists in the product.
 
-### Creating Templates
+What you *can* do from the console is disregard a control:
 
-Platform admins can create custom templates:
-
-**UI:** Admin UI → Compliance → Measurement Templates
-
-**API:** `POST /api/v1/compliance-engine/admin/templates`
-
-Templates can be filtered by:
-- Category (tls, certificate, cipher)
-- Framework tag (SOC2, PCI-DSS, NIST, etc.)
-- Active status
-
-## Compliance Workspace
-
-The compliance workspace allows tenants to evaluate compliance against frameworks using saved assessments.
-
-### Assessments
-
-Assessments (formerly called "scenarios" in the API) are saved configurations that include:
-- Framework selection
-- Filter criteria (environment, severity, tags, owner)
-- Assessment-specific overrides
-
-**UI:** Web UI → Compliance → Workspace
-
-**Creating an Assessment:**
-1. Select a framework
-2. Apply filters (environment, severity, tags, etc.)
-3. Click "Save Assessment" to save the configuration
-4. Load saved assessments to restore filters and overrides
-
-**API:** The API uses "scenarios" endpoints, but the UI refers to them as "assessments":
-- `POST /api/v1/compliance-engine/scenarios` - Create assessment
-- `GET /api/v1/compliance-engine/scenarios` - List assessments
-- `GET /api/v1/compliance-engine/scenarios/:id` - Get assessment
-- `PUT /api/v1/compliance-engine/scenarios/:id` - Update assessment
-- `DELETE /api/v1/compliance-engine/scenarios/:id` - Delete assessment
-
-### Overrides
-
-Compliance overrides allow users to:
-- **Disregard controls**: Mark controls as not applicable
-- **Change severity**: Adjust control severity (e.g., High → Medium)
-
-**Override Scope:**
-- **Global**: Applies to all assessments (omit `scenario_id`)
-- **Assessment-scoped**: Applies only to a specific assessment (include `scenario_id`)
-
-**UI:** Click "Disregard" or "Change severity" on a control in the workspace
-
-**API:** `POST /api/v1/compliance-engine/overrides`
-
-**Request Body (Disregard):**
-```json
-{
-  "control_id": "control-uuid",
-  "override_type": "disregard",
-  "rationale": "Control not applicable to our environment",
-  "scenario_id": "scenario-uuid"  // Optional: omit for global override
-}
-```
-
-**Request Body (Severity Change):**
-```json
-{
-  "control_id": "control-uuid",
-  "override_type": "severity",
-  "severity_from": "High",
-  "severity_to": "Medium",
-  "rationale": "Risk assessment indicates lower severity",
-  "scenario_id": "scenario-uuid"  // Optional: omit for global override
-}
-```
+**Risk & Compliance → Findings →** open a compliance finding **→ Override
+control (justified exception)**. A rationale is required and audited, and the
+control is disregarded in future evaluations from then on. The override is
+organization-wide — there is no per-assessment scope to choose, because there
+are no assessments to scope it to.
 
 ## Compliance Checking
 
@@ -376,17 +318,21 @@ per framework:
 **Risk & Compliance → Posture** also offers a manual re-evaluation for when you
 want the numbers refreshed immediately (rate-limited to once an hour).
 
-## Best Practices
+## Working with frameworks
 
-1. **Use Templates First**: When adding measurements, check for existing templates before creating custom rules
-2. **Start with Published Frameworks**: Use published frameworks as starting point
-3. **Leverage Validation**: The system validates measurements automatically - trust the guardrails
-4. **Customize Carefully**: Only customize when necessary, and use templates as starting points
-5. **Test Before Publishing**: Test frameworks thoroughly before publishing
-6. **Version Control**: Use version numbers for framework changes
-7. **Documentation**: Document custom controls and measurements
-8. **Category Organization**: Use measurement categories to find the right measurement type quickly
+1. **Start from a published framework.** Activating one and reading its results
+   tells you more about your estate than authoring from scratch will.
+2. **Trust the guardrails.** The rule builder will not let you write a rule the
+   measurement type cannot answer; if an option is missing, the measurement type
+   does not support it.
+3. **Version deliberately.** A framework's version number is what tells a reader
+   whether the thing they were scored against last quarter is the thing they are
+   scored against now.
+4. **Read the coverage line, not just the score.** A high score over a small
+   assessed population is not the same claim as a high score over all of it.
 
 ## Related Documentation
 
-- [Measurement Templates](./measurement-templates.md) - Using measurement templates
+- [Framework Transparency](./framework-transparency.md) — reading any published framework's controls and measurements, and how a score is computed
+- [Findings](./findings.md) — what a failed control becomes
+- [Algorithm Reference](./algorithm-reference.md) — the assessments the rules measure against

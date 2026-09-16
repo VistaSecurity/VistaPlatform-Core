@@ -1,11 +1,21 @@
 # Tenant User Guide
 
-**Version:** 1.6
-**Last Updated:** 2026-06-24
+**Version:** 3.0
+**Last Updated:** 2026-09
 
-> **v1.6 navigation correction:** the navigation section now reflects the current 5-section top navigation (Dashboard · Discovery · Inventory · Risk & Compliance · Remediation) and the profile dropdown. References to the retired v1 "Crypto Workbench" page, the standalone "Tickets" page, and the legacy "Reports" surface have been updated to their current homes (the Inventory lenses, Remediation → Queue, and page-local Export + CBOM artifacts).
+This guide walks through Vista Platform the way you actually use it: from the
+left navigation rail outward, one section at a time, as a sequence of tasks. Each
+part tells you where to click, what you will see, and links to the feature page
+that carries the full detail.
 
-This guide provides comprehensive instructions for tenant users using the Vista Platform platform.
+It covers what a **tenant user** does day to day. Configuration that belongs to a
+**Tenant Admin** — members and roles, connected systems, notification channels and
+routing, retention, locations and network segments, billing — lives in the
+[Tenant Admin Guide](./tenant-admin-guide.md), and this guide points there rather
+than repeating it.
+
+If a term is unfamiliar — asset, endpoint, class, relationship, fact, finding —
+[Concepts](../concepts.md) defines the vocabulary the whole product uses.
 
 ---
 
@@ -13,2183 +23,1127 @@ This guide provides comprehensive instructions for tenant users using the Vista 
 
 1. [Getting Started](#getting-started)
 2. [Dashboard](#dashboard)
-3. [Crypto Inventory](#crypto-inventory)
-5. [Asset Management](#asset-management)
-6. [Discovery](#discovery)
-7. [Sensor Management](#sensor-management)
-8. [Compliance](#compliance)
-9. [CBOM & Exports](#cbom--exports)
-10. [Settings](#settings)
-11. [Profile Management](#profile-management)
-12. [Activity Logs & Audit Trail](#activity-logs--audit-trail)
-13. [Notifications](#notifications)
-14. [Alert Management](#alert-management)
-15. [SIEM Integration](#siem-integration)
-16. [Retention Policies](#retention-policies)
-18. [Best Practices](#best-practices)
-19. [Troubleshooting](#troubleshooting)
-20. [Support](#support)
+3. [Discovery](#discovery)
+4. [Inventory](#inventory)
+5. [Risk & Compliance](#risk--compliance)
+6. [Remediation](#remediation)
+7. [Global Search and Ask](#global-search-and-ask)
+8. [Notifications](#notifications)
+9. [Organization Settings at a Glance](#organization-settings-at-a-glance)
+10. [My Profile](#my-profile)
+11. [Troubleshooting](#troubleshooting)
+12. [Support](#support)
 
 ---
 
 ## Getting Started
 
-### First Login
+### First sign-in
 
-1. Receive invitation email from tenant administrator
-2. Click invitation link
-3. Choose your authentication method:
-   - **Email and Password**: Create a password for your account
-   - **SSO Provider**: Sign in with your organization's identity provider (Google, Microsoft, Okta, etc.)
-4. Complete authentication
-5. Verify your email (if required)
-6. Complete onboarding workflow
-7. Access the dashboard
+You reach the console one of two ways:
 
-**Note:** The authentication options available depend on your tenant's authentication policy configured by administrators. Some tenants may require SSO authentication for all users.
+- **An invitation email** from someone in your organization. Click the link, set
+  a password, and you land on the Dashboard.
+- **Self-service signup**, if your deployment offers it. You create the
+  organization, verify your email address, and become its first administrator.
 
-### Signing In
+Either way, the first thing worth doing is the setup checklist — see
+[The setup checklist](#the-setup-checklist) below.
 
-Your tenant administrator configures the authentication methods available for your organization. You may see one or more of the following options on the login page:
+### Signing in
 
-#### Password Authentication
+The sign-in page asks for your **work email** first, then adapts to what your
+organization allows.
 
-Sign in with your email address and password:
+**Password.** Enter your email, then your password, and continue. "Forgot
+password" sends a reset link to your address.
 
-1. Enter your email address
-2. Enter your password
-3. Click **Sign In**
-
-**Forgot Password?** Click the "Forgot Password" link to reset your password via email.
-
-#### SSO Authentication
-
-> Single Sign-On is an Enterprise capability. If your organization runs Core,
-> email and password is the only sign-in method and the rest of this subsection
-> does not apply.
+> Single sign-on is an Enterprise capability. On a Core deployment, email and
+> password is the only way in and the rest of this subsection does not apply.
 
 
-### Onboarding
+### Finding your way around
 
-New users complete an onboarding workflow:
+The console has a **left navigation rail** with five sections, ordered as the
+lifecycle of an asset:
 
-1. **Welcome**: Platform introduction
-2. **Profile**: Complete your profile
-3. **Tutorial**: Platform tutorial (optional)
-4. **First Asset**: Add or discover your first asset (optional)
+| Section | What it is for |
+|---|---|
+| **Dashboard** | Where you stand right now — two heroes, a triage strip, and the lifecycle end to end |
+| **Discovery** | Finding things: sensors and agents, jobs, devices, scans, the review queue, and file/cloud sources |
+| **Inventory** | Everything the platform tracks, viewed through switchable **lenses** |
+| **Risk & Compliance** | Posture, findings, and the evidence documents you hand an auditor |
+| **Remediation** | Fixing what was found: alerts, the ticket queue, and plans |
 
-You can skip optional steps and complete them later.
+Click a section to open it; its sub-navigation appears beneath it in the rail.
+Inventory's sub-items are **lenses** — they all live at the same page and differ
+by what they show.
+
+**Settings** and **My Profile** are not in the rail. Click your account chip at
+the bottom of the rail to open the profile menu:
+
+- **Getting Started** — the setup checklist, shown while onboarding is in progress
+- **My Profile** — your own account
+- **Organization Settings** — everything your organization configures
+- **About** — the running version and build
+- **Switch to Light Mode / Switch to Dark Mode**
+- **Sign out**
+
+On a narrow screen the rail collapses behind a menu icon in the header; tap it
+to slide the same navigation in, tap a link to go, and it closes itself.
+
+### The setup checklist
+
+**Profile chip → Getting Started** opens a short checklist that makes the
+platform useful faster. It tracks three steps:
+
+1. **Add network segments** — so discovery is scoped and results carry location
+   and environment context.
+2. **Add locations** — so assets can be organized by site or cloud region.
+3. **Add an agent** — register a sensor or discovery agent so things start being
+   found.
+
+Each step has a button that takes you to the page that does it, and a way to mark
+it done by hand if you already did it elsewhere. **Dismiss setup guide** hides the
+reminders for you only; the page stays reachable from the profile menu.
+
+The first two steps need settings permissions and the third needs permission to
+register a sensor, so a read-only user is never nagged about them. Full detail:
+[Getting Started](../features/getting-started.md).
 
 ---
 
 ## Dashboard
 
-### Overview
+**Dashboard** is the standing answer to "how are we doing?" It has two heroes,
+because two different people read this page: one cares about cryptographic
+posture, the other about whether the inventory is any good.
 
-The dashboard provides:
-- **Asset Summary**: Total assets, risk levels
-- **Recent Activity**: Latest discoveries and changes
-- **Compliance Status**: Current compliance scores with finding breakdown
-- **Quick Actions**: Common tasks
+### The cryptographic posture hero
 
-### Compliance Metrics
+The top band shows a **risk index out of 100** — the share of your assets sitting
+at high risk — with the risk level beside it, and a sentence naming how many
+critical findings are open across how many monitored assets. Under it, four
+figures: **Assets**, **Configs**, **Critical**, and **PQC configs**.
 
-The Compliance Score card shows:
-- **Overall Score**: Severity-weighted percentage of **assessed** controls passing (controls that could not be checked are excluded — see [Control results](../features/framework-transparency.md#control-results-pass-fail-and-not-assessed)). Shows **—** if nothing has been assessed yet.
-- **Active Findings**: Number of currently detected violations (red)
-- **Suppressed Findings**: Number of temporarily suppressed findings (yellow)
-- **New Findings**: Findings not yet processed (blue)
-- **Resolved Findings**: Findings that have been resolved (green)
+Beside it, **Posture trend · 30 days** plots the same risk index over time; lower
+is better. On the right, **External Exposure** counts observed third-party
+connections and the internal hosts making them — click it to open the **3rd
+Party** inventory lens.
 
-Click the Compliance Score card to navigate to the Compliance Workspace for detailed analysis.
+### The inventory health hero
 
-### Navigation
+Directly beneath, **Inventory Health** answers the operations question. It leads
+with the number of **configuration items** the platform tracks — everything, not
+only the things that speak TLS — and two lifecycle counts you can click:
 
-The platform uses a **5-section primary navigation** organized around the lifecycle of your cryptographic assets. The sections appear as a vertical rail; clicking a section expands its sub-navigation beneath it.
+- **Pending approval** — discovered assets waiting for someone to accept or deny
+  them; this links to Discovery → Approvals, the one review queue.
+- **Stale** — assets not seen recently. Still in the inventory, still counted.
 
-| Section | Purpose | Sub-navigation |
-|---------|---------|----------------|
-| **Dashboard** | Priority-based health overview — assets, compliance status, and recent activity | — |
-| **Discovery** | Find assets — sensors, scanning, device interrogation, and cloud/PCAP sources | Command Center; Sensors & Agents, Discovery Jobs, Devices, Scheduled Scans; Approvals; Job Logs; Cloud, PCAP Upload |
-| **Inventory** | One unified inventory, viewed through switchable **lenses** | Lenses (Infrastructure, Certificates, Keys, and more) plus By-Protocol lenses — see [Inventory & Lenses](../features/inventory-and-lenses.md) |
-| **Risk & Compliance** | Where you stand and what's failing | Posture, Findings, Bills of Materials |
-| **Remediation** | Fixing what was found, end to end | Alerts, Queue, Plans |
+**By class** breaks the inventory down by asset class, with a **Topology** link
+into the map's tenant-wide view. **Data Quality** shows your Inventory Hygiene
+score with how many checks pass, fail, and were not assessed.
 
-**Settings** and **My Profile** are *not* in the primary rail — they live in the **profile dropdown** at the bottom of the rail (see below).
+> A count that could not be loaded shows an em dash and "Couldn't load", never a
+> zero. A reassuring zero on a failed read is the one thing this page must not
+> say.
 
-#### Profile Dropdown
+### Needs attention now
 
-Click your account chip at the bottom of the navigation rail to open the profile menu. It contains:
+A strip of clickable tiles, prioritized across every section: **Critical
+findings** (all producers), **High-risk assets**, **Certs expiring** within 30
+days, **Unscored assets**, **Not PQC-ready**, **Not yet assessed**, and **Overdue
+tickets**. Each opens the filtered list behind it.
 
-- **Getting Started** — the onboarding checklist (shown while onboarding is still in progress)
-- **My Profile** — your personal settings (Personal, Security, Notifications, Sessions & Devices, Connected Accounts, API Tokens, and more)
-- **Organization Settings** — all tenant configuration (see the grouped list below)
-- **About** — version and build information for the running platform
-- **Theme toggle** — switch between Light and Dark mode
-- **Sign out**
+### The lifecycle, end to end
 
-#### Global Search (Command Palette)
+Four stages — **Discovery**, **Inventory**, **Risk & Compliance**, **Remediation**
+— each showing its own headline number (sensors online, crypto configurations,
+critical findings, overdue tickets) and linking into that section.
 
-Press **`Cmd+K`** (Mac) or **`Ctrl+K`** (Windows/Linux) anywhere in the application — or click the search icon in the header — to open the **Command Palette**.
+Below that, **Certificate expiry outlook** and **Quantum readiness** give the two
+supporting views most people come back for.
 
-- **Empty state**: Shows quick-navigation links across the platform's sections (Dashboard, Discovery, Inventory, Risk & Compliance, Remediation, Settings).
-- **Search**: Type (2+ characters) to search across assets, certificates, devices, and sensors simultaneously. Results are grouped by type with section headers. Selecting an asset or certificate opens the matching Inventory lens with the search pre-filled.
-- **Keyboard navigation**: Use ↑↓ arrows to move through results, **Enter** to navigate, **Esc** to close.
-
-See [Global search (⌘K)](../features/global-search.md) for the full reference.
-
-#### Mobile & Tablet Navigation
-
-On smaller screens (tablets and phones), the top navigation bar is replaced by a menu icon (☰) in the header. Tap the icon to open a slide-out navigation drawer from the left side of the screen. The drawer contains all the same navigation sections listed above, organized as expandable groups. Tap a section header (e.g., "Inventory") to expand it and see its sub-items. Tap any link to navigate — the drawer closes automatically. You can also close the drawer by tapping the X button, tapping the dimmed background, or pressing the Escape key.
-
-#### Section Details
-
-- **Dashboard**: Priority-based overview of assets, compliance status, and recent activity.
-- **Discovery** — find assets and bring them into inventory:
-  - *Command Center*: Discovery overview and entry point
-  - *Sensors & Agents*: Manage deployed sensors and discovery agents
-  - *Discovery Jobs*: Create and monitor discovery jobs
-  - *Devices*: View and manage discovered network devices
-  - *Scheduled Scans*: Configure automated, recurring discovery
-  - *Approvals*: Review and approve (or deny) discovered assets
-  - *Job Logs*: Inspect discovery job run logs
-  - *Cloud* / *PCAP Upload*: Cloud-provider discovery (AWS, Azure, GCP) and PCAP file ingestion
-- **Inventory** — one unified inventory, reshaped by **lenses** (not separate pages). Switch lenses to view the same assets through different angles — Infrastructure, Certificates, Keys, and by-protocol views. See [Inventory & Lenses](../features/inventory-and-lenses.md).
-- **Risk & Compliance**:
-  - *Posture*: Standing compliance/risk view, with Algorithm Reference and Framework transparency sub-views
-  - *Findings*: Active compliance findings, filterable by lens
-  - *CBOM*: Generate and compare audit-grade CBOM artifacts
-- **Remediation**:
-  - *Alerts*: The alert inbox — acknowledge, snooze, resolve, or turn one into a ticket
-  - *Queue*: The unified ticket queue — every remediation ticket lives here
-  - *Plans*: Track multi-step remediation and migration plans (e.g. PQC migration)
-- **My Profile** (via the profile dropdown): your personal settings — Personal, Preferences, Security, Notifications, Sessions & Devices, Connected Accounts, API Tokens, Accessibility, and Account & Privacy.
-- **Organization Settings** (via the profile dropdown):
-  All tenant configuration is consolidated under Organization Settings, grouped into categories:
-  - *Organization*: Overview, Branding
-  - *Account*: Billing, Usage & Limits
-  - *People & Access*: Members, Roles & Permissions, Security & SSO
-  - *Integrations*: Integrations hub (SIEM, CMDB/ITSM, messaging, storage)
-  - *Notifications & Alerts*: Routing Rules, Alert Rules
-  - *Policies*: Compliance Frameworks, Custom Policies, Severity Ratings, Asset Lifecycle, Retention Policies, Scopes
-  - *Audit*: Audit trail search and export
-  - *Infrastructure*: Sensor Configuration, Locations, Network Segments
-
----
-
-## Crypto Risks
-
-The Crypto Risks page provides a focused view of cryptographic weaknesses across your network, with detailed remediation guidance to help you prioritize and fix security issues.
-
-### Risk Summary
-
-The page displays severity-based summary cards:
-- **Critical**: Immediate action required (SSL/TLS 1.0, RC4, MD5, DES)
-- **High**: High priority remediation (TLS 1.1, SHA-1, 3DES, RSA-1024)
-- **Medium**: Medium priority (expiring certificates, weak keys)
-- **Assets Affected**: Total count of assets with crypto risks
-
-Click on any severity card to filter the list by that severity level.
-
-### Category Breakdown
-
-View issues grouped by category:
-- **Protocol Issues**: Outdated TLS/SSL versions
-- **Algorithm Issues**: Weak ciphers and hash algorithms
-- **Certificate Issues**: Certificate-related problems
-- **Key Size Issues**: Insufficient key lengths
-
-### Filtering and Search
-
-- Use the search bar to find specific assets by hostname, IP, or protocol
-- Click severity cards to filter by risk level
-- Click category cards to filter by issue type
-- Multiple filters can be combined
-
-### Remediation Guidance
-
-Click on any risk row or the wrench icon to open the Remediation Panel, which provides:
-
-1. **Risk Score**: Overall risk assessment
-2. **Priority Actions**: Most critical steps to take
-3. **Issues List**: Detailed breakdown of each issue with:
-   - Severity and type
-   - Impact description
-   - Step-by-step remediation instructions
-   - Recommended timeline
-   - Alternative technologies to migrate to
-4. **Compliance Impact**: How the issue affects compliance with frameworks (PCI-DSS, NIST, FIPS)
-5. **Resources**: Links to external documentation and standards
-
-### Ticket Integration
-
-Each risk row includes an **Action** column:
-- **Create Ticket**: Click the ticket icon to create a remediation ticket pre-filled with the risk details (severity, description, affected asset)
-- **View Ticket**: If a ticket already exists for that risk, click the eye icon to view the ticket details
-
-You can also create tickets from the risk detail panel by clicking "Create Ticket" in the panel footer.
-
-Tickets created from Crypto Risks are tracked in **Remediation → Queue** (the unified ticket queue) and surfaced in the **Remediation Progress** dashboard. See [Remediation](../features/remediation.md).
-
-### Export
-
-Click "Export CSV" to download a CSV file of all risks for reporting or further analysis.
-
----
-
-## Remediation Progress
-
-The Remediation tab on the Risk & Compliance page provides a dashboard view of your remediation efforts across all ticket categories.
-
-### Summary Cards
-
-Four cards at the top show your current remediation posture:
-- **Open Tickets**: Total tickets in open or in-progress status
-- **Resolved (30d)**: Tickets resolved in the last 30 days
-- **Overdue**: Tickets past their due date (highlighted in red)
-- **Avg Resolution**: Average time to resolve a ticket
-
-### Remediation Trend
-
-A 30-day bar chart shows daily ticket activity:
-- **Orange bars**: Tickets opened per day
-- **Green bars**: Tickets resolved per day
-
-Use this to track whether your team is keeping up with incoming remediation work.
-
-### PQC Migration Progress
-
-A stacked progress bar and table show your organization's post-quantum cryptography readiness:
-- **PQC-Ready** (green): Implementations using post-quantum algorithms (ML-KEM, ML-DSA, SLH-DSA)
-- **Quantum-Safe** (blue): Symmetric algorithms that are inherently quantum-safe (AES, ChaCha20, SHA-256)
-- **Needs Migration** (amber): Asymmetric algorithms vulnerable to quantum attack (RSA, ECDSA, ECDH)
-
-The by-family table shows each algorithm family with its count, status, and recommended migration target.
-
-### Category Breakdown
-
-Cards for each ticket category (compliance, certificate, remediation, vulnerability, operational, general) show open vs. resolved counts. Click any card to open **Remediation → Queue** filtered by that category. See [Remediation](../features/remediation.md).
-
----
-
-## Posture: Algorithm Reference & Frameworks
-
-Open **Risk & Compliance → Posture**. Three sub-links appear under it: **Overview**, **Frameworks**, and **Algorithm Reference**. Overview is the standing/score view; the other two let you see exactly *why* the platform rates things the way it does — so a verdict is never a black box.
-
-### Reading a control result
-
-On the Overview control grid — and on each group in **Risk & Compliance → Findings → By Control** — every control shows one of three results:
-
-- **PASS** — the control was checked and nothing in scope violated it.
-- **FAIL** — the control was checked and something violated it. One violation is enough, whatever its severity.
-- **Not assessed** — the control wasn't checked, so no claim is made either way. Hover it to see why: no measurement rule configured, nothing in scope to check, or the check failed.
-
-Severity (Critical / High / Med / Low) rates *how much a failure matters* — it labels each finding and weights the score — but it never decides pass or fail. Scores cover assessed controls only and are shown with a coverage line such as *"8 of 11 controls assessed"*; a framework with nothing assessed shows **—**, never 100%. Full detail in [Viewing Frameworks, Controls & Measurements](../features/framework-transparency.md#control-results-pass-fail-and-not-assessed).
-
-### Algorithm Reference
-
-A read-only catalogue of every cryptographic algorithm the platform knows about, with our assessment of each. Search or filter by **strength** (recommended / strong / acceptable / weak), **status** (current / deprecated / obsolete), or **quantum** (PQC vs classical). Click any algorithm to open a detail panel showing its strength, deprecation and post-quantum status, risk score, our migration guidance, and the specific recommended alternatives to move to. This is the same rating used to flag risk across your inventory — so when something is marked "weak" or "deprecated," this is where you see why and what to do about it.
-
-### Frameworks
-
-Browse compliance frameworks and, crucially, what each one actually measures. The view opens on **My frameworks** — the ones you've activated, which drive your compliance score — and an **All published** toggle reveals the full catalogue, each with a preview score showing what you'd score against it today. Open a framework to see its controls; expand a control to read its measurement in plain language (for example, *"Passes when RSA key size is at least 2,048 bits"*). Nothing is marked failing without a rule you can read here.
-
-See [Algorithm Reference](../features/algorithm-reference.md) and [Viewing Frameworks, Controls & Measurements](../features/framework-transparency.md) for more detail.
-
----
-
-## Crypto Inventory
-
-The Crypto Inventory page provides a unified view of assets, certificates, and cryptographic configurations, enabling comprehensive search and filtering across all entity types.
-
-### View Modes
-
-The Crypto Inventory page supports three view modes:
-
-1. **Assets**: View only infrastructure assets
-2. **Certificates**: View only certificates
-3. **Unified**: View assets and certificates together in a single list
-
-Switch between view modes using the tabs at the top of the page.
-
-### Summary Statistics
-
-The page displays summary statistics:
-- **Total Assets**: Count of all assets in your inventory
-- **Total Certificates**: Count of all certificates
-- **Expiring Soon**: Certificates expiring within 30 days
-- **Deprecated Algorithms**: Count of deprecated algorithm usage
-
-### Filtering
-
-The unified filter panel supports comprehensive filtering:
-
-#### Common Filters
-- **Search**: Search across all entity types (hostname, IP, certificate CN, issuer, etc.)
-- **Risk Level**: Filter by risk level (Critical, High, Medium, Low, Informational)
-- **Environment**: Filter by environment (production, staging, development, test)
-
-#### Asset Filters
-- **Class**: Filter by class — the kind of thing an asset is (Server, Switch, Firewall, Virtual Machine, S3 Bucket, Business Service, …). Classes form a tree, and picking a parent includes everything beneath it: choosing **Hardware** matches every server, switch and firewall in one go.
-- **Business Unit**: Filter by business unit
-- **Operating System**: Filter by operating system
-- **Owner Email**: Filter by asset owner
-- **Asset Ownership**: Filter by ownership type (customer, third_party, unknown)
-- **Asset Status**: Filter by status (monitoring, pending_approval, denied)
-
-#### Certificate Filters
-- **Expiring Within**: Filter certificates expiring within X days
-- **Min Key Size**: Filter certificates with minimum key size
-- **Algorithm**: Filter by public key algorithm (RSA, ECDSA, etc.)
-- **Issuer**: Filter by certificate issuer
-
-#### Crypto Configuration Filters
-- **Protocol Version**: Filter by TLS/SSL version (TLSv1.3, TLSv1.2, TLSv1.1, TLSv1.0, SSLv3)
-- **Hash Algorithm**: Filter by hash algorithm (SHA256, SHA1, MD5)
-- **Min Key Size**: Filter by minimum key size
-- **Deprecated Algorithms**: Filter for deprecated algorithms
-
-#### Cross-Entity Filters
-- **Assets with Certificates**: Show only assets that have associated certificates
-- **Uses Deprecated Algorithms**: Show only assets using deprecated algorithms (TLS 1.0, SHA1, weak keys)
-
-### Smart Filters
-
-Pre-configured filter sets for common use cases:
-- **TLS 1.0 Implementations**: Find all assets using deprecated TLS 1.0
-- **Certificates Expiring in 30 Days**: Certificates that need renewal soon
-- **Assets with Weak Cryptography**: Assets using deprecated algorithms or weak keys
-- **Self-Signed Certificates**: Certificates that are self-signed
-- **Certificates with Weak Key Size**: Certificates with key size less than 2048 bits
-
-### Viewing Entities
-
-#### Entity Cards
-
-Each entity is displayed as a card showing:
-- **Entity Type Badge**: Asset or Certificate indicator
-- **Risk Level Badge**: Visual risk indicator
-- **Key Information**: Hostname/CN, IP/Issuer, environment
-- **Relationship Counts**: Number of associated certificates or assets
-- **Expiration Warning**: Days until certificate expiration (if applicable)
-
-#### Certificate List View
-
-In Certificates view mode, certificates are displayed in a sortable table with:
-- **Common Name**: Certificate common name
-- **Issuer**: Certificate issuer DN
-- **Expiration**: Expiration date and days remaining
-- **Key Size**: Public key size in bits
-- **Algorithm**: Public key algorithm
-- **Status**: Expiration status (Valid, Warning, Critical, Expired)
-- **Used By**: Number of assets using this certificate
-
-Click on any certificate to view detailed information.
-
-### Certificate Details
-
-Click on a certificate to view detailed information:
-
-1. **Basic Information**:
-   - Common name and serial number
-   - Subject DN and Issuer DN
-   - Subject Alternative Names (SANs)
-
-2. **Validity & Security**:
-   - Valid from/to dates
-   - Days until expiration
-   - Public key size and algorithm
-   - Signature algorithm
-   - Fingerprints (SHA1, SHA256)
-
-3. **Properties**:
-   - Self-signed status
-   - CA certificate status
-   - Key usage and extended key usage
-
-4. **Associated Assets**:
-   - List of assets using this certificate
-   - Asset details (hostname, type, environment)
-
-5. **Export Options**:
-   - Export certificate as PEM
-   - Export certificate details as JSON
-
-### Bulk Actions
-
-Select multiple entities to perform bulk operations:
-- **Export CSV**: Export selected entities to CSV format
-- **Export JSON**: Export selected entities to JSON format
-- **Generate Report**: Create a report for selected entities
-- **Bulk Tag**: Apply tags to multiple entities
-
-### Best Practices
-
-- Use Smart Filters for common security checks (expiring certs, deprecated algorithms)
-- Regularly review certificates expiring within 30 days
-- Use cross-entity filters to find assets with certificate issues
-- Export certificate lists for external tracking systems
-- Monitor deprecated algorithm usage across your infrastructure
-
----
-
-## Asset Management
-
-### Understanding Assets vs Certificates
-
-**Assets** are network endpoints (servers, services, appliances) in your infrastructure. They represent the physical or logical devices that host your applications and services.
-
-**Certificates** are X.509 certificates that can be used by multiple assets. They're linked to assets through **crypto configurations**, which capture the cryptographic protocols and configurations used by each asset.
-
-**Relationship:** One asset can have multiple certificates (through multiple crypto configurations), and one certificate can be used by multiple assets. This many-to-many relationship is managed through the crypto configurations table.
-
-**To find certificates:** Use the "Crypto Inventory" page and select "Certificates" view, or filter assets by "Has Certificates" to see which assets have associated certificates.
-
-### Assets Overview Page
-
-The Assets Overview page (`/assets`) provides a quick dashboard view of your asset inventory:
-
-#### Overview Metrics
-
-The page displays key metrics at a glance:
-- **Total Assets**: Total count of all assets in your inventory
-- **Pending Approvals**: Assets awaiting approval (with action needed badge)
-- **Stale Assets**: Assets that haven't been seen recently (with needs attention badge)
-- **Crypto Configurations**: Total count of cryptographic configurations
-- **High Risk Assets**: Assets with high or critical risk levels (with critical badge)
-- **Recent Activity**: Link to view recent activity feed
-
-Each metric card includes a link to the relevant management view.
-
-#### Quick Actions Panel
-
-Quick access to common tasks:
-- **Discover Assets**: Start a new asset discovery job
-- **Review Approvals**: View and manage pending asset approvals
-- **Manage Stale Assets**: View and manage stale assets
-- **New Asset**: Manually create a new asset
-
-Actions are permission-gated based on your role.
-
-#### Navigation Cards
-
-Quick navigation to different views:
-- **Full Asset Management**: Complete CRUD operations, filtering, and bulk actions
-- **Crypto Configurations**: View and filter cryptographic configurations
-- **Inventory lenses**: Open the **Inventory** section and switch lenses (Infrastructure, Certificates, Keys, and more) to view your assets from different angles — see [Inventory & Lenses](../features/inventory-and-lenses.md)
-
-#### Recent Activity Feed
-
-Displays recent activity including:
-- New asset discoveries
-- Expiring certificates (with warning badges)
-- High risk assets (with severity indicators)
-
-Click any activity item to view details.
-
-#### Quick Asset List
-
-Shows the last 10 assets sorted by last seen date. Click any asset to view details or click "View all" to go to the full management page.
-
-### Asset Management Page
-
-Open the **Inventory** section and use the **Infrastructure** lens to access the complete asset management interface.
-
-#### View Modes
-
-The management page supports two view modes:
-
-1. **Assets View** (default): View and manage infrastructure assets
-2. **Crypto Configurations View**: View cryptographic configurations as first-class entities
-
-Switch between views using the toggle at the top of the page.
-
-#### Viewing Assets
-
-In Assets view mode:
-
-1. View asset list with:
-   - Asset name and type
-   - IP address and port
-   - Risk level
-   - **Certificate count badge** (if asset has certificates)
-   - **Stale status badge** — `Stale Xd` (yellow) or `Archived` (orange) for assets with stale or archived status
-   - Compliance status
-   - Last updated
-
-**Certificate Badges:** Assets with associated certificates display a green badge showing the number of certificates (e.g., "3 certificates"). Click the badge or use the "Has Certificates" filter to find assets with certificates.
-
-**Stale Badges:** Assets that haven't been seen recently show an inline badge in the Status column. `Stale 32d` means the asset was last seen 32 days ago and is in warning state. `Archived` means the asset has been marked as inactive. Use the **Stale Assets** button to manage these assets.
-
-#### Saved Searches
-
-The asset management page lets you save and reapply named filter presets:
-
-1. Configure your desired filters
-2. Click **Save current filters** in the saved searches strip above the bulk toolbar
-3. Enter a name (e.g., "Production TLS 1.0 assets") and click **Save**
-4. The preset appears as a chip in the strip — click it to reapply those filters instantly
-5. Click **×** on a chip to delete that preset
-
-Up to 20 presets are stored per user (saved in browser storage, scoped to your account).
-
-#### Bulk Actions
-
-Select multiple assets using the checkboxes in the asset table, then use the **Bulk Actions** dropdown:
-
-| Action | Effect | Permission |
-|--------|--------|------------|
-| **Approve** | Move pending-approval assets to monitoring | `assets.manage` |
-| **Deny** | Deny pending discovered assets | `assets.manage` |
-| **Rescan** | Trigger re-discovery for selected assets | `assets.manage` |
-| **Revalidate** | Re-run compliance validation | `assets.manage` |
-| **Archive** | Archive stale/inactive assets | `assets.manage` |
-
-Use the **select all** checkbox in the table header to select all assets on the current page.
-
-#### Viewing Crypto Configurations
-
-In Crypto Configurations view mode:
-
-1. View implementations table with:
-   - **Asset**: Link to the associated asset
-   - **Protocol & Version**: Protocol type and version (e.g., TLS 1.3)
-   - **Cipher Suite**: Cipher suite used
-   - **Certificate**: Link to associated certificate (if any)
-   - **Risk Score**: Risk level and score
-   - **Last Verified**: Last verification timestamp
-
-2. Filter implementations by:
-   - Protocol (TLS, SSH, IPSec, etc.)
-   - Protocol version
-   - Cipher suite
-   - Hash algorithm
-   - Risk level
-   - Discovery method
-   - Deprecated algorithms
-   - Search across all fields
-
-3. Click any implementation to view details or navigate to the associated asset.
-
-### Filtering Assets
-
-The Asset Management page (Assets view mode) provides comprehensive filtering organized into logical groups:
-
-#### Asset Properties
-- **Environment**: Production, staging, development, test
-- **Class**: The kind of thing this is — Server, Switch, Firewall, Virtual Machine, S3 Bucket, Business Service, and so on. The classes form a tree and the filter is hierarchical: picking **Hardware** matches everything under it, picking **Server** narrows to servers. The columns in the list change with the class you pick, because different kinds of thing are described by different attributes.
-- **Risk Level**: Critical, High, Medium, Low, Informational
-- **Business Unit**: Filter by business unit
-- **Operating System**: Filter by operating system
-- **Owner Email**: Filter by asset owner
-- **Asset Ownership**: Customer, third party, unknown
-- **Asset Status**: Monitoring, pending approval, denied, archived
-
-#### Certificate Relationships
-- **Has Certificates**: Check this box to show only assets that have associated certificates. This is the correct way to find assets with certificates — a certificate is not a class of asset, it is something an asset presents.
-
-#### Cryptographic Properties
-- **Protocol Version**: Filter by TLS/SSL version (TLSv1.3, TLSv1.2, TLSv1.1, TLSv1.0, SSLv3)
-- **Hash Algorithm**: Filter by hash algorithm (SHA256, SHA1, MD5)
-- **Min Key Size**: Filter by minimum key size
-- **Uses Deprecated Algorithms**: Filter for assets using deprecated algorithms
-
-**Filter Tooltips:** Hover over filter labels to see helpful tooltips explaining each filter's purpose and usage.
-
-**Help Panel:** Click the "Understanding Assets vs Certificates" help panel at the top of the page for detailed information about the relationship between assets and certificates.
-
-**Error Handling:** "Certificates" is not one of the classes, because a certificate is not a kind of asset. If you look for it in the class tree and cannot find it, use the **Has Certificates** filter to see the assets that present one, or open the **Certificates** lens to see every certificate in the tenant.
-
-### Asset Details
-
-1. Click on an asset to view details
-2. View:
-   - **Overview**: Basic information
-   - **Crypto Configurations**: Cryptographic configurations
-   - **History**: Change history and audit trail
-   - **Compliance Findings**: Active compliance findings for this asset
-     - View finding severity, workflow status, and detection state
-     - See occurrence count and resurfaced indicators
-     - Click "View all →" to see all findings in Compliance Workspace
-   - **Notes**: User notes and comments
-
-### Asset History
-
-View asset change history:
-
-1. Open asset → **History**
-2. View timeline of changes:
-   - Change type (created, updated, deleted)
-   - Changed fields
-   - Actor (user or system)
-   - Source (manual, discovery, API)
-   - Timestamp
-
-### Adding Assets
-
-#### Manual Entry
-
-1. Navigate to **Assets** (Overview) → **New Asset** (Quick Actions) or **Assets** → **Full Asset Management** → **New Asset**
-2. Pick the **Class** first. It decides the rest of the form: a server asks for an operating system, an S3 bucket asks for a region and a bucket name, a business service asks for neither.
-3. Give it at least one **identifier** — an FQDN, hostname, IP address, MAC address or serial number. Identifiers are how the platform recognises this thing again: a serial you type in counts as much as one a scanner read, so a machine you record by hand is not duplicated the first time discovery finds it. (A business service is the exception — it is identified by its name, so a name is what it asks for.)
-4. Fill in whatever context you know — **Display name**, **Environment**, **Business unit**, **Support group**, **Owner email**, **Description** — and any attributes the class declares.
-5. Click **Save**. Endpoints (an address, a port and the service on it) are added by discovery as they are observed; you do not enter them by hand.
-
-#### Import from Discovery
-
-1. Navigate to **Discovery** → **Import Results**
-2. Select discovery job
-3. Review discovered assets
-4. Resolve conflicts (if any)
-5. Click **Import**
-
-### Managing Stale Assets
-
-Assets that haven't been seen recently are automatically marked as stale to help keep your inventory current.
-
-#### Viewing Stale Assets
-
-1. Navigate to **Assets** (Overview) → **Manage Stale Assets** (Quick Actions) or **Assets** → **Full Asset Management** → **Stale Assets** button
-2. The button shows a count badge if stale assets exist
-3. View stale assets with:
-   - Hostname and IP address
-   - Stale status (warning or archived)
-   - Days since last seen
-   - Last seen timestamp
-
-#### Filtering Stale Assets
-
-Filter stale assets by status:
-- **All**: All stale assets
-- **Warning**: Assets not seen in X days (configurable, default: 30)
-- **Archived**: Assets not seen in Y days (configurable, default: 60)
-
-#### Rescanning Assets
-
-Verify if stale assets are still alive:
-
-1. Open **Stale Assets** modal
-2. Select assets to rescan
-3. Click **Rescan Selected**
-4. A discovery job is created to verify the assets
-5. If found: Assets are updated and stale status is cleared
-6. If not found: Assets remain stale
-
-#### Archiving Assets
-
-Move warning-status assets to archived state (an intermediate step before removal):
-
-1. Open **Stale Assets** modal
-2. Select assets to archive
-3. Click **Archive Selected**
-4. Assets move from `warning` to `archived` status
-5. Assets remain in inventory with an **Archived** badge and can be removed later
-
-Use this when you want to flag assets as inactive but keep them visible for reference before deciding to remove them.
-
-#### Removing Assets from Inventory
-
-Remove assets from active inventory while preserving them for reporting:
-
-1. Open **Stale Assets** modal
-2. Select assets to remove
-3. Click **Remove from Inventory**
-4. Assets are soft-deleted (preserved for historical reporting)
-5. Assets can be restored if needed
-
-#### Permanently Deleting Assets
-
-**Note:** This action requires administrator permissions and cannot be undone.
-
-1. Open **Stale Assets** modal
-2. Select assets to delete
-3. Click **Permanently Delete**
-4. Confirm the deletion
-5. Assets are permanently removed from the database
-
-**Warning:** Permanent deletion removes all asset data and cannot be reversed. Use with caution.
-
----
-
-## Inventory & Lenses
-
-Vista Platform keeps **one** inventory of your cryptographic assets. Rather than scattering assets, certificates, and crypto configurations across separate pages, the **Inventory** section reshapes that single inventory through **lenses** — each lens is a different angle on the same data, not a different dataset.
-
-### Switching Lenses
-
-1. Open **Inventory** in the primary navigation.
-2. The lenses appear in the sub-navigation beneath the Inventory section. Click a lens to reshape the view.
-3. Primary lenses include **Infrastructure** (assets in their CMDB context), **Certificates** (every certificate, including manually uploaded ones), and **Keys** (your cryptographic-key inventory — algorithm, size, lifecycle state, and how many assets use each key). Additional **By-Protocol** lenses let you focus on specific protocols.
-
-The lens you choose only changes *your* view — it doesn't filter or alter anyone else's inventory.
-
-### Working Within a Lens
-
-Each lens presents the data in a sortable, filterable table tuned to that angle:
-
-- **Search & filter** within the lens to narrow to the assets, certificates, or keys you care about.
-- **Click a row** to open a detail drawer — for example, the Keys lens drills through to the assets using each key, and the Certificates lens opens full certificate details (validity, key size, signature algorithm, fingerprints, and associated assets).
-- **Export** the current view as CSV using the **Export** button in the toolbar (see [CBOM & Exports](#cbom--exports)).
-
-### Global Search Lands in a Lens
-
-When you use Global Search (⌘K) and select an asset or certificate, Vista Platform opens the matching **Inventory lens** with your search pre-filled — so search and inventory share one surface.
-
-For the full design and the complete list of available lenses, see [Inventory & Lenses](../features/inventory-and-lenses.md).
+Full reference: [The Dashboard](../features/dashboard.md).
 
 ---
 
 ## Discovery
 
+Discovery is how things get *into* the inventory. Everything under it either
+finds assets, or decides what to do with what was found.
+
+### Command Center
+
+**Discovery → Command Center** is the section's front page. Four stat cards —
+**Fleet online**, **Jobs running**, **Failed jobs**, **Pending approvals** — each
+link to the page behind them, and two panels list your **Sensor fleet** and
+**Recent jobs**.
+
+Two buttons in the header start work immediately:
+
+- **Discover assets** — opens the scan dialog (see below).
+- **Import from spreadsheet** — brings in a CSV or Excel file of assets or
+  network segments. See [Spreadsheet Import](../features/spreadsheet-import.md).
+
+**To run a discovery scan:** click **Discover assets**, then
+
+1. Type **Targets** — one per line or comma-separated; IP addresses, CIDR
+   ranges, or hostnames, up to 1000.
+2. Tick the **Protocols** to probe.
+3. Set **Ports** (comma-separated) and an **Execution mode** — *Auto* lets the
+   platform decide, *Cloud* runs it from the platform sensor.
+4. Start it. The dialog shows progress; you can leave it running and check
+   **Discovery → Discovery Jobs** later.
+
+What it finds flows into your inventory automatically: hosts on a network segment
+marked auto-approve are monitored straight away, everything else waits in
+**Approvals**.
+
+### Sensors & Agents
+
+**Discovery → Sensors & Agents** is where the fleet lives. Two tables, because
+they are two different things:
+
+**Sensors** — the passive capture binaries deployed on your network. Columns:
+Sensor, Type, Segment, Assets found, Version, Status. A coloured dot shows
+online/offline based on the last heartbeat.
+
+**Discovery agents** — the command-driven binaries that log in to network devices
+(F5, Palo Alto, Cisco, Fortinet and so on) and read their configuration. The table
+is hidden entirely if you have none. Columns: Agent, Host, Interrogates, Jobs,
+Version, Status. **Host** is the address the agent reaches the platform from, plus
+a count of the other addresses its host holds — hover for the full list with
+network prefixes, which answers which segments the agent can actually reach.
+**Jobs** shows when it last ran work and how many it has run; one that never has
+reads "Never run".
+
+> An agent that has stopped sending heartbeats shows as offline even when its
+> stored status still reads *active*. The heartbeat is the truth.
+
+**To register a sensor or agent:** click **Register sensor or agent**, fill in the
+name and expected address, and generate a registration key. The installation
+instructions that follow are platform-specific (Linux, Windows, macOS) and include
+the key. Keys expire, so install before the countdown runs out or generate a new
+one.
+
+**Platform-managed sensors** appear in the list with a lock rather than a delete
+button. They are shared platform resources — the in-cluster sensor and the
+platform interrogation agent — and the discovery counts you see beside them are
+your organization's alone. Deleting one is not offered, and would be refused.
+
+**To remove a sensor or agent:** click the ✕ on its row and confirm. Removing an
+agent revokes its certificate, returns its queued jobs to the pool for another
+agent, and marks any job it was mid-way through as failed. It does **not**
+uninstall the binary — stop and remove that on its host separately, or it will
+keep trying to check in and logging rejections.
+
+#### The sensor drawer
+
+Click any sensor row to open its drawer. Four tabs (a platform-managed sensor
+shows the first two only):
+
+- **Overview** — status, last heartbeat, reporting interval, version, address,
+  deployment (connected or air-gapped), uptime, monitored interfaces, and the
+  sensor's certificate with its serial, issue and expiry dates.
+- **Discoveries** — what this sensor has found: protocol, destination, port,
+  confidence, timestamp.
+- **Health** — current metrics plus a **History** chart over a range you choose.
+  If the sensor reports them, a **Host observations** block shows **Hosts seen**,
+  **Shed**, and **Accumulating now**: devices seen on the wire without connecting
+  to them, each of which becomes a pending asset in Approvals. A non-zero *Shed*
+  count means the segment is busier than the sensor is sized for — that is
+  actionable, not cosmetic.
+- **Control** — **Send command** queues a typed command with an optional JSON
+  payload, and **Command history** shows every command sent, its lifecycle and
+  its response.
+
+Full reference: [Sensor Registration & Management](../features/SENSOR_REGISTRATION.md).
+
 ### Discovery Jobs
 
-Create discovery jobs to automatically discover assets:
+**Discovery → Discovery Jobs** lists every job: id, type, target, source, how many
+assets it found, duration and status. A failed or cancelled job can be **retried**
+from its row; a running one can be **cancelled**. Click a row for the run detail.
 
-1. Navigate to **Discovery** → **Create Job**
-2. Configure discovery:
-   - **Name**: Job name
-   - **Type**: Discovery type (network scan, cloud API, device interrogation)
-   - **Targets**: IP ranges, cloud accounts, devices
-   - **Schedule**: One-time or recurring
-3. Click **Create Job**
-4. Job runs and discovers assets
+### Devices
+
+**Discovery → Devices** lists the assets you have given the platform credentials
+for, so it can log in and read their cryptographic configuration directly. Every
+device here is also an asset in Inventory — this page is where its *management*
+settings live.
+
+Columns: Asset, Management address, Class, Interrogator, Firmware, Last
+interrogated, Connection. Per row you can **open the asset's page**,
+**interrogate** it now, **test the connection**, **edit its management settings**,
+or **stop managing** it.
+
+Two buttons add to the list: **Add managed asset** (you know the address and have
+credentials) and **Discover & add** (find it and configure it in one step).
+
+> **Stop managing is not delete.** It removes the management configuration and its
+> credentials. The asset stays in Inventory with everything ever discovered about
+> it. An asset discovered through a cloud integration has no management
+> credentials, so interrogate and test are unavailable on it.
+
+See [Device Interrogation](../features/device-interrogation.md) and the
+[Device Interrogation Guide](./device-interrogation-user-guide.md).
 
 ### Active Scan
 
-**Discovery** → **Active Scan** lists the assets in your inventory that have
-never been actively scanned, and lets you probe them on demand instead of
-waiting for a sensor to observe traffic.
+**Discovery → Active Scan** lists assets that have **never been actively
+scanned** — typically ones that arrived by import, by SBOM, or from a CMDB. Run a
+TLS probe to catalogue and verify their cryptography; the results flow back
+through the normal discovery pipeline.
 
-1. Navigate to **Discovery** → **Active Scan**
-2. Scan a single asset with **Scan** on its row, or **Scan all** for the whole list
-3. Results flow back through the normal discovery pipeline and appear on the
-   asset within minutes
+Click **Scan** on a row, or **Scan all** in the header. When every active asset
+has been scanned at least once, the page says so and stays empty until something
+new arrives.
 
-**What gets probed:**
+### Scheduled Scans
 
-- **The port on the asset record.** Each asset is probed on the port stored in
-  its inventory entry — so a service on `9443`, `2222`, or any other
-  non-standard port is scanned where it actually listens. Assets with no port
-  recorded fall back to the standard TLS ports (443 and 8443).
-- **The protocols the asset is known to speak.** The scan uses the protocols
-  already recorded on the asset's crypto configurations, plus what its port is
-  well known to speak. An SSH host — port 22, or any port with an SSH
-  configuration on record — gets an SSH key-exchange probe; TLS-bearing assets
-  get a TLS handshake. Assets with nothing on record are probed for TLS.
+**Discovery → Scheduled Scans** turns interrogation into a recurring job. Click
+**New schedule** and give it:
 
-Scans are grouped by port and protocol behind the scenes, so each asset is
-probed only for what it plausibly runs rather than for every port in the batch.
+- a **Name** and optional **Description**,
+- a **Cron expression** — standard five fields, for example `0 2 * * *` for daily
+  at 02:00,
+- a **Target type** and target: a specific device, or a cloud integration.
 
-**Assets that cannot be scanned:** an asset with neither an IP address nor a
-hostname has no address to probe. It is skipped, is *not* marked as scanned, and
-stays on the Active Scan list — add an IP or hostname to its record, then scan
-again.
+From the list you can **run a schedule now**, **edit** it, toggle it on and off,
+or **delete** it. The target is fixed once a schedule is created — to point at
+something else, create a new one.
 
-If a scan fails to dispatch, the affected assets are marked with a failed scan
-status and their previous scan freshness is put back exactly as it was: an asset
-that had never been scanned returns to the Active Scan list, and an asset with
-real scan history keeps that history rather than being reported as never
-scanned. A failed batch is also recorded in the platform logs with the assets it
-covered.
+### Approvals
 
-> Active Scan probes assets already in your inventory. It does not sweep address
-> space for unknown hosts. Tenant-wide active-probing policy — including
-> per-segment allow lists — is set under **Organization Settings** →
-> **Infrastructure** → **Sensor Configuration**.
+**Discovery → Approvals** is the hinge between Discovery and Inventory, and it is
+the **one queue for every proposal**. Nothing waits for review anywhere else.
 
-### Discovery Results
+A **Source** facet across the top says where each item came from, which is the
+first thing worth knowing because it decides how much scrutiny is owed:
+**Discovered** (a sensor or scan saw it), **Imported** (spreadsheet),
+**Declared from SBOM upload**, **Pulled from CMDB**, **Proposed by matcher**,
+**Proposed by classifier**, **Proposed by assistant**. Click a chip to filter;
+**Clear** removes the filter.
 
-1. Navigate to **Discovery** → **Results**
-2. View discovered assets:
-   - Asset details
-   - Cryptographic configurations
-   - Risk assessment
-   - Compliance findings
-3. Review and approve assets
+Four kinds of row can be waiting:
 
-### Asset Approval
+**Discovered assets.** A table of things found but not yet admitted: name,
+address, class, segment, source, confidence, when it was found. **Accept** admits
+it — and materializes its deferred certificates and crypto configurations into
+Inventory. **Reject** denies it and suppresses rediscovery. **Accept all** (or
+"Accept these *n*" when a source filter is on) decides the whole visible set at
+once.
 
-Approve or deny discovered assets:
+**Merge proposals.** "This looks like something you already have." The matcher
+thinks a new sighting and an existing asset are the same thing, and shows you the
+candidates with a match percentage and the identifiers they share. Pick the
+surviving asset and click **Merge** — the survivor's History records what was
+merged in. **Keep separate** says they are different things; the matcher will not
+propose it again, and the discovery goes back to waiting for ordinary approval.
 
-1. Navigate to **Discovery** → **Pending Approval**
-2. Review asset details
-3. Choose action:
-   - **Approve**: Add to inventory
-   - **Deny**: Reject and suppress from rediscovery
-   - **Edit**: Modify before approval
-4. Bulk actions available for multiple assets
+**Relationship proposals.** A claim that two assets are connected in a particular
+way, read left to right: this → relationship → that, with a confidence bar and how
+many times it was observed. **Accept** confirms it, and it starts counting in
+impact analysis. **Reject** records the decision so the same claim is not proposed
+again. See [Relationships](../features/relationships.md).
 
-### Import Conflicts
+**Class proposals.** A claim about what an asset *is*: current class → proposed
+class. Where the evidence was ambiguous you get **Candidates** to choose between
+before accepting. Accepting sets the class and records which rule — or which
+model — decided it. Rejecting stops that class being proposed again.
 
-When importing assets, conflicts may occur:
+**Auto-merged by the matcher.** If your organization has raised the auto-accept
+threshold above zero, this section lists merges that already happened inside the
+recent window, each with its score and the matcher's reasons. It is deliberately
+not a queue: there is nothing to decide, no buttons, and **no way to reverse one
+from here**. A **Change the threshold** link goes to the setting that allowed it.
+On the default threshold of zero the section does not appear at all.
 
-1. Review conflict dialog
-2. Compare existing vs. incoming data
-3. Choose resolution policy:
-   - **Overwrite**: Replace existing data
-   - **Fill Blanks**: Only update empty fields
-   - **Merge**: Combine data intelligently
-   - **Skip**: Keep existing data
-4. Apply to all conflicts (optional)
-5. Click **Resolve**
+> If one of these reads fails, the page tells you so instead of showing an empty
+> section. "Nothing awaiting review" is a claim about the whole queue, and it is
+> only made when every read succeeded.
+
+Full detail: [Asset Approval](../features/asset-approval.md).
+
+### Job Logs
+
+**Discovery → Job Logs** is the run stream: every job with its short id, status,
+when it started, what type it was, what it was pointed at, what it found, and how
+long it took. Failures show their error message inline. Click any entry for the
+full run detail.
+
+### Sources
+
+**Sources** is a group in the rail, not a page. Three ways to bring data in that
+are not a sensor:
+
+#### Cloud
+
+**Discovery → Cloud** connects AWS, Azure and GCP accounts and discovers the
+cryptographic assets in them. Add an integration, then from its row: **run
+discovery now**, **test connection**, **edit**, or **remove**.
+
+Each provider asks for its own credentials — for AWS, a role to assume or an
+access key; for Azure, its tenant and client details; for GCP, a project and
+service-account key. See [AWS](../features/aws-cloud-discovery.md),
+[Azure](../features/azure-cloud-discovery.md) and
+[GCP](../features/gcp-cloud-discovery.md).
+
+#### PCAP Upload
+
+**Discovery → PCAP Upload** takes a packet capture and extracts cryptographic
+configurations from the handshakes in it. Drop a `.pcap` or `.pcapng` file on the
+zone, or click **Choose file**. **Recent uploads** underneath shows each file with
+its size, packet count, how many discoveries it produced, and when.
+
+This is the route for a segment no sensor covers — a capture taken elsewhere
+becomes inventory. See [PCAP Ingestion](../features/pcap-ingestion.md).
+
+#### SBOM Upload
+
+**Discovery → SBOM Upload** takes a bill of materials — CycloneDX JSON 1.4–1.7 or
+SPDX JSON 2.2/2.3, up to 32 MB — and turns its components into software inventory.
+The format is read from inside the document, not from the filename.
+
+First say **where the document belongs**:
+
+- **An existing asset** — the host, container or application this software runs
+  on. Search for it by name and pick it.
+- **Create an application asset from the document** — the artefact the document is
+  about becomes an application asset, waiting for approval. Uploading the same
+  artefact again lands on the same asset rather than making a second one.
+
+Then drop the file or click **Choose a document**. When it finishes you get a
+summary, a link to the asset's **Software** tab, and — if the upload created an
+asset — a link to Approvals. Anything skipped is listed with the reason.
+
+See [SBOM Upload](../features/sbom.md).
 
 ---
 
-## Sensor Management
+## Inventory
 
-### Overview
+**Inventory** is one list of everything, reshaped by **lenses**. The lenses are
+grouped in the rail exactly as they are here.
 
-The Sensor Management page provides a centralized interface for managing network sensors that monitor your infrastructure for cryptographic configurations, certificates, and TLS connections.
+| Group | Lenses |
+|---|---|
+| **Assets** | All assets · Map · Software |
+| **Cryptography** | Certificates · Keys · Configuration · TLS · SSH · Data Protection · 3rd Party |
+| **Lifecycle** | Stale · Pending (a cross-link to Discovery → Approvals) |
 
-### System Sensors
+**Pending** carries an arrow because it leaves the section: pending assets are
+reviewed in Approvals, and a second queue here would be a second inbox.
 
-Your sensor list includes two **System Sensors** that are automatically provided by the platform:
+Reference: [Inventory & Lenses](../features/inventory-and-lenses.md).
 
-1. **Platform Discovery Sensor** - A platform-managed sensor that performs network discovery operations
-2. **Platform Device Interrogation Agent** - A platform-managed agent that handles device interrogation, data collection, and cloud discovery operations. This sensor is also used for cloud discovery results from AWS, Azure, and GCP integrations.
+### All assets
 
-#### Identifying System Sensors
+The default lens, and the one that answers "what is out there". It has three
+controls above the table and a facet rail beside it.
 
-System sensors are visually distinguished in the UI:
-- **Blue background row** - System sensors are highlighted with a blue/indigo background
-- **"System" type label** - Instead of showing "network" or "endpoint", system sensors display a "System" badge
-- **No delete button** - System sensors cannot be deleted by tenants as they are shared platform resources
+**The filter rail** (left) builds the query for you. Facets: **Class**,
+**Status**, **Environment**, **Site**, **Segment**, **Owner**, **Business unit**,
+**Tag**, **Risk**, **Provenance**, and a findings toggle. Each value carries its
+own count.
 
-#### System Sensor Features
+- **Class** is a tree. Picking *Hardware* selects everything beneath it; drill
+  down to *Server* to narrow. Only one class at a time — the taxonomy is a
+  hierarchy, and a multi-select over it reads as nonsense.
+- **Status** is Monitoring / Pending approval / Denied / Archived.
+- **Risk** bands are Critical, High, Medium, Low, Informational and **Not
+  assessed** — a separate band, because "we have not scored this" is not the same
+  claim as "this is fine".
+- **Provenance** is how the class was decided: **Discovered** (something measured
+  it), **Declared**, **Imported**, **Proposed**.
 
-System sensors provide the same functionality as tenant-deployed sensors:
-- **Live Status** - Real-time online/offline status based on platform service health
-- **Heartbeat Updates** - Regular heartbeat updates showing when the sensor was last seen
-- **Tenant-Specific Discovery Counts** - The number of discoveries shown is specific to your tenant's data
-- **Sensor Details** - Click on a system sensor to view its details, activity, and health information
+Values within one facet are OR-ed; different facets are AND-ed.
 
-#### System Sensor Details View
+**The query box** (top) holds the same thing the rail writes, in one readable
+line. You can type in it directly: it autocompletes fields, operators and values,
+and a query it cannot parse tells you *where* it is wrong and what to write
+instead, rather than just "invalid". The rail and the box are never two different
+filters — the query is the state, and the rail is a way of writing it.
 
-When viewing a system sensor's details:
-- A **blue banner** indicates "This is a platform-managed system sensor"
-- Certificate details are hidden (system sensors use platform-level authentication)
-- Activity and health information reflect the sensor's operations for your tenant
+**Query applied.** Under the box, the predicate the *server* actually ran. It is
+often not identical to what you typed, because the read path adds its own default
+scope — `status:monitoring`, which steps aside as soon as your query names a
+status itself. When the two differ you get a **not what you typed** marker
+explaining why. This is how you find out that the asset you expected is missing
+because it is still pending approval.
 
-> **Note**: System sensors are shared platform resources. While they appear in your sensor list and you can view their details and tenant-specific activity, they are managed by the platform and cannot be modified or deleted.
+**Saved views** (the **Views** button) name a query so you can come back to it, or
+share it. Build a filter, open the menu, and choose **Save current query…** — give
+it a name and decide whether to share it with your organization. Shared views
+carry a marker; only the owner can delete one. Only a query that parses can be
+saved: a saved view is a predicate other people will run.
 
-### Navigation
+The language is documented in full at [Query](../features/query.md).
 
-The sensor management page features a simplified navigation structure:
+**Other controls.** **New asset** (top right) creates one by hand. The header
+strip shows the running count, and a warning band appears above the table
+whenever items are awaiting review, with a **Review** button into Approvals.
 
-- **Status Filters**: Filter sensors by status (Active, Inactive, Error, Pending)
-- **Location Filters**: Filter by sensor location
-- **Network Filters**: Filter by network segment
-- **Teams Filters**: Filter by team assignment
-- **Quick Stats**: View overall sensor health, status breakdown, and activity metrics
+The empty state differs on purpose: a filtered no-match offers to clear the query,
+while a genuinely empty inventory offers the three ways to get some — run a
+discovery, import a spreadsheet, or add one by hand.
 
-All navigation sections are collapsible and can be expanded or collapsed as needed.
+### The asset page
 
-### Pending Registrations
+Click any row to open the asset. Overview lives at the bare URL and each other tab
+deep-links, so the link you copy off the first tab is the short one. Seven tabs:
 
-When you create a new sensor registration, it appears in the **Pending Registrations** section at the top of the page:
+1. **Overview** — **Identity** (what this thing is called), **Identifiers** (every
+   way it is known, each with its kind, value, source, confidence and when it was
+   last seen), the **class attributes** for its class, **Risk**, **Context**
+   (environment, business unit, owner, support group, location, segment),
+   **Status**, and **Tags**.
+2. **Services & Endpoints** — every network face it has: address, port, transport,
+   service, exposure, status and last seen. An asset with no network face simply
+   has none, rather than a fabricated port.
+3. **Relationships** — what it is attached to, where each edge came from, and what
+   is affected if it changes.
+4. **Cryptography** — its cryptographic configurations, each drilling through to
+   the protocol, cipher suite and certificate behind it.
+5. **Findings** — what is open against it, and what was not assessed.
+6. **Software** — what is installed, from a host agent or an uploaded SBOM.
+7. **History** — reclassification, context edits, merges and approvals, recorded
+   as they happen.
 
-- **Visual Distinction**: Pending registrations are highlighted with a yellow/amber background
-- **Expiration Countdown**: See how much time remains before the registration key expires
-- **Quick Actions**:
-  - **View Guide**: Opens the installation guide with registration-specific details
-  - **Delete**: Remove the pending registration if no longer needed
+### The drawer
 
-The section automatically hides when no pending registrations exist.
+Clicking a row in a cryptography lens opens a **drawer** — the peek, rather than
+the whole record — and the drawers stack: configuration → asset → certificate, so
+you can drill in and close back out one layer at a time.
 
-### Installation Guide
+The asset drawer shows a risk gauge, the asset's identity and primary address,
+its cryptographic configurations, and its details. **Open full page** is the way
+out of the peek and into the asset page.
 
-Access installation instructions from multiple entry points:
+### Acting on an asset
 
-1. **Installation Guide Button**: Located in the page header, next to "Register new"
-   - Opens a generic installation guide
-   - Select your platform (Linux, Windows, macOS)
-   - View platform-specific prerequisites
-   - Copy installation commands
-   - Download sensor binaries
+From the asset drawer:
 
-2. **Pending Registration Cards**: Click "View Guide" on any pending registration
-   - Opens installation guide with pre-filled registration details
-   - Registration key and IP address are included in commands
-   - Ready-to-use installation commands
+- **Active Scan** — probe this asset now and catalogue its TLS cryptography.
+  Results arrive once the probe completes.
+- **Edit** — open the asset form.
+- **Delete** — soft-delete. It leaves active inventory and can be restored.
+- **Restore** — brings a deleted or archived asset back.
 
-3. **Registration Details Modal**: After generating a registration key
-   - Complete installation instructions
-   - Registration-specific commands
-   - Binary downloads for all platforms
-   - mTLS certificate information
+These need the matching permission; without it the button is simply not there.
 
-### Viewing Sensors
+### Adding an asset by hand
 
-Sensors and discovery agents are listed in **two separate tables** on this page,
-because they are different things and almost nothing describes both. Network
-sensors come first; discovery agents follow in their own **Discovery agents**
-table (which is hidden entirely if you have none).
+**New asset** opens a form whose shape is decided by the class you pick, so pick
+that first.
 
-The sensor table displays:
+1. **Class** — an indented list of the whole taxonomy. What you choose decides
+   which attributes the asset has.
+2. **Display name** — what a person calls it. Usually optional, because the
+   platform derives one from the identifiers. For a **service** class it is
+   **required**: a service identifies by its name, having no address or serial to
+   be known by.
+3. **Identifiers** — the ways this thing can be recognised later, so a future
+   sighting updates it rather than creating a second copy. You can enter
+   hostnames, FQDNs, IP addresses, MAC addresses, serial numbers, CMDB sys ids,
+   SSH host key fingerprints and names. Two kinds are **collector-minted** —
+   agent id and cloud resource id — and cannot be typed: they are identities the
+   platform assigns, and being able to type one would let two real assets be
+   merged into one by hand with nothing to review.
+4. **Class attributes** — the fields that class declares.
+5. **Context** — Environment, Support group, Business unit, Owner email.
+6. **Description**, **Tags**, and optional **Metadata (JSON)** for anything the
+   class schema does not cover.
 
-- **Sensor**: Click to view detailed information
-- **Type**: Sensor type
-- **Segment**: The network segments the sensor is monitoring
-- **Assets found**: How many assets this sensor has discovered
-- **Version**: Installed sensor version
-- **Status**: Current operational status with color-coded badges
+Click **Create asset**. If you ask to remove an identifier the platform must keep,
+it is kept and you are told which and why, rather than the removal quietly failing.
 
-### Viewing Discovery Agents
+Editing an existing asset uses the same form, and the class is changeable —
+reclassifying something that was wrongly classed is an ordinary correction, and
+the History tab records it.
 
-A discovery agent is the command-driven binary that interrogates network devices
-(F5, Palo Alto, Cisco, Fortinet and so on) — not a passive capture sensor. The
-**Discovery agents** table displays:
+### Uploading a certificate
 
-- **Agent**: Its name, with your description and host platform beneath
-- **Host**: The address the agent reaches the platform from, plus a count of any
-  other addresses its host holds. Hover for the full list with network prefixes —
-  useful for answering which segments the agent can actually reach
-- **Interrogates**: What the agent is permitted to interrogate
-- **Jobs**: When it last ran a job, and how many it has run in total. An agent
-  that has never been given work reads "Never run"
-- **Version**: Agent binary version
-- **Status**: Whether the agent is currently checking in
+**Upload cert** (in the header of the cryptography lenses) adds an X.509
+certificate by PEM — useful when no sensor covers the thing that presents it.
+Switch between **Upload file** and **Paste PEM**, drop or paste the certificate
+(a chain, leaf first, is accepted; 1 MiB maximum), set its ownership, and upload.
+The certificate is authoritative: its cryptographic details are extracted from it
+server-side rather than typed.
 
-An agent that has stopped sending heartbeats shows as offline even if its status
-still reads *active*.
+An uploaded certificate shows as **Unassigned** in the Certificates lens until it
+is linked to an asset. See
+[Certificate Chain Management](../features/certificate-chain-management.md).
 
-### Removing a Discovery Agent
+### The cryptography lenses
 
-Click the **✕** on the agent's row and confirm. Requires the **Manage discovery**
-permission.
+Each has its own shape, a search box, and an **Export** button for the current
+view.
 
-This removes the agent from the fleet, revokes its certificate, and settles its
-outstanding work: queued jobs go back to the pool for another agent to pick up,
-and any job it was running is marked failed (it is not retried automatically,
-since the agent may already have done the work).
+- **Certificates** — every certificate, including ones uploaded by hand, with an
+  **Ownership** filter (3rd-party / Internal / Unknown).
+- **Keys** — the key inventory: key, algorithm, state, expiry, and **Used by**,
+  which counts the assets using it ("Unlinked" when none). The drawer drills
+  through to the using asset. See
+  [Cryptographic Keys](../features/cryptographic-keys.md).
+- **Configuration** — negotiated cryptographic configurations, grouped by
+  strength: Weak, Acceptable, Strong, and **Not assessed** — which is its own
+  group so that unresolved configurations are never quietly counted as strong.
+  Filters for Environment, Risk and Strength.
+- **TLS** and **SSH** — the same configuration lens, narrowed to one protocol.
+- **Data Protection** — at-rest posture across the resources that store data,
+  with **Resource type**, **Assessment** and **Risk** filters. Each row names the
+  key-custody rung it sits on.
+- **3rd Party** — outbound connections your assets make to SaaS, partners and
+  APIs. A connection you decide to track like an internal asset can be
+  **promoted**: click the promote control, confirm **Elevate to managed?**, and it
+  joins managed inventory. See
+  [Third-Party & External Connections](../features/third-party-and-external-connections.md).
 
-**It does not uninstall the agent.** The binary keeps running on its host and
-must be stopped and removed there separately. Until it is, its check-ins are
-rejected — harmless, but it will log errors.
+### Map and Software
 
-### Filtering Sensors
+**Map** has two views, switched at the top of the page:
 
-Use the filter bar at the top of the page to:
+- **Neighbourhood** — an interactive graph around one focus asset, up to three
+  hops, with the impact overlay and a GraphML/Cytoscape export. It also opens full
+  screen, which returns you to the lens carrying your depth and selection rather
+  than resetting.
+- **Topology** — the tenant-wide "where is everything", as a site → segment →
+  class tree with counts.
 
-- **Status**: Filter by Active, Inactive, Error, or Pending
-- **Location**: Filter by sensor location
-- **Network**: Filter by network segment
-- **Search**: Search by name, IP address, MAC address, or tags
+**Software** is anchored on the *product*, not the asset: it answers "who runs
+this version of this thing?" Columns for product, vendor, version, end of life,
+vulnerabilities, identifier, licence, last checked, and the number of assets. Sort
+by any of them, search across name, vendor, Package URL and CPE, and click through
+to the assets. An **Upload SBOM** link sits in its header.
 
-### Sensor Details
+See [The Map](../features/map.md) and [SBOM Upload](../features/sbom.md).
 
-Click on any sensor to view detailed information:
+### Stale
 
-- **Overview**: Basic sensor information and status
-- **Configuration**: Network interfaces, profile, and settings
-- **Activity**: Recent discoveries and network activity
-- **Health**: Sensor health metrics and diagnostics
+**Inventory → Stale** lists assets not observed for more than **30 days**. That
+number is the product's one definition of stale: the lens, the hygiene finding and
+the compliance control all mean the same thing by the word.
 
-### Registering New Sensors
+Per row: **Rescan** (queue a revalidation job for that asset) and **Archive** (set
+its lifecycle to archived). A header bar acts on the whole current page —
+**Revalidate all** and **Archive all**, the latter behind a confirmation that says
+what archiving does: archived assets drop out of active inventory and reporting,
+discovery can resurface them, and you can restore one individually from its
+drawer.
 
-1. Click **"Register new"** button in the page header
-2. Fill in the registration form:
-   - **Name**: Human-readable sensor name (required)
-   - **IP Address**: Expected IP address for validation (required)
-   - **Description**: Optional description
-3. Click **"Generate Registration Key"**
-4. Use the installation guide to deploy the sensor
+Thresholds and auto-archive behaviour are set by a Tenant Admin under
+**Settings → Policies → Asset Lifecycle**. See
+[Asset Lifecycle Management](../features/asset-lifecycle-management.md).
 
-The registration key expires after 60 minutes. If expired, generate a new registration key.
+### Exporting what you are looking at
 
-### Best Practices
+Every lens has an **Export** button that writes the rows currently on screen to
+CSV, built in your browser from what is already loaded — no round trip, no
+template.
 
-- Monitor pending registrations regularly and complete installation before expiration
-- Use descriptive sensor names that indicate location or purpose
-- Review sensor health metrics in the Quick Stats section
-- Keep sensor versions up to date
-- Use tags to organize sensors by environment, team, or function
+> **A page export is convenience, not evidence.** For audit-grade output with
+> provenance, a content hash and a fixed scope, generate a bill of materials
+> instead (see below). Detail: [Page-Local Exports](../features/page-local-exports.md).
 
 ---
 
-## Compliance
+## Risk & Compliance
 
-### Framework Selection
+### Posture
 
-The platform uses compliance frameworks to evaluate your cryptographic inventory. You can switch between available frameworks to see how your inventory performs against different standards.
-
-#### Understanding Default vs Selected Framework
-
-- **Tenant Default Framework**: Set by your tenant administrator, used by default for all calculations
-- **Your Framework Preference**: You can override the default with your own framework selection
-- **Active Framework**: The framework currently being used (your preference or tenant default)
-
-#### Switching Frameworks
-
-1. Look for the **Framework Selector** in the header (top right, next to notifications)
-2. Click the dropdown to see all licensed frameworks
-3. Select a framework to use it for all calculations:
-   - Dashboard compliance scores
-   - Risk & Compliance evaluations (Posture and Findings)
-   - Inventory metrics
-4. Your selection persists across pages and sessions
-5. Select "Use Default" to return to the tenant default framework
-
-#### Framework Impact
-
-When you switch frameworks:
-- **Dashboard**: Compliance scores recalculate using the new framework
-- **Risk & Compliance**: Posture and Findings re-evaluate against the new framework
-- **Inventory**: Compliance violation counts update
-- **All Calculations**: Every compliance metric uses your selected framework
-
-**Note**: Framework selection only affects your view. Other users see their own framework preferences or the tenant default.
-
-### Compliance Frameworks
-
-View compliance frameworks:
-
-1. Navigate to **Compliance** → **Frameworks**
-2. View available frameworks:
-   - **Published Frameworks**: Platform-provided frameworks
-   - **Custom Frameworks**: Tenant-specific frameworks you authored — an Enterprise capability, absent on Core
-3. Select framework to view details
-
-### Compliance Status
-
-1. Navigate to **Compliance** → **Status**
-2. View compliance scores:
-   - Overall compliance score (uses your active framework)
-   - Framework-specific scores
-   - Control compliance status
-   - Finding details
-
-### Compliance Findings
-
-1. Navigate to **Compliance** → **Findings**
-2. View compliance findings:
-   - Finding type
-   - Severity
-   - Affected assets
-   - Remediation recommendations
-3. Filter by framework, control, or severity
-
-### Compliance Workspace
-
-The Compliance Workspace provides an auditor-focused view of your compliance posture, allowing you to evaluate frameworks, assign findings to team members, create remediation tickets, and generate actionable intelligence.
+**Risk & Compliance → Posture** carries three views, switched from the rail:
+**Overview**, **Frameworks** and **Algorithm Reference**. The last two exist so a
+verdict is never a black box — you can always read why the platform rates
+something the way it does.
 
 #### Overview
 
-1. Navigate to **Compliance** → **Workspace**
-2. Select a framework from the dropdown
-3. View compliance summary:
-   - Overall compliance score
-   - Key performance indicators (KPIs)
-   - Control families with pass / fail / not-assessed counts
-   - Individual control status
+A gauge for the share of assets at high risk, **Posture trend · 30 days**,
+per-framework standing for each framework you have activated, a **Control posture
+grid**, and **Highest-priority exposures** ranked for you.
 
-#### Framework and Assessment Management
+#### Reading a control result
 
-**Selecting a Framework:**
-- Choose from available frameworks in the header dropdown
-- Framework selection determines which controls are evaluated
-- Your selection persists for the session
+On the control grid — and on each group under **Findings → By Control** — every
+control shows one of three results:
 
-**Saving Assessments:**
-- Name your assessment (e.g., "Q1 2025 Audit")
-- Click "Save" to store your current framework, filters, and overrides
-- Load saved assessments to quickly return to a specific compliance view
-- Assessments can be shared with team members
+- **PASS** — the control was checked and nothing in scope violated it.
+- **FAIL** — the control was checked and something violated it. One violation is
+  enough, whatever its severity.
+- **Not assessed** — the control was not checked, so no claim is made either way.
+  Hover it to see why: no measurement rule configured, nothing in scope to check,
+  or the check itself failed.
 
-#### Filtering and Views
+Severity (Critical / High / Medium / Low) rates *how much a failure matters* — it
+labels each finding and weights the score — but it never decides pass or fail.
+Scores cover assessed controls only and are shown with a coverage line such as
+*"8 of 11 controls assessed"*. A framework with nothing assessed shows **—**,
+never 100%. Controls that could not be evaluated are left out of the score
+entirely: they neither reward nor punish you.
 
-**Active Filters:**
-- **Environment**: Filter by production, staging, development, or test
-- **Severity**: Filter by Critical, High, Med, or Low
-- **Family**: Click family cards to filter controls by family
-- **Owner**: Filter by assigned owner (when findings are assigned)
-- **Tags**: Filter by asset tags
+#### Frameworks
 
-**Note:** Filters are optional. By default, all controls are displayed regardless of findings status. This allows you to see the complete compliance posture, including controls that are passing with no findings.
+Browse compliance frameworks and, crucially, what each one actually measures. The
+view opens on **My frameworks** — the ones you have activated, which drive your
+compliance score — and an **All published** toggle reveals the full catalogue,
+each with a preview score showing what you would score against it today. Open a
+framework to see its controls; expand a control to read its measurement in plain
+language (for example, *"Passes when RSA key size is at least 2,048 bits"*).
+Nothing is marked failing without a rule you can read here.
 
-**Family Cards:**
-- Click any family card to filter controls to that family
-- View pass / fail / not-assessed counts for each family
-- See compliance trend sparklines (7-day trend) showing compliance health over time
-- Selected families are highlighted in blue
-- Use the family filter dropdown in the controls table header for quick filtering
+Activating and deactivating frameworks is a Tenant Admin job, under
+**Settings → Policies → Compliance Frameworks**.
 
-#### Control Details
 
-**Viewing Control Details:**
-1. Click any control in the controls table
-2. View detailed sidebar with:
-   - Control rationale and description
-   - Evidence summary (failing findings, affected assets, last seen)
-   - List of findings with full details
-   - Override status and history
+#### Algorithm Reference
 
-**Findings Table:**
-- **Checkbox Selection**: Select individual findings or use "Select All" for bulk operations
-- **Sortable Columns**: Click column headers to sort by:
-  - Severity (Critical, High, Med, Low)
-  - Asset name
-  - First seen date
-  - Last seen date
-- **Detection State**: Shows the system-detected state of the finding:
-  - **ACTIVE**: Violation is currently detected (red badge)
-  - **INACTIVE**: No violation detected, but finding retained for audit (gray badge)
-  - **ARCHIVED**: Finding has been archived after extended inactivity (gray badge)
-- **Workflow Status**: Shows the human workflow state (filterable via dropdown):
-  - **NEW**: Finding detected but not yet processed (blue badge)
-  - **NOTIFIED**: Stakeholders have been notified (yellow badge)
-  - **RESOLVED**: Finding has been resolved (green badge)
-  - **SUPPRESSED**: Finding is temporarily suppressed (gray badge)
-- **Resurfaced Indicator**: Shows 🔄 icon if finding was previously resolved but violation reappeared
-- **Occurrence Count**: Shows how many times this finding has been detected
-- **Assignment Display**: View assigned owner badges with assignment details
-- **Ticket Count**: See ticket count badges (clickable to view tickets)
-- **Quick Actions**: Access actions for each finding:
-  - Copy Evidence ID (clipboard icon)
-  - Assign Owner (user icon)
-  - Create Ticket (ticket icon)
-  - Update Workflow Status (checkmark icon)
-  - View History (clock icon)
-- **Bulk Actions Toolbar**: When findings are selected, use:
-  - Bulk Assign: Assign multiple findings at once
-  - Create Tickets: Create tickets for selected findings
+A read-only catalogue of every cryptographic algorithm the platform knows about,
+with our assessment of each. Search or filter by **strength** (recommended /
+strong / acceptable / weak), **status** (current / deprecated / obsolete), or
+**quantum** (post-quantum vs classical). Click an algorithm for its strength,
+deprecation and post-quantum status, risk score, migration guidance, and the
+specific alternatives to move to. This is the same rating used to flag risk across
+your inventory — so when something is marked "weak", this is where you see why.
 
-#### Assigning Findings
+See [Algorithm Reference](../features/algorithm-reference.md) and
+[Framework Transparency](../features/framework-transparency.md).
 
-**Assign Owner to Finding:**
-1. In the control details sidebar, find the finding
-2. Click the "Assign Owner" button (user icon)
-3. Select a user from the dropdown
-4. Optionally add remediation notes
-5. Click "Assign"
+### Findings
 
-**Bulk Assignment:**
-1. Select multiple findings using checkboxes
-2. Click "Bulk Assign" in the toolbar
-3. Assign all selected findings to a user
+**Risk & Compliance → Findings** is every open problem, from every producer.
 
-**Viewing Assignments:**
-- Assigned findings show a blue badge with the owner's email
-- Unassigned findings show "Unassigned" in gray
-- Assignment information includes:
-  - Assigned owner (email)
-  - Assignment date and time
-  - Who assigned the finding (assigned_by)
-  - Remediation notes (if provided)
+#### Lenses
 
-#### Creating Tickets
+The rail groups the lenses by what they read:
 
-**Create Ticket from Finding:**
-1. In the control details sidebar, find the finding
-2. Click the "Create Ticket" button (ticket icon)
-3. Enter ticket details:
-   - Title (required)
-   - Description
-   - Priority (low, medium, high, critical)
-   - Assign to user (optional)
-4. Click "Create Ticket"
+**Platform findings** — the one findings table, every producer:
 
-**Managing Tickets:**
-- View ticket count badge on findings (clickable to view details)
-- Tickets are linked to findings and controls
-- **Ticket Status**: open, in_progress, resolved, closed
-- **Ticket Priority**: low, medium, high, critical
-- **Update Tickets**: Edit status, priority, assigned user, and resolution notes
-- **Resolution Notes**: Add notes when resolving or closing tickets
-- Filter tickets by status, priority, or assigned user
-- Tickets can be created from findings or controls directly
+- **By Producer** *(the default)* — the only lens that shows every producer's
+  findings without a framework in the way, and therefore the home of end-of-life
+  and vulnerability findings. The producers are **Compliance**, **Cryptography**,
+  **End of life**, **Vulnerability**, **Configuration**, **Inventory hygiene** and
+  **Drift**.
+- **By Framework** — grouped by the frameworks you have activated.
+- **By Control** — grouped by control, with each control's pass/fail/not-assessed
+  result.
 
-#### Managing Workflow Status
+**Crypto findings** — the cryptographic-risk stream, a different data set:
 
-**Update Workflow Status:**
-1. In the findings table, click the "Update Workflow Status" button (checkmark icon)
-2. Select the new workflow status:
-   - **NEW**: Mark as new (default for new findings)
-   - **NOTIFIED**: Mark as notified (after stakeholders are informed)
-   - **RESOLVED**: Mark as resolved (when remediation is complete)
-   - **SUPPRESSED**: Temporarily suppress the finding
-3. If suppressing, provide:
-   - Suppression reason (required)
-   - Suppression expiration date (optional - finding will auto-activate after this date)
-4. Click "Update Status"
+- **By Severity**, **By Asset**, **By Category** (protocol / algorithm / key size
+  / certificate), **By Date Observed**.
 
-**Understanding Detection State vs Workflow Status:**
-- **Detection State** (system-controlled): Automatically managed based on evaluation results
-  - Changes from ACTIVE → INACTIVE when violation is fixed
-  - Changes from INACTIVE → ACTIVE when violation reappears (resurfaced)
-  - Auto-archived after extended inactivity
-- **Workflow Status** (user-controlled): Managed by your team for remediation tracking
-  - Use to track your remediation process
-  - Can be updated independently of detection state
-  - Suppressed findings are excluded from active reports but still tracked
+> The two scopes are counted separately and labelled, because switching between
+> them changes the number on screen. That is not a counting bug: they are
+> different sets.
 
-**Resurfaced Findings:**
-- Findings that go from INACTIVE → ACTIVE are marked as "resurfaced"
-- The 🔄 icon indicates a finding that was previously resolved but the violation has reappeared
-- Workflow status automatically resets to NEW when a finding resurfaces
-- Review resurfaced findings to understand why violations are recurring
+#### Filtering
 
-**View Finding History:**
-1. In the findings table, click the "View History" button (clock icon)
-2. View complete audit trail of all changes:
-   - Field changes (detection_state, workflow_status, severity, etc.)
-   - Who made the change
-   - When the change occurred
-   - Reason for the change
-   - Old and new values
+Above the list: a filter box, and segment chips for **Open**, **Critical +
+High**, **Mine** and **Unassigned**. A **producer facet** gives one chip per
+registered producer with its count under the current filters — a producer with no
+findings shows a zero rather than disappearing, because zero is an answer.
+**Export** writes the current view to CSV.
 
-#### Managing Workflow Status
+Arriving from a link that narrows to one subject or severity shows a banner saying
+so, with a way to clear it — a page that is filtered always says it is filtered.
 
-**Update Workflow Status:**
-1. In the findings table, click the "Update Workflow Status" button (checkmark icon)
-2. Select the new workflow status:
-   - **NEW**: Mark as new (default for new findings)
-   - **NOTIFIED**: Mark as notified (after stakeholders are informed)
-   - **RESOLVED**: Mark as resolved (when remediation is complete)
-   - **SUPPRESSED**: Temporarily suppress the finding
-3. If suppressing, provide:
-   - Suppression reason (required)
-   - Suppression expiration date (optional - finding will auto-activate after this date)
-4. Click "Update Status"
+#### The inspector
 
-**Understanding Detection State vs Workflow Status:**
-- **Detection State** (system-controlled): Automatically managed based on evaluation results
-  - Changes from ACTIVE → INACTIVE when violation is fixed
-  - Changes from INACTIVE → ACTIVE when violation reappears (resurfaced)
-  - Auto-archived after extended inactivity
-- **Workflow Status** (user-controlled): Managed by your team for remediation tracking
-  - Use to track your remediation process
-  - Can be updated independently of detection state
-  - Suppressed findings are excluded from active reports but still tracked
+Click a finding to open the inspector. It carries the finding's evidence and, for
+some kinds, the same issue found elsewhere on your network, with a way to raise
+tickets for the set at once. Advisories and, for drift findings, a
+**Baseline / Observed** comparison appear where they apply.
 
-**Resurfaced Findings:**
-- Findings that go from INACTIVE → ACTIVE are marked as "resurfaced"
-- The 🔄 icon indicates a finding that was previously resolved but the violation has reappeared
-- Workflow status automatically resets to NEW when a finding resurfaces
-- Review resurfaced findings to understand why violations are recurring
+The **Workflow** block is where you act:
 
-**View Finding History:**
-1. In the findings table, click the "View History" button (clock icon)
-2. View complete audit trail of all changes:
-   - Field changes (detection_state, workflow_status, severity, etc.)
-   - Who made the change
-   - When the change occurred
-   - Reason for the change
-   - Old and new values
+- **Status** — **New**, **Notified**, **Resolved** or **Suppressed**. Choosing
+  Suppressed asks for a suppression reason before it is applied.
+- **Assignee** — assign the finding to a member of your organization, or leave it
+  unassigned.
+- **Create ticket** — opens a remediation ticket pre-filled from the finding. It
+  lands in **Remediation → Queue**.
+- **Add to plan** — attach it to an existing remediation plan, or create a plan
+  and add it in one step.
+- **Override control (justified exception)** — for compliance findings only.
+  Disregards that control in future evaluations. A rationale is required and is
+  audited.
 
-#### Evidence Management
+The **Remediation** block above it always shows the standard guidance for that
+kind of finding — in every edition, with no model involved.
 
-**Copy Evidence ID:**
-1. In the findings table, click the "Copy Evidence ID" button (clipboard icon)
-2. Evidence reference (e.g., "CF-12345678") is copied to clipboard
-3. Use this ID for external tracking systems or documentation
 
-**View Asset Details:**
-1. Click the asset name link in any finding
-2. Navigate to the asset detail page
-3. View full asset information, certificates, and compliance status
-4. View compliance findings for this asset in the asset details modal
-4. View compliance findings for this asset in the asset details modal
+Full reference: [Findings](../features/findings.md).
 
-#### Applying Overrides
+### Bills of Materials
 
-**Disregard Control:**
-1. In control details, click "Disregard Control"
-2. Provide rationale for disregarding
-3. Control is excluded from compliance calculations
+**Risk & Compliance → Bills of Materials** produces the documents you hand an
+auditor: immutable, dated, content-hashed snapshots of what matched a scope at the
+moment of generation.
 
-**Change Severity:**
-1. In control details, click "Change Severity"
-2. Select new severity level
-3. Provide rationale for the change
-4. Severity override applies to this assessment
+#### The four kinds
 
-**Override Scope:**
-- **Global Overrides**: Apply to all assessments (default)
-- **Assessment-Specific**: Apply only to the current saved assessment
+| Kind | What it contains |
+|---|---|
+| **Cryptographic (CBOM)** | Certificates, algorithms, protocols, keys and crypto libraries |
+| **Software (SBOM)** | Every distinct software product installed, and the assets it was found on |
+| **Hardware (HBOM)** | Every hardware asset, with vendor, model, serial and firmware |
+| **Full inventory** | Every asset with its endpoints, relationships, facts and open vulnerabilities |
 
-#### Exporting
+All four share one pipeline: the same scope, the same content hash, the same
+comparison.
 
-> The standalone Reports surface — templated reports, the custom report builder,
-> and per-page PDF export — has been retired. There is no "Export PDF" or "Build
-> Custom Report" button. For convenience exports of what's on screen, use the
-> page-local **Export** button, which produces CSV (e.g. on the Inventory
-> lenses). For audit-grade output with provenance and a content hash, generate a
-> **CBOM Artifact** — see [CBOM & Exports](#cbom--exports).
+#### Generating one
 
-**Controls Table:**
-- **Checkbox Selection**: Select controls for bulk operations
-- **Sortable Columns**: Sort by Control ID, Name, Status, Findings count, or Last seen
-- **Family Filter**: Use dropdown in table header to filter by family
-- **Quick Actions**: Access actions directly from table rows:
-  - Disregard Control
-  - Change Severity
-  - Assign Finding (for controls with findings)
-  - Create Ticket
-- **Override Indicators**: Yellow highlight shows controls with active overrides
+Click **Generate** and choose:
 
-#### Best Practices
+- **Kind** — one of the four above.
+- **Scope** — the boundary the artifact attests to. Scopes are named, versioned
+  asset definitions managed under **Settings → Policies → Scopes**; see
+  [Scopes](../features/scopes.md).
+- **Name** — optional. For an audit submission, name it after the engagement.
 
-1. **Save Assessments Regularly**: Save your work as you apply filters and overrides
-2. **Assign Findings Promptly**: Assign findings to team members for faster remediation
-3. **Create Tickets for Tracking**: Use tickets to track remediation work in external systems
-4. **Use Family Filters**: Click family cards or use dropdown to focus on specific control areas
-5. **Review Overrides**: Regularly review overrides to ensure they're still valid
-6. **Export for Audits**: Export compliance data for external audits and documentation
-7. **Use Bulk Actions**: Select multiple findings to assign or create tickets efficiently
-8. **Monitor Trends**: Check family trend sparklines to identify compliance health trends
+The artifact captures the scope's exact version, so it stays reproducible even
+after the scope is later edited.
 
-#### Tips
+#### The list
 
-- Use the "Encryption-only" filter to focus on crypto-relevant controls
-- Family cards show trend sparklines for quick compliance health checks
-- Findings table is sortable - click column headers to sort
-- Bulk actions allow you to assign or create tickets for multiple findings at once
-- Evidence IDs can be copied for external tracking systems
-- Asset links provide quick navigation to asset details
+Each row shows name, scope, kind, when it was generated, entry count and size.
+Filters for kind and scope sit above. Click a row for the artifact drawer.
+
+#### Downloading
+
+**Download** offers the formats that kind supports:
+
+- **CycloneDX 1.7** — the canonical bytes, and what the content hash covers.
+  Available for every kind.
+- **OCSF 1.9 events** — JSON Lines for a SIEM: one Device Inventory Info per
+  asset, one Vulnerability Finding per CVE. Offered for the **full inventory**
+  kind only, because it is the only one with devices and CVEs to project.
+
+
+#### Verifying
+
+**Verify** in the artifact drawer recomputes the content hash (and the signature,
+where there is one) and reports the verdict. This is how you prove an artifact you
+were handed is the one that was generated.
+
+#### Deleting
+
+**Delete** soft-deletes an artifact. The row stays, so a comparison that referenced
+it shows "deleted" rather than a dead end.
+
+
+Reference: [Bills of Materials](../cbom/xbom.md) and
+[CBOM Artifacts](../cbom/cbom-artifacts.md).
 
 ---
 
-## CBOM & Exports
+## Remediation
 
-Vista Platform's reporting surface has two parts: **CBOM Artifacts** for audit-grade cryptographic snapshots, and **page-local CSV exports** for convenience exports of whatever you're looking at on screen.
+### Alerts
 
-### CBOM Artifacts
+**Remediation → Alerts** is the inbox. Summary cards count **Acknowledged**,
+**Snoozed** and the rest; a severity filter and status filters narrow the list.
 
-A **CBOM Artifact** is an immutable, content-hashed, dated snapshot of every cryptographic component matching a [Scope](../features/scopes.md) at the moment of generation. It's what you submit to an auditor, attach to a vendor questionnaire, or use as before/after evidence in a PQC migration program.
+Each row names the alert, its type, its severity, and its **subject** — the thing
+the alert is about. Where the subject has a page of its own, it is a link: an
+asset goes to the asset page; a software install or a crypto configuration goes to
+Findings narrowed to exactly that subject; a control goes to the control lens; a
+certificate goes to the Certificates lens. Where there is no honest destination
+the subject is plain text, because a link that lands on an empty page reads as
+"nothing is wrong here" — the one thing it must never say.
 
-#### Generating a CBOM
+**Working an alert.** Per row:
 
-1. Navigate to **Risk & Compliance → Bills of Materials** (or go directly to `/risk-compliance/cbom`).
-2. Click **Generate CBOM**.
-3. Select a **Scope** — the named boundary that defines which assets the CBOM will include. Use *All* for a complete snapshot or *Production* for a scoped one. See [Scopes](../features/scopes.md).
-4. Optionally give it a meaningful name (e.g., "Q2 2026 PCI Submission").
-5. Click **Generate**. The artifact appears in the list immediately.
+- **Acknowledge** — you have seen it.
+- **Snooze** — put it aside until a time you choose, with a reason.
+- **Unsnooze** — bring it back now.
+- **Resolve** — close it, with a resolution note.
+- **Create ticket** — turn it into remediation work in the Queue. A row whose
+  ticket already exists links straight to it.
 
-#### Downloading a CBOM
+Click a row for the detail panel: the full message, the subject, and who
+acknowledged, snoozed or resolved it and when.
 
-Click the **Download** dropdown on any artifact row:
-- **CycloneDX 1.7 (.json)** — canonical format, industry standard for CBOMs, matches the content hash (artifacts generated before v0.2.0 declare 1.6 and keep their original bytes)
+**What raises an alert.** These are the types that can open against your
+organization:
 
+| Alert | Raised when |
+|---|---|
+| **Certificate expiring** | A certificate is approaching, or past, expiry. One alert per certificate, escalating as expiry nears. Activated compliance policies can add earlier rungs. |
+| **Control noncompliant** | A control in an activated framework went noncompliant. One alert per control, with the affected-asset count — not one per asset. |
+| **Compliance score drop** | A framework's score fell more than 10 points in 24 hours. |
+| **Hygiene score drop** | Your Inventory Hygiene score fell more than 10 points in 24 hours. Split out from the above because data quality is worth routing — and silencing — separately from security posture. |
+| **Known vulnerability** | An installed software product matched the vulnerability catalogue. |
+| **End of life** | Something on an asset passed, or is approaching, the date its vendor stops shipping fixes — its operating system, its hardware, or an installed package. |
+| **Drift detected** | Something about a subject changed relative to its recent baseline: a new device class on its segment, a protocol it has not spoken before, a different set of listening ports, a certificate from an unfamiliar issuer. Drift is not automatically bad — most are planned changes, and resolving the finding is how you tell the baseline so. |
+| **Sensor offline** | A sensor stopped reporting (after a 15-minute dwell). |
+| **Discovery agent offline** | A discovery agent stopped reporting (same dwell). |
+| **Discovery job failed** | A discovery job failed. |
+| **Failed login burst** | Multiple failed sign-in attempts in a short window. |
+| **Asset limit approaching** | Asset usage is nearing your plan limit. |
 
-### Page-Local CSV Exports
+Most resolve themselves when the condition clears — a renewed certificate is
+observed, a heartbeat returns, the next run succeeds, the finding stops being
+detected.
 
-On the **Inventory** page, every lens view has an **Export** button in the toolbar. This exports the currently visible rows as a CSV — no backend round-trip, no wait time. Each lens exports a layout tailored to its data.
+Which alert types are enabled, and where they are delivered, is configured by a
+Tenant Admin under **Settings → Notifications & Alerts**.
 
-> Page-local exports are for convenience. For audit-grade output with provenance and a content hash, generate a CBOM Artifact instead.
+### Queue
+
+**Remediation → Queue** is the single ticket queue: every remediation ticket in
+your organization, whatever raised it.
+
+Five cards across the top double as filters: **Open work**, **Overdue**, **Due
+soon**, **Resolved**, and **Keeping pace** — the share of open work still on track.
+Click a card to filter to it, click again to clear.
+
+The table lists ticket, category, external reference, SLA state and due date.
+Click a ticket for its drawer: description, due date, assignee, what it is linked
+to, and a threaded **Comments** section (⌘/Ctrl + Enter posts). Status changes are
+made from the drawer.
+
+Categories are compliance, certificate, remediation, vulnerability, operational
+and general — each able to link back to the asset, certificate, configuration or
+finding it came from.
+
+### Plans
+
+**Remediation → Plans** groups related work into one initiative — a post-quantum
+migration, a protocol deprecation, a certificate replacement programme — and
+tracks it as a whole. Click **New plan**, give it a title, and add findings to it
+from the findings inspector (**Add to plan**). A plan's detail view shows its
+steps and its progress.
+
+See [Remediation](../features/remediation.md).
 
 ---
 
-## Notifications & Alerts
+## Global Search and Ask
 
-The platform provides a unified notification system that allows you to configure how you receive alerts and notifications across multiple channels.
+Press **⌘K** (Mac) or **Ctrl+K** (Windows/Linux) anywhere, or click the search
+icon in the header, to open the command palette.
 
-Every account gets a working setup with zero configuration: new organizations
-are seeded with an **in-app channel**, an **email channel** that reaches your
-admins, and default routing so critical and high-severity alerts reach you
-immediately. The pieces below let you extend or customize that setup.
+**Search** is the default. Type two or more characters to search assets,
+certificates, devices and sensors at once; results are grouped by type. With the
+box empty it lists the pages you can jump to. Navigate with ↑↓, open with
+**Enter**, close with **Esc**, and ⌘K toggles it.
 
-### The Notification Bell
 
-The bell icon in the header shows your unread count and, when clicked, your
-ten most recent notifications with mark-as-read and **mark all read**. From
-there, **View alerts** takes you to [Remediation → Alerts](../features/remediation.md#alerts)
-(the work surface — where you act on conditions demanding attention) and
-**View delivery history** takes you to the settings page described below
-(where you can see every notification that was ever sent — the record of
-what was communicated).
-
-### Notification Channels
-
-Notification channels define where alerts are sent. You can configure multiple channels of different types:
-
-#### Channel Types
-
-- **Slack**: Send notifications to a Slack channel via webhook
-- **Email**: Send email notifications to specified recipients
-- **Webhook**: Send notifications to a custom webhook endpoint
-- **PagerDuty**: Send alerts to PagerDuty for incident management
-- **In-App**: Display notifications in the platform's notification center
-
-#### Managing Channels
-
-1. Navigate to **Organization Settings** → **Notifications & Alerts** → **Channels**
-2. Click **Add Channel** to create a new channel
-3. Select the channel type and configure:
-   - **Slack**: Provide webhook URL and optional channel name
-   - **Email**: List recipient email addresses
-   - **Webhook**: Provide URL and optional authentication
-   - **PagerDuty**: Provide integration key
-4. Test the channel to verify connectivity
-5. Enable or disable channels as needed
-
-#### Testing Channels
-
-After creating a channel, use the **Test** button to send a test notification. This verifies that the channel is configured correctly and can receive notifications.
-
-### Notification Rules
-
-Notification rules determine which alerts are sent to which channels based on:
-- **Alert Source**: Where the alert originates (monitoring, discovery, compliance, audit, inventory)
-- **Alert Type**: Specific alert type or all types from a source
-- **Severity**: Filter by severity level (critical, high, medium, low)
-- **Category**: Filter by category (security, sensors, billing, system, reports, users)
-
-#### Creating Rules
-
-1. Navigate to **Organization Settings** → **Notifications & Alerts** → **Routing Rules**
-2. Click **Add Rule**
-3. Configure the rule:
-   - **Rule Name**: Descriptive name for the rule
-   - **Alert Source**: Select the source (monitoring, discovery, etc.)
-   - **Alert Type**: Optional - leave empty for all types
-   - **Channels**: Select one or more channels to route to
-   - **Severity Filter**: Optional - select specific severities
-   - **Frequency**: Choose immediate delivery or digest mode
-   - **Priority**: Higher priority rules are evaluated first
-4. Enable the rule
-
-#### Rule Priority
-
-Rules are evaluated in priority order. Higher priority rules are checked first. If multiple rules match an alert, channels from all matching rules are used.
-
-### The Alert Catalog
-
-Above the audit alert rules, **Organization Settings → Notifications &
-Alerts → Alert Rules** also shows the **alert catalog** — the platform's
-built-in library of conditions it can raise a stateful alert for (certificate
-expiry, failing compliance controls, and more; some entries are marked
-"coming soon" — registered but not yet wired to a detector). For each type
-you can enable or disable it, and for time-based types like certificate
-expiry you can see and adjust the **warning ladder**: the schedule of
-thresholds (e.g., 60 days, 30 days) at which the alert opens or escalates.
-
-Any compliance framework your organization has activated can add its own
-rung to that ladder automatically — for example, activating a framework that
-requires 30-day certificate warnings adds a 30-day rung you cannot remove
-from this screen (only by deactivating the framework). Your own preference
-can replace the platform's default rung, but framework-required rungs always
-stay — so tightening your notification schedule to match a compliance
-commitment happens automatically, and you can't accidentally silence a
-requirement you've committed to. See
-[Remediation → Alerts](../features/remediation.md#alerts) for what these
-alerts look like once raised.
-
-### Delivery History
-
-View a history of every notification the platform has sent — or attempted
-to send — on your organization's behalf:
-
-1. Navigate to **Organization Settings** → **Notifications & Alerts** →
-   **Delivery History**
-2. View details including:
-   - Timestamp
-   - Alert source and type
-   - Severity
-   - Message
-   - Channels used
-   - Delivery status
-
-Rows where no channel matched (nothing was actually delivered) are called
-out — a quick way to spot a routing rule that needs adjusting.
-
-### User Preferences
-
-Configure your personal notification preferences:
-
-1. Open your profile menu (top right) → **My Profile** → **Notifications**
-2. Configure:
-   - **Categories**: Enable/disable notification categories
-   - **Delivery**: Choose in-app and/or email delivery
-   - **Frequency**: Immediate or digest mode
-
-These preferences currently record what you'd like to receive; the alerts
-that actually reach you are still governed by your organization's routing
-rules above.
-
-## Settings
-
-### Notification Preferences
-
-Configure notification preferences:
-
-1. Navigate to **Settings** → **Notifications**
-2. Configure notification categories:
-   - **Security Alerts**: Security-related notifications
-   - **Compliance Updates**: Compliance status changes
-   - **System Notifications**: System messages
-   - **Stale Assets**: Notifications when assets become stale
-3. Configure delivery methods:
-   - **In-App**: In-app notifications
-   - **Email**: Email notifications
-4. Set notification frequency:
-   - **Immediate**: Real-time notifications
-   - **Daily**: Daily digest
-   - **Weekly**: Weekly summary
-5. Click **Save**
-
-### Locations and Network Segments
-
-Locations and network segments define where your infrastructure lives and how discovered assets are classified. You need at least one **location** and one **network segment** before running discovery.
-
-#### Locations
-
-Locations are hierarchical (e.g. region → datacenter → rack) and can represent physical sites or cloud regions.
-
-1. Navigate to **Organization Settings** → **Infrastructure** → **Locations**
-2. Click **Add location**
-3. Enter **Name** and **Type** (e.g. datacenter, cloud_region, office)
-4. Optionally set **Parent** (for hierarchy), **Description**, physical address, cloud provider/region, or geo/timezone
-5. Click **Save**
-
-Locations are required before you can create network segments.
-
-#### Network Segments
-
-Segments define CIDR blocks, IP ranges, or domain patterns and assign them an **environment** (production, staging, development, test) and a **location**. Matching assets get that environment and location when you reclassify.
-
-1. Navigate to **Organization Settings** → **Infrastructure** → **Network Segments**
-2. Ensure at least one location exists (create one under Locations if needed)
-3. Click **Add segment**
-4. Enter **Name**, **Type** (cidr, ip_range, domain, or cloud_vpc), and **Value** (e.g. `10.0.0.0/8` for CIDR)
-5. Select **Environment** and **Location**
-6. Optionally set **Description**, **Business unit**, **Owner email**, and **Tags** (key:value per line; tags are applied to matching assets when you reclassify)
-7. Enable **Auto-approve discoveries** if sensor discoveries in this range should be auto-approved
-8. Click **Save**
-
-**Reclassify all assets:** Use **Reclassify all assets** on the Network Segments page to match existing assets to segments and update their location, environment, and tags.
-
-#### Sensor Configuration
-
-The **Sensor Configuration** page (under **Organization Settings** → **Infrastructure**) controls fleet-wide sensor behavior beyond individual sensor records.
-
-1. Navigate to **Organization Settings** → **Infrastructure** → **Sensor Configuration**
-2. **Active scanning policy** — Turn active probing (TLS handshakes, SSH key exchange, related scans) on or off for the tenant, and optionally restrict which **network segments** allow active scanning. Unchecked segments remain passive-only.
-3. **Observation rest period** — Choose how long deployable sensors wait before sending another report for the **same** observation (same server IP, port, and protocol, for example repeated TLS to the same `443` endpoint). The default is **1 hour**. Shorter periods mean fresher data and more traffic to the platform; longer periods reduce duplicate noise.
-4. Click **Apply to All Sensors** to save the rest period. Active sensors receive an `update_config` command and apply the new TTL on their **next heartbeat** (no binary restart required).
-5. Use the **Select Platform** controls to view or override which **sensor binary** artifact is offered for download per OS and architecture.
-
-> **Note:** Bulk updates are queued for every sensor in **active** or **healthy** status for your tenant, including platform-managed **system** sensors that participate in the same heartbeat/command channel. Deployable agents pick up changes on the next checkin after you apply the rest period.
-
-### User Preferences
-
-1. Navigate to **Settings** → **Preferences**
-2. Configure:
-   - **Language**: Interface language
-   - **Timezone**: Timezone for timestamps
-   - **Date Format**: Date display format
-   - **Theme**: Light or dark theme
-3. Click **Save**
-
-### Billing & Subscription
-
-Track usage against your plan limits.
-
-> **Self-service billing is an Enterprise capability.** A Core deployment has no
-> subscription, no invoices and no payment provider, so it mounts no billing
-> screens. **Usage Tracking** and **Usage Limits** below apply to every edition;
-> the subscription, payment, invoice and coupon subsections do not.
-
-
-#### Usage Tracking
-
-Monitor your resource usage against plan limits:
-
-1. Navigate to **Settings** → **Usage & Limits**
-2. View current month's usage:
-   - **API Requests**: Current vs. plan limit
-   - **Storage**: Data stored vs. plan limit
-   - **Infrastructure Assets**: Active assets
-3. Review usage charts showing historical trends
-4. See projected end-of-month usage
-
-**Usage Alerts:** You'll receive email notifications when usage reaches 80%, 90%, and 100% of your plan limits.
-
-#### Usage Limits (No Overage Charges)
-
-Your subscription is a flat per-plan price — there are no usage-based
-overage charges. If you reach a hard limit (assets, sensors, users), the
-platform prevents adding more rather than billing you for the excess.
-
-**Tip:** If you consistently approach your plan limits, upgrade your plan
-or contact sales about a custom limit (Enterprise plans are tuned per
-contract).
-
-
----
-
-## Profile Management
-
-### View Profile
-
-1. Navigate to **Profile**
-2. View profile information:
-   - Name and email
-   - Role and permissions
-   - Tenant information
-   - Account status
-
-### Update Profile
-
-1. Open **My Profile → Personal** (from the user profile dropdown, top-right)
-2. Edit any of:
-   - First name
-   - Last name
-   - Timezone (e.g. `America/New_York`)
-3. Click **Save changes**
-
-To update your photo, click **Upload photo** in the Photo row and choose an image (JPEG, PNG, GIF, or WebP, up to 5 MB). The new photo appears immediately and is saved automatically.
-
-> Email and Role are shown here but are not self-editable — email changes require confirming a link sent to the new address, and your role is assigned by your organization's admins under **Settings → Members**.
-
-### Change Password
-
-1. Open **My Profile → Security**
-2. Enter:
-   - Current password
-   - New password (minimum 8 characters)
-   - Confirm new password
-3. Click **Change password**
-
-After a successful change you may be signed out of the current session and need to sign in again with the new password.
-
-### Multi-Factor Authentication (MFA)
-
-Enable MFA for additional security:
-
-1. Navigate to **Profile** → **Security**
-2. Click **Enable 2FA**
-3. Follow setup instructions
-4. Scan QR code with authenticator app
-5. Enter verification code
-6. MFA is enabled
-
-**Note:** MFA setup is coming soon. The UI is prepared for future implementation.
-
-### SSO Account Linking
-
-> **Requires SSO, an Enterprise capability.** On a Core deployment there are no
-> SSO providers to link and **Connected Accounts** has nothing to show.
-
-
----
-
-## Activity Logs & Audit Trail
-
-### Overview
-
-The Activity Logs feature provides complete visibility into all actions performed within your tenant. Every system event is logged with detailed information for security auditing, compliance reporting, and troubleshooting.
-
-### Viewing Activity Logs
-
-Access the Activity Logs page from **Operations → Activity Logs** to view all system activity.
-
-### Filtering Options
-
-Use filters to narrow down logs:
-
-- **Date Range**: Last hour, 24 hours, 7 days, 30 days, or custom range
-- **Event Type**: Filter by specific event types (asset.created, user.login, etc.)
-- **Event Category**: Filter by category (security, asset, compliance, etc.)
-- **Status**: Filter by success or failure
-- **Search**: Search across all log fields including user email, resource ID, and action
-
-### Analytics Tab
-
-The Analytics tab provides visual insights:
-
-- **Events by Category**: Pie chart showing distribution of events
-- **Top Event Types**: Bar chart of most frequent events
-- **Success vs Failure Ratio**: Overall system health indicator
-- **Activity Timeline**: Event volume over time
-
-### Advanced Queries
-
-Click **Advanced Query** to build complex filters:
-
-1. Click the **Advanced Query** button
-2. Add multiple filter conditions
-3. Combine conditions with AND/OR logic
-4. Filter by:
-   - Event types (multi-select)
-   - Compliance tags (soc2, iso27001, gdpr, hipaa, pci_dss)
-   - User IDs
-   - Resource types
-   - Date ranges
-5. Save frequently used queries for quick access
-6. Export query results
-
-### Exporting Logs
-
-Export logs for external analysis or compliance reporting:
-
-1. Apply your desired filters
-2. Click **Export** button
-3. Choose format (CSV or JSON)
-4. Download begins automatically
-
-**CSV Format**: Best for spreadsheet analysis
-**JSON Format**: Best for programmatic processing
-
-### Resource Audit Trail
-
-View complete history for any resource:
-
-1. Navigate to the resource (asset, certificate, user, etc.)
-2. Click the **View Audit Trail** button
-3. View all changes including:
-   - Who made the change
-   - When it was made
-   - What fields changed
-   - Old and new values
-4. Filter by date range to narrow results
-5. Export audit trail for documentation
-
-### User Activity Timeline
-
-View complete activity for a specific user:
-
-1. Access from user management pages
-2. Filter by date range
-3. View detailed timeline with:
-   - All user actions
-   - Success/failure indicators
-   - Activity patterns
-   - Risk indicators
-4. Expand any event for full details
-5. Export user activity for security reviews
+Full reference: [Global search](../features/global-search.md).
 
 ---
 
 ## Notifications
 
-### Notification Channels
+### The bell
 
-Configure channels to receive platform notifications.
+The bell in the header carries a count of unread notifications. Open it for the
+recent list, mark one read by clicking it, or **Mark all read**. Two links at the
+bottom go to **View alerts** and **View delivery history**.
 
-#### Accessing Channels
+### Your own preferences
 
-Navigate to **Organization Settings → Notifications & Alerts → Channels** to manage delivery channels.
+**My Profile → Notifications** controls what reaches *you*, within what your
+organization has configured.
 
-#### Supported Channel Types
+**What you're notified about** — per-category switches: Security findings &
+alerts, Sensors & discovery, Billing & subscription, System & maintenance, CBOM &
+compliance evidence, Members & access changes.
 
-**Email**
-- Send notifications to email addresses
-- Configure multiple recipients
-- Set email templates
+**How it reaches you** — **In-app** and **Email** switches, plus a **Frequency**:
+Immediate, Hourly digest, or Daily digest.
 
-**Slack**
-- Post notifications to Slack channels
-- Configure webhook URL
-- Customize message format
+Click **Save changes** to apply.
 
-**Webhook**
-- Send notifications to custom HTTP endpoints
-- Configure headers and authentication
-- Support for JSON payloads
-
-**PagerDuty**
-- Create incidents in PagerDuty
-- Configure integration key
-- Set severity mapping
-
-**SMS** (Coming Soon)
-- Send text message notifications
-- Configure phone numbers
-
-**In-App**
-- Receive notifications in the platform
-- Real-time notifications
-- Notification history
-
-#### Creating a Channel
-
-1. Navigate to **Organization Settings → Notifications & Alerts → Channels**
-2. Click **Add Channel**
-3. Select channel type
-4. Enter configuration details:
-   - Channel name
-   - Type-specific settings (URL, API key, etc.)
-5. Click **Test Connection** to verify setup
-6. Click **Create**
-
-#### Testing Channels
-
-Always test channels after creation:
-
-1. Click the **Test** button on the channel card
-2. System sends a test notification
-3. Verify you receive the notification
-4. Check notification formatting
-
-### Notification Rules
-
-Create rules to automatically send notifications when specific events occur.
-
-#### Accessing Rules
-
-Navigate to **Organization Settings → Notifications & Alerts → Routing Rules** to manage notification rules.
-
-#### Creating a Rule
-
-1. Click **Create Rule**
-2. Configure rule details:
-   - **Rule Name**: Descriptive name
-   - **Description**: Optional details
-   - **Event Triggers**: Select which events trigger notifications
-   - **Channels**: Select delivery channels
-   - **Filters**: Add conditions to refine when rule triggers
-3. Click **Create**
-
-#### Event Triggers
-
-Select from various event types:
-- Asset created, updated, deleted
-- Compliance findings created, resolved
-- Discovery jobs completed, failed
-- User authentication events
-- Certificate expiration warnings
-- System errors
-
-#### Notification Filters
-
-Refine when notifications are sent:
-- Event severity (critical, high, medium, low)
-- Specific asset classes
-- Compliance frameworks
-- User roles
-- Time of day
-
-### Notification History
-
-View all sent notifications.
-
-#### Accessing History
-
-Navigate to **Operations → Notification History** to view past notifications.
-
-#### History Details
-
-For each notification:
-- **Timestamp**: When notification was sent
-- **Event**: What triggered the notification
-- **Channels**: Where it was sent
-- **Status**: Delivery status (sent, failed, pending)
-- **Content**: Notification message
-- **Metadata**: Additional context
-
-#### Filtering History
-
-Use filters to find specific notifications:
-- Date range
-- Event type
-- Channel used
-- Delivery status
-- Severity level
+> You choose *what* and *how often*. The channels themselves — Slack, email,
+> PagerDuty, a webhook — are configured for the whole organization, as are the
+> routing rules that decide which events reach which channel and the alert rules
+> that decide what raises an alert in the first place. Those live under
+> **Settings → Integrations** and **Settings → Notifications & Alerts**, and are
+> covered in the [Tenant Admin Guide](./tenant-admin-guide.md).
 
 ---
 
-## Alert Management
+## Organization Settings at a Glance
 
-### Overview
+Reached from the profile chip → **Organization Settings**. What you see depends on
+your permissions and your edition; the detail for each is in the
+[Tenant Admin Guide](./tenant-admin-guide.md).
 
-This section covers **audit alert rules** — pattern- and threshold-based
-detection over your activity log (failed-login bursts, bulk exports,
-privileged actions). Unlike notification rules that trigger on individual
-events, alert rules can detect patterns, thresholds, and anomalies.
+| Group | Pages | In one line |
+|---|---|---|
+| **Organization** | Overview, Branding | Organization metadata, and white-labelling the console |
+| **Account** | Usage & Limits, Billing | Consumption against plan limits, and (on the commercial editions) the subscription itself |
+| **People & Access** | Members, Roles & Permissions, Security & SSO | Who is in the organization, what each role grants, and how people sign in |
+| **Integrations** | Integrations, AI assistant | Connected systems — CMDB/ITSM, messaging, storage, SIEM — and which AI capabilities are on |
+| **Notifications & Alerts** | Routing Rules, Alert Rules, Delivery History | Which events reach which channel, what raises an alert, and what was actually sent |
+| **Policies** | Compliance Frameworks, Custom Policies, Asset Lifecycle, Retention Policies, Scopes, Classes, Identification rules | The rules the platform applies to your data |
+| **Audit** | Audit | Search and export the full trail of who did what, when |
+| **Infrastructure** | Locations, Network Segments | The physical/cloud location registry and the network boundaries discovery scopes against |
 
-> **Looking for the alert inbox with acknowledge/snooze/resolve buttons and
-> an evidence timeline?** That's a separate, newer capability:
-> **[Remediation → Alerts](../features/remediation.md#alerts)**. It covers
-> stateful conditions across the platform — certificate expiry today, with
-> more alert types planned — each with a full lifecycle (active →
-> acknowledged → snoozed → resolved) and an audit-grade evidence trail. The
-> audit alert rules on this page are a different, narrower mechanism scoped
-> to activity-log patterns; both surfaces route through the same
-> notification channels and rules above.
+Some of these belong to the commercial editions and are simply absent from the
+rail on a Core deployment: **Billing**, **Security & SSO**, **Custom Policies**,
+and SIEM export among the integrations. Core has local users, invitations, roles
+and the free frameworks, with no subscription to manage.
 
-### Alert Rules
+Three pages are worth knowing about as a user even though you may not administer
+them:
 
-#### Accessing Alert Rules
+- **Policies → Scopes** defines the asset boundaries a bill of materials attests
+  to ([Scopes](../features/scopes.md)).
+- **Policies → Classes** browses the asset class taxonomy and the attributes each
+  class carries — which is what the New asset form is built from.
+- **Policies → Identification rules** shows how a new sighting is matched to an
+  existing asset, and whether a high enough match may be accepted without you.
+  That setting is what fills the **Auto-merged by the matcher** section in
+  Approvals.
 
-Navigate to **Organization Settings → Notifications & Alerts → Alert Rules** to manage alert rules.
-
-#### Creating Alert Rules
-
-1. Click **Create Rule**
-2. Configure rule settings:
-   - **Rule Name**: Descriptive name
-   - **Description**: What the rule monitors
-   - **Severity**: critical, high, medium, or low
-   - **Conditions**: When the alert triggers
-   - **Actions**: What happens when triggered
-   - **Cooldown**: Minimum time between alerts
-3. Click **Create**
-
-#### Rule Conditions
-
-Configure what triggers the alert:
-
-**Threshold-Based**
-- Count of events in a time window
-- Example: 5 failed login attempts in 5 minutes
-
-**Pattern-Based**
-- Specific sequence of events
-- Example: User creates asset, then immediately deletes it
-
-**Event Type Filters**
-- Monitor specific event types
-- Example: All asset deletion events
-
-**Failure Detection**
-- Monitor for failed operations
-- Example: Any failed API calls
-
-#### Rule Actions
-
-Configure what happens when an alert triggers:
-
-**Email Notifications**
-- Send to specific recipients
-- Include alert details
-- Link to relevant resources
-
-**Webhooks**
-- Call external HTTP endpoints
-- Send alert payload
-- Custom headers and authentication
-
-**SIEM Forwarding**
-- Forward to configured SIEM system
-- Include full event context
-
-#### Cooldown Period
-
-Set minimum time between alert instances to prevent spam:
-- 5 minutes: For frequently occurring events
-- 15 minutes: Default for most rules
-- 60 minutes: For low-frequency events
-- Custom: Set any duration
-
-#### Example Alert Rules
-
-**Multiple Failed Logins**
-- Condition: 5 failed login attempts in 5 minutes
-- Action: Email security team
-- Severity: High
-
-**Asset Deletion**
-- Condition: Any asset deleted
-- Action: Email administrators
-- Severity: Medium
-
-**High-Severity Changes**
-- Condition: Any critical resource modified
-- Action: Webhook + Email
-- Severity: Critical
-
-### Where Triggered Audit Alerts Go
-
-When an audit alert rule fires, it's delivered as a notification through
-your organization's channels and routing rules (above) — there is currently
-no separate dashboard for browsing and acknowledging *audit* alert
-instances. For a full acknowledge / snooze / resolve workflow with an
-evidence timeline, use **[Remediation → Alerts](../features/remediation.md#alerts)**,
-described in the note above.
+Billing, retention, locations and network segments are administrator work; the
+[Tenant Admin Guide](./tenant-admin-guide.md) covers each.
 
 ---
 
-## SIEM Integration
+## My Profile
 
-> **Enterprise capability.** In Core the `/siem/*` routes are never mounted and
-> audit-event ingestion skips the SIEM tee, so there is no SIEM screen. Core logs
-> every audit event and serves every audit query and export — what Enterprise
-> adds is the outbound forwarding.
+Reached from the profile chip → **My Profile**. Six pages.
 
+### Personal
 
----
+Your identity. Edit **First name**, **Last name** and **Timezone**, and **Save
+changes**. **Upload photo** takes a JPEG, PNG, GIF or WebP up to 5 MB and applies
+it immediately.
 
-## Scheduled Compliance Reports
+**Email** and **Role** are shown but not directly editable: changing your email
+requires confirming a link sent to the new address, and your role is assigned by
+your organization's admins under **Settings → Members**.
 
-> **Enterprise capability.** In Core the scheduler never starts and the
-> `/scheduled-reports` endpoints are not mounted, so there is no Scheduled
-> Reports screen. On-demand compliance reports *are* Core — what Enterprise adds
-> is running them on a schedule and emailing the result.
-
-
-> For ad-hoc audit evidence with cryptographic provenance (content hash), use [CBOM Artifacts](#cbom--exports) instead.
-
----
-
-## Retention Policies
-
-### Overview
-
-Configure how long audit logs are retained in hot (fast access) and cold (archival) storage.
-
-### Accessing Retention Policies
-
-Navigate to **Organization Settings → Policies → Retention Policies** to manage policies.
-
-### Storage Tiers
-
-**Hot Storage**
-- Fast access
-- Recent events
-- Frequent queries
-- Higher cost
-
-**Cold Storage**
-- Archival
-- Older events
-- Infrequent access
-- Lower cost
-
-**Total Retention**
-- Sum of hot + cold
-- Maximum retention period
-- After this, logs are permanently deleted
-
-### Compliance Framework Templates
-
-Pre-configured retention periods based on common compliance requirements:
-
-| Framework | Total Days | Hot Days | Cold Days |
-|-----------|------------|----------|-----------|
-| SOC2      | 365        | 90       | 275       |
-| ISO 27001 | 730        | 90       | 640       |
-| HIPAA     | 2555 (7y)  | 90       | 2465      |
-| PCI DSS   | 365        | 90       | 275       |
-| GDPR      | 730        | 90       | 640       |
-
-### Creating Policies
-
-1. Click **Create Policy**
-2. Configure policy:
-   - **Policy Name**: Descriptive name
-   - **Scope**: Framework-based or event type-based
-   - **Hot Storage Days**: Fast access period
-   - **Cold Storage Days**: Archival period
-3. System calculates total retention
-4. Click **Create**
-
-### Policy Types
-
-**Framework-Based**
-- Apply to all events tagged with framework
-- Use compliance templates
-- Example: All HIPAA-tagged events
-
-**Event Type-Based**
-- Apply to specific event types
-- Custom retention periods
-- Example: user.login events
-
-### Editing Policies
-
-1. Click edit icon on policy card
-2. Modify retention periods
-3. Click **Update**
-4. Changes apply to new events immediately
-
-### Policy Visualization
-
-Each policy shows:
-- Hot storage bar (orange)
-- Cold storage bar (blue)
-- Total retention days
-- Visual percentage breakdown
-
-### Best Practices
-
-**Compliance Requirements**
-- Use framework templates as starting point
-- Verify against your specific requirements
-- Document policy decisions
-
-**Storage Optimization**
-- Keep hot storage minimal for cost efficiency
-- Use cold storage for compliance-required retention
-- Review policies quarterly
-
-**Event-Specific Policies**
-- Create custom policies for high-volume event types
-- Separate security events (longer retention)
-- Separate operational events (shorter retention)
-
----
-
-## Best Practices
-
-### Asset Management
-
-- Regularly review and update asset information
-- Approve discovered assets promptly
-- Add notes for important assets
-- Monitor asset risk levels
-- Review stale assets regularly to keep inventory current
-- Rescan stale assets before removing them to verify they're truly gone
-
-### Discovery
-
-- Schedule regular discovery jobs
-- Review discovery results regularly
-- Approve or deny assets promptly
-- Use bulk actions for efficiency
-
-### Compliance
-
-- Monitor compliance scores regularly
-- Address compliance findings promptly
-- Review compliance reports monthly
-- Keep frameworks up to date
+**Your data → Export** downloads everything the platform holds about you, as a
+file you can keep.
 
 ### Security
 
-- **Use Strong Passwords**: Create unique, complex passwords with at least 12 characters
-- **Prefer SSO**: Use your organization's SSO provider when available for enhanced security
-- **Link SSO Accounts**: Link your account to SSO providers in Profile → Security for seamless authentication
-- **Enable MFA**: Enable Multi-Factor Authentication when available for additional security
-- **Review Account Activity**: Regularly check the Activity Logs for any suspicious sign-ins or actions
-- **Report Suspicious Activity**: Immediately report any unauthorized access or unusual behavior to your tenant administrator
-- **Keep Credentials Private**: Never share your password or SSO credentials with others
-- **Sign Out on Shared Devices**: Always sign out when using shared or public computers
+**Password** — enter your current password, a new one (8 characters minimum) and
+the confirmation, then **Change password**. You may be signed out afterwards and
+have to sign in again.
+
+**Multi-factor authentication** — an authenticator app with backup codes is on the
+roadmap and will be enrolled from here. It is not available yet, and the page says
+so rather than offering a control that does nothing.
+
+**Account status** — whether your account is active, when you joined, and your
+last sign-in.
+
+### Notifications
+
+Covered under [Notifications](#notifications) above.
+
+### Sessions & Devices
+
+Every active session: device, IP address, last active, and when it was signed in.
+Your current session is marked. **Revoke** ends one session; **Revoke other
+sessions** ends every session except the one you are using — the right move after
+signing in somewhere you do not control.
+
+### Connected Accounts
+
+
+On a Core deployment there are no providers to link, so this page has nothing to
+show.
+
+### API Tokens
+
+Personal access tokens for scripts and for the read-only MCP server. **New token**
+creates one: name it, choose its scopes, and copy the value — **the full value is
+shown only once**, so put it in a secret manager immediately.
+
+The table lists name, prefix, scopes, created, expires, last used and status.
+**Revoke** kills a token. Tokens carry a subset of read-only scopes, are owned by
+you, and you may hold up to 25 active at a time. See
+[API Tokens & MCP Server](../features/api-tokens-and-mcp.md).
+
+> **Preferences** and **Accessibility** appear in the design but are not in this
+> build, so they are not listed in the profile rail. Theme is switched from the
+> profile chip menu in the meantime.
 
 ---
 
 ## Troubleshooting
 
-### Cannot Access Assets
+**"I ran a discovery and the inventory did not change."**
+New discoveries wait in **Discovery → Approvals** and are invisible to every lens
+until accepted. Check the pending count on the Inventory header, or **Pending
+approval** on the Dashboard's Inventory Health hero.
 
-1. Check your role permissions
-2. Verify asset filters are not too restrictive
-3. Contact tenant administrator
+**"An asset I know exists is not in the list."**
+Look at the **Query applied** line under the query box. The default scope is
+`status:monitoring`, so anything pending, denied or archived is excluded until
+your query names a status itself. Add `status:pending_approval` (or archived, or
+denied) to see it.
 
-### Discovery Not Working
+**"Two records exist for the same thing."**
+That is what merge proposals are for — check **Approvals**. If no proposal was
+raised, the two records may share no identifier the matcher can compare; add one
+to each from the asset form, and the next sighting should link them. See
+[Asset Approval](../features/asset-approval.md).
 
-1. Check discovery job status
-2. Verify discovery targets are correct
-3. Review discovery logs
-4. Contact tenant administrator
+**"An asset was merged and I did not approve it."**
+Check **Approvals → Auto-merged by the matcher**. If the section is there, your
+organization's auto-accept threshold is above zero. The **Change the threshold**
+link goes to the setting. There is no way to reverse a completed auto-merge from
+that page.
 
-### Reports Not Generating
+**"A sensor shows offline but the process is running."**
+Offline is decided by the heartbeat, not by the stored status. Check the sensor
+drawer's **Health** tab for the last heartbeat and the reporting interval, and
+confirm the host can reach the platform.
 
-1. Check report status
-2. Verify report parameters are valid
-3. Wait for async generation to complete
-4. Contact support if issues persist
+**"Host observations show a large *Shed* count."**
+The segment is busier than the sensor is sized for, so observations are being
+dropped rather than emitted. That is a capacity signal.
+
+**"A compliance control says Not assessed."**
+Nothing was claimed either way. Hover the result for the reason: no measurement
+rule configured, nothing in scope to check, or the check failed. Not-assessed
+controls are excluded from the score entirely.
+
+**"My compliance score has not moved after fixing something."**
+Evaluation is continuous but not instantaneous, and catalogue rule changes take a
+few minutes to propagate. Check **Findings** for whether the finding cleared
+before assuming the score is wrong.
+
+**"A risk score reads 0."**
+Zero means **not assessed** — nothing resolved against the algorithm catalogue and
+no size or lifecycle rule fired. It is not a claim that the thing is safe. The
+**Unscored assets** tile on the Dashboard lists these.
+
+**"My saved views will not load."**
+The menu says so and offers a retry; your views have not been deleted. If the
+query box shows an error, a view can only be saved when the query parses — fix the
+query and save again.
+
+**"I cannot see a page or a button that the documentation describes."**
+Two possibilities. It may be gated by **permission** — your role does not grant
+it, and your administrator assigns roles under Settings → Members. Or it may be
+gated by **edition** — the capability belongs to Enterprise, in which case a deep
+link shows an upgrade card rather than a broken page.
 
 ---
 
 ## Support
 
-For user support:
+- **In-product** — **About** (profile chip) reports the exact version and build
+  you are running. Quote it in any report.
+- **Concepts** — [Concepts](../concepts.md) defines every term this guide uses.
+- **Feature guides** — the [documentation index](../README.md) lists a page per
+  feature; each goes deeper than this guide does.
+- **Administrator tasks** — [Tenant Admin Guide](./tenant-admin-guide.md), and
+  your organization's administrators for access, roles, connected systems,
+  notification channels and anything else under Organization Settings.
 
-- **Documentation**: See [Tenant Admin Guide](./tenant-admin-guide.md)
-- **API Reference**: See [API Documentation](../../../api/)
-- **Tenant Support**: Contact your tenant administrator
-
----
-
-**Last Updated:** 2026-02-09
+When reporting a problem, include what you clicked, what you expected, what you
+saw, and the version from the About page.

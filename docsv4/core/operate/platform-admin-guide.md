@@ -4,12 +4,14 @@ render_macros: false
 
 # Platform Administrator Guide
 
-**Version:** 3.0 (admin-ui v2 rewrite)
-**Last Updated:** 2026-06-24
+**Version:** 4.0 (1.0.0 navigation refresh)
+**Last Updated:** 2026-09-16
 
-This guide is for **platform administrators** — the staff who operate Vista Platform for an organization and its customers. If you run Vista Platform as a white-label provider, *your* admins own everything described here: the tenants, the fleet, the catalog, the packaging, the audit trail.
+This guide is for **platform administrators** — the staff who operate Vista Platform for an organization and its customers. If you run Vista Platform as a white-label provider, *your* admins own everything described here: the tenants, the fleet, the catalog, the packaging, the activity trail.
 
-It documents the rebuilt administration console (admin-ui v2). The console has a single, persistent **left-rail navigation**: top-level sections, with sub-pages indented underneath the active section (there are no in-page tabs). The sections are grouped into three blocks — an ungrouped operations block at the top, then **Platform**, then **Governance**.
+It documents the administration console (admin-ui v2). The console has a single, persistent **left-rail navigation**: top-level sections, with sub-pages indented underneath the active section (there are no in-page tabs). The sections are grouped into three blocks — an ungrouped operations block at the top, then **Platform**, then **Governance**.
+
+**Core vs. paid editions.** A handful of sections belong to a specific edition and simply don't exist in a Core build — their rail entries are hidden and their routes render an edition notice rather than a page whose calls 404. **Tenants** and **Comms** are part of the MSP tenant-lifecycle surface; **Billing & Revenue** is part of the Enterprise+ billing surface. Everything else on this page — Mission Control, Support, Fleet, Jobs & Queues, Plans & Pricing, System Health, Catalog, Settings, Staff & Access, and Security & Trust — ships in every edition, including Core.
 
 ---
 
@@ -18,19 +20,18 @@ It documents the rebuilt administration console (admin-ui v2). The console has a
 1. [Getting Started](#getting-started)
 2. [Mission Control](#mission-control)
 3. [Tenants](#tenants)
-4. [Fleet](#fleet)
-5. [Jobs & Queues](#jobs--queues)
-6. [Billing & Revenue](#billing--revenue)
-7. [Plans & Pricing](#plans--pricing)
-8. [System Health](#system-health)
-9. [Notifications](#notifications)
-10. [Catalog](#catalog)
-11. [Settings](#settings)
-12. [Staff & Access](#staff--access)
-13. [Security](#security)
-14. [Compliance Packages](#compliance-packages)
-15. [Audit](#audit)
-16. [Appendix: Tenant Roles (support reference)](#appendix-tenant-roles-support-reference)
+4. [Support](#support)
+5. [Fleet](#fleet)
+6. [Jobs & Queues](#jobs--queues)
+7. [Billing & Revenue](#billing--revenue)
+8. [Plans & Pricing](#plans--pricing)
+9. [System Health](#system-health)
+10. [Comms](#comms)
+11. [Catalog](#catalog)
+12. [Settings](#settings)
+13. [Staff & Access](#staff--access)
+14. [Security & Trust](#security--trust)
+15. [Appendix: Tenant Roles (support reference)](#appendix-tenant-roles-support-reference)
 
 ---
 
@@ -63,7 +64,7 @@ Access is role-based. Roles and the permissions they carry are managed in **Staf
 - **Platform Administrator** — day-to-day platform and tenant management, excluding the most sensitive billing/settings actions.
 - **Support Administrator** — read-oriented access for assisting tenants.
 
-Permissions are enforced by the services, not just hidden in the UI — a missing permission yields a `403` even on a direct request. The console only shows you the sections and actions your role permits.
+Permissions are enforced by the services, not just hidden in the UI — a missing permission yields a `403` even on a direct request. The console only shows you the sections and actions your role permits, and an edition your build doesn't ship is hidden regardless of role.
 
 ### Navigation structure
 
@@ -71,9 +72,9 @@ The left rail is the spine of the console. Top-level sections in order:
 
 | Block | Sections |
 |---|---|
-| (top) | Mission Control · Tenants · Fleet · Jobs & Queues · Billing & Revenue · Plans & Pricing |
-| **Platform** | System Health · Notifications · Catalog · Settings |
-| **Governance** | Staff & Access · Security · Compliance Packages · Audit |
+| (top) | Mission Control · Tenants · Support · Fleet · Jobs & Queues · Billing & Revenue · Plans & Pricing |
+| **Platform** | System Health · Comms · Catalog · Settings |
+| **Governance** | Staff & Access · Security & Trust |
 
 When a section has sub-pages, selecting it expands them indented in the rail; the first sub-page is the section's default view. The topbar shows the active section's title and a one-line subtitle so you always know where you are.
 
@@ -83,54 +84,27 @@ A command palette (**Cmd/Ctrl + K**) lets you jump to any page by name; it respe
 
 ## Mission Control
 
-**What it's for:** the morning screen — *what's healthy, what's earning, what's running, and what needs you.* It rolls up platform health, revenue, fleet status, and a "needs attention" overview into one page so you can triage before diving into any one area.
+**What it's for:** the morning screen — *what's healthy, what's earning, what's running, and what needs you.* It rolls up service health, fleet status, and a "needs attention" overview into one page so you can triage before diving into any one area. On a build that ships tenant management or billing, the page also surfaces a tenant roster and a revenue hero — those two tiles are edition-gated the same way the sections that own them are; a Core build's Mission Control shows the service-health picture without them.
 
 **Key tasks:**
 
-- Scan overall service health and recent revenue at a glance.
+- Scan overall service health at a glance.
 - Work the "needs you" items — failing services, expiring trials, open security events — each links straight to the section that owns it.
 - Use it as the jumping-off point; it's an index, not a place you do detailed work.
 
 ---
 
-## Tenants
+---
 
-**What it's for:** every customer organization, and the place where the entire **tenant lifecycle** lives. The section opens on a searchable, filterable tenant table; selecting a tenant opens a **detail drawer** with everything about that customer.
+## Support
 
-This is the highest-traffic operational section, so it gets real weight below.
+**What it's for:** the customer-success operator cockpit — **tenant health, impersonation, and job repair**. Three sub-pages:
 
-### Create a tenant
+- **Tenant Health** — per-tenant health scores and the alerts that drive them, so you can spot a customer trending toward churn or trouble before they open a ticket.
+- **Impersonation** — the audit trail of support-impersonation sessions: who impersonated which tenant's user, when, and for how long.
+- **Job Repair** — retry or cancel stuck discovery jobs on a tenant's behalf, without needing database access.
 
-1. From the tenant table, click **Create tenant** (or **New tenant**).
-2. Provide the tenant's identity and starting plan:
-   - **Name** — the organization name.
-   - **Slug / identifier** — URL-friendly handle.
-   - **Tier** — the plan they start on (from your published Tiers — see [Plans & Pricing](#plans--pricing)).
-   - **Admin email** — the person who'll receive the invitation and become the tenant's first administrator.
-3. Save. The tenant administrator receives an invitation to set up their account.
-
-### Edit a tenant
-
-Open the tenant's drawer to review and update its core record — name, identifier, contact, plan/tier, and status. Changes save from the drawer. Switching a tenant's tier here changes the plan they're on; pricing and packaging behavior follows from the tier definition in Plans & Pricing.
-
-### Suspend a tenant
-
-From the drawer's actions, **Suspend** the tenant. Suspended tenants' users lose access to the product until you restore them. Reverse it with the matching **Restore** action. Suspension is the right lever for non-payment holds or security holds where you intend to bring the customer back.
-
-### Delete a tenant
-
-From the drawer's actions, **Delete** removes the tenant. This is destructive and final (as opposed to suspend, which is reversible) — use it for genuine off-boarding, and confirm you have the right tenant first. Prefer **suspend** whenever there's any chance the customer returns.
-
-### Scope to a tenant (support context)
-
-From the tenant drawer you can **scope to the tenant** — enter that tenant's context to assist with a support request and see what they see. The action is logged in the [Audit](#audit) trail with your identity and the reason, the session is time-bounded, and it does not grant the tenant any platform-admin capability. Use it to reproduce a tenant's problem or verify a fix, then exit the scoped context when you're done. Because every scope-to-tenant session is audited (start and end), it's the supportable, accountable way to act on a customer's behalf rather than asking them for credentials.
-
-### Per-tenant tabs in the drawer
-
-The drawer is organized into tabs for the customer's full record:
-
-- **Overview / details** — the editable core record (above), usage at a glance, status.
-- **SSO** — the tenant's single-sign-on configuration.
+**Key tasks:** triage tenant health, review impersonation history, and unstick a discovery job a tenant has reported as hung.
 
 ---
 
@@ -158,33 +132,15 @@ The drawer is organized into tabs for the customer's full record:
 
 ---
 
-## Billing & Revenue
-
-**What it's for:** **money operations** — the RevOps surface. This is revenue and collections, kept deliberately separate from *packaging* (which lives in [Plans & Pricing](#plans--pricing)). Sub-pages in the left rail:
-
-- **Overview** — MRR, ARR, revenue by plan, and invoices. Your top-line revenue picture and invoice list.
-- **Coupons** — create, edit, deactivate, and apply discount codes; review redemptions. You can apply or remove a coupon for a specific tenant from here.
-- **Trials** — trial-conversion analytics: who's in trial, who's converting, who's expiring soon.
-- **Dunning (Payment Recovery)** — past-due invoices and the recovery workflow: review failed payments, trigger retries, and manage suspension/restoration for non-payment.
-- **FinOps** — platform infrastructure cost broken down by service and by tenant, so you can see cost against revenue.
-
-**Key tasks:** track MRR/ARR and revenue mix, run discount campaigns, monitor and recover failed payments, and watch unit economics.
-
-**Deeper billing operations** — Stripe setup, the dunning retry schedule, trial lifecycle, coupon strategy, usage monitoring, and invoice PDFs — have dedicated runbooks (billing is flat per-tier; there is no overage/metered billing):
-
 
 ---
 
 ## Plans & Pricing
 
-**What it's for:** **packaging** — *what you sell and how it's composed.* You define **Entitlements** (the levers), compose them into **Tiers** (the plans you publish), and offer **Add-ons** à la carte. Per-tenant **Plan Exceptions** are the rare, non-billing escape hatch and are granted from the [tenant drawer](#tenants), not here.
+**What it's for:** **packaging** — *what you sell and how it's composed.* This section ships in every edition: browse the **Entitlements** catalogue (the levers), the **Tiers** built from them, and any **Add-ons**, and assign a tenant to a tier. Tier assignment and enforcement work on every edition, so entitlements still resolve correctly on a Core deployment.
 
 Sub-pages: **Entitlements** · **Tiers** · **Add-ons**.
 
-This area has its own authoritative operator guide — it is not duplicated here:
-
-
-(That guide covers the lever catalog, the tier matrix and plan builder, custom/bespoke tiers, add-ons, and exactly when to use a Custom tier vs. a Plan Exception vs. a Catalog → Artifacts → Tenant Override.)
 
 ---
 
@@ -199,23 +155,6 @@ This area has its own authoritative operator guide — it is not duplicated here
 **Key tasks:** confirm all services are healthy, diagnose latency or routing problems, and review what's been alerting.
 
 ---
-
-## Notifications
-
-**What it's for:** how the platform reaches operators and tenants — **channels, rules, announcements, and maintenance windows** for infrastructure, security, and system events. These are platform-level notifications, distinct from any tenant's own channels.
-
-**Key tasks:**
-
-- Configure platform notification **channels** (e.g., chat webhook, email, generic webhook, paging) and test connectivity.
-- Define **rules** that route alerts of a given source/severity to specific channels.
-- Post **announcements** to tenants and schedule **maintenance windows**.
-
-If no platform channels are configured yet, the Notifications page shows a
-prominent warning — platform-level alerts (from monitoring and audit) are
-still recorded but reach nobody until at least one channel and a matching
-routing rule exist. The **bell icon** in the admin console header gives
-platform staff a live in-app feed of these alerts independent of that
-external-channel setup.
 
 ---
 
@@ -239,19 +178,32 @@ The crypto-assessment **source of truth**: the platform-wide table of cryptograp
 
 > A framework's *availability* to tenants is governed by your packaging (a capacity cap on the number of frameworks a tier can activate, set in [Plans & Pricing](#plans--pricing)). Authoring the framework and gating who can activate it are two separate jobs.
 
-### Artifacts
+### End-of-life, Vulnerability feed, and Classification rules
 
-Downloadable binaries (sensor/agent installers and similar) the platform distributes. Indented one level deeper under Artifacts:
+The remaining three catalog pages are covered in full in [Platform catalogues and their feeds](../operate/catalogs.md) — this section only orients you to what each one is, not how to run it.
 
-- **Tenant Overrides** — pin a specific tenant to a specific **artifact/binary version**. ⚠️ This is *version pinning of downloadable artifacts* and is **not** the same thing as a Plan Exception (an entitlement grant). The names are similar; the features are unrelated. Use Tenant Overrides only to control which binary build a tenant gets.
+- **End-of-life** mirrors upstream release-cycle data from [endoflife.date](https://endoflife.date) into three views: the **Catalogue** itself, **Proposals** (AI-proposed rows awaiting your review, Enterprise), and **Gaps** (products the catalogue couldn't answer for, so you know what to add by hand). See [Air-gapped installs: the offline bundle](../operate/catalogs.md#air-gapped-installs-the-offline-bundle) if your deployment has no internet access, and [Filling gaps in the end-of-life catalogue](../operate/catalogs.md#filling-gaps-in-the-end-of-life-catalogue) for working the gap list.
+- **Vulnerability feed** mirrors CVE data from [NVD](https://nvd.nist.gov) and [OSV](https://osv.dev), and reports the health of both feeds — see [The feeds](../operate/catalogs.md#the-feeds) for the mirror mechanics, rate limits, and attribution requirements.
+- **Classification rules** are the fingerprint rules (OUI, sysObjectID, cloud type, banner, model, platform) behind every class proposal a discovery produces — see [Classification rules](../operate/catalogs.md#classification-rules) for what a rule looks like and how precedence is resolved when two rules disagree.
+
+All three are gated on the platform permission `catalogs.manage`, separate from the `algorithms.manage` permission the two sections above use, since curating crypto ratings and re-pointing the platform at a vulnerability source are different trust decisions.
 
 ---
 
 ## Settings
 
-**What it's for:** platform-wide configuration: **email, limits, and security**. This is the operator's control panel for cross-cutting defaults — outbound email setup, platform/tenant limits and rate caps, file-upload limits, registration toggles, session and password policy, storage backends, and related security knobs.
+**What it's for:** platform-wide configuration — email delivery, self-service sign-up, white-labeling, legal documents, identity providers, and outbound notification delivery. Six sub-pages:
 
-**Key tasks:** wire up email delivery, configure object storage for artifacts/branding, set platform-wide limits and rate controls, and configure authentication/session policy. Changes apply platform-wide, so review before saving. (Object-storage backends for artifacts and branding are configured here; see the deployment docs for the underlying S3/bucket setup.)
+- **Email** — SMTP configuration for invitations, password resets, and onboarding mail.
+- **Access & Sign-up** — self-service sign-up and email-verification gates for new organizations.
+- **Branding** — white-label the platform: product name, logos, and favicon.
+- **Legal** — author and version your Terms of Service and Privacy Policy.
+- **Identity Providers** — the platform's own Google / Microsoft OAuth apps, used for social sign-up.
+- **Notification Delivery** — the platform-level notification channels (chat webhook, email, generic webhook, paging), the routing rules that send alerts of a given source/severity to them, and delivery history. These are platform-level notifications — from monitoring and security — distinct from any tenant's own channels.
+
+**Key tasks:** wire up email delivery, configure self-service sign-up policy, white-label the console, keep your legal documents current, connect an identity provider for social sign-up, and configure where platform alerts go.
+
+If no platform notification channels are configured yet, the Notification Delivery page shows a prominent warning — platform-level alerts (from monitoring and security) are still recorded but reach nobody until at least one channel and a matching routing rule exist. The **bell icon** in the admin console header gives platform staff a live in-app feed of these alerts independent of that external-channel setup.
 
 ---
 
@@ -265,43 +217,23 @@ The list of platform (internal) admin users. From here you **invite/create** a p
 
 ### Roles
 
-The platform **roles and their permissions**. Create, edit, and delete roles, and tune exactly which permissions each role grants. Because every section and action in this console is permission-gated, Roles is where you implement least-privilege for your team — e.g., a support role that can scope-to-tenant and read audit logs but can't touch packaging or billing.
+The platform **roles and their permissions**. Create, edit, and delete roles, and tune exactly which permissions each role grants. Because every section and action in this console is permission-gated, Roles is where you implement least-privilege for your team — e.g., a support role that can scope-to-tenant and read the activity trail but can't touch packaging or billing.
 
 **Key tasks:** onboard/offboard platform staff, assign least-privilege roles, and adjust role definitions as your team's responsibilities change.
 
 ---
 
-## Security
+## Security & Trust
 
-**What it's for:** the platform's security posture and policy. Sub-pages:
+**What it's for:** the consolidated "are we trustworthy" home — posture, the platform-wide activity trail, and the outbound integrations and retention controls around it. Five sub-pages:
 
 - **Dashboard** — security events, anomalies, and overall posture across the platform.
+- **Activity Log** — the full platform-wide activity trail: user and system actions across platform and tenants. Filter by tenant, user, event type, status, and date range to investigate an incident or answer a "who changed this?" question. Scope-to-tenant sessions and other sensitive operator actions land here. Export the filtered set to CSV or JSON.
+- **Retention** — log **retention and archival** policies: how long activity is kept hot vs. archived. Set these to match the compliance regimes you operate under; longer retention typically means tiered/archived storage rather than indefinite hot storage.
+- **SIEM Export** — outbound **SIEM forwarding**: stream the activity trail to your external security tooling (Splunk, Datadog, Elasticsearch, etc.) for correlation and long-term analysis. Configure and verify the forwarding integration here.
 - **Policy** — platform security and authentication settings (the policy that governs how the platform itself is secured): registration toggles, email-verification requirement, password policy, and session/lockout controls.
 
-**Key tasks:** monitor security events, investigate anomalies, and set platform-level security/authentication policy.
-
----
-
-## Compliance Packages
-
-**What it's for:** assembling **auditor evidence bundles** — packaged compliance artifacts you can hand to an auditor or customer to demonstrate the platform's compliance posture.
-
-**Key tasks:** generate and manage evidence packages for audits and customer due-diligence requests.
-
----
-
-## Audit
-
-**What it's for:** the **platform-wide activity trail** and everything built on top of it — the system of record for who did what, and the outbound integrations and retention controls around it. This is a Governance cornerstone, so it gets real weight. Sub-pages:
-
-- **Activity** — the full platform-wide activity log: user and system actions across platform and tenants. Filter by tenant, user, event type, status, and date range to investigate an incident or answer a "who changed this?" question. Scope-to-tenant sessions and other sensitive operator actions land here. Export the filtered set to CSV or JSON.
-- **Alerts** — audit alerts that have triggered (e.g., a watched event occurred).
-- **Alert Rules** — configure which audit events raise an alert. This is how you turn the raw trail into proactive signals (e.g., alert on privileged-role changes or repeated failures).
-- **SIEM** — outbound **SIEM forwarding**: stream the audit trail to your external security tooling (Splunk, Datadog, Elasticsearch, etc.) for correlation and long-term analysis. Configure and verify the forwarding integration here.
-- **Retention** — log **retention and archival** policies: how long activity is kept hot vs. archived. Set these to match the compliance regimes you operate under; longer retention typically means tiered/archived storage rather than indefinite hot storage.
-- **Compliance** — audit compliance reporting built from the trail.
-
-**Key tasks:** investigate activity, codify watch-for events into alert rules, forward the trail to your SIEM, and set retention to satisfy your compliance obligations.
+**Key tasks:** monitor security events and investigate anomalies, search and export the activity trail, set retention to satisfy your compliance obligations, forward the trail to your SIEM, and set platform-level security/authentication policy.
 
 ---
 
@@ -330,4 +262,5 @@ Permissions are enforced by the services, not just the UI — a tenant user with
 ## See also
 
 - **Money operations:** Billing & Revenue (in this console) for invoices, coupons, dunning, trials, and FinOps; deeper runbooks in [operations/](operations/) and [troubleshooting/](troubleshooting/).
+- **Platform catalogues:** [Platform catalogues and their feeds](catalogs.md) for the End-of-life, Vulnerability feed, and Classification rules pages.
 - **Tenant-side documentation:** the [Tenant Administrator Guide](../guides/tenant-admin-guide.md).

@@ -20,11 +20,12 @@ is proposed as.
 All five are **Core** — free, present in every edition, with no entitlement to
 check.
 
-> **What these catalogues do today.** They hold reference data and nothing reads
-> them against your inventory yet. Matching an asset's OS and installed software
-> against these rows — and raising end-of-life and known-vulnerability findings
-> from the match — is the next slice of work. Until it lands, the pages below are
-> a browsing and operations surface, not a source of findings.
+Every tenant's inventory is matched against these catalogues nightly (and
+after an SBOM upload): an asset's OS and hardware resolve against the
+end-of-life catalogue, and its installed software resolves against the
+vulnerability catalogue, raising end-of-life and known-vulnerability findings
+when there's a match. See [Findings](../features/findings.md) for what those
+look like and how to triage them.
 
 ## Who can see and change them
 
@@ -238,13 +239,12 @@ onto a **vendor** and, where the mapping is unambiguous, an **asset class**.
 Every rule produces a *proposal* that goes through Approvals. Nothing on this
 page classifies anything on its own.
 
-> **What this page does today.** The rules that ship with the platform are
-> already used — the collectors consult them when an interrogation identifies a
-> device. Rules you **add or edit here do not take effect yet**: the classifier
-> reads the shipped set, and reading your curated rows back at run time is the
-> next slice of work, landing alongside class proposals in Approvals. Until it
-> does, treat this page as the place to *review* what the platform believes and
-> to stage your own rules, not as a live control.
+> **Rules you add or edit here go live within about five minutes.** The
+> classification service rebuilds its in-memory rule set on an interval
+> (`CLASSIFICATION_RULES_REFRESH`, default `5m`) rather than only at the next
+> release, so a rule you save here starts affecting new class proposals shortly
+> after — no redeploy needed. A rule that fails validation is skipped (and
+> logged by name); the rest of the table keeps working.
 
 ### What a rule looks like
 
@@ -310,9 +310,9 @@ disagreement: one is a refinement of the other, and the more specific class wins
 
 **Add rule** opens the form. The pattern box shows what that kind expects, and
 the server validates against exactly the rules the classifier applies — so a
-rule that saves is a well-formed rule, not one the engine will later refuse. (It
-will not fire until the classifier reads this table at run time; see the note
-above.) If it is rejected, the message names what to change.
+rule that saves is a well-formed rule, not one the engine will later refuse. It
+starts proposing classes within about five minutes (see the note above). If it
+is rejected, the message names what to change.
 
 Two things are worth knowing before you edit or delete:
 

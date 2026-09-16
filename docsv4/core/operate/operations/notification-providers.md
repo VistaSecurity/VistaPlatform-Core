@@ -32,7 +32,7 @@ The unified notification service supports multiple notification channels:
 2. **Create New App**:
    - Click "Create New App"
    - Choose "From scratch"
-   - Enter app name (e.g., "Crypto Inventory Alerts")
+   - Enter app name (e.g., "Vista Platform Alerts")
    - Select your workspace
    - Click "Create App"
 
@@ -50,7 +50,7 @@ The unified notification service supports multiple notification channels:
 
 #### For Platform Administrators
 
-1. Navigate to **Operations** → **Notifications & Alerts** → **Channels**
+1. Navigate to **Settings → Notification Delivery** in the admin console
 2. Click **Add Channel**
 3. Configure:
    - **Channel Name**: "Platform Alerts" (or descriptive name)
@@ -63,24 +63,26 @@ The unified notification service supports multiple notification channels:
 
 #### For Tenant Administrators
 
-1. Navigate to **Settings** → **Notifications** → **Channels**
+1. Navigate to **Settings → Integrations** in the tenant app
 2. Click **Add Channel**
 3. Configure as above
 4. Test and save
 
 ### Step 3: Create Notification Rules
 
-After creating the channel, create rules to route alerts:
+After creating the channel, create rules to route alerts. For a tenant
+administrator, rules are under **Settings → Notifications & Alerts → Routing
+Rules**; for a platform administrator, routing rules live alongside channels on
+**Settings → Notification Delivery**.
 
-1. Navigate to **Notifications** → **Rules**
-2. Click **Add Rule**
-3. Configure:
+1. Click **Add Rule**
+2. Configure:
    - **Rule Name**: "Critical Alerts to Slack"
    - **Alert Source**: Select source (monitoring, discovery, etc.)
    - **Channels**: Select your Slack channel
    - **Severity Filter**: Select severities (e.g., critical, high)
    - **Frequency**: Immediate
-4. Enable and save
+3. Enable and save
 
 ### Message Format
 
@@ -191,20 +193,20 @@ Slack notifications are sent as formatted message blocks:
 
 ### Step 2: Configure Platform Email (Platform Admins)
 
-1. Navigate to **Platform Administration** → **Platform Settings** → **Email Configuration**
+1. Navigate to **Settings → Email** in the admin console
 2. Configure SMTP settings:
    - **SMTP Host**: Your provider's SMTP host
    - **SMTP Port**: `587` (TLS) or `465` (SSL)
    - **SMTP Username**: Your SMTP username
    - **SMTP Password**: Your SMTP password (encrypted in database)
    - **From Email**: Verified sender address
-   - **From Name**: Display name (e.g., "Crypto Inventory Platform")
+   - **From Name**: Display name (e.g., "Vista Platform")
 3. Test configuration
 4. Save settings
 
 ### Step 3: Configure Tenant Email Channel
 
-1. Navigate to **Settings** → **Notifications** → **Channels**
+1. Navigate to **Settings → Integrations** in the tenant app
 2. Click **Add Channel**
 3. Configure:
    - **Channel Name**: "Email Alerts"
@@ -280,7 +282,8 @@ app.post('/webhook/alerts', (req, res) => {
 
 ### Step 2: Configure Webhook Channel
 
-1. Navigate to **Notifications** → **Channels**
+1. Navigate to **Settings → Integrations** (tenant app) or **Settings →
+   Notification Delivery** (admin console)
 2. Click **Add Channel**
 3. Configure:
    - **Channel Name**: "Custom Webhook"
@@ -370,7 +373,7 @@ Webhooks receive notifications in this format:
    - Click "Integrations" tab
    - Click "New Integration"
    - Select "Events API v2"
-   - Enter integration name (e.g., "Crypto Inventory Platform")
+   - Enter integration name (e.g., "Vista Platform")
    - Click "Add Integration"
 
 4. **Copy Integration Key**:
@@ -379,7 +382,8 @@ Webhooks receive notifications in this format:
 
 ### Step 2: Configure in Platform
 
-1. Navigate to **Notifications** → **Channels**
+1. Navigate to **Settings → Integrations** (tenant app) or **Settings →
+   Notification Delivery** (admin console)
 2. Click **Add Channel**
 3. Configure:
    - **Channel Name**: "PagerDuty Critical"
@@ -400,7 +404,8 @@ PagerDuty severity mapping:
 
 ### Step 4: Create Rules for Critical Alerts
 
-1. Navigate to **Notifications** → **Rules**
+1. Navigate to **Settings → Notifications & Alerts → Routing Rules** (tenant
+   app) or **Settings → Notification Delivery** (admin console)
 2. Create rule:
    - **Rule Name**: "Critical to PagerDuty"
    - **Alert Source**: Select source

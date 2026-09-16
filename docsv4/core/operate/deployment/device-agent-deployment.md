@@ -275,6 +275,10 @@ Currently supported:
 
 ### Host inventory: local and remote modes
 
+> The tenant-facing view of this — what it collects, what the result becomes,
+> and where it shows up in the console — is
+> [Host Inventory](../../features/host-inventory.md).
+
 Beyond interrogating network devices, the agent can build a general inventory of
 a **host** — its operating system and kernel, hardware identity, installed
 packages, listening sockets, and installed certificate stores. One collector,
@@ -645,71 +649,6 @@ To update the agent:
 4. Restart agent
 
 The agent will automatically re-register with the platform if needed.
-
-## Building and Uploading Binaries (Platform Administrators)
-
-For platform administrators who need to build and upload device-agent binaries:
-
-### Prerequisites
-
-- Go 1.26+ installed
-- AWS credentials configured (for S3 upload)
-- S3 bucket: `crypto-inventory-artifacts` (or set `S3_ARTIFACTS_BUCKET` env var)
-
-### Build Process
-
-```bash
-# Build binaries for all supported platforms
-make device-agent-all-platforms
-
-# Stamp a release version into the binaries (reported at registration and
-# shown in the UI). Without AGENT_VERSION the binary reports "dev".
-make device-agent-all-platforms AGENT_VERSION=v0.5.1
-
-# This creates binaries in artifacts/device-agent/{os}/{arch}/device-agent
-# Supported platforms:
-# - linux/amd64
-# - linux/arm64
-# - windows/amd64
-# - darwin/amd64 (macOS Intel)
-# - darwin/arm64 (macOS Apple Silicon)
-```
-
-### Upload to S3
-
-```bash
-# Upload latest version
-make device-agent-upload
-
-# Upload with a specific version tag
-make device-agent-upload DEVICE_AGENT_VERSION=v1.0.0
-
-# Dry run (preview what would be uploaded, without the Makefile's build step)
-go run scripts/upload-device-agent-artifacts.go -artifacts-dir artifacts/device-agent -dry-run
-```
-
-### S3 Structure
-
-Binaries are uploaded to:
-```
-s3://crypto-inventory-artifacts/device-agents/{version}/{os}/{arch}/device-agent
-```
-
-For example:
-- `s3://crypto-inventory-artifacts/device-agents/latest/linux/amd64/device-agent`
-- `s3://crypto-inventory-artifacts/device-agents/v1.0.0/windows/amd64/device-agent.exe`
-
-### Distribution
-
-The platform does not serve device-agent binaries over HTTP — there is no
-download endpoint. Operators distribute the uploaded S3 objects (or the signed
-GitHub Release assets) to their target hosts themselves.
-
-### Version Management
-
-- `latest` - Always points to the most recent version
-- Version tags (e.g., `v1.0.0`) - Specific versioned releases
-- SHA256 hashes stored in S3 metadata for integrity verification
 
 ## Support
 

@@ -1,209 +1,223 @@
 # Asset Lifecycle Management
 
-The Asset Lifecycle Management feature enables automatic detection and management of stale assets, ensuring inventory stays current and providing users with control over asset lifecycle decisions.
+An inventory that only ever grows is not an inventory. Things get
+decommissioned, moved, replaced and forgotten, and unless something notices they
+have gone quiet, your asset list slowly becomes a list of what you *used* to
+have — with compliance scores and risk counts computed over ghosts.
 
-## Overview
+Asset lifecycle management is how the platform notices. It watches when each
+asset was last observed, tells you which ones have gone quiet, and gives you the
+four things you can do about one: **rescan it**, **archive it**, **delete it**,
+or **restore it**.
 
-Asset Lifecycle Management allows tenants to:
-- Automatically detect assets that haven't been seen recently
-- Configure thresholds for stale asset warnings and archiving
-- Review stale assets in a dedicated management modal
-- Rescan assets to verify if they're still alive
-- Soft delete assets (remove from active inventory, preserve for reporting)
-- Hard delete assets (permanent removal, admin-only)
-- Configure lifecycle policies per tenant
+## Where it lives
 
-## Workflow
+| What | Where |
+|---|---|
+| The list of quiet assets, and the actions on them | **Inventory → Stale** |
+| The thresholds and the automatic behaviour | **Settings → Policies → Asset Lifecycle** |
+| Delete and restore for one asset | The asset's drawer, reached from a certificate, key or configuration row |
 
-### 1. Automatic Stale Detection
+Stale is a **lens** on the one inventory, not a separate screen — the same data,
+cut to the assets nothing has seen recently. Its address is
+`/inventory?lens=stale`, so you can bookmark it or send it to someone.
 
-A background job runs daily (configurable) to detect stale assets:
-- Queries all assets where `last_seen_at` exceeds configured thresholds
-- Updates `stale_status` to `warning` or `archived` based on policy
-- Sends notifications if enabled
+## What "stale" means
 
-**Default Thresholds:**
-- **Warning**: 30 days since `last_seen_at`
-- **Archived**: 60 days since `last_seen_at`
+**Nothing has observed this asset for more than 30 days.**
 
-These defaults apply to **every** tenant, including one that has never opened
-Settings and saved a lifecycle policy — you do not have to configure anything to
-get stale detection. Saving a policy overrides the defaults; clearing
-**Auto Archive Enabled** opts a tenant out of archiving entirely, and that
+That is a claim about your *coverage*, not about the asset. A host behind a
+firewall your sensors cannot reach is stale on its first day of life; a
+decommissioned host is stale because it is genuinely gone. The platform cannot
+tell those apart from silence alone, which is exactly why the lens exists — the
+list is a question to answer, not a verdict to act on blindly.
+
+Individual **endpoints** go stale on the same 30-day boundary, shown on the
+asset's Services & Endpoints tab. An endpoint is only ever marked **closed** by
+something that actually connected and found nothing listening; time alone never
+closes one, because a measurement should not be overruled by a calendar.
+
+The same 30 days is the first rung of the inventory-hygiene finding ladder and
+the threshold in the seeded Inventory Hygiene framework, so the lens, the
+finding and the compliance control all mean the same thing by the word. Findings
+escalate at **30**, **90** and **180** days.
+
+## The Stale lens
+
+Each row shows the asset, its class, its network segment, its status and how many
+days it has been quiet. Click a row to open the asset's page.
+
+**On each row**, at the right:
+
+- **Rescan** — queue a revalidation job for that one asset.
+- **Archive** — move it to archived.
+
+**Above the table**, a bar that acts on every stale asset on the page you are
+looking at:
+
+- **Revalidate all** — queue revalidation for all of them.
+- **Archive all** — archive all of them, after a confirmation that spells out how
+  many and what archiving does.
+
+There is no row-selection checkbox. The bar acts on the current page — up to 50
+assets — which is why it tells you how many that is before you click. To work
+through a long list, act on a page and move to the next one.
+
+Both bars require the **update assets** permission; without it they are not
+shown.
+
+### Rescan and revalidate
+
+Both queue the same work: the platform re-probes the asset's endpoints using the
+ordinary discovery machinery. If something answers, `last seen` moves forward and
+the asset drops out of the lens on the next pass. If nothing answers, the asset
+stays where it is — which is itself an answer, and the second one you get for
+free.
+
+A rescan becomes an ordinary discovery job, so it turns up under **Discovery →
+Discovery Jobs** with everything else and you can watch it run there. A large
+selection may be dispatched as several jobs.
+
+### Archive
+
+Archiving takes an asset out of active inventory and out of reporting, without
+deleting anything. Discovery can bring it back on its own if the thing turns out
+to still be there.
+
+Use it when you are fairly sure something is gone but not ready to say so
+permanently.
+
+## Delete and restore
+
+These live on the **asset drawer** — the quick-look panel that slides in when you
+click through to an asset from one of the cryptography lenses. They act on one
+asset that is already in front of you, which is the point: a one-click bulk
+delete of a page of rows is not something anyone should be offered.
+
+The drawer header shows whichever of these apply to the asset you are looking at:
+
+- **Delete** asks you to confirm, then soft-deletes: the asset leaves active
+  inventory but the record is kept, and it can be restored. Requires the **delete
+  assets** permission. Not offered on an asset that is already deleted.
+- **Restore** brings a soft-deleted or archived asset back to active inventory.
+  Requires the **update assets** permission. Offered only on a deleted or
+  archived asset.
+- **Active Scan** probes the asset now and catalogues what it finds — faster than
+  waiting for the next scheduled sweep when you just want to know whether
+  something is still alive. Offered only on a live asset.
+- **Edit** opens the asset form. Also on the asset page.
+- **Open full page** hops from the peek to the whole record.
+
+> Clicking a row on **All assets** or **Stale** takes you straight to the asset
+> *page*, which carries **Edit** but not delete, restore or active scan. To reach
+> those, open the asset through a certificate, key or configuration row — or use
+> the Stale lens's own Rescan and Archive actions, which cover the same ground
+> for a quiet asset.
+
+### Permanent deletion
+
+There is a **permanent delete** operation — it removes the asset row and its
+crypto configurations for good, with no restore — but it is reachable only
+through the API (`DELETE /api/v1/inventory-service/assets/:id/hard`), not from
+any button. It requires the **manage assets** permission.
+
+Everything the console offers you is reversible. If you need the irreversible
+version, you have to ask for it deliberately.
+
+## The lifecycle policy
+
+**Settings → Policies → Asset Lifecycle**
+
+| Setting | Default | What it does |
+|---|---|---|
+| **Stale warning** | 30 days | Days since last seen before an asset is flagged stale. |
+| **Auto-archive after** | 60 days | Days since last seen before a stale asset is archived automatically. Must be greater than the warning threshold. |
+| **Auto-archive stale assets** | On | The master switch for the automatic pass. Turn it off and nothing ages by itself — no warning flag, no archiving. The Stale lens still lists quiet assets and its actions still work; the decisions just become yours. |
+| **Stale notifications** | On | Records your preference. Stale assets surface in the Stale lens and as inventory-hygiene findings; no message is sent for them today. |
+
+**The defaults apply whether or not you have ever opened this page.** A tenant
+that has never saved a policy still gets 30/60 with auto-archive on. Saving a
+policy overrides the defaults; turning auto-archive off opts you out, and that
 opt-out is honoured.
 
-### 2. Review Stale Assets
+A background pass runs daily. It walks every tenant that has assets, reads that
+tenant's effective policy, and moves assets to warning or archived accordingly.
 
-**UI:** Navigate to Assets → Stale Assets
+### The drift baseline window
 
-**API:** `GET /api/v1/inventory-service/assets/stale`
+The same page carries one more setting, which is about change rather than
+silence.
 
-The stale assets modal displays:
-- Hostname, IP address, port
-- Stale status (warning/archived)
-- Days since last seen
-- Last seen timestamp
+**Drift baseline** is how far back the platform looks when deciding that
+something is *new*. A device class, a protocol, a listening port or a certificate
+issuer first seen inside the window is reported as drift; once it has been there
+for a full window it becomes part of the baseline and the finding closes.
 
-**Filtering:**
-- Filter by status: All, Warning, Archived
-- Pagination support
+Nothing is reported as drift until your organization has been observed for a full
+window — a new tenant is never told that everything it owns is new.
 
-### 3. Manage Stale Assets
+Changing it needs the **update settings** permission; everyone with settings
+access can see it.
 
-Users can take the following actions on selected assets:
-
-#### Rescan Assets
-**UI:** Select assets → Click "Rescan Selected"
-
-**API:** `POST /api/v1/inventory-service/assets/stale/rescan`
-
-Creates a discovery job targeting the selected assets to verify if they're still alive:
-- If found: Updates `last_seen_at` and clears `stale_status`
-- If not found: Keeps `stale_status`, notifies user
-
-#### Archive Assets
-**UI:** Select assets → Click "Archive Selected"
-
-**API:** `POST /api/v1/inventory-service/assets/stale/archive`
-
-Archives selected assets without removing them from inventory:
-- Moves assets from `warning` to `archived` status
-- Assets remain visible with an "Archived" badge
-- Use this as an intermediate step before removal when you want to flag assets as inactive but retain them for reference
-- Requires `assets.manage` permission
-
-#### Remove from Inventory (Soft Delete)
-**UI:** Select assets → Click "Remove from Inventory"
-
-**API:** `DELETE /api/v1/inventory-service/assets/:id`
-
-Soft deletes assets by setting `deleted_at`:
-- Assets are removed from active inventory
-- Assets are preserved for reporting and historical data
-- Can be restored if needed
-
-#### Permanently Delete (Hard Delete)
-**UI:** Select assets → Click "Permanently Delete" (admin-only)
-
-**API:** `DELETE /api/v1/inventory-service/assets/:id/hard`
-
-Permanently deletes assets from the database:
-- Requires `assets.hard_delete` permission (admin-only)
-- Cannot be undone
-- Removes asset and associated crypto configurations
-
-### 4. Configure Lifecycle Policy
-
-**UI:** Navigate to Organization Settings → Asset Lifecycle
-
-**API:**
-- `GET /api/v1/inventory-service/lifecycle/policy` - Get current policy
-- `PUT /api/v1/inventory-service/lifecycle/policy` - Update policy
-
-**Policy Settings:**
-- **Stale Warning Days**: Days before marking as warning (default: 30)
-- **Stale Archived Days**: Days before auto-archiving (default: 60)
-- **Auto Archive Enabled**: Automatically archive stale assets (default: true)
-- **Notifications Enabled**: Send notifications for stale assets (default: true)
-- **Revalidation Schedule**: Configure automatic re-validation (future enhancement)
-
-## Stale Status Visibility in the Asset Table
-
-Assets with a stale status display inline badges in the **Status** column of the asset management table:
-
-- **`Stale Xd`** (yellow badge, ⚠ icon) — Asset has `stale_status: warning`. The `Xd` shows days since last seen (e.g., "Stale 32d").
-- **`Archived`** (orange badge) — Asset has `stale_status: archived`.
-
-These badges appear alongside the normal asset status (monitoring, pending approval, etc.) so you can identify stale assets without opening the Stale Assets modal.
-
-## Asset Status Flow
+## How an asset moves through the states
 
 ```
-monitoring → (30 days) → warning → (60 days) → archived (automatic)
-                              ↓
-                     Archive Selected (manual)
-                              ↓
-                           archived
-                              ↓
-                    Remove from Inventory (soft delete)
-                              ↓
-                          deleted_at set
-                              ↓
-               Permanently Delete (hard delete, admin-only)
+monitoring
+   │  nothing observes it for the warning threshold (default 30 days)
+   ▼
+stale (warning)                      ← shown in Inventory → Stale
+   │  ├─ Rescan / Revalidate → something answers → back to monitoring
+   │  └─ nothing answers
+   │     and auto-archive is on, at the archive threshold (default 60 days)
+   ▼
+archived                             ← out of active inventory and reporting
+   │  ├─ Restore (asset drawer) → back to active inventory
+   │  └─ Delete (asset drawer)
+   ▼
+soft-deleted                         ← record kept, restorable
+   │
+   ▼
+permanently deleted                  ← API only, not reversible
 ```
 
-**Status Values:**
-- `monitoring` - Active asset being monitored
-- `warning` - Asset hasn't been seen in X days (configurable)
-- `archived` - Asset hasn't been seen in Y days (configurable, Y > X)
-- `deleted_at` set - Soft deleted, preserved for reporting
-- Hard deleted - Permanently removed from database
+You can skip steps in either direction. Archive something on day one if you know
+it is gone; restore something from archived years later if it comes back.
 
-## Re-validation
+## Reading the lens honestly
 
-Re-validation uses the existing discovery infrastructure:
-- Creates discovery jobs targeting existing assets
-- Extracts IP addresses/hostnames from asset inventory
-- Uses same discovery job system as new asset discovery
-- Results update `last_seen_at` and clear `stale_status` if found
+- **A long stale list on a new deployment is usually a coverage problem, not a
+  decommissioning backlog.** Check that the segments those assets live in are
+  actually being scanned before you archive a few hundred rows.
+- **Rescan before you archive.** It costs one click per page and it turns a guess
+  into a measurement.
+- **Prefer archive over delete, and delete over permanent delete.** Each step
+  keeps less. Nothing you archive is lost; almost nothing you soft-delete is.
+- **An asset that has never been seen at all is not stale.** Staleness is computed
+  from the last observation, so a record with no observation to date is absent
+  from this lens rather than at the top of it — look for it under Risk → Not
+  assessed instead.
 
-**API:** `POST /api/v1/inventory-service/assets/revalidate`
+## When something looks wrong
 
-## Permissions
+**Assets are not being flagged stale.** Check **Settings → Policies → Asset
+Lifecycle**: if the warning threshold has been raised, or auto-archive turned
+off, the pass may be doing exactly what you told it. Then check that `last seen`
+on a sample asset is actually old — an asset a sensor keeps re-observing is not
+stale however dead the service on it is.
 
-- **View Stale Assets**: `assets.read` or `assets.manage`
-- **Rescan Assets**: `assets.manage`
-- **Archive Assets**: `assets.manage`
-- **Soft Delete**: `assets.delete` or `assets.manage`
-- **Hard Delete**: `assets.hard_delete` (admin-only: `billing_admin`, `tenant_admin`)
+**Rescan finds nothing.** Confirm the asset is reachable from a sensor in its
+segment at all, and find the job under **Discovery → Discovery Jobs**. A rescan
+that cannot get a packet to the host reports the same silence as a host that is
+gone.
 
-## Notifications
+**The archive count seems too small.** The daily pass takes assets in order of
+how long they have been quiet and works through a bounded batch, so a very large
+backlog clears over several nights rather than in one.
 
-When enabled, notifications are sent for:
-- Assets becoming stale (warning status)
-- Assets being auto-archived
-- Re-validation completion (if assets still not found)
+## Related
 
-**Configuration:** Organization Settings → Asset Lifecycle → Notifications Enabled
-
-## Best Practices
-
-1. **Set Appropriate Thresholds**: Adjust warning/archived days based on your network characteristics
-2. **Regular Re-validation**: Periodically rescan stale assets before removing them
-3. **Review Before Deleting**: Always review stale assets before permanent deletion
-4. **Use Soft Delete First**: Prefer soft delete to preserve historical data
-5. **Monitor Notifications**: Enable notifications to stay informed about stale assets
-
-## Limitations
-
-- Maximum 1000 assets per revalidation job
-- Background job runs daily (configurable via `STALE_ASSET_DETECTION_INTERVAL`)
-- Hard delete requires admin permissions
-- Re-validation uses existing discovery infrastructure (subject to discovery job limits)
-
-## Troubleshooting
-
-### Assets Not Being Detected as Stale
-
-- Verify lifecycle policy exists for tenant
-- Check `auto_archive_enabled` is true
-- Verify `last_seen_at` timestamps are accurate
-- Check background job is running (inventory-service logs)
-
-### Re-validation Not Finding Assets
-
-- Verify assets are still on the network
-- Check discovery job status
-- Verify IP addresses/hostnames are correct
-- Check network connectivity
-
-### Hard Delete Fails
-
-- Verify user has `assets.hard_delete` permission
-- Check user role is `billing_admin` or `tenant_admin`
-- Verify asset exists and belongs to tenant
-
-## Related Documentation
-
-- [Discovery Feature](./discovery.md) - Asset discovery and re-validation
-- [Asset Approval Workflow](./asset-approval.md) - Asset approval process
+- [Inventory and lenses](./inventory-and-lenses.md) — the Stale lens in its place among the rest
+- [Discovery](./discovery.md) — what does the observing
+- [Asset approval](./asset-approval.md) — how assets get into inventory in the first place
+- [Findings](./findings.md) — the inventory-hygiene findings staleness raises
+- [Operational context](./operational-context.md) — locations and network segments

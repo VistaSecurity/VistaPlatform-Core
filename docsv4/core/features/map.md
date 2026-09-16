@@ -147,7 +147,7 @@ The third of those is the one to read first. It tells you whether the tree below
 Under them, the tree:
 
 - **Site** — each site you have recorded, and an explicit **Unassigned** node for everything that has none. Sites are read from the asset's own site field, falling back to a `location.site` or `site` tag, so an estate labelled by a CMDB import groups correctly.
-- **Segment** — each [network segment](./network-spaces.md) within the site, and an explicit **Unsegmented** node for assets that belong to none. The unsegmented node is drawn in a lighter style, because it is an absence rather than something somebody drew.
+- **Segment** — each [network segment](./operational-context.md) within the site, and an explicit **Unsegmented** node for assets that belong to none. The unsegmented node is drawn in a lighter style, because it is an absence rather than something somebody drew.
 - **Class** — expand a segment and you get one chip per [asset class](./inventory-and-lenses.md) present in it, coloured the same way the neighbourhood colours its nodes, with a count.
 
 **Nothing is left out.** On a fresh inventory most assets have neither a site nor a segment, and a topology that quietly omitted them would draw the curated minority and look complete. If the tree does not add up to the total at the top, the page says so rather than letting you assume it does.
@@ -188,5 +188,5 @@ No full-screen mode and no export. The tree is a way into the list rather than a
 - [Inventory & Lenses](./inventory-and-lenses.md) — the list the map is an alternative view of
 - [Query](./query.md) — the language the asset picker speaks
 - [Page-Local Exports](./page-local-exports.md) — the same convenience-not-evidence rule, for lists
-- [Network Spaces](./network-spaces.md) — the segments the topology groups by
+- [Operational Context](./operational-context.md) — the network segments the topology groups by
 - [The Dashboard](./dashboard.md) — the Inventory health panel that links here

@@ -62,15 +62,18 @@ them with.
 
 ## Workflow
 
-### 1. Register Fortinet Device
+### 1. Add the FortiGate
 
-Register a Fortinet device with the platform:
+**Where:** **Discovery → Devices → Add device** (or **Discover & add**, which
+asks the FortiGate for its own model, serial and firmware).
 
-**UI:** Navigate to Devices → Add Device
+**Credentials belong to the device.** A FortiGate carries its own username and
+password, entered on the device form and encrypted at rest — there is no
+separate integration record to create and link. **Skip TLS verification** is
+there for a management interface with a self-signed certificate.
 
 **API:** `POST /api/v1/device-interrogation-service/devices`
 
-**Request Body:**
 ```json
 {
   "device_type": "fortinet",
@@ -79,65 +82,39 @@ Register a Fortinet device with the platform:
   "hostname": "fw01.example.com",
   "ip_address": "10.0.1.1",
   "management_url": "https://fw01.example.com",
-  "firmware_version": "7.4.0",
-  "discovery_method": "device_interrogation",
-  "credential_id": "uuid-of-platform-integration"
+  "username": "vista-readonly",
+  "password": "…"
 }
 ```
 
-### 2. Configure Credentials
+### 2. Interrogate
 
-Store Fortinet credentials in platform integrations:
-
-**UI:** Navigate to Settings → Integrations → Add Integration
-
-**Required Fields:**
-- Integration Type: `fortinet` (or generic device type)
-- Username: FortiGate admin username
-- Password: FortiGate admin password
-- URL: Management URL (optional, uses device management_url if not provided)
-- Insecure Skip Verify: Boolean (for self-signed certificates)
-
-Credentials are encrypted at rest and decrypted only when needed.
-
-### 3. Interrogate Device
-
-Initiate device interrogation:
-
-**UI:** Navigate to Devices → Select Device → Interrogate
+**Where:** the device's row on **Discovery → Devices** → **Interrogate**. **Test
+connection** first if you want to check the credentials before queueing work.
 
 **API:** `POST /api/v1/device-interrogation-service/devices/:id/interrogate`
 
-The service automatically:
-1. Creates a discovery job
-2. Retrieves and decrypts device credentials
-3. Connects to FortiGate via REST API
-4. Interrogates SSL VPN, IPSec, and certificate configurations
-5. Parses crypto details from configurations
-6. Creates discovery findings for each discovered asset
+The run creates a job, decrypts the credentials for that job only, connects over
+the FortiGate REST API, reads the SSL VPN, IPSec and certificate configuration,
+parses the cryptographic detail out of it, and produces a finding per discovered
+asset.
 
-### 4. Review Results
+### 3. Review the run
 
-Review discovery findings:
+**Where:** **Discovery → Discovery Jobs**, or **Discovery → Job Logs** for the
+per-stage detail. The run reports what it discovered and what reached inventory
+as two separate counts, so a job that answered but materialized nothing says so.
 
-**UI:** Navigate to Assets → Discovery Jobs → View Results
+Findings include the SSL VPN configuration with its crypto parameters, each
+IPSec tunnel with its encryption and authentication algorithms, the certificates
+found, and the device's own identity.
 
-**Findings Include:**
-- SSL VPN configurations with detailed crypto parameters
-- IPSec tunnel configurations with encryption/authentication details
-- Certificate information
-- Device metadata
+### 4. Where it lands
 
-### 5. Import to Inventory
-
-Import findings as infrastructure assets:
-
-**UI:** Select findings → Import Selected
-
-Imported assets are:
-- Linked to parent device via `device_id`
-- Created with `discovery_method = 'device_interrogation'`
-- Set to `pending_approval` status
+There is no import step and nothing to select. Findings flow into the inventory
+through the normal pipeline: the asset is auto-approved if its network segment
+says so, and otherwise waits on **Discovery → Approvals**. Assets carry a
+discovery method of `device_interrogation`.
 
 ## Crypto Parameter Extraction
 
@@ -194,7 +171,7 @@ The service extracts detailed crypto parameters from IPSec configurations:
   "hash_algorithm": "SHA256",
   "port": 500,
   "hostname": "tunnel-to-remote-site",
-  "ip_address": "192.168.1.1",
+  "ip_address": "10.0.0.1",
   "metadata": {
     "encryption_algorithm": "aes256",
     "authentication_algorithm": "sha256",
@@ -227,7 +204,7 @@ The service extracts detailed crypto parameters from IPSec configurations:
     },
     {
       "hostname": "tunnel-to-datacenter",
-      "ip_address": "192.168.1.1",
+      "ip_address": "10.0.0.1",
       "port": 500,
       "protocol": "IPSec",
       "cipher_suite": "aes256-sha256",
@@ -235,7 +212,7 @@ The service extracts detailed crypto parameters from IPSec configurations:
       "hash_algorithm": "SHA256",
       "metadata": {
         "name": "tunnel-to-datacenter",
-        "remote-gw": "192.168.1.1",
+        "remote-gw": "10.0.0.1",
         "proposal": "aes256-sha256",
         "encryption": "aes256",
         "authentication": "sha256",
@@ -266,7 +243,7 @@ The service extracts detailed crypto parameters from IPSec configurations:
 ## Security Considerations
 
 ### Credential Management
-- Credentials encrypted at rest in `platform_integrations` table
+- Credentials are encrypted at rest on the device record
 - Decrypted only when needed for API calls
 - Never logged or exposed in responses
 - Credentials cleared from memory after use
@@ -309,6 +286,7 @@ The service extracts detailed crypto parameters from IPSec configurations:
 
 ## Related Documentation
 
-- [Device Interrogation Feature](./device-interrogation.md)
-- [Platform Integrations](../operate/configuration/platform-integrations.md)
-- [Discovery Feature](./discovery.md)
+- [Device Interrogation](./device-interrogation.md) — every vendor, and what is collected
+- [Device Interrogation User Guide](../guides/device-interrogation-user-guide.md) — the walkthrough
+- [Discovery](./discovery.md) — where the findings go
+- [Asset Approval](./asset-approval.md) — the queue a discovered asset waits in

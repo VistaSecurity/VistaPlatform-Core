@@ -4,7 +4,7 @@ render_macros: false
 
 # Production Monitoring & Alerting Setup
 
-This document provides instructions for setting up monitoring and alerting for the crypto-inventory platform in production environments.
+This document provides instructions for setting up monitoring and alerting for Vista Platform in production environments.
 
 ## Overview
 

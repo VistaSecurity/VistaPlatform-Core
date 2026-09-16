@@ -181,9 +181,7 @@ it never has to be.
 
 Store GCP credentials in platform integrations:
 
-**UI (Tenant):** Navigate to Operations > Cloud > Add Integration > GCP tab
-
-**UI (Admin):** Navigate to Integrations > GCP tab
+**UI:** Discovery → Cloud → **Add integration**, choose provider **GCP**.
 
 **Required Fields:**
 - **Integration Type**: `gcp`

@@ -12,28 +12,17 @@ This guide covers common issues and their solutions.
 
 **Symptom**: Login page shows a loading spinner indefinitely and never displays the login form.
 
-**Cause**: Cached authentication state (e.g. expired or invalid cookies, or legacy localStorage tokens) can cause authentication initialization to hang.
+**Cause**: Cached authentication state — expired or invalid cookies — can cause authentication initialization to hang. Auth uses httpOnly cookies exclusively; there is no localStorage token to clear.
 
 **Immediate Fix**:
 
-1. **Clear site data (Recommended)**  
-   The platform uses httpOnly cookies for auth. Clear cookies and site data for the app origin (e.g. `http://localhost:3000`):
+1. **Clear site data (Recommended)**
+   Clear cookies and site data for the app origin (e.g. `http://localhost:3000`):
    - Chrome/Edge: Application tab → Storage → Clear site data
    - Firefox: Application → Storage → Clear All
    - Or clear cookies for the site in browser settings and refresh.
 
-2. **If using legacy token storage (localStorage)**:
-   - Open Developer Tools (F12) → Application/Storage → Local Storage → your domain
-   - Remove `crypto_inventory_token` and `crypto_inventory_refresh_token` if present, then refresh
-
-3. **Browser console (localStorage only)**:
-   ```javascript
-   localStorage.removeItem('crypto_inventory_token');
-   localStorage.removeItem('crypto_inventory_refresh_token');
-   location.reload();
-   ```
-
-4. **Clear All Site Data**:
+2. **Clear All Site Data** (if step 1 doesn't resolve it):
    - Chrome/Edge: Settings → Privacy → Clear browsing data → Cookies and other site data
    - Firefox: Settings → Privacy & Security → Cookies and Site Data → Clear Data
    - Safari: Develop → Empty Caches
@@ -200,7 +189,7 @@ wants signups on a trial tier. In the Helm chart, set it via
 
 ### Cloud Discoveries Not Appearing in Discovery Approvals
 
-**Symptom**: Cloud discovery jobs complete successfully, but discovered assets don't appear in the Discovery Approvals modal.
+**Symptom**: Cloud discovery jobs complete successfully, but discovered assets don't appear on the Discovery → Approvals page.
 
 **Troubleshooting Steps**:
 

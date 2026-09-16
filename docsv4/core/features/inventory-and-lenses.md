@@ -16,7 +16,10 @@ There is **one inventory** — a single dataset — and **lenses** reshape it. A
 
 The active lens is in the page address (`/inventory?lens=…`), so a lens view is bookmarkable and shareable.
 
-**Map** and **Software** are in the navigation but not yet built: opening either tells you which release brings it. They are listed now because the shape of the inventory is part of what the navigation tells you.
+Every lens in that table is live. **Map** draws the neighbourhood around one
+asset and **Software** answers "who is running this product, at this version?" —
+both have their own pages ([The Map](./map.md), [SBOM upload](./sbom.md)) because
+neither is a table with different columns.
 
 **Pending** is a link, not a second list. Everything awaiting your review — discovered assets, imports, CMDB pulls and merge proposals — lives in one queue at **Discovery → Approvals**, and Inventory points at it rather than keeping a copy.
 
@@ -31,6 +34,8 @@ Every asset has exactly one **class** — Server, Switch, Object storage, Web ap
 The tree is **hierarchical**, and picking a parent selects everything beneath it: click **Hardware** and you get servers, switches, firewalls and printers together; drill to **Server** and you get only servers. That is why there is one asset list rather than one page per class.
 
 **The columns follow the class you pick.** Choose Server and you get operating system and model; choose Object storage and you get provider and account. Pick a parent class, or none at all, and the columns fall back to what everything shares — because a list mixing servers and switches has no common operating-system column to show.
+
+To browse the taxonomy itself — every class, the attributes it carries, and what a class decides — see [Asset Classes & Identification Rules](./asset-classes.md).
 
 ### The other filters
 
@@ -66,6 +71,16 @@ The query lives in the page address, so a filtered view is shareable: send someo
 
 If you type something the filters can't represent — a relationship traversal, say — the rail tells you so and **keeps it**. Clicking a checkbox afterwards does not throw away what you typed.
 
+### Adding something by hand
+
+**New asset** (top right) records a thing you already know about — an appliance
+nothing can scan, a business service with no address at all. The form asks for
+the class first, because the class decides which fields it then offers you. See
+[Adding assets manually](./adding-assets-manually.md).
+
+On the Certificates lens the same corner also carries **Upload cert**, for
+pasting or uploading a PEM.
+
 ### Saved views
 
 **Views** (beside the query box) saves the current query under a name, for you and your team. A view is nothing more than its query, so applying one puts that query in the box where you can see it, adjust it, and save the result as another view.
@@ -78,19 +93,24 @@ Some assets have **no address at all**, and the column is genuinely blank for th
 
 ## Opening an asset
 
-Click any row to open the **asset page** at its own address (`/inventory/assets/…`), which you can link to. It has tabs:
+From **All assets** and from **Stale**, clicking a row opens the **asset page** at
+its own address (`/inventory/assets/…`), which you can link to. It has tabs:
 
 | Tab | What's on it |
 |---|---|
 | **Overview** | Class and how it was decided; every identifier with its kind, source, confidence and when it was last seen; the class's attributes; ownership and context; status; and risk — with **who assessed it**, or an explicit *Not assessed*. |
 | **Services & Endpoints** | Every network face of the asset: address, port, transport, the identified service and how confidently it was identified, and when it was last seen. |
-| **Relationships** | Arrives in a later release. |
+| **Relationships** | What this asset is attached to — each edge with its type, its direction, where it came from, and whether it is confirmed or still proposed — plus the impact closure: what else is affected if this goes away. |
 | **Cryptography** | The crypto configurations discovered on the asset. Click one for the full configuration drawer. |
 | **Findings** | Cryptographic findings on this asset, with the configuration each was found on. |
-| **Software** | Arrives in a later release. |
+| **Software** | The products installed on this asset — name, vendor, version, end-of-life state, known vulnerabilities, identifier, source, last seen and status. A product that has been removed is shown muted rather than dropped, because "it was here and is gone" is an answer. |
 | **History** | Two lists. **Class history** first — every class this asset has held, what moved it, and who decided — then the general change log: context edits, merges, approvals, newest first. |
 
-Clicking a row from a list still opens the quick-look **drawer** as well; the drawer has an **Open full page** button when you want the whole record.
+From the cryptography lenses — where the row is a certificate, a key or a
+configuration rather than an asset — clicking through to an asset opens the
+quick-look **drawer** instead, so you keep your place in the list you were
+working. The asset drawer carries an **Open full page** button when the peek is
+not enough.
 
 ### Class history: was this ever something else?
 
@@ -153,11 +173,45 @@ Outbound connections your assets make to **external** endpoints — SaaS provide
 
 **Use it when** you're assessing third-party crypto exposure — are the vendors and services we depend on using strong TLS? (See [Third-Party and External Connections](./third-party-and-external-connections.md) for detail.)
 
+### Data Protection
+
+At-rest encryption posture across every resource that stores data — object
+stores, managed databases. It is a *property* lens rather than a family of
+things: the question is "is this data protected, and by whose key?", and the
+answer is the same shape whether the resource is a bucket or a database.
+
+Each row shows the resource, its type, its encryption state, **key custody** (who
+holds the key — the provider, or you), the origin of the answer, and whether it
+was verified. Encryption state has **three** values, not two: Encrypted, Not
+encrypted, and **Not assessed** — drawn deliberately neutral so it can never be
+read as either verdict. Filters for resource type, assessment and risk sit in the
+toolbar.
+
+An empty lens means nothing has been inventoried, not that everything is
+encrypted. Object stores and databases arrive here from a cloud discovery.
+
+**Use it when** you are answering "is our data encrypted at rest, and who holds
+the keys?" — for a questionnaire, an audit, or your own peace of mind.
+
 ### Stale
 
-Assets that haven't been seen recently (more than two weeks) or are no longer active. Each row shows how long it's been since the asset was last observed, its status, and quick actions for housekeeping. The staleness cut is applied across the whole inventory, so the count and pagination reflect every stale asset, not just the current page.
+Assets nothing has observed for more than **30 days**. Each row shows the asset,
+its class, its segment, its status and how many days it has been quiet, with
+per-row **Rescan** and **Archive** actions on the right and a bar above the table
+that acts on the whole page at once. The staleness cut runs across the whole
+inventory, so the count and pagination reflect every stale asset, not just the
+current page.
 
-**Use it when** you're cleaning up — retiring decommissioned hosts, investigating assets that dropped off the radar, or keeping your inventory honest.
+Staleness is a property of the asset — of when the *host* was last seen — and it
+is a claim that nothing has looked recently, not that the thing is gone.
+Individual **endpoints** go stale on the same 30-day boundary and are marked so on
+the asset's Services & Endpoints tab; an endpoint is only ever marked *closed* by
+something that actually looked and found nothing listening.
+
+**Use it when** you're cleaning up — retiring decommissioned hosts, investigating
+assets that dropped off the radar, or keeping your inventory honest. See
+[Asset lifecycle management](./asset-lifecycle-management.md) for the actions and
+the thresholds behind them.
 
 ### TLS and SSH
 
@@ -188,7 +242,11 @@ says **not assessed** — which is not the same as safe. See
 
 ## Exporting the current view
 
-The **Export** button (top right) downloads exactly what you're looking at — the current lens, with your active filters and search applied — as a CSV. Each lens exports the columns that make sense for it (assets export hostnames and segments; certificates export issuers and expiry; keys export sizes and fingerprints; and so on). The file is built right in your browser from the rows already on screen, so there's no waiting.
+The **Export** button in the toolbar downloads exactly what you're looking at — the current lens, with your active filters and search applied — as a CSV. Each lens exports the columns that make sense for it: certificates export issuers and expiry; keys export sizes and fingerprints; configurations export cipher suites and algorithms; Stale exports class, segment, status and last seen. The file is built right in your browser from the rows already on screen, so there's no waiting.
+
+You will find it on the **Certificates, Keys, Configuration, TLS, SSH, Data
+Protection, 3rd Party** and **Stale** lenses. **Map** has its own export — a
+graph, in GraphML or Cytoscape JSON, rather than a table.
 
 **Exports are convenience, not evidence.** A page-local CSV is perfect for a quick spreadsheet pivot, a key-length sweep, or sharing a snapshot with a teammate. It is **not** an audit-grade artifact: it has no provenance, no content hash, and no fixed scope boundary. When you need something an auditor can rely on — reproducible, hashed, and tied to a defined boundary — generate a **CBOM artifact** instead. (See [Page-Local Exports](./page-local-exports.md) for the distinction, and [CBOM Artifacts](../cbom/cbom-artifacts.md) for audit-grade output.)
 
@@ -203,7 +261,11 @@ Two lenses were absorbed by the class facet on All assets, and their bookmarks r
 
 ## See also
 
+- [Assets and Crypto Configurations](./assets-and-crypto-configurations.md) — what an asset, an endpoint and a configuration each are
+- [Adding assets manually](./adding-assets-manually.md) — the New asset form and the class picker
+- [Asset Lifecycle Management](./asset-lifecycle-management.md) — the Stale lens, archiving and deletion
 - [Cryptographic Keys](./cryptographic-keys.md) — the Keys lens in depth
 - [Third-Party and External Connections](./third-party-and-external-connections.md) — the 3rd Party lens in depth
+- [Query](./query.md) — the language the query box and the filter rail share
 - [Page-Local Exports](./page-local-exports.md) — what the Export button is (and isn't) for
 - [CBOM Artifacts](../cbom/cbom-artifacts.md) — audit-grade, hashed, scoped evidence

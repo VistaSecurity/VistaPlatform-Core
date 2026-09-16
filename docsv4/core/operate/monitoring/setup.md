@@ -13,7 +13,7 @@ render_macros: false
 
 ## 📋 Overview
 
-The Crypto Inventory Platform includes comprehensive system monitoring and alerting capabilities that provide real-time visibility into platform health, performance metrics, and automated alert notifications. This guide covers all monitoring features, alert configuration, and notification setup.
+Vista Platform includes comprehensive system monitoring and alerting capabilities that provide real-time visibility into platform health, performance metrics, and automated alert notifications. This guide covers all monitoring features, alert configuration, and notification setup.
 
 ---
 
@@ -40,62 +40,39 @@ The Crypto Inventory Platform includes comprehensive system monitoring and alert
 
 ## 📊 Monitoring Dashboard
 
-### Accessing the Status Page
+### Accessing the System Health pages
 
-Navigate to **Status** in the admin UI sidebar to access the platform monitoring dashboard.
+Navigate to **System Health** in the admin console's left rail to access the
+platform monitoring dashboard — its three sub-pages are **Services** (backend
+status and latency), **Gateway** (API gateway routing health), and **Alerts**
+(alert history and thresholds). See the [Platform Admin Guide → System Health](../platform-admin-guide.md#system-health)
+for the current tour of those pages.
 
 ### Dashboard Sections
 
-#### 1. Overall Platform Status
-- **Total Services**: Number of services monitored
-- **Healthy Services**: Services currently operational
-- **Degraded Services**: Services with performance issues
-- **Down Services**: Services that are unavailable
+#### 1. Services
 
-#### 2. Platform Metrics Grid
-Real-time metrics displayed as stat cards:
-- **Healthy Services**: Count of operational services
-- **Active Tenants**: Tenants with recent activity
-- **Total Users**: Platform-wide user count
-- **Avg Response Time**: Average API response time
+The default sub-page. An overall-status banner ("All systems operational" or a
+count of services needing attention), four stat tiles pulled from the
+monitoring-service's aggregate metrics (**Healthy**, **Degraded**, **Down**,
+**Avg latency**), and a table of every reporting service with its status,
+message, and response time. There is no per-service uptime percentage and no
+Core/Platform/Infra grouping — the underlying API doesn't return that shape.
 
-#### 3. Core Platform Services
-Detailed status for each platform service:
-- Service name and details
-- Current status (healthy, degraded, down)
-- Response time (milliseconds)
-- Last checked timestamp
+#### 2. Gateway
 
-#### 4. Service Health Trends Chart
-Interactive chart showing historical performance metrics:
-- **Metric Types**: 
-  - Latency P95 (95th percentile response time)
-  - Error Rate (percentage of failed requests)
-  - Throughput (requests per second)
-- **Time Windows**: 
-  - Last Hour (1h aggregation)
-  - Last Day (1d aggregation)
-- **Features**:
-  - Real-time updates (refreshes every minute)
-  - Color-coded by status (green=healthy, yellow=degraded, red=down)
-  - Interactive tooltips with detailed values
+A read-only view of the API gateway's routers and services, proxied from
+Traefik's own API. Shows router/service counts and per-router/per-service
+status. There is no historical chart on this page.
 
-#### 5. Alert History Chart
-Stacked bar chart showing alerts over the last 7 days:
-- **Severity Levels**: Critical, High, Medium, Low
-- **Color Coding**: 
-  - Red = Critical
-  - Orange = High
-  - Blue = Medium
-  - Gray = Low
-- **Grouping**: Alerts grouped by date
+#### 3. Alerts
 
-#### 6. Tenant Status Overview
-Status of individual tenants and their services:
-- Tenant name and metadata
-- User and asset counts
-- Per-tenant service status
-- Filter by specific tenant
+Alert history (triggered alerts and their status) and the configured alert
+thresholds, both read-only in the console today — creating or editing a
+threshold is done via the API (below), not a form on this page. The page also
+surfaces platform-track stateful alerts (e.g. `service_down`,
+`tenant_health_degraded`) and active maintenance windows, since notification
+delivery is suppressed during a window.
 
 ---
 
