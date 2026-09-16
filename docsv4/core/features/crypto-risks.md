@@ -89,6 +89,14 @@ Remediation guidance is sourced from the **Algorithm Taxonomy**, a database of:
 - Recommended migration paths
 - Post-Quantum Cryptography (PQC) alternatives
 
+**Quantum vulnerability is classified by algorithm family, not by exact
+catalogue match.** RSA at any key size and ECDSA on any curve are both
+Shor-breakable and are flagged as needing PQC migration even when the
+catalogue has no row sized to your exact key — key size changes how risky
+that key is scored *today*, not whether it eventually needs to move off
+classical asymmetric cryptography. This applies to certificates and to
+standalone keys (the Inventory Keys lens) alike.
+
 ### Example Remediation Guidance
 
 | Algorithm | Issue | Guidance |
@@ -477,10 +485,10 @@ Data sources:
 
 ## Related Features
 
-- [Unified Crypto Inventory](./unified-crypto-inventory.md) - Comprehensive asset and certificate view
+- [Inventory & Lenses](./inventory-and-lenses.md) - Comprehensive asset and certificate view
 - [Compliance Frameworks](./compliance-frameworks.md) - Framework-based compliance assessment
 - [Discovery](./discovery.md) - Asset discovery and configuration collection
-- [Algorithm Analysis](./unified-crypto-inventory.md#algorithm-analysis-features) - Algorithm taxonomy and recommendations
+- [Algorithm Reference](./algorithm-reference.md) - Algorithm taxonomy and recommendations
 - [Remediation](./remediation.md) - Alerts, the ticket Queue, and migration Plans
 
 ---

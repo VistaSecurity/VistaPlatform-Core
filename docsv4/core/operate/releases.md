@@ -65,10 +65,17 @@ to verify an image with the same identity.
 
 ## Upgrading
 
-See the RKE2 deployment guide's **Upgrade** section for cross-version upgrade
-mechanics (`--reset-then-reuse-values`, schema-migration/seed Jobs, single-node
-surge caveats). The chart's `NOTES.txt` echoes the key upgrade flags on every
+See **`INSTALL.md`**'s "Run it" section for cross-version upgrade mechanics
+(`--reset-then-reuse-values`, schema-migration/seed Jobs, single-node surge
+caveats). The chart's `NOTES.txt` echoes the key upgrade flags on every
 `helm upgrade`.
+
+**1.0.0 is a fresh install only — there is no upgrade path from a `core-v0.x`
+release.** See `INSTALL.md`'s "Run it" section and the "Breaking / Upgrading"
+notes under `[1.0.0]` in [`CHANGELOG.md`](../../../CHANGELOG.md) before
+upgrading an existing deployment: the port-as-asset tables were dropped rather
+than migrated, and credential encryption moved to v2, so credentials need
+re-entering and sensors re-enrolling on the first 1.0.0 deploy.
 
 ## Where documentation lives
 

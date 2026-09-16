@@ -4,6 +4,15 @@ render_macros: false
 
 # Database Migration Guide
 
+> **1.0.0 is a fresh install only.** The general asset inventory release
+> dropped the port-as-asset tables (`network_assets`, `devices`) and the
+> `asset_type` enum rather than migrating them, and moved credential
+> encryption to v2 — old credentials cannot be decrypted under it. There is no
+> migration path from a `core-v0.x` database to 1.0.0; start a new database
+> and `pg_dump` the old one first if you want to keep it for reference. See
+> `INSTALL.md`'s "Run it" section and the `[1.0.0]` entry in
+> [`CHANGELOG.md`](../../../../CHANGELOG.md).
+
 ## Overview
 
 This guide explains how database schema is managed for the crypto inventory platform across different deployment environments, including Docker Compose, EC2, EKS, and RDS.
@@ -377,9 +386,12 @@ Partitioning migration creates new tables but doesn't rename existing ones. To r
 
 ```sql
 DROP TABLE IF EXISTS sensor_discoveries_partitioned CASCADE;
-DROP TABLE IF EXISTS network_assets_partitioned CASCADE;
 DROP TABLE IF EXISTS crypto_implementations_partitioned CASCADE;
 ```
+
+> `network_assets_partitioned` is not listed above because its source table,
+> `network_assets`, was dropped outright in the 1.0.0 general asset inventory
+> release (port-as-asset model retired, not migrated) — see the note below.
 
 ## Pre-Deployment Checklist
 

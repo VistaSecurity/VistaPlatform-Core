@@ -104,6 +104,20 @@ Retains the platform's existing gating: OT active probing and the OT lens have o
 
 ---
 
+## Generative AI capabilities
+
+The five generative AI seams — narrator, author, enricher, ask/query and remediator — are Enterprise. Like the MSP surface below, they are carved by which SOURCE ships in a build (the public export deletes each seam's `ee/` implementation package outright), not by a billable item, so they have no row in the table above either. Every one of them has a rule-based null default that answers in every edition, Core included — see [AI assistant](features/ai-assistant.md) for what each falls back to without a model.
+
+| Seam | What it does | Documentation |
+|---|---|---|
+| **Ask / Query** | Ask a question about your inventory in plain language. The model's whole output is one line of the query language, shown to you editable, before anything runs — never rows the model guessed at. | in Enterprise docs |
+| **Author** | Draft compliance controls from a standard you paste in, each draft citing the passage it came from. Nothing is saved until you accept it. | in Enterprise docs |
+| **Enricher** | Propose an end-of-life catalogue row for a product the offline catalogue has no answer for, citing the vendor's own lifecycle page. | [Guide](operate/catalogs.md) |
+| **Narrator** | Narrate what changed between two CBOM artifacts in prose, each sentence citing the component or finding it describes. | in Enterprise docs |
+| **Remediator** | Draft a remediation plan for a finding as an editable proposal. Never applied automatically. | in Enterprise docs |
+
+---
+
 ## MSP management plane
 
 The MSP edition is carved by which services ship, not by capability flags, so these areas have no entry in the table above. Tenant *isolation* is Core — MSP sells the plane that manages tenants, not the model that isolates them.

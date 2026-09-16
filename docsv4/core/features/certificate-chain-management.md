@@ -341,7 +341,7 @@ Chain rebuilding publishes events for:
 
 ## Related Features
 
-- [Unified Crypto Inventory](./unified-crypto-inventory.md) - Certificate management interface
+- [Inventory & Lenses](./inventory-and-lenses.md) - The certificate lens and unified inventory view
 - [Compliance Frameworks](./compliance-frameworks.md) - Certificate compliance checks
 - [Discovery](./discovery.md) - Certificate discovery from infrastructure assets
 

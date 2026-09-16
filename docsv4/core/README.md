@@ -63,7 +63,6 @@ Documentation for **tenants** and **tenant admins** — people who use Vista Pla
 - [Spreadsheet Import](./features/spreadsheet-import.md)
 - [Page-Local Exports](./features/page-local-exports.md)
 - [Scopes](./features/scopes.md)
-- [Unified Crypto Inventory](./features/unified-crypto-inventory.md)
 - [Certificate Chain Management](./features/certificate-chain-management.md)
 - [Third-Party & External Connections](./features/third-party-and-external-connections.md)
 - [CMDB Integrations](./features/cmdb-integrations.md)

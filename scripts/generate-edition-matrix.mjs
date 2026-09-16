@@ -18,9 +18,10 @@
 //                                     Edition-gate corrective UPDATE — the list
 //                                     that stops a tier self-granting paid
 //                                     capability.
-//   standards/editions.yaml           Documentation links, edition blurbs, and
-//                                     the MSP surface (carved by service split,
-//                                     so absent from editionByItem entirely).
+//   standards/editions.yaml           Documentation links, edition blurbs, the
+//                                     AI surface and the MSP surface (both
+//                                     carved by build/service split, so absent
+//                                     from editionByItem entirely).
 //
 // Checks, all of which fail --check:
 //
@@ -236,6 +237,7 @@ const meta = yaml.parse(read(EDITIONS_YAML, 'editions.yaml'));
 
 must(meta && meta.editions, 'editions.yaml has no `editions:` block');
 must(meta.docs && typeof meta.docs === 'object', 'editions.yaml has no `docs:` block');
+must(Array.isArray(meta.ai_surface), 'editions.yaml has no `ai_surface:` list');
 must(Array.isArray(meta.msp_surface), 'editions.yaml has no `msp_surface:` list');
 
 // Gated capabilities that have no user-facing surface yet. Documenting one
@@ -276,6 +278,19 @@ for (const entry of meta.msp_surface) {
       `msp_surface entry "${entry.name}" collides with gated item key ${slug} — ` +
         `a capability carved both by billable item and by service split`,
     );
+  }
+}
+
+for (const entry of meta.ai_surface) {
+  const slug = String(entry.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  if (gatedKeys.has(slug)) {
+    problems.push(
+      `ai_surface entry "${entry.name}" collides with gated item key ${slug} — ` +
+        `a capability carved both by billable item and by build`,
+    );
+  }
+  if (entry.doc && !existsSync(join(repoRoot, 'docsv4', entry.doc))) {
+    problems.push(`editions.yaml ai_surface "${entry.name}" points at docsv4/${entry.doc}, which does not exist`);
   }
 }
 
@@ -382,6 +397,35 @@ function render() {
 
   L.push('---');
   L.push('');
+  L.push('## Generative AI capabilities');
+  L.push('');
+  L.push(
+    'The five generative AI seams — narrator, author, enricher, ask/query and ' +
+      'remediator — are Enterprise. Like the MSP surface below, they are carved by ' +
+      'which SOURCE ships in a build (the public export deletes each seam\'s `ee/` ' +
+      'implementation package outright), not by a billable item, so they have no row ' +
+      'in the table above either. Every one of them has a rule-based null default that ' +
+      'answers in every edition, Core included — see ' +
+      '[AI assistant](features/ai-assistant.md) for what each falls back to without a ' +
+      'model.',
+  );
+  L.push('');
+  L.push('| Seam | What it does | Documentation |');
+  L.push('|---|---|---|');
+  for (const entry of meta.ai_surface) {
+    const summary = escapeTableCell(String(entry.summary ?? '').trim().replace(/\s+/g, ' '));
+    const docPath = entry.doc;
+    const link = !docPath
+      ? '—'
+      : docPath.startsWith('core/')
+        ? `[Guide](${docPath.slice('core/'.length)})`
+        : 'in Enterprise docs';
+    L.push(`| **${entry.name}** | ${summary} | ${link} |`);
+  }
+  L.push('');
+
+  L.push('---');
+  L.push('');
   L.push('## MSP management plane');
   L.push('');
   L.push(
@@ -439,8 +483,8 @@ if (problems.length) {
 }
 
 if (CHECK) {
-  console.log(`${GREEN}✓ Edition matrix in sync (${gatedKeys.size} gated capabilities, ${meta.msp_surface.length} MSP areas).${RESET}`);
+  console.log(`${GREEN}✓ Edition matrix in sync (${gatedKeys.size} gated capabilities, ${meta.ai_surface.length} AI seams, ${meta.msp_surface.length} MSP areas).${RESET}`);
 } else {
   writeFileSync(OUT, rendered);
-  console.log(`${GREEN}✓ Wrote docsv4/core/editions.md (${gatedKeys.size} gated capabilities, ${meta.msp_surface.length} MSP areas).${RESET}`);
+  console.log(`${GREEN}✓ Wrote docsv4/core/editions.md (${gatedKeys.size} gated capabilities, ${meta.ai_surface.length} AI seams, ${meta.msp_surface.length} MSP areas).${RESET}`);
 }

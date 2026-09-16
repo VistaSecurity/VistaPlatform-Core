@@ -93,6 +93,45 @@ no_self_service:
   - ot_active_probing
   - ot_primary_lens
 
+# The five generative AI seams (ADR-0008; AI_SEAMS.md).
+#
+# Same shape as msp_surface below: capability AREAS, not billable-item keys.
+# These are carved by which SOURCE ships in a build — the public export
+# deletes each seam's ee/ implementation package outright — not by a tier
+# entitlement, so there is no billable_items row and nothing to cross-check
+# against editionByItem. Every one of these seams also has a rule-based null
+# default that answers in every edition (Core included); see
+# core/features/ai-assistant.md for what each falls back to without a model.
+# The generator asserts these do NOT collide with a gated item key, same as
+# msp_surface.
+ai_surface:
+  - name: Ask / Query
+    summary: >-
+      Ask a question about your inventory in plain language. The model's whole
+      output is one line of the query language, shown to you editable, before
+      anything runs — never rows the model guessed at.
+    doc: enterprise/features/asking-about-your-inventory.md
+  - name: Author
+    summary: >-
+      Draft compliance controls from a standard you paste in, each draft citing
+      the passage it came from. Nothing is saved until you accept it.
+    doc: enterprise/features/custom-policies.md
+  - name: Enricher
+    summary: >-
+      Propose an end-of-life catalogue row for a product the offline catalogue
+      has no answer for, citing the vendor's own lifecycle page.
+    doc: core/operate/catalogs.md
+  - name: Narrator
+    summary: >-
+      Narrate what changed between two CBOM artifacts in prose, each sentence
+      citing the component or finding it describes.
+    doc: enterprise/cbom/cbom-comparison.md
+  - name: Remediator
+    summary: >-
+      Draft a remediation plan for a finding as an editable proposal. Never
+      applied automatically.
+    doc: enterprise/features/remediation-drafting.md
+
 # The MSP management plane.
 #
 # Sourced from OPEN_SOURCE_CARVE_TRACKER §5.4's admin-msp inventory. These are

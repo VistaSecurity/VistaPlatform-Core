@@ -259,4 +259,4 @@ One important rule: **an item's status mirrors its linked finding or ticket.** Y
 
 - [Crypto Risks Dashboard](./crypto-risks.md) — where most remediation tickets are born; *Create ticket* / *View ticket* on each risk flows into the Queue
 - [Compliance Frameworks](./compliance-frameworks.md) — framework findings that can be ticketed and grouped into Plans
-- [Unified Crypto Inventory](./unified-crypto-inventory.md) — the assets, certificates, and crypto configurations a ticket can link back to
+- [Inventory & Lenses](./inventory-and-lenses.md) — the assets, certificates, and crypto configurations a ticket can link back to

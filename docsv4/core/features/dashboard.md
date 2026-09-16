@@ -63,7 +63,7 @@ This matters more than it looks. Zero is the *most* reassuring thing several of 
 
 Below the two heroes:
 
-- **Needs attention now** — a strip of prioritised counts across every section: critical findings, high-risk assets, certificates expiring within thirty days, unscored assets, configurations not yet post-quantum, configurations with no algorithm data at all, and overdue tickets. Each opens the page that answers it.
+- **Needs attention now** — a strip of prioritised counts across every section: critical findings, high-risk assets, certificates expiring within thirty days, unscored assets, configurations not yet post-quantum, configurations with no algorithm data at all, and overdue tickets. Each opens the page that answers it. The critical-findings count is across **every** finding producer (config, drift, EOL, vulnerability, hygiene, crypto and compliance), not just crypto — see [Findings → Where to find them](./findings.md#where-to-find-them) for exactly what the tile counts and what its drill-through shows.
 - **The lifecycle, end to end** — Discovery → Inventory → Risk & Compliance → Remediation, with a live number at each stage.
 - **Certificate expiry outlook** and **Quantum readiness** — the two supporting charts.
 

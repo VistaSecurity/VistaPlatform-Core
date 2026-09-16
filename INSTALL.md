@@ -171,6 +171,21 @@ the evaluation install exposes the tenant UI only.
 
 ## Run it
 
+> **Upgrading from a Core v0.x release? There is no upgrade path — 1.0.0 needs
+> a fresh install.** The general asset inventory release dropped the old
+> port-as-asset tables (`network_assets`, `devices`) and the `asset_type` enum
+> rather than migrating them — there's no backfill and no compatibility view.
+> Credential encryption also moved to v2 with new key-derivation constants, so
+> anything encrypted under the old ones — integration credentials, device
+> credentials, sensor certificates — is undecryptable: re-enter credentials and
+> re-enroll every sensor and device agent after the upgrade. `pg_dump` your
+> existing database first if you want to keep it for reference; the chart
+> cannot carry its data forward regardless. From 1.0.0 onward the chart
+> re-applies the schema on every `helm upgrade` as before, and `NOTES.txt`
+> reminds you to `pg_dump` on every run. A **new install** (no prior Core
+> deployment) is unaffected — this only applies when upgrading an existing
+> `core-v0.x` deployment in place.
+
 ```bash
 helm install vista oci://ghcr.io/vistasecurity/vistaplatform \
   --namespace vista --create-namespace \
@@ -223,13 +238,37 @@ for the supported way to fix that (mounting the CA bundle), and why
 `insecureSkipVerify` on a synthetic check isn't the answer for anything but a
 lab cluster.
 
-### One thing worth knowing before you upgrade
+### Upgrading across versions
 
 `ENCRYPTION_MASTER_KEY` encrypts stored integration credentials. If it changes,
 those become permanently undecryptable. The chart therefore reads the existing
 Secret back on upgrade and reuses it rather than generating a new one — but if
 you manage that Secret yourself, treat it the way you'd treat a database
 encryption key.
+
+**Use `--reset-then-reuse-values` for a cross-version upgrade, not
+`--reuse-values`.** `--reuse-values` carries every previous release's
+user-supplied value forward verbatim — including any per-service
+`backends.<svc>.image.tag` override you set for a one-off hotfix — which then
+silently pins that service to the OLD image even though the chart version (and
+every other service) moved forward. `helm upgrade` reports success either way,
+because nothing about that is an error from Helm's point of view.
+`--reset-then-reuse-values` resets to the new chart's defaults first, then
+reapplies only the values you still have set in your `-f`/`--set` flags, which
+is what you want when moving to a new `vistaplatform` chart version. Reserve
+plain `--reuse-values` for a same-version re-run (e.g. rolling a single
+service's tag by hand). The chart's `NOTES.txt` repeats this on every
+`helm upgrade`.
+
+**A single-node cluster can deadlock mid-upgrade.** A default `helm upgrade`
+rolls every backend with a rolling-update strategy, so old and new pods briefly
+coexist — on a one-node cluster that can surge pod CPU *requests* past what the
+node has to give, which can leave a recreated `postgres-0` unable to schedule
+and every backend's init container hanging waiting on it. If you're running a
+single node: size it for roughly double your steady-state CPU request during
+upgrades, or set `strategy: Recreate` on the backends you can afford brief
+downtime on (the chart already does this for `pcap-processor`). A wedged
+upgrade recovers with `helm rollback`.
 
 ---
 
