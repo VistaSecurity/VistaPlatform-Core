@@ -23,6 +23,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/services"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 )
 
 // entitlementsService is the package-level singleton initialized at
@@ -88,6 +89,9 @@ func CreateBillableItem(store billableItemStore) gin.HandlerFunc {
 				c.JSON(http.StatusConflict, gin.H{"error": "billable_item key already exists", "key": dup.Key})
 				return
 			}
+			if respondInvalidValue(c, err) {
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create billable item"})
 			return
 		}
@@ -118,6 +122,9 @@ func UpdateBillableItem(store billableItemStore) gin.HandlerFunc {
 		item, err := store.UpdateBillableItem(id, in)
 		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Billable item not found"})
+			return
+		}
+		if respondInvalidValue(c, err) {
 			return
 		}
 		if err != nil {
@@ -234,6 +241,14 @@ func updateTierEntitlementsWithService(c *gin.Context, svc tierEntitlementsProvi
 			c.JSON(http.StatusBadRequest, gin.H{"error": "unknown or inactive billable_item key", "item_key": validationErr.Key})
 			return
 		}
+		var dupErr *services.DuplicateItemKeyError
+		if errors.As(err, &dupErr) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "billable_item key appears more than once", "item_key": dupErr.Key})
+			return
+		}
+		if respondInvalidValue(c, err) {
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update tier entitlements"})
 		return
 	}
@@ -247,4 +262,18 @@ func updateTierEntitlementsWithService(c *gin.Context, svc tierEntitlementsProvi
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"tier_id": tierID, "entitlements": updated})
+}
+
+// respondInvalidValue writes the 400 for an entitlements.InvalidValueError and
+// reports whether it did. The reason is echoed verbatim: it describes the
+// request's shape ("missing \"quantity\" (expected {\"quantity\": N} ...)"),
+// never the database, and the whole point of the check is that an operator
+// can fix the cell from the message.
+func respondInvalidValue(c *gin.Context, err error) bool {
+	var ive *entitlements.InvalidValueError
+	if !errors.As(err, &ive) {
+		return false
+	}
+	c.JSON(http.StatusBadRequest, gin.H{"error": "invalid entitlement value", "kind": string(ive.Kind), "detail": err.Error()})
+	return true
 }

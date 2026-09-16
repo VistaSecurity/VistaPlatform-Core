@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/entitlements"
@@ -1181,4 +1182,60 @@ func (s *TierService) activeTenantOverrides(tenantID uuid.UUID) ([]models.LimitO
 		})
 	}
 	return overrides, nil
+}
+
+// tierCapKeys are the numeric caps the impact analysis compares between two
+// tiers — the same three the tenant-facing usage page reports and the three
+// enforcement gates (CheckSensorLimit / CheckAssetLimit / CheckUserLimit) read.
+var tierCapKeys = []string{itemMaxSensors, itemMaxAssets, itemMaxUsers}
+
+// TierCapKeys returns a copy of the cap keys the impact analysis compares.
+func TierCapKeys() []string { return append([]string(nil), tierCapKeys...) }
+
+// GetTierCaps returns what a tier GRANTS for each numeric cap in keys: the
+// tier_entitlements row when the tier composes the item, else the catalogue
+// default — which is exactly the value a tenant on that tier resolves to
+// before any per-tenant override. nil = unlimited. A key is absent when the
+// catalogue has no active item for it or its stored value is malformed
+// (QuantityValue refuses a missing "quantity" rather than reading it as
+// unlimited).
+//
+// This exists because the impact analysis compared the legacy
+// subscription_tiers.max_* columns, which the plan editor never writes on
+// edit: for any admin-authored plan they are frozen at creation, so the
+// analysis reported "no change / 0 tenants over limit" no matter what the
+// composition actually did to the caps that gate those tenants.
+func (s *TierService) GetTierCaps(tierID uuid.UUID, keys []string) (map[string]*int, error) {
+	rows, err := s.db.Query(`
+		SELECT bi.key, COALESCE(te.included_value, bi.default_value)
+		FROM billable_items bi
+		LEFT JOIN tier_entitlements te ON te.item_id = bi.id AND te.tier_id = $1
+		WHERE bi.key = ANY($2) AND bi.is_active = true
+	`, tierID, pq.Array(keys))
+	if err != nil {
+		return nil, fmt.Errorf("tier caps for %s: %w", tierID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[string]*int, len(keys))
+	for rows.Next() {
+		var (
+			key string
+			raw []byte
+		)
+		if err := rows.Scan(&key, &raw); err != nil {
+			return nil, fmt.Errorf("scan tier cap: %w", err)
+		}
+		ent := entitlements.EffectiveEntitlement{Value: json.RawMessage(raw)}
+		qty, ok := ent.QuantityValue()
+		if !ok {
+			log.Printf("admin-service: tier %s item %s has a malformed quantity value %s — omitted from caps", tierID, key, raw)
+			continue
+		}
+		out[key] = qty
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate tier caps: %w", err)
+	}
+	return out, nil
 }

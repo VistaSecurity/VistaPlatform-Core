@@ -6,10 +6,12 @@ import (
 	"errors"
 	"os"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -531,8 +533,11 @@ func TestUpdateBillableItem_RewritesNonKeyFields(t *testing.T) {
 
 func TestUpdateBillableItem_NotFound(t *testing.T) {
 	svc, _ := setup(t)
+	// A well-formed default: value validation runs before the row lookup, so
+	// a malformed one would surface as InvalidValueError, not ErrNoRows.
 	_, err := svc.UpdateBillableItem(uuid.New(), BillableItemInput{
 		DisplayName: "x", Category: "capacity", Kind: "numeric_cap", IsActive: true,
+		DefaultValue: json.RawMessage(`{"quantity": 1}`),
 	})
 	if !errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("expected sql.ErrNoRows for nonexistent id, got %v", err)
@@ -837,5 +842,245 @@ func TestUpdateTenantEntitlement_ExpiresBeforeEffectiveRejected(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected expires_at validation error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Value-shape validation (entitlements.ValidateValue at every write path)
+//
+// These pin the ED-06 acceptance list: an omitted value, an empty object, a
+// wrong-kind value, a negative quantity and a duplicated key each fail with a
+// typed error and NO partial write. Explicit zero and explicit null remain
+// distinct, valid values.
+// ---------------------------------------------------------------------------
+
+func TestReplaceTierEntitlements_RejectsMalformedValues(t *testing.T) {
+	svc, db := setup(t)
+	pro := tierID(t, db, "pro")
+	restoreTierEntitlements(t, db, pro)
+
+	before, err := svc.GetTierEntitlements(pro)
+	if err != nil {
+		t.Fatalf("GetTierEntitlements: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		inputs []TierEntitlementInput
+		want   string // substring of the error
+	}{
+		{"omitted value", []TierEntitlementInput{{ItemKey: "max_sensors"}}, "value is required"},
+		{"empty object", []TierEntitlementInput{{ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{}`)}}, `missing "quantity"`},
+		{"boolean on a cap", []TierEntitlementInput{{ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{"enabled": true}`)}}, `missing "quantity"`},
+		{"quantity on a gate", []TierEntitlementInput{{ItemKey: "custom_policies", IncludedValue: json.RawMessage(`{"quantity": 1}`)}}, `missing "enabled"`},
+		{"negative quantity", []TierEntitlementInput{{ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{"quantity": -1}`)}}, "must not be negative"},
+		{"string quantity", []TierEntitlementInput{{ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{"quantity": "10"}`)}}, "must be an integer or null"},
+		{"empty enum", []TierEntitlementInput{{ItemKey: "support_sla_tier", IncludedValue: json.RawMessage(`{"value": ""}`)}}, "non-empty string"},
+		{"malformed after a valid row", []TierEntitlementInput{
+			{ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{"quantity": 5}`)},
+			{ItemKey: "max_assets", IncludedValue: json.RawMessage(`{}`)},
+		}, `item max_assets`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := svc.ReplaceTierEntitlements(pro, tc.inputs)
+			if err == nil {
+				t.Fatalf("ReplaceTierEntitlements accepted %s", tc.name)
+			}
+			var ive *entitlements.InvalidValueError
+			if !errors.As(err, &ive) {
+				t.Fatalf("error type = %T (%v), want *entitlements.InvalidValueError", err, err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not mention %q", err.Error(), tc.want)
+			}
+			after, gerr := svc.GetTierEntitlements(pro)
+			if gerr != nil {
+				t.Fatalf("GetTierEntitlements after rejected write: %v", gerr)
+			}
+			if len(after) != len(before) {
+				t.Errorf("rejected write changed the composition: %d rows before, %d after", len(before), len(after))
+			}
+		})
+	}
+}
+
+func TestReplaceTierEntitlements_DuplicateKeyRejected(t *testing.T) {
+	svc, db := setup(t)
+	pro := tierID(t, db, "pro")
+	restoreTierEntitlements(t, db, pro)
+
+	err := svc.ReplaceTierEntitlements(pro, []TierEntitlementInput{
+		{ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{"quantity": 5}`)},
+		{ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{"quantity": 50}`)},
+	})
+	if err == nil {
+		t.Fatal("a composition naming max_sensors twice was accepted")
+	}
+	var dup *DuplicateItemKeyError
+	if !errors.As(err, &dup) {
+		t.Fatalf("error type = %T (%v), want *DuplicateItemKeyError", err, err)
+	}
+	if dup.Key != "max_sensors" {
+		t.Errorf("DuplicateItemKeyError.Key = %q, want max_sensors", dup.Key)
+	}
+}
+
+func TestReplaceTierEntitlements_ZeroAndUnlimitedStayDistinct(t *testing.T) {
+	svc, db := setup(t)
+	pro := tierID(t, db, "pro")
+	restoreTierEntitlements(t, db, pro)
+
+	if err := svc.ReplaceTierEntitlements(pro, []TierEntitlementInput{
+		{ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{"quantity": 0}`)},
+		{ItemKey: "max_assets", IncludedValue: json.RawMessage(`{"quantity": null}`)},
+	}); err != nil {
+		t.Fatalf("ReplaceTierEntitlements: %v", err)
+	}
+	got, err := svc.GetTierEntitlements(pro)
+	if err != nil {
+		t.Fatalf("GetTierEntitlements: %v", err)
+	}
+	byKey := map[string]string{}
+	for _, e := range got {
+		byKey[e.ItemKey] = string(e.IncludedValue)
+	}
+	if byKey["max_sensors"] != `{"quantity": 0}` {
+		t.Errorf("max_sensors stored as %s, want {\"quantity\": 0}", byKey["max_sensors"])
+	}
+	if byKey["max_assets"] != `{"quantity": null}` {
+		t.Errorf("max_assets stored as %s, want {\"quantity\": null}", byKey["max_assets"])
+	}
+}
+
+func TestCreateBillableItem_RejectsMalformedDefault(t *testing.T) {
+	svc, db := setup(t)
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM billable_items WHERE key LIKE 'test_malformed_%'`)
+	})
+
+	cases := []struct {
+		name string
+		in   BillableItemInput
+		want string
+	}{
+		{"omitted default", BillableItemInput{Key: "test_malformed_a", DisplayName: "A", Category: "capability", Kind: "boolean"}, "value is required"},
+		{"empty object", BillableItemInput{Key: "test_malformed_b", DisplayName: "B", Category: "capacity", Kind: "numeric_cap", DefaultValue: json.RawMessage(`{}`)}, `missing "quantity"`},
+		{"unknown kind", BillableItemInput{Key: "test_malformed_c", DisplayName: "C", Category: "capacity", Kind: "limit", DefaultValue: json.RawMessage(`{"quantity": 1}`)}, "unknown item kind"},
+		{"negative default", BillableItemInput{Key: "test_malformed_d", DisplayName: "D", Category: "capacity", Kind: "numeric_cap", DefaultValue: json.RawMessage(`{"quantity": -3}`)}, "must not be negative"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := svc.CreateBillableItem(tc.in)
+			if err == nil {
+				t.Fatalf("CreateBillableItem accepted %s", tc.name)
+			}
+			var ive *entitlements.InvalidValueError
+			if !errors.As(err, &ive) {
+				t.Fatalf("error type = %T (%v), want *entitlements.InvalidValueError", err, err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not mention %q", err.Error(), tc.want)
+			}
+			var n int
+			_ = db.QueryRow(`SELECT count(*) FROM billable_items WHERE key = $1`, tc.in.Key).Scan(&n)
+			if n != 0 {
+				t.Errorf("rejected create wrote %d row(s) for %s", n, tc.in.Key)
+			}
+		})
+	}
+}
+
+func TestUpdateBillableItem_RejectsMalformedDefault(t *testing.T) {
+	svc, db := setup(t)
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM billable_items WHERE key = 'test_update_malformed'`)
+	})
+	created, err := svc.CreateBillableItem(BillableItemInput{
+		Key: "test_update_malformed", DisplayName: "U", Category: "capacity", Kind: "numeric_cap",
+		DefaultValue: json.RawMessage(`{"quantity": 3}`), IsActive: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateBillableItem: %v", err)
+	}
+	_, err = svc.UpdateBillableItem(created.ID, BillableItemInput{
+		DisplayName: "U", Category: "capacity", Kind: "numeric_cap", DefaultValue: json.RawMessage(`{}`), IsActive: true,
+	})
+	var ive *entitlements.InvalidValueError
+	if !errors.As(err, &ive) {
+		t.Fatalf("UpdateBillableItem with {} default: err = %v, want *entitlements.InvalidValueError", err)
+	}
+	after, err := svc.GetBillableItem(created.ID)
+	if err != nil {
+		t.Fatalf("GetBillableItem: %v", err)
+	}
+	if string(after.DefaultValue) != `{"quantity": 3}` {
+		t.Errorf("rejected update changed default_value to %s", after.DefaultValue)
+	}
+}
+
+func TestCreateTenantEntitlement_RejectsMalformedValue(t *testing.T) {
+	svc, db := setup(t)
+	tenant := mkTenant(t, db, "starter")
+
+	cases := []struct {
+		name string
+		key  string
+		raw  string
+		want string
+	}{
+		{"omitted", "max_sensors", ``, "value is required"},
+		{"empty object on a cap", "max_sensors", `{}`, `missing "quantity"`},
+		{"empty object on a gate", "ot_active_probing", `{}`, `missing "enabled"`},
+		{"wrong kind", "ot_active_probing", `{"quantity": 5}`, `missing "enabled"`},
+		{"negative", "max_sensors", `{"quantity": -1}`, "must not be negative"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := svc.CreateTenantEntitlement(tenant, nil, TenantEntitlementInput{
+				ItemKey: tc.key, OverrideValue: json.RawMessage(tc.raw), Reason: ptrStr("test"),
+			})
+			var ive *entitlements.InvalidValueError
+			if !errors.As(err, &ive) {
+				t.Fatalf("err = %v, want *entitlements.InvalidValueError", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not mention %q", err.Error(), tc.want)
+			}
+		})
+	}
+	rows, err := svc.ListTenantEntitlements(tenant)
+	if err != nil {
+		t.Fatalf("ListTenantEntitlements: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("rejected creates left %d override row(s)", len(rows))
+	}
+}
+
+func TestUpdateTenantEntitlement_RejectsMalformedValue(t *testing.T) {
+	svc, db := setup(t)
+	tenant := mkTenant(t, db, "starter")
+	created, err := svc.CreateTenantEntitlement(tenant, nil, TenantEntitlementInput{
+		ItemKey: "max_sensors", OverrideValue: json.RawMessage(`{"quantity": 9}`), Reason: ptrStr("test"),
+	})
+	if err != nil {
+		t.Fatalf("CreateTenantEntitlement: %v", err)
+	}
+	// The stored item is max_sensors (numeric_cap); the update must be
+	// checked against THAT kind even though the request omits item_key.
+	_, err = svc.UpdateTenantEntitlement(tenant, created.ID, TenantEntitlementInput{
+		OverrideValue: json.RawMessage(`{"enabled": true}`), Reason: ptrStr("test"),
+	})
+	var ive *entitlements.InvalidValueError
+	if !errors.As(err, &ive) {
+		t.Fatalf("err = %v, want *entitlements.InvalidValueError", err)
+	}
+	after, err := svc.GetTenantEntitlement(created.ID)
+	if err != nil {
+		t.Fatalf("GetTenantEntitlement: %v", err)
+	}
+	if string(after.OverrideValue) != `{"quantity": 9}` {
+		t.Errorf("rejected update changed override_value to %s", after.OverrideValue)
 	}
 }

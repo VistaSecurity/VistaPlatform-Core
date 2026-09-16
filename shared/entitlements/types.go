@@ -74,9 +74,16 @@ func (e *EffectiveEntitlement) BooleanValue() (enabled, ok bool) {
 	return *v.Enabled, true
 }
 
-// QuantityValue parses {"quantity": N|null}. A nil result means the catalog
-// row set quantity to JSON null, conventionally "unlimited". The boolean ok
-// flag distinguishes that from a malformed value.
+// QuantityValue parses {"quantity": N|null}. A nil result means the row set
+// quantity to an EXPLICIT JSON null, conventionally "unlimited". The boolean
+// ok flag distinguishes that from a malformed value.
+//
+// A value with no "quantity" key at all — `{}` in particular — is malformed,
+// not unlimited. It used to parse clean here (a missing key and an explicit
+// null both leave a *int nil), which turned a blank form field into
+// unlimited capacity; ValidateValue now keeps such rows out of the database,
+// and this accessor refuses to honour any that predate it, so the gates that
+// consume it (CheckCap, GetQuantity) fail closed on them instead of open.
 func (e *EffectiveEntitlement) QuantityValue() (qty *int, ok bool) {
 	var v struct {
 		Quantity *int `json:"quantity"`
@@ -84,7 +91,21 @@ func (e *EffectiveEntitlement) QuantityValue() (qty *int, ok bool) {
 	if err := json.Unmarshal(e.Value, &v); err != nil {
 		return nil, false
 	}
+	if v.Quantity == nil && !hasKey(e.Value, "quantity") {
+		return nil, false
+	}
 	return v.Quantity, true
+}
+
+// hasKey reports whether raw is a JSON object carrying key, regardless of the
+// key's value (including null).
+func hasKey(raw json.RawMessage, key string) bool {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return false
+	}
+	_, ok := m[key]
+	return ok
 }
 
 // EnumValue parses {"value": "..."}.

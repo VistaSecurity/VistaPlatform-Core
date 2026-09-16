@@ -199,8 +199,8 @@ INSERT INTO billable_items (key, display_name, description, category, kind, unit
 -- Meters (numeric_metered: included quota; NOT billed — billing is flat
 -- per-tier since the 2026-07 overage-pipeline removal, so no seeded
 -- overage prices. Quotas are monitoring/enforcement metadata only.)
-('storage_gb',                'Storage',                    'Total tenant data storage, tracked against the included quota (monitoring only; not billed)', 'meter', 'numeric_metered', 'GB',  '{"quantity": 1}'::jsonb,  false, NULL, 100),
-('pcap_gb_per_month',         'PCAP Processed per Month',   'Monthly PCAP bytes processed by pcap-processor, tracked against the included quota (monitoring only; not billed)', 'meter', 'numeric_metered', 'GB',  '{"quantity": 0}'::jsonb,  false, NULL, 110),
+('storage_gb',                'Storage',                    'Included storage quota. Not yet metered: nothing measures tenant storage, so this is descriptive plan metadata — never enforced, never billed', 'meter', 'numeric_metered', 'GB',  '{"quantity": 1}'::jsonb,  false, NULL, 100),
+('pcap_gb_per_month',         'PCAP Processed per Month',   'Included monthly PCAP quota. Not yet metered: pcap-processor records no usage, so this is descriptive plan metadata — never enforced, never billed', 'meter', 'numeric_metered', 'GB',  '{"quantity": 0}'::jsonb,  false, NULL, 110),
 
 -- Capabilities (boolean gates)
 ('custom_policies',           'Custom Compliance Policies', 'Tenant may author their own compliance frameworks beyond platform-published ones', 'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, true, 19900, 200),

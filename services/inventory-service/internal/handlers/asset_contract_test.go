@@ -19,6 +19,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1136,4 +1137,88 @@ func TestContract_HardDeleteAsset_500_permCheckError(t *testing.T) {
 		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+// ---------------------------------------------------------------------------
+// The asset cap on the OTHER user-initiated managed-asset increases.
+//
+// Restore un-soft-deletes a row (the enforced count is `deleted_at IS NULL`),
+// and elevate creates a managed asset from a third-party connection. Both
+// used to bypass the cap that manual create and spreadsheet import enforce.
+// ---------------------------------------------------------------------------
+
+func newAssetCapEngine(assets *stubAssetStore, limits assetLimitChecker) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	grp := r.Group("/api/v2")
+	grp.Use(func(c *gin.Context) {
+		c.Set("tenantID", uuid.New())
+		c.Set("userID", uuid.New())
+		c.Next()
+	})
+	ah := NewAssetHandler(assets, nil)
+	ah.limits = limits
+	grp.POST("/inventory-service/infrastructure-assets/:id/restore", ah.RestoreAsset)
+	grp.POST("/inventory-service/external-connections/:id/elevate", ah.ElevateExternalConnection)
+	return r
+}
+
+func overCap() *stubAssetLimitChecker {
+	limit := 100
+	return &stubAssetLimitChecker{res: &sharedservices.LimitCheckResult{
+		Allowed: false, CurrentUsage: 100, Limit: &limit,
+		Message:       "Asset limit exceeded: 100/100",
+		UpgradePrompt: "Upgrade your plan or contact support to add more assets",
+	}}
+}
+
+func TestContract_RestoreAsset_402_overLimit(t *testing.T) {
+	a := sampleAsset()
+	store := &stubAssetStore{getResult: &a}
+	eng := newAssetCapEngine(store, overCap())
+	w := do(eng, http.MethodPost, "/api/v2/inventory-service/infrastructure-assets/"+aUUID+"/restore", nil)
+	if w.Code != http.StatusPaymentRequired {
+		t.Fatalf("status = %d, want 402; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// A cap check that cannot be answered stops the restore (500), never passes it.
+func TestContract_RestoreAsset_500_capCheckError(t *testing.T) {
+	a := sampleAsset()
+	eng := newAssetCapEngine(&stubAssetStore{getResult: &a}, &stubAssetLimitChecker{err: errors.New("resolver down")})
+	w := do(eng, http.MethodPost, "/api/v2/inventory-service/infrastructure-assets/"+aUUID+"/restore", nil)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestContract_RestoreAsset_200_underLimit(t *testing.T) {
+	sv := loadSpec(t)
+	limit := 100
+	a := sampleAsset()
+	eng := newAssetCapEngine(&stubAssetStore{getResult: &a},
+		&stubAssetLimitChecker{res: &sharedservices.LimitCheckResult{Allowed: true, CurrentUsage: 1, Limit: &limit}})
+	w := do(eng, http.MethodPost, "/api/v2/inventory-service/infrastructure-assets/"+aUUID+"/restore", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "AssetResponse", w.Body.Bytes())
+}
+
+func TestContract_ElevateExternalConnection_402_overLimit(t *testing.T) {
+	elevated := sampleAsset()
+	eng := newAssetCapEngine(&stubAssetStore{elevatedAsset: &elevated}, overCap())
+	w := do(eng, http.MethodPost, "/api/v2/inventory-service/external-connections/"+uuid.New().String()+"/elevate", nil)
+	if w.Code != http.StatusPaymentRequired {
+		t.Fatalf("status = %d, want 402; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestContract_ElevateExternalConnection_500_capCheckError(t *testing.T) {
+	elevated := sampleAsset()
+	eng := newAssetCapEngine(&stubAssetStore{elevatedAsset: &elevated}, &stubAssetLimitChecker{err: errors.New("resolver down")})
+	w := do(eng, http.MethodPost, "/api/v2/inventory-service/external-connections/"+uuid.New().String()+"/elevate", nil)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
+	}
 }

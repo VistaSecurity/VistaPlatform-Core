@@ -335,8 +335,9 @@ function render() {
     'Vista Platform ships as a free, source-available **Vista Platform Core** plus two paid editions — **Vista Platform Enterprise** and **Vista Platform MSP**. ' +
       'An edition is a licensing boundary that decides whether a capability exists ' +
       'in a build at all. It is not the same thing as a *tier* — tiers are ' +
-      'commercial packaging that an operator authors, and only the MSP edition can ' +
-      'author them.',
+      'commercial packaging that a deployment\'s operator authors and assigns, in ' +
+      'every edition including Core; an edition decides which capabilities a tier ' +
+      'is allowed to grant, and whether anything can be charged for it.',
   );
   L.push('');
   L.push('Anything not listed on this page is Core.');

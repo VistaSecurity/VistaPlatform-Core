@@ -232,8 +232,13 @@ export function UsagePage({ meta }: { meta: SettingsNavItem }) {
     { label: 'Users', cur: data.usage.users_count, lim: data.limits.users_count, fmt: fmtCount },
     { label: 'Discovery sensors', cur: data.usage.sensors_count, lim: data.limits.sensors_count, fmt: fmtCount },
     { label: 'API calls (this period)', cur: data.usage.api_requests, lim: data.limits.api_requests, fmt: fmtCount },
-    { label: 'Storage', cur: data.usage.storage_bytes, lim: data.limits.storage_bytes, fmt: (n: number) => `${gb(n)} GB` },
   ]) : [];
+  // Storage is deliberately NOT a meter. The API reports storage_bytes as 0
+  // because nothing measures it yet — rendering that through the same
+  // bar as the real counters turned an honest "unmeasured" into a confident
+  // "0.0 GB of 25 GB used". It is shown as a labelled row instead, with the
+  // plan's quota (when one is set) and the fact that it is not metered.
+  const storageQuota = data && data.limits.storage_bytes != null && data.limits.storage_bytes >= 0 ? `${gb(data.limits.storage_bytes)} GB` : null;
 
   return (
     <SPage eyebrow="Account" title="Usage & Limits" job={meta.job}>
@@ -244,6 +249,12 @@ export function UsagePage({ meta }: { meta: SettingsNavItem }) {
       ) : (
         <SCard pad={22}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+              <span style={{ fontSize: 12.5, color: 'var(--app-t2)' }}>Storage</span>
+              <span className="mono" style={{ fontSize: 12, color: 'var(--app-t3)', fontWeight: 600 }} title="Storage usage is not measured yet, so nothing is enforced or billed against this quota.">
+                {storageQuota ? `not metered · plan quota ${storageQuota}` : 'not metered'}
+              </span>
+            </div>
             {meters.map((m) => {
               // Only a negative (or missing) limit means unlimited — the
               // backend's convention (see resolveUsageLimits in

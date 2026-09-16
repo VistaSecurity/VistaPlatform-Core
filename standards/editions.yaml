@@ -30,7 +30,9 @@ editions:
       complete crypto inventory and CMDB, compliance evaluation against the
       free frameworks, CBOM generation and CycloneDX export, RBAC, local users
       and invitations, audit logging, RLS tenant isolation, the mTLS service
-      mesh, and the sensor and agent source.
+      mesh, and the sensor and agent source. Subscription tiers and the
+      entitlements they compose are Core too — a Core deployment authors,
+      assigns and enforces them; what Core lacks is any way to charge for them.
 
   enterprise:
     label: Enterprise
@@ -145,12 +147,6 @@ msp_surface:
     summary: >-
       Creating, suspending, migrating and deleting tenants; the tenant switcher
       and cross-tenant views.
-    doc: null
-  - name: Tier and entitlement authoring
-    summary: >-
-      Defining subscription tiers and the entitlements each includes. Tier
-      ASSIGNMENT and enforcement stay Core, so entitlements still resolve on a
-      Core deployment.
     doc: null
   - name: Billing and subscriptions
     summary: >-

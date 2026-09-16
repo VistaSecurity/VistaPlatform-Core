@@ -694,7 +694,7 @@ export interface paths {
         put?: never;
         /**
          * Create a billable-item catalog row
-         * @description The `key` is the stable code identifier (immutable after creation). A duplicate key returns 409. Returns the created item directly (not wrapped).
+         * @description The `key` is the stable code identifier (immutable after creation). A duplicate key returns 409. `default_value` must match `kind` (see PUT /admin/tiers/{id}/entitlements for the shapes); a malformed or omitted default returns 400 with `kind` and `detail`. Returns the created item directly (not wrapped).
          */
         post: operations["createBillableItem"];
         delete?: never;
@@ -713,7 +713,7 @@ export interface paths {
         get?: never;
         /**
          * Update a billable-item catalog row
-         * @description Rewrites every non-key field; the `key` is immutable and ignored if supplied. Returns the updated item directly (not wrapped).
+         * @description Rewrites every non-key field; the `key` is immutable and ignored if supplied. `default_value` must match `kind`; a malformed or omitted default returns 400 with `kind` and `detail` before the row is touched. Returns the updated item directly (not wrapped).
          */
         put: operations["updateBillableItem"];
         post?: never;
@@ -1926,7 +1926,7 @@ export interface paths {
         put?: never;
         /**
          * Grant a tenant entitlement override
-         * @description Grants the tenant an override on a billable_item. Unknown/inactive item_key or invalid effective_from/expires_at → 400.
+         * @description Grants the tenant an override on a billable_item. Unknown/inactive item_key, an `override_value` that does not match the item's `kind` (omitted or `{}` included — an override outranks the tier, so a malformed one is never defaulted), or invalid effective_from/expires_at → 400.
          */
         post: operations["createTenantEntitlement"];
         delete?: never;
@@ -2568,7 +2568,7 @@ export interface paths {
         get: operations["getTierEntitlements"];
         /**
          * Bulk-replace a tier's entitlement composition
-         * @description The body is the complete desired composition (atomic replace). 400 with `item_key` on an unknown item key.
+         * @description The body is the complete desired composition (atomic replace). Every `included_value` is validated against its item's `kind` before anything is written — `{"enabled": bool}` for boolean, `{"quantity": N>=0}` or `{"quantity": null}` (unlimited) for numeric_cap/numeric_metered, `{"value": "..."}` for enum_choice; an omitted or empty value is rejected, not defaulted. 400 with `item_key` on an unknown or duplicated item key; 400 with `kind` and `detail` on a malformed value. Nothing is written on any 400.
          */
         put: operations["updateTierEntitlements"];
         post?: never;

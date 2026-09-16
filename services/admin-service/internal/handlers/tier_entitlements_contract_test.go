@@ -13,6 +13,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -20,6 +21,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/services"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 )
 
 type stubTierEntitlements struct {
@@ -152,6 +154,39 @@ func TestContract_UpdateTierEntitlements_500(t *testing.T) {
 	w := doRequest(eng, http.MethodPut, apiBase+tierEntsBase, strings.NewReader(validTierEntsBody))
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+// A malformed included_value → 400 carrying the shape the operator should
+// have sent, so the composer can pinpoint the cell. The stub returns what the
+// real service returns for `{}` on a numeric cap.
+func TestContract_UpdateTierEntitlements_400_invalidValue(t *testing.T) {
+	sv := loadSpec(t)
+	eng := tierEntitlementsEngine(&stubTierEntitlements{
+		replaceErr: fmt.Errorf("item max_sensors: %w", &entitlements.InvalidValueError{Kind: entitlements.KindNumericCap, Reason: `missing "quantity"`}),
+	})
+	w := doRequest(eng, http.MethodPut, apiBase+tierEntsBase, strings.NewReader(validTierEntsBody))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `missing \"quantity\"`) {
+		t.Errorf("400 body does not carry the validation reason: %s", w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+// The same item_key twice in one composition → 400 with the key, not the bare
+// 500 the (tier_id, item_id) primary key used to produce.
+func TestContract_UpdateTierEntitlements_400_duplicateKey(t *testing.T) {
+	sv := loadSpec(t)
+	eng := tierEntitlementsEngine(&stubTierEntitlements{replaceErr: &services.DuplicateItemKeyError{Key: "max_sensors"}})
+	w := doRequest(eng, http.MethodPut, apiBase+tierEntsBase, strings.NewReader(validTierEntsBody))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"item_key":"max_sensors"`) {
+		t.Errorf("400 body does not name the duplicated key: %s", w.Body.String())
 	}
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
 }

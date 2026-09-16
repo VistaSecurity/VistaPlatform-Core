@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/services"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 )
 
 // --- in-memory stub billableItemStore ---------------------------------------
@@ -234,4 +235,30 @@ func TestContract_BillableItem_DriftIsCaught(t *testing.T) {
 	if err := sch.Validate(bad); err == nil {
 		t.Fatal("expected validation to FAIL for a drifted BillableItem, but it passed — the guardrail is not actually checking")
 	}
+}
+
+// A malformed default_value → 400 with the expected shape, distinct from the
+// 409 for a duplicate key and the 500 for everything else.
+func TestContract_CreateBillableItem_400_invalidDefault(t *testing.T) {
+	sv := loadSpec(t)
+	eng := billableItemEngine(&stubBillableItemStore{
+		createErr: &entitlements.InvalidValueError{Kind: entitlements.KindBoolean, Reason: `missing "enabled"`},
+	})
+	w := doRequest(eng, http.MethodPost, billableItemBase, strings.NewReader(validBillableItemBody))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+func TestContract_UpdateBillableItem_400_invalidDefault(t *testing.T) {
+	sv := loadSpec(t)
+	eng := billableItemEngine(&stubBillableItemStore{
+		updateErr: &entitlements.InvalidValueError{Kind: entitlements.KindNumericCap, Reason: `"quantity" must not be negative`},
+	})
+	w := doRequest(eng, http.MethodPut, billableItemBase+"/"+uuid.New().String(), strings.NewReader(validBillableItemBody))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
 }

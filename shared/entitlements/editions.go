@@ -6,17 +6,20 @@ import "sort"
 //
 // The platform ships as a source-available Core plus two paid editions. An
 // edition is not a tier: tiers are a commercial packaging concept that a
-// deployment's operator authors (and that only the MSP edition can author),
-// whereas an edition is a build/licensing boundary that decides whether a
-// capability's code and grant can exist at all.
+// deployment's operator authors and assigns — in every edition, Core included
+// (admin-service mounts tier CRUD and composition unconditionally) — whereas an
+// edition is a build/licensing boundary that decides whether a capability's
+// code and grant can exist at all, and therefore which items a tier may grant.
 //
 //	EditionCore       — free, source-available. Ships with every capability below
 //	                    that is NOT listed in editionByItem.
 //	EditionEnterprise — paid. Compliance authoring, SSO, CBOM evidence,
 //	                    white-label, and the regulated framework catalog.
 //	EditionMSP        — paid, superset of Enterprise. The multi-tenant
-//	                    management plane: tenant lifecycle, tier/entitlement
-//	                    authoring, cross-tenant views, and billing.
+//	                    management plane: tenant lifecycle, cross-tenant views,
+//	                    customer comms and support. (Billing is currently
+//	                    classified Enterprise — see billing_portal — and tier
+//	                    authoring is Core; both are open product questions.)
 type Edition string
 
 const (

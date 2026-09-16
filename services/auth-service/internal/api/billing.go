@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	sharedservices "github.com/vistasecurity/vistaplatform/shared/services"
 )
 
 // BillingInfo represents billing information for a tenant
@@ -673,47 +675,61 @@ func CheckLimitsWithStore(store billingUsageStore) gin.HandlerFunc {
 	}
 }
 
-// GetFeatureAvailability handles GET /billing/feature-availability - Get feature availability
+// featureAvailabilityStore is the slice of the billing repository that
+// GetFeatureAvailability needs: the tenant's tier name for the label, and the
+// resolver for every numeric cap it reports.
+type featureAvailabilityStore interface {
+	GetTenantTierName(ctx context.Context, tenantID uuid.UUID) (string, error)
+	ResolveCaps(ctx context.Context, tenantID uuid.UUID, keys []string) (map[string]*int, error)
+}
+
+// featureAvailabilityCapKeys are the numeric caps the response's `limits` map
+// carries, keyed exactly as the entitlement catalogue keys them.
+var featureAvailabilityCapKeys = []string{
+	itemMaxSensors, itemMaxAssets, itemMaxUsers,
+	"retention_days", "compliance_frameworks_max", "integrations_max",
+}
+
+// GetFeatureAvailability handles GET /features/availability.
+//
+// It used to read subscription_tiers.features / .limits / .max_* directly —
+// the legacy display-only mirror columns that the plan editor never writes
+// and that enforcement stopped consulting — so it was the one tenant-facing
+// endpoint still capable of describing a tier the tenant is not actually on.
+// It now answers from the same two sources every gate uses:
+//
+//   - features: LimitEnforcementService.CheckFeatureAccess over knownFeatures,
+//     which is exactly what GET /tenant/features returns and what the
+//     frontend's useFeature() gates on (edition-gated keys are false on Core
+//     no matter what any tier row says);
+//   - limits: the entitlement resolver (override > tier > default), reported
+//     with the legacy convention this endpoint always used, -1 = unlimited.
+//
+// The response shape (tier, features, limits) is unchanged. No in-repo
+// client calls this route today; it is kept for compatibility, not
+// preference — GET /tenant/features is the endpoint new code should use.
 func GetFeatureAvailability(db *sql.DB) gin.HandlerFunc {
+	return GetFeatureAvailabilityWithDeps(newBillingRepo(db), sharedservices.NewLimitEnforcementService(db))
+}
+
+// GetFeatureAvailabilityWithDeps is the injectable form GetFeatureAvailability
+// wraps, so the handler can be driven without a database.
+func GetFeatureAvailabilityWithDeps(store featureAvailabilityStore, limitSvc limitChecker) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Get tenant ID from context
 		tenantIDStr := c.GetString("tenantID")
 		if tenantIDStr == "" {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Tenant ID not found"})
 			return
 		}
-
 		tenantID, err := uuid.Parse(tenantIDStr)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
 			return
 		}
+		ctx := c.Request.Context()
 
-		// Get tier features and limits.
-		// tenants + subscription_tiers are GLOBAL reference tables (no
-		// tenant_isolation policy); left unwrapped.
-		var tierName string
-		var featuresJSON, limitsJSON []byte
-		var maxSensors, maxAssets, maxUsers, retentionDays sql.NullInt64
-
-		err = db.QueryRow(`
-			SELECT
-				st.name,
-				st.features,
-				st.limits,
-				st.max_sensors,
-				st.max_assets,
-				st.max_users,
-				st.retention_days
-			FROM tenants t
-			JOIN subscription_tiers st ON t.subscription_tier_id = st.id
-			WHERE t.id = $1
-		`, tenantID).Scan(
-			&tierName, &featuresJSON, &limitsJSON,
-			&maxSensors, &maxAssets, &maxUsers, &retentionDays,
-		)
-
-		if err == sql.ErrNoRows {
+		tierName, err := store.GetTenantTierName(ctx, tenantID)
+		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Tenant or tier not found"})
 			return
 		}
@@ -722,42 +738,34 @@ func GetFeatureAvailability(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 
-		// Parse features
-		features := make(map[string]interface{})
-		if featuresJSON != nil {
-			if err := json.Unmarshal(featuresJSON, &features); err != nil {
-				features = make(map[string]interface{})
+		features := make(map[string]interface{}, len(knownFeatures))
+		for _, name := range knownFeatures {
+			ok, ferr := limitSvc.CheckFeatureAccess(tenantID, name)
+			if ferr != nil {
+				log.Printf("GetFeatureAvailability: CheckFeatureAccess(%s) for tenant %s failed: %v", name, tenantID, ferr)
+				ok = false
 			}
+			features[name] = ok
 		}
 
-		// Parse limits
-		limits := make(map[string]interface{})
-		if limitsJSON != nil {
-			if err := json.Unmarshal(limitsJSON, &limits); err != nil {
-				limits = make(map[string]interface{})
+		resolved, err := store.ResolveCaps(ctx, tenantID, featureAvailabilityCapKeys)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to resolve limits"})
+			return
+		}
+		limits := make(map[string]interface{}, len(resolved))
+		for key, qty := range resolved {
+			if qty == nil {
+				limits[key] = int64(-1) // unlimited, this endpoint's long-standing convention
+				continue
 			}
+			limits[key] = int64(*qty)
 		}
 
-		// Add tier column limits
-		if maxSensors.Valid {
-			limits["max_sensors"] = maxSensors.Int64
-		}
-		if maxAssets.Valid {
-			limits["max_assets"] = maxAssets.Int64
-		}
-		if maxUsers.Valid {
-			limits["max_users"] = maxUsers.Int64
-		}
-		if retentionDays.Valid {
-			limits["retention_days"] = retentionDays.Int64
-		}
-
-		response := FeatureAvailability{
+		c.JSON(http.StatusOK, FeatureAvailability{
 			Tier:     tierName,
 			Features: features,
 			Limits:   limits,
-		}
-
-		c.JSON(http.StatusOK, response)
+		})
 	}
 }

@@ -44,7 +44,28 @@ function toValue(kind: string, draft: string): unknown {
     const t = (draft ?? '').trim().toLowerCase();
     return { quantity: t === '' || t === '∞' || t === 'unlimited' ? null : Number(t) };
   }
-  return { value: draft };
+  return { value: draft.trim() };
+}
+/**
+ * Why a lever draft cannot be sent. Mirrors the server's entitlements.ValidateValue:
+ * a quantity is a whole number ≥ 0 or blank/∞ for unlimited, an enum choice is a
+ * non-empty string. Before the server rule existed, `Number("abc")` was NaN,
+ * JSON.stringify turned NaN into null, and "abc" silently saved as unlimited.
+ */
+function leverDraftError(kind: string, draft: string): string | null {
+  if (kind === 'numeric_cap' || kind === 'numeric_metered') {
+    const t = (draft ?? '').trim().toLowerCase();
+    if (t === '' || t === '∞' || t === 'unlimited') return null;
+    if (!/^\d+$/.test(t)) return 'must be a whole number ≥ 0, or blank for unlimited';
+    return null;
+  }
+  if (kind === 'enum_choice' && !(draft ?? '').trim()) return 'cannot be blank';
+  return null;
+}
+/** The server's 400 carries a `detail` naming the bad item and the expected shape; prefer it to a generic message. */
+function apiDetail(err: unknown, fallback: string): string {
+  const d = (err as { detail?: unknown } | null)?.detail;
+  return typeof d === 'string' && d ? d : fallback;
 }
 function fmtCard(kind: string, draft: string): string {
   if (kind === 'numeric_cap' || kind === 'numeric_metered') return draft.trim() === '' ? 'Unlimited' : Number(draft).toLocaleString();
@@ -87,7 +108,7 @@ export function PlanBuilder({ tier, items, onClose }: { tier?: SubscriptionTier;
     for (const it of items) d[it.key] = draftFrom(it.kind, byKey.has(it.key) ? byKey.get(it.key) : it.default_value);
     return d;
   }, [ready, entQ.data, items]);
-  const draft = drafts ?? initDrafts ?? {};
+  const draft = useMemo(() => drafts ?? initDrafts ?? {}, [drafts, initDrafts]);
   const setLever = (k: string, v: string) => setDrafts({ ...(drafts ?? initDrafts ?? {}), [k]: v });
 
   const byKind = useMemo(() => {
@@ -107,10 +128,10 @@ export function PlanBuilder({ tier, items, onClose }: { tier?: SubscriptionTier;
         const u = await clients.admin.PUT('/admin/tiers/{id}', { params: { path: { id: tier!.id } }, body: { display_name: displayName.trim(), price_cents, annual_price_cents, billing_method: billingMethod, is_custom: isCustom } });
         if (u.error) throw new Error('Failed to save plan');
         const e = await clients.admin.PUT('/admin/tiers/{id}/entitlements', { params: { path: { id: tier!.id } }, body: { entitlements: entitlementsBody() } });
-        if (e.error) throw new Error('Saved the plan, but its entitlements failed to save');
+        if (e.error) throw new Error(apiDetail(e.error, 'Saved the plan, but its entitlements failed to save'));
       } else {
         const { error } = await clients.admin.POST('/admin/tiers', { body: { name: slug(displayName), display_name: displayName.trim(), billing_interval: 'month', billing_method: billingMethod, price_cents, annual_price_cents, is_custom: isCustom, entitlements: entitlementsBody() } });
-        if (error) throw new Error('Failed to create plan');
+        if (error) throw new Error(apiDetail(error, 'Failed to create plan'));
       }
     },
     onSuccess: () => {
@@ -131,7 +152,14 @@ export function PlanBuilder({ tier, items, onClose }: { tier?: SubscriptionTier;
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Deprecate failed'),
   });
 
-  const error = !displayName.trim() ? 'Plan name is required' : null;
+  const leverError = useMemo(() => {
+    for (const it of items) {
+      const e = leverDraftError(it.kind, draft[it.key] ?? '');
+      if (e) return `${it.display_name} ${e}`;
+    }
+    return null;
+  }, [items, draft]);
+  const error = !displayName.trim() ? 'Plan name is required' : leverError;
   const price = Number(monthly || 0);
   const stripeFee = billingMethod === 'stripe' && price > 0 ? price * 0.029 + 0.3 : 0;
   const marginAbs = price - INFRA_PER_CUSTOMER - stripeFee;
@@ -223,7 +251,7 @@ export function PlanBuilder({ tier, items, onClose }: { tier?: SubscriptionTier;
                     {it.kind === 'boolean' ? (
                       <button onClick={() => setLever(it.key, draft[it.key] === 'on' ? 'off' : 'on')} className="op-chip" style={{ width: 64, justifyContent: 'center', color: draft[it.key] === 'on' ? 'var(--op-accent-text)' : 'var(--op-t3)', fontWeight: 600 }}>{draft[it.key] === 'on' ? 'On' : 'Off'}</button>
                     ) : (it.kind === 'numeric_cap' || it.kind === 'numeric_metered') ? (
-                      <input value={draft[it.key] ?? ''} onChange={(e) => setLever(it.key, e.target.value)} placeholder="∞" style={{ ...modalInputStyle, width: 120, textAlign: 'right' }} />
+                      <input inputMode="numeric" value={draft[it.key] ?? ''} onChange={(e) => setLever(it.key, e.target.value)} placeholder="∞" aria-invalid={!!leverDraftError(it.kind, draft[it.key] ?? '')} title={leverDraftError(it.kind, draft[it.key] ?? '') ?? 'Whole number, or blank for unlimited'} style={{ ...modalInputStyle, width: 120, textAlign: 'right', borderColor: leverDraftError(it.kind, draft[it.key] ?? '') ? 'var(--op-danger, #d33)' : undefined }} />
                     ) : (
                       <input value={draft[it.key] ?? ''} onChange={(e) => setLever(it.key, e.target.value)} placeholder="—" style={{ ...modalInputStyle, width: 160 }} />
                     )}

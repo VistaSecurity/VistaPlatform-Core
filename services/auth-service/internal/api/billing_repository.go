@@ -276,8 +276,17 @@ const (
 var usageLimitItemKeys = []string{itemMaxSensors, itemMaxAssets, itemMaxUsers}
 
 func (r *billingRepository) ResolveNumericLimits(ctx context.Context, tenantID uuid.UUID) (map[string]*int, error) {
+	return r.ResolveCaps(ctx, tenantID, usageLimitItemKeys)
+}
+
+// ResolveCaps resolves the given numeric_cap item keys for the tenant through
+// shared/entitlements (override > tier > default). Same contract as
+// ResolveNumericLimits, for any key list: present-with-nil means unlimited,
+// absent means it could not be resolved (unknown key, or a malformed value —
+// QuantityValue refuses those rather than reading them as unlimited).
+func (r *billingRepository) ResolveCaps(ctx context.Context, tenantID uuid.UUID, keys []string) (map[string]*int, error) {
 	resolver := entitlements.NewPostgresResolver(r.db)
-	resolved, err := resolver.ResolveMany(ctx, tenantID, usageLimitItemKeys)
+	resolved, err := resolver.ResolveMany(ctx, tenantID, keys)
 	if err != nil {
 		return nil, err
 	}
@@ -291,4 +300,21 @@ func (r *billingRepository) ResolveNumericLimits(ctx context.Context, tenantID u
 		}
 	}
 	return out, nil
+}
+
+// GetTenantTierName returns the name of the tenant's assigned subscription
+// tier. sql.ErrNoRows when the tenant does not exist OR has no tier assigned —
+// the same "tenant or tier not found" the legacy JOIN produced.
+//
+// tenants + subscription_tiers are global reference tables (no
+// tenant_isolation policy); left unwrapped.
+func (r *billingRepository) GetTenantTierName(ctx context.Context, tenantID uuid.UUID) (string, error) {
+	var name string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT st.name
+		FROM tenants t
+		JOIN subscription_tiers st ON t.subscription_tier_id = st.id
+		WHERE t.id = $1
+	`, tenantID).Scan(&name)
+	return name, err
 }

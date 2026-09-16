@@ -122,6 +122,35 @@ func NewAssetHandler(assetService assetStore, db *database.DB) *AssetHandler {
 	return h
 }
 
+// enforceAssetCap runs the subscription asset-cap check for a user-initiated
+// addition of `additional` managed assets and writes the response when the
+// request must stop. It reports whether the handler may proceed.
+//
+// Fails CLOSED: a check that cannot be answered is a 500, not a pass — the
+// connectors used to treat a resolver error as permission and that is the
+// fail-open the review flagged. Skipped only when no checker is wired
+// (DB-free contract tests), which is the one deliberately optional case.
+func (h *AssetHandler) enforceAssetCap(c *gin.Context, tenantUUID uuid.UUID, additional int) bool {
+	if h.limits == nil {
+		return true
+	}
+	result, err := h.limits.CheckAssetLimit(tenantUUID, additional)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check asset limit"})
+		return false
+	}
+	if !result.Allowed {
+		c.JSON(http.StatusPaymentRequired, gin.H{
+			"error":          result.Message,
+			"current_usage":  result.CurrentUsage,
+			"limit":          result.Limit,
+			"upgrade_prompt": result.UpgradePrompt,
+		})
+		return false
+	}
+	return true
+}
+
 // GetAssets handles GET /api/v1/assets
 // Binds query params into filters and returns paginated assets with pagination metadata.
 func (h *AssetHandler) GetAssets(c *gin.Context) {
@@ -651,21 +680,8 @@ func (h *AssetHandler) CreateAsset(c *gin.Context) {
 	// Enforce the tenant's subscription asset cap before inserting.
 	// Plan limits are otherwise display-only, so an over-limit tenant could
 	// keep creating assets via this endpoint.
-	if h.limits != nil {
-		result, err := h.limits.CheckAssetLimit(tenantUUID, 1)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check asset limit"})
-			return
-		}
-		if !result.Allowed {
-			c.JSON(http.StatusPaymentRequired, gin.H{
-				"error":          result.Message,
-				"current_usage":  result.CurrentUsage,
-				"limit":          result.Limit,
-				"upgrade_prompt": result.UpgradePrompt,
-			})
-			return
-		}
+	if !h.enforceAssetCap(c, tenantUUID, 1) {
+		return
 	}
 
 	asset, err := h.assetService.CreateAsset(tenantUUID, input)
@@ -998,6 +1014,14 @@ func (h *AssetHandler) RestoreAsset(c *gin.Context) {
 		return
 	}
 
+	// Restoring un-soft-deletes the row, which raises the enforced count
+	// (`deleted_at IS NULL`) by one exactly as a create does. Without this a
+	// tenant at the cap could delete and restore freely — the same
+	// user-initiated managed-asset increase, through a door the cap forgot.
+	if !h.enforceAssetCap(c, tenantUUID, 1) {
+		return
+	}
+
 	if err := h.assetService.RestoreAsset(tenantUUID, assetID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to restore asset"})
 		return
@@ -1030,6 +1054,14 @@ func (h *AssetHandler) ElevateExternalConnection(c *gin.Context) {
 	connID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid connection ID"})
+		return
+	}
+
+	// Elevation creates a NEW managed asset from a third-party connection —
+	// a user-initiated addition, same class as manual create, same cap. (The
+	// service is idempotent for an already-elevated connection; charging the
+	// check there too is the conservative side of that edge.)
+	if !h.enforceAssetCap(c, tenantUUID, 1) {
 		return
 	}
 

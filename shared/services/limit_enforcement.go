@@ -361,9 +361,21 @@ func (s *LimitEnforcementService) countTenantScoped(tenantID uuid.UUID, what, qu
 	return n, nil
 }
 
+// countSensors counts the sensors a tenant has REGISTERED — the ones its
+// max_sensors entitlement is about. Platform-provided collectors are excluded.
+//
+// Every tenant gets two of those from the create_system_sensors_on_tenant_create
+// trigger the moment the tenants row exists (the in-cluster Discovery Sensor
+// and Device Interrogation Agent, platform = 'platform'). Counting them here
+// charged two slots of the purchased cap before the tenant had registered
+// anything: on the seeded `free` tier (max_sensors 1) that made registration
+// impossible outright, and on every other tier it under-delivered the cap by
+// two. The tenant-facing usage figure (auth-service billing_repository
+// GetRealtimeCounts) has always excluded them, so the gate and the meter
+// disagreed by exactly that much.
 func (s *LimitEnforcementService) countSensors(tenantID uuid.UUID) (int, error) {
 	return s.countTenantScoped(tenantID, "sensors",
-		`SELECT COUNT(*) FROM sensors WHERE tenant_id = $1 AND deleted_at IS NULL`, tenantID)
+		`SELECT COUNT(*) FROM sensors WHERE tenant_id = $1 AND deleted_at IS NULL AND platform <> 'platform'`, tenantID)
 }
 
 func (s *LimitEnforcementService) countAssets(tenantID uuid.UUID) (int, error) {

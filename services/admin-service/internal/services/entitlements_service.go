@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 )
 
 // UnknownItemKeyError is returned by ReplaceTierEntitlements when the
@@ -23,6 +24,30 @@ type UnknownItemKeyError struct {
 
 func (e *UnknownItemKeyError) Error() string {
 	return "unknown or inactive billable_item key: " + e.Key
+}
+
+// DuplicateItemKeyError is returned by ReplaceTierEntitlements when the same
+// item_key appears more than once in one composition. Before this check the
+// second row tripped the (tier_id, item_id) primary key and surfaced as a
+// bare 500 with the message swallowed; a composition that names a lever
+// twice is ambiguous about which value it meant, so it is a 400 with the key.
+type DuplicateItemKeyError struct {
+	Key string
+}
+
+func (e *DuplicateItemKeyError) Error() string {
+	return "billable_item key appears more than once in the composition: " + e.Key
+}
+
+// validateItemValue is the write-side gate for every entitlement value column.
+// It wraps entitlements.ValidateValue so the failure names the item the
+// operator was editing — the shared error carries the kind, and a composer
+// PUT carries dozens of items.
+func validateItemValue(itemKey string, kind string, raw json.RawMessage) error {
+	if err := entitlements.ValidateValue(entitlements.Kind(kind), raw); err != nil {
+		return fmt.Errorf("item %s: %w", itemKey, err)
+	}
+	return nil
 }
 
 // DuplicateKeyError is returned by CreateBillableItem when the
@@ -225,7 +250,14 @@ type TierEntitlementInput struct {
 // single transaction. Anything not in the input is deleted; new
 // keys are inserted; existing keys are updated. The whole set is
 // validated up-front (every item_key must resolve to a known,
-// active billable_items row) so a typo can't half-apply.
+// active billable_items row, appear once, and carry a value of the
+// shape that row's kind requires) so a typo can't half-apply.
+//
+// An omitted or empty included_value is rejected rather than defaulted.
+// It used to default to `{}` "to keep PUT requests tolerant of a
+// partially-typed UI form" — and `{}` resolved as an unlimited quantity,
+// so a blank cell in the composer granted unlimited capacity to every
+// tenant on the tier. See entitlements.ValidateValue.
 //
 // Idempotent: running the same input twice produces the same end
 // state. Concurrent calls for the same tier race; admin-UI prevents
@@ -238,10 +270,14 @@ func (s *EntitlementsService) ReplaceTierEntitlements(tierID uuid.UUID, inputs [
 		keys = append(keys, in.ItemKey)
 	}
 
-	keyToID := make(map[string]uuid.UUID, len(keys))
+	type catalogRow struct {
+		id   uuid.UUID
+		kind string
+	}
+	keyToItem := make(map[string]catalogRow, len(keys))
 	if len(keys) > 0 {
 		rows, err := s.db.Query(`
-			SELECT key, id FROM billable_items
+			SELECT key, id, kind FROM billable_items
 			WHERE key = ANY($1) AND is_active = true
 		`, pq.Array(keys))
 		if err != nil {
@@ -249,14 +285,15 @@ func (s *EntitlementsService) ReplaceTierEntitlements(tierID uuid.UUID, inputs [
 		}
 		for rows.Next() {
 			var (
-				key string
-				id  uuid.UUID
+				key  string
+				id   uuid.UUID
+				kind string
 			)
-			if err := rows.Scan(&key, &id); err != nil {
+			if err := rows.Scan(&key, &id, &kind); err != nil {
 				_ = rows.Close()
 				return fmt.Errorf("scan item key: %w", err)
 			}
-			keyToID[key] = id
+			keyToItem[key] = catalogRow{id: id, kind: kind}
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
@@ -264,9 +301,18 @@ func (s *EntitlementsService) ReplaceTierEntitlements(tierID uuid.UUID, inputs [
 		}
 		_ = rows.Close()
 	}
+	seen := make(map[string]bool, len(inputs))
 	for _, in := range inputs {
-		if _, ok := keyToID[in.ItemKey]; !ok {
+		item, ok := keyToItem[in.ItemKey]
+		if !ok {
 			return &UnknownItemKeyError{Key: in.ItemKey}
+		}
+		if seen[in.ItemKey] {
+			return &DuplicateItemKeyError{Key: in.ItemKey}
+		}
+		seen[in.ItemKey] = true
+		if err := validateItemValue(in.ItemKey, item.kind, in.IncludedValue); err != nil {
+			return err
 		}
 	}
 
@@ -285,13 +331,8 @@ func (s *EntitlementsService) ReplaceTierEntitlements(tierID uuid.UUID, inputs [
 	}
 
 	for _, in := range inputs {
-		itemID := keyToID[in.ItemKey]
-		// Default includedValue to {} when the caller omits it — keeps
-		// PUT requests tolerant of a partially-typed UI form.
+		itemID := keyToItem[in.ItemKey].id
 		val := []byte(in.IncludedValue)
-		if len(val) == 0 {
-			val = []byte("{}")
-		}
 		var overageCents, overageSize interface{}
 		if in.OveragePriceCents != nil {
 			overageCents = *in.OveragePriceCents
@@ -337,11 +378,16 @@ type BillableItemInput struct {
 // row (active OR inactive — inactive rows are kept for FK integrity
 // and would still conflict on the unique constraint).
 //
-// Category and kind are validated against the CHECK constraints in the
-// schema; a bad value surfaces as the DB error wrapped in fmt.Errorf
-// (handler returns 400). The composer's UI only emits valid values,
-// so this is a belt-and-suspenders check for direct API callers.
+// Category is validated against the CHECK constraint in the schema; a
+// bad value surfaces as the DB error wrapped in fmt.Errorf. Kind and
+// default_value are validated here (entitlements.ValidateValue) so the
+// failure is a typed 400 naming the expected shape — the default is what
+// every tier-less tenant resolves to, so a malformed one is not a cosmetic
+// problem.
 func (s *EntitlementsService) CreateBillableItem(in BillableItemInput) (*BillableItem, error) {
+	if err := validateItemValue(in.Key, in.Kind, in.DefaultValue); err != nil {
+		return nil, err
+	}
 	// Sanity check at the service layer too, so the typed error is
 	// preferred over a raw 23505 from Postgres for the most common
 	// failure case.
@@ -355,9 +401,6 @@ func (s *EntitlementsService) CreateBillableItem(in BillableItemInput) (*Billabl
 	}
 
 	val := []byte(in.DefaultValue)
-	if len(val) == 0 {
-		val = []byte("{}")
-	}
 	var unit interface{}
 	if in.Unit != nil {
 		unit = *in.Unit
@@ -426,10 +469,10 @@ func (s *EntitlementsService) GetBillableItem(id uuid.UUID) (*BillableItem, erro
 // catalog row. Key is intentionally not editable. Returns
 // sql.ErrNoRows when id doesn't exist.
 func (s *EntitlementsService) UpdateBillableItem(id uuid.UUID, in BillableItemInput) (*BillableItem, error) {
-	val := []byte(in.DefaultValue)
-	if len(val) == 0 {
-		val = []byte("{}")
+	if err := validateItemValue(id.String(), in.Kind, in.DefaultValue); err != nil {
+		return nil, err
 	}
+	val := []byte(in.DefaultValue)
 	var unit interface{}
 	if in.Unit != nil {
 		unit = *in.Unit
@@ -636,15 +679,24 @@ type TenantEntitlementInput struct {
 // ctx: service method has no ctx param; using context.Background().
 func (s *EntitlementsService) CreateTenantEntitlement(tenantID uuid.UUID, createdBy *uuid.UUID, in TenantEntitlementInput) (*TenantEntitlement, error) {
 	ctx := context.Background()
-	var itemID uuid.UUID
+	var (
+		itemID   uuid.UUID
+		itemKind string
+	)
 	err := s.db.QueryRow(`
-		SELECT id FROM billable_items WHERE key = $1 AND is_active = true
-	`, in.ItemKey).Scan(&itemID)
+		SELECT id, kind FROM billable_items WHERE key = $1 AND is_active = true
+	`, in.ItemKey).Scan(&itemID, &itemKind)
 	if err == sql.ErrNoRows {
 		return nil, &UnknownItemKeyError{Key: in.ItemKey}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("resolve item key: %w", err)
+	}
+	// An override outranks the tier in the resolver, so a malformed one is
+	// the worst place for `{}` to land: it wins the COALESCE and then has to
+	// be interpreted. Reject before the row exists.
+	if err := validateItemValue(in.ItemKey, itemKind, in.OverrideValue); err != nil {
+		return nil, err
 	}
 
 	effectiveFrom := time.Now()
@@ -668,9 +720,6 @@ func (s *EntitlementsService) CreateTenantEntitlement(tenantID uuid.UUID, create
 	}
 
 	val := []byte(in.OverrideValue)
-	if len(val) == 0 {
-		val = []byte("{}")
-	}
 	var reason interface{}
 	if in.Reason != nil {
 		reason = *in.Reason
@@ -771,16 +820,28 @@ func (s *EntitlementsService) GetTenantEntitlement(id uuid.UUID) (*TenantEntitle
 // ctx: service method has no ctx param; using context.Background().
 func (s *EntitlementsService) UpdateTenantEntitlement(tenantID, id uuid.UUID, in TenantEntitlementInput) (*TenantEntitlement, error) {
 	ctx := context.Background()
-	var existingEff sql.NullTime
+	var (
+		existingEff sql.NullTime
+		itemKey     string
+		itemKind    string
+	)
 	if err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
-			SELECT effective_from FROM tenant_entitlements WHERE id = $1 AND tenant_id = $2
-		`, id, tenantID).Scan(&existingEff)
+			SELECT te.effective_from, bi.key, bi.kind
+			FROM tenant_entitlements te
+			JOIN billable_items bi ON bi.id = te.item_id
+			WHERE te.id = $1 AND te.tenant_id = $2
+		`, id, tenantID).Scan(&existingEff, &itemKey, &itemKind)
 	}); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, sql.ErrNoRows
 		}
 		return nil, fmt.Errorf("prefetch tenant entitlement: %w", err)
+	}
+	// The item is immutable on update, so the value is checked against the
+	// STORED row's kind, not whatever item_key the request happens to carry.
+	if err := validateItemValue(itemKey, itemKind, in.OverrideValue); err != nil {
+		return nil, err
 	}
 
 	effectiveFrom := time.Now().UTC()
@@ -796,9 +857,6 @@ func (s *EntitlementsService) UpdateTenantEntitlement(tenantID, id uuid.UUID, in
 	}
 
 	val := []byte(in.OverrideValue)
-	if len(val) == 0 {
-		val = []byte("{}")
-	}
 	var reason interface{}
 	if in.Reason != nil {
 		reason = *in.Reason

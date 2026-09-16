@@ -6,7 +6,7 @@
 
 # Editions
 
-Vista Platform ships as a free, source-available **Vista Platform Core** plus two paid editions — **Vista Platform Enterprise** and **Vista Platform MSP**. An edition is a licensing boundary that decides whether a capability exists in a build at all. It is not the same thing as a *tier* — tiers are commercial packaging that an operator authors, and only the MSP edition can author them.
+Vista Platform ships as a free, source-available **Vista Platform Core** plus two paid editions — **Vista Platform Enterprise** and **Vista Platform MSP**. An edition is a licensing boundary that decides whether a capability exists in a build at all. It is not the same thing as a *tier* — tiers are commercial packaging that a deployment's operator authors and assigns, in every edition including Core; an edition decides which capabilities a tier is allowed to grant, and whether anything can be charged for it.
 
 Anything not listed on this page is Core.
 
@@ -14,7 +14,7 @@ Anything not listed on this page is Core.
 
 *Free and source-available. One team securing its own estate.*
 
-Everything not listed as Enterprise or MSP below. Full discovery, the complete crypto inventory and CMDB, compliance evaluation against the free frameworks, CBOM generation and CycloneDX export, RBAC, local users and invitations, audit logging, RLS tenant isolation, the mTLS service mesh, and the sensor and agent source.
+Everything not listed as Enterprise or MSP below. Full discovery, the complete crypto inventory and CMDB, compliance evaluation against the free frameworks, CBOM generation and CycloneDX export, RBAC, local users and invitations, audit logging, RLS tenant isolation, the mTLS service mesh, and the sensor and agent source. Subscription tiers and the entitlements they compose are Core too — a Core deployment authors, assigns and enforces them; what Core lacks is any way to charge for them.
 
 ## Enterprise
 
@@ -125,7 +125,6 @@ The MSP edition is carved by which services ship, not by capability flags, so th
 | Area | What it covers |
 |---|---|
 | **Tenant lifecycle** | Creating, suspending, migrating and deleting tenants; the tenant switcher and cross-tenant views. |
-| **Tier and entitlement authoring** | Defining subscription tiers and the entitlements each includes. Tier ASSIGNMENT and enforcement stay Core, so entitlements still resolve on a Core deployment. |
 | **Billing and subscriptions** | Payment provider wiring, invoicing, plans and pricing, trials, and the subscription lifecycle. |
 | **Announcements and maintenance windows** | Platform-wide notices and scheduled maintenance windows across tenants. |
 | **Support tickets** | Operator-side support queue spanning tenants. |

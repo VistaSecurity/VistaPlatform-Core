@@ -273,17 +273,25 @@ func TierImpactAnalysis(c *gin.Context) {
 	//
 	// These counts are shown BESIDE the tier's limits to answer "who would this
 	// change break", so each has to be the number the corresponding gate
-	// measures — live rows only (shared/services.LimitEnforcementService counts
-	// `deleted_at IS NULL`). Soft-deleted rows were counted here, which
-	// overstated every tenant's usage against the cap it is being compared to.
+	// measures (shared/services.LimitEnforcementService):
+	//
+	//   assets   live rows only (`deleted_at IS NULL`); soft-deleted rows were
+	//            once counted here and overstated every tenant's usage.
+	//   users    live users PLUS pending, unexpired invitations — an invite
+	//            reserves a seat (CheckUserLimit), so a tenant with 4 users and
+	//            2 open invites breaks on a max_users of 5, not 4.
+	//   sensors  tenant-registered only; the two platform collectors the
+	//            tenant-create trigger seeds (platform = 'platform') are the
+	//            platform's, not the tenant's, and CheckSensorLimit excludes them.
 	//
 	// An asset is a host, not one of its listening ports (phase 1): count
 	// `assets`, never a join through `asset_endpoints`.
 	rows, err := tierService.BypassDB().Query(`
 		SELECT t.id, t.name,
 			COALESCE((SELECT COUNT(*) FROM assets a WHERE a.tenant_id = t.id AND a.deleted_at IS NULL), 0) AS asset_count,
-			COALESCE((SELECT COUNT(*) FROM users u WHERE u.tenant_id = t.id AND u.deleted_at IS NULL), 0) AS user_count,
-			COALESCE((SELECT COUNT(*) FROM sensors s WHERE s.tenant_id = t.id AND s.deleted_at IS NULL), 0) AS sensor_count
+			COALESCE((SELECT COUNT(*) FROM users u WHERE u.tenant_id = t.id AND u.deleted_at IS NULL), 0)
+			  + COALESCE((SELECT COUNT(*) FROM invitations i WHERE i.tenant_id = t.id AND i.status = 'pending' AND i.expires_at > NOW()), 0) AS user_count,
+			COALESCE((SELECT COUNT(*) FROM sensors s WHERE s.tenant_id = t.id AND s.deleted_at IS NULL AND s.platform <> 'platform'), 0) AS sensor_count
 		FROM tenants t
 		WHERE t.subscription_tier_id = $1 AND t.deleted_at IS NULL
 		ORDER BY t.name ASC
@@ -331,6 +339,23 @@ func TierImpactAnalysis(c *gin.Context) {
 		targetTier, err := tierService.GetTier(targetTierID)
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Target tier not found"})
+			return
+		}
+
+		// Compare what each tier GRANTS — its tier_entitlements composition,
+		// falling back to the catalogue default — not the legacy
+		// subscription_tiers.max_* columns. The plan editor never writes those
+		// on edit, so for an admin-authored plan they are frozen at creation
+		// and the analysis said "no change" regardless of the composition.
+		// The resolved values are what actually gate the tenants listed above.
+		sourceCaps, err := tierService.GetTierCaps(tierID, services.TierCapKeys())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to resolve source tier limits"})
+			return
+		}
+		targetCaps, err := tierService.GetTierCaps(targetTierID, services.TierCapKeys())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to resolve target tier limits"})
 			return
 		}
 
@@ -390,9 +415,9 @@ func TierImpactAnalysis(c *gin.Context) {
 			})
 		}
 
-		compareLimit("max_assets", sourceTier.MaxAssets, targetTier.MaxAssets, func(tu tenantUsage) int { return tu.Usage.Assets })
-		compareLimit("max_users", sourceTier.MaxUsers, targetTier.MaxUsers, func(tu tenantUsage) int { return tu.Usage.Users })
-		compareLimit("max_sensors", sourceTier.MaxSensors, targetTier.MaxSensors, func(tu tenantUsage) int { return tu.Usage.Sensors })
+		compareLimit("max_assets", sourceCaps["max_assets"], targetCaps["max_assets"], func(tu tenantUsage) int { return tu.Usage.Assets })
+		compareLimit("max_users", sourceCaps["max_users"], targetCaps["max_users"], func(tu tenantUsage) int { return tu.Usage.Users })
+		compareLimit("max_sensors", sourceCaps["max_sensors"], targetCaps["max_sensors"], func(tu tenantUsage) int { return tu.Usage.Sensors })
 
 		if changes == nil {
 			changes = []limitChange{}

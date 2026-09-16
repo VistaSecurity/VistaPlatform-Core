@@ -30,7 +30,22 @@ function toValue(kind: string, draft: string): unknown {
     const t = (draft ?? '').trim().toLowerCase();
     return { quantity: t === '' || t === '∞' || t === 'unlimited' ? null : Number(t) };
   }
-  return { value: draft };
+  return { value: draft.trim() };
+}
+/** Mirrors the server's entitlements.ValidateValue so the form blocks what the API would 400. */
+function draftError(kind: string, draft: string): string | null {
+  if (kind === 'numeric_cap' || kind === 'numeric_metered') {
+    const t = (draft ?? '').trim().toLowerCase();
+    if (t === '' || t === '∞' || t === 'unlimited') return null;
+    if (!/^\d+$/.test(t)) return 'Value must be a whole number ≥ 0, or blank for unlimited';
+    return null;
+  }
+  if (kind === 'enum_choice' && !(draft ?? '').trim()) return 'Value cannot be blank';
+  return null;
+}
+function apiDetail(err: unknown, fallback: string): string {
+  const d = (err as { detail?: unknown } | null)?.detail;
+  return typeof d === 'string' && d ? d : fallback;
 }
 function draftFrom(kind: string, v: unknown): string {
   const dv = (v ?? {}) as DV;
@@ -143,7 +158,7 @@ function ExceptionModal({ tenantId, items, existing, onClose }: { tenantId: stri
   const onPickItem = (k: string) => { setItemKey(k); const it = items.find((i) => i.key === k); setDraft(draftFrom(it?.kind ?? 'boolean', it?.default_value)); };
   const kind = (existing?.item_kind ?? item?.kind ?? 'boolean');
   const numeric = kind === 'numeric_cap' || kind === 'numeric_metered';
-  const error = !reason.trim() ? 'Reason is required' : (!itemKey ? 'Pick a lever' : null);
+  const error = !reason.trim() ? 'Reason is required' : (!itemKey ? 'Pick a lever' : draftError(kind, draft));
 
   const save = useMutation({
     mutationFn: async () => {
@@ -155,10 +170,10 @@ function ExceptionModal({ tenantId, items, existing, onClose }: { tenantId: stri
       };
       if (isEdit) {
         const { error: err } = await clients.admin.PUT('/admin/tenants/{id}/entitlements/{overrideId}', { params: { path: { id: tenantId, overrideId: existing!.id } }, body });
-        if (err) throw new Error('Failed to update exception');
+        if (err) throw new Error(apiDetail(err, 'Failed to update exception'));
       } else {
         const { error: err } = await clients.admin.POST('/admin/tenants/{id}/entitlements', { params: { path: { id: tenantId } }, body });
-        if (err) throw new Error('Failed to grant exception');
+        if (err) throw new Error(apiDetail(err, 'Failed to grant exception'));
       }
     },
     onSuccess: () => { toast.success(isEdit ? 'Exception updated' : 'Exception granted'); qc.invalidateQueries({ queryKey: KEY(tenantId) }); onClose(); },
@@ -193,7 +208,7 @@ function ExceptionModal({ tenantId, items, existing, onClose }: { tenantId: stri
             <option value="off">Off</option><option value="on">On</option>
           </select>
         ) : numeric ? (
-          <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="number, or ∞ / blank for unlimited" style={modalInputStyle} />
+          <input inputMode="numeric" value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="number, or ∞ / blank for unlimited" aria-invalid={!!draftError(kind, draft)} style={modalInputStyle} />
         ) : (
           <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="value" style={modalInputStyle} />
         )}

@@ -49,9 +49,10 @@ own or are authorized to assess**, and read the OT/ICS caution in
 [DISCLAIMER.md](DISCLAIMER.md#authorized-use-only) first.
 
 **Inventory.** Everything discovered lands in a CMDB-aligned model: assets,
-certificates, keys, crypto configurations, and the relationships between them.
-Nine lenses reshape the same data — infrastructure, certificates, keys,
-configuration, network, third-party connections, stale assets, and TLS/SSH.
+certificates, keys, crypto configurations, installed software with its
+lifecycle state, and the relationships between them. Eleven lenses reshape the
+same data — assets, network map, software, certificates, keys, configuration,
+TLS, SSH, data protection, third-party connections, and stale assets.
 
 **Assessment.** Every algorithm is scored against a maintained catalog:
 strength, deprecation status, post-quantum resistance, and NIST security level.
@@ -59,9 +60,10 @@ Post-quantum exposure is computed per asset, so "what does Shor's algorithm
 break" is a query rather than a research project.
 
 **Compliance.** A rules engine evaluates your inventory continuously against
-policy frameworks and materializes findings as things change. Core ships six
+policy frameworks and materializes findings as things change. Core ships eight
 frameworks: security best practices, post-quantum readiness, certificate
-hygiene, and three certificate-expiry policies.
+hygiene, three certificate-expiry policies, inventory hygiene, and software
+lifecycle.
 
 **CBOM.** Define a *scope* — a named, versioned predicate over your inventory —
 and generate an immutable, content-hashed CycloneDX 1.7 cryptographic bill of
@@ -79,21 +81,25 @@ security in a security product is indefensible.
 | | Core | Enterprise | MSP |
 |---|---|---|---|
 | Discovery — sensor, agent, cloud; passive OT/ICS | ✅ | ✅ | ✅ |
-| Inventory, CMDB model, all nine lenses | ✅ | ✅ | ✅ |
+| Inventory, CMDB model, all eleven lenses; software + lifecycle (ITAM) | ✅ | ✅ | ✅ |
 | Crypto assessment + PQC exposure | ✅ | ✅ | ✅ |
-| Compliance engine + 6 frameworks | ✅ | ✅ | ✅ |
+| Compliance engine + 8 frameworks | ✅ | ✅ | ✅ |
 | CBOM generation + CycloneDX export | ✅ | ✅ | ✅ |
 | Tenant isolation, mTLS, RBAC, audit log | ✅ | ✅ | ✅ |
 | Ticketing, notifications, dashboards | ✅ | ✅ | ✅ |
+| Plan and entitlement authoring, usage against limits | ✅ | ✅ | ✅ |
 | Regulated frameworks — SOC 2, PCI-DSS, ISO 27001, NIST CSF, IEC 62351-3 | | ✅ | ✅ |
 | CBOM evidence — signing, attestation, drift comparison, SPDX/PDF | | ✅ | ✅ |
 | SSO — tenant OIDC/SAML, social sign-up, staff SSO | | ✅ | ✅ |
 | Custom policies + threshold overrides | | ✅ | ✅ |
 | CMDB/ITSM sync — ServiceNow, Device42, SolarWinds | | ✅ | ✅ |
+| NetBox network source of truth + drift view | | ✅ | ✅ |
 | SIEM forwarding, scheduled audit reports | | ✅ | ✅ |
 | White-label branding | | ✅ | ✅ |
 | OT/ICS active probing + OT inventory lens | | ✅ | ✅ |
-| Multi-tenant management plane, tiering, billing | | | ✅ |
+| Self-service billing — subscription, invoices, payment portal | | ✅ | ✅ |
+| Generative AI assistants (ask, author, enrich, narrate, remediate) | | ✅ | ✅ |
+| Multi-tenant management plane — tenant lifecycle, cross-tenant views | | | ✅ |
 
 The line is **generation vs. evidence**: Core produces a real CycloneDX CBOM
 that your pipeline can consume. Enterprise makes it *audit-grade* — signed,

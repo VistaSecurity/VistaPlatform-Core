@@ -41,16 +41,21 @@ function useBillableItems() {
     staleTime: 5 * 60 * 1000,
   });
 }
+/** The server's 400 for a malformed default_value carries a `detail` naming the expected shape. */
+function apiDetail(err: unknown, fallback: string): string {
+  const d = (err as { detail?: unknown } | null)?.detail;
+  return typeof d === 'string' && d ? d : fallback;
+}
 function useSaveBillableItem() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ id, body }: { id?: string; body: BillableItemInput }) => {
       if (id) {
         const { error } = await clients.admin.PUT('/admin/billable-items/{id}', { params: { path: { id } }, body });
-        if (error) throw new Error('Failed to update entitlement');
+        if (error) throw new Error(apiDetail(error, 'Failed to update entitlement'));
       } else {
         const { error } = await clients.admin.POST('/admin/billable-items', { body });
-        if (error) throw new Error('Failed to create entitlement');
+        if (error) throw new Error(apiDetail(error, 'Failed to create entitlement'));
       }
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: KEY }),
@@ -210,14 +215,18 @@ function BillableItemModal({ item, onClose }: { item: BillableItem | null; onClo
   const onKindChange = (k: string) => { setKind(k); if (KIND_CATEGORY[k]) setCategory(KIND_CATEGORY[k]); };
 
   const slug = (s: string) => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-  const error = !displayName.trim() ? 'Name is required' : (!isEdit && !key.trim() ? 'Key is required' : null);
+  const numeric = kind === 'numeric_cap' || kind === 'numeric_metered';
+  const defaultError = numeric && !dvUnlimited && !/^\d+$/.test(dvQty.trim())
+    ? 'Default must be a whole number ≥ 0 (or tick Unlimited)'
+    : kind === 'enum_choice' && !dvEnum.trim() ? 'Default value cannot be blank' : null;
+  const error = !displayName.trim() ? 'Name is required' : (!isEdit && !key.trim() ? 'Key is required' : defaultError);
 
   const submit = () => {
     if (error) { toast.error(error); return; }
     let default_value: unknown;
     if (kind === 'boolean') default_value = { enabled: dvBool };
-    else if (kind === 'numeric_cap' || kind === 'numeric_metered') default_value = { quantity: dvUnlimited ? null : Number(dvQty || 0) };
-    else if (kind === 'enum_choice') default_value = { value: dvEnum };
+    else if (numeric) default_value = { quantity: dvUnlimited ? null : Number(dvQty) };
+    else if (kind === 'enum_choice') default_value = { value: dvEnum.trim() };
     else default_value = {};
 
     const body: BillableItemInput = {
@@ -243,7 +252,6 @@ function BillableItemModal({ item, onClose }: { item: BillableItem | null; onClo
     );
   };
 
-  const numeric = kind === 'numeric_cap' || kind === 'numeric_metered';
   return (
     <Modal
       open onClose={onClose}
@@ -289,7 +297,7 @@ function BillableItemModal({ item, onClose }: { item: BillableItem | null; onClo
             </select>
           ) : numeric ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <input type="number" value={dvQty} disabled={dvUnlimited} onChange={(e) => setDvQty(e.target.value)} style={{ ...modalInputStyle, flex: 1, opacity: dvUnlimited ? 0.5 : 1 }} />
+              <input type="number" min={0} step={1} value={dvQty} disabled={dvUnlimited} onChange={(e) => setDvQty(e.target.value)} aria-invalid={!!defaultError} style={{ ...modalInputStyle, flex: 1, opacity: dvUnlimited ? 0.5 : 1 }} />
               <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, color: 'var(--op-t2)', whiteSpace: 'nowrap' }}>
                 <input type="checkbox" checked={dvUnlimited} onChange={(e) => setDvUnlimited(e.target.checked)} /> Unlimited
               </label>

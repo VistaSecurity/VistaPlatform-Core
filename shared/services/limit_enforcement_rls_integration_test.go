@@ -24,14 +24,28 @@ func TestIntegration_LimitEnforcement_CountsUnderNonOwnerRole(t *testing.T) {
 	tenantID := testdb.NewTenant(t, owner)
 	ctx := context.Background()
 
-	// A create_system_sensors_on_tenant_create trigger seeds platform sensors for
-	// every new tenant, so assert relative to that baseline rather than an
-	// absolute count.
-	var baseline int
+	// A create_system_sensors_on_tenant_create trigger seeds two platform
+	// sensors (platform = 'platform') for every new tenant. Those are the
+	// platform's collectors, not the tenant's registrations, and must NOT
+	// consume max_sensors — so the expected count is the tenant-registered
+	// sensors only. Record the platform baseline to prove it is non-zero, i.e.
+	// that the exclusion is actually being exercised rather than vacuous.
+	var platformSeeded int
 	if err := owner.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM sensors WHERE tenant_id = $1 AND deleted_at IS NULL`,
-		tenantID).Scan(&baseline); err != nil {
-		t.Fatalf("baseline sensor count: %v", err)
+		`SELECT COUNT(*) FROM sensors WHERE tenant_id = $1 AND deleted_at IS NULL AND platform = 'platform'`,
+		tenantID).Scan(&platformSeeded); err != nil {
+		t.Fatalf("platform sensor baseline: %v", err)
+	}
+	if platformSeeded == 0 {
+		t.Fatalf("expected the tenant-create trigger to seed platform sensors; found none, so this test cannot prove they are excluded from the cap")
+	}
+	// And one more explicit platform-marked row, so the exclusion is tested
+	// against a row this test wrote, not only against trigger output.
+	if _, err := owner.ExecContext(ctx, `
+		INSERT INTO sensors (id, tenant_id, name, platform, version, profile, status, created_at, updated_at)
+		VALUES ($1, $2, 'extra-platform-collector', 'platform', '1.0.0', 'discovery', 'active', NOW(), NOW())
+	`, uuid.New(), tenantID); err != nil {
+		t.Fatalf("seed platform sensor: %v", err)
 	}
 
 	// Seed two sensors and one user for this tenant on the owner connection.
@@ -58,8 +72,8 @@ func TestIntegration_LimitEnforcement_CountsUnderNonOwnerRole(t *testing.T) {
 		if err != nil {
 			t.Fatalf("countSensors as %s: %v", testdb.RLSAppRole, err)
 		}
-		if n != baseline+2 {
-			t.Fatalf("countSensors = %d, want %d — a zero here means the cap can never trip", n, baseline+2)
+		if n != 2 {
+			t.Fatalf("countSensors = %d, want 2 (the two tenant-registered sensors; %d platform collectors must not count) — a zero here means the cap can never trip, a higher number means platform collectors are consuming the tenant's cap", n, platformSeeded+1)
 		}
 	})
 
