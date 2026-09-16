@@ -1185,6 +1185,52 @@ func (a *AuthService) lookupDefaultSignupTier() (*uuid.UUID, error) {
 	return &id, nil
 }
 
+// tenantSlug derives the tenant slug from its display name.
+//
+// The column is varchar(100), UNIQUE, and carries CHECK (slug ~ '^[a-z0-9-]+$').
+// The previous derivation replaced spaces and nothing else, so every name
+// carrying a character outside [a-z0-9 -] produced a slug the CHECK rejected —
+// and self-signup, the ONLY way into a Core install, answered HTTP 500. Not a
+// corner case: "Acme, Inc.", "O'Brien Ltd" and "Müller GmbH" all failed, and
+// rc-verify's own fresh tenant ("… v1.0.0-rc.6") is what surfaced it.
+//
+// So: fold anything that is not [a-z0-9] into a single dash, trim the ends, and
+// guarantee the other two constraints rather than hoping the name respects
+// them. The tenant's own UUID supplies uniqueness and a non-empty fallback —
+// it is already generated, always unique, and made of exactly the characters
+// the CHECK allows, so a name that slugifies to nothing ("日本", "!!!") still
+// yields a valid slug instead of a 500.
+func tenantSlug(name string, tenantID uuid.UUID) string {
+	var b strings.Builder
+	dashPending := false
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			if dashPending && b.Len() > 0 {
+				b.WriteByte('-')
+			}
+			b.WriteRune(r)
+			dashPending = false
+			continue
+		}
+		// Runs of punctuation, whitespace and non-ASCII collapse to ONE dash,
+		// and a trailing run never emits one — "Acme,  Inc." is "acme-inc".
+		dashPending = true
+	}
+	slug := b.String()
+
+	// Uniqueness is a constraint, not a hope: two tenants may legitimately share
+	// a display name, and the second INSERT would otherwise violate
+	// tenants_slug_key. The UUID's first block is enough to separate them.
+	suffix := "-" + strings.SplitN(tenantID.String(), "-", 2)[0]
+	if slug == "" {
+		return strings.TrimPrefix(suffix, "-")
+	}
+	if len(slug)+len(suffix) > 100 {
+		slug = strings.TrimRight(slug[:100-len(suffix)], "-")
+	}
+	return slug + suffix
+}
+
 // createTenant creates a new tenant.
 //
 // The tenant is placed on the default signup tier (see DefaultSignupTierName).
@@ -1196,7 +1242,7 @@ func (a *AuthService) lookupDefaultSignupTier() (*uuid.UUID, error) {
 // assets forever.
 func (a *AuthService) createTenant(name string) (*models.Tenant, error) {
 	tenantID := uuid.New()
-	slug := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(name), " ", "-"))
+	slug := tenantSlug(name, tenantID)
 
 	subscriptionTierID, err := a.lookupDefaultSignupTier()
 	if err != nil {
