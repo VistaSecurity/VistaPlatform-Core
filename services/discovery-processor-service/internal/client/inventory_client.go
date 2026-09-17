@@ -98,18 +98,26 @@ func NewInventoryClient(cfg *config.Config) (*InventoryClient, error) {
 // ExternalConnectionUpsert is the payload sent to inventory-service POST /external-connections.
 // Mirrors models.ExternalConnectionUpsert in inventory-service.
 type ExternalConnectionUpsert struct {
-	SourceIP             string     `json:"source_ip"`
-	SourceHostname       *string    `json:"source_hostname,omitempty"`
-	DestIP               string     `json:"dest_ip"`
-	DestHostname         *string    `json:"dest_hostname,omitempty"`
-	DestPort             int        `json:"dest_port"`
-	Protocol             string     `json:"protocol"`
-	ProtocolVersion      *string    `json:"protocol_version,omitempty"`
-	CipherSuite          *string    `json:"cipher_suite,omitempty"`
-	KeyExchangeAlgorithm *string    `json:"key_exchange_algorithm,omitempty"`
-	KeySize              *int       `json:"key_size,omitempty"`
-	SupportedTLSVersions []string   `json:"supported_tls_versions,omitempty"`
-	SensorID             *uuid.UUID `json:"sensor_id,omitempty"`
+	SourceIP       string     `json:"source_ip"`
+	SourceHostname *string    `json:"source_hostname,omitempty"`
+	SourceAssetID  *uuid.UUID `json:"source_asset_id,omitempty"`
+	DestIP         string     `json:"dest_ip"`
+	DestHostname   *string    `json:"dest_hostname,omitempty"`
+	// DestHostnameSourceKind states where DestHostname came from, in the
+	// ADR-0005 vocabulary: "measured" for a name read off the wire (the TLS
+	// SNI, a name the host announced), "inferred" for a reverse-DNS guess.
+	// inventory-service refuses an inference that would overwrite a stored
+	// measurement, which is what stops a generic cloud PTR replacing the
+	// vhost the client actually asked for.
+	DestHostnameSourceKind *string    `json:"dest_hostname_source_kind,omitempty"`
+	DestPort               int        `json:"dest_port"`
+	Protocol               string     `json:"protocol"`
+	ProtocolVersion        *string    `json:"protocol_version,omitempty"`
+	CipherSuite            *string    `json:"cipher_suite,omitempty"`
+	KeyExchangeAlgorithm   *string    `json:"key_exchange_algorithm,omitempty"`
+	KeySize                *int       `json:"key_size,omitempty"`
+	SupportedTLSVersions   []string   `json:"supported_tls_versions,omitempty"`
+	SensorID               *uuid.UUID `json:"sensor_id,omitempty"`
 
 	// Certificate fields
 	CertSubject            *string    `json:"cert_subject,omitempty"`

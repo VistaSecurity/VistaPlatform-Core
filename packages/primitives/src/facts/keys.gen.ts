@@ -49,6 +49,8 @@ export type FactKey =
   | 'sw.package_count'
   | 'sw.cpe'
   | 'svc.listening_sockets'
+  | 'svc.bound_udp_sockets'
+  | 'net.outbound_connections'
   | 'certs.store_count'
   | 'certs.non_certificate_blocks'
   | 'eol.os.date'
@@ -103,6 +105,8 @@ export const FACT_KEYS = {
   SWPackageCount: 'sw.package_count',
   SWCPE: 'sw.cpe',
   SvcListeningSockets: 'svc.listening_sockets',
+  SvcBoundUdpSockets: 'svc.bound_udp_sockets',
+  NetOutboundConnections: 'net.outbound_connections',
   CertsStoreCount: 'certs.store_count',
   CertsNonCertificateBlocks: 'certs.non_certificate_blocks',
   EOLOSDate: 'eol.os.date',
@@ -298,6 +302,22 @@ export const FACT_KEY_DEFS: Record<FactKey, FactKeyDef> = {
     redact: false,
     description: 'Sockets the host is listening on, as observed locally by the agent. This is the host\'s own view, which sees loopback-only and firewalled services a network scan cannot; the network-visible services remain endpoints. The baseline the drift producer\'s port_profile_changed compares against.',
   },
+  'svc.bound_udp_sockets': {
+    key: 'svc.bound_udp_sockets',
+    type: 'array',
+    itemSchema: {"type":"object","properties":{"address":{"type":"string","description":"bound local address"},"port":{"type":"integer","description":"bound local port"},"process":{"type":"string","description":"process name, where visible"},"role":{"type":"string","enum":["unknown"],"description":"listener/client role is not proven by the platform API"}},"required":["port","role"]},
+    producers: ['device-agent'],
+    redact: false,
+    description: 'UDP bindings whose local address and port were measured but whose role is unknown. UDP has no listen state, and several platform APIs expose no peer, so these are preserved as evidence without claiming that every client socket is a listening service.',
+  },
+  'net.outbound_connections': {
+    key: 'net.outbound_connections',
+    type: 'array',
+    itemSchema: {"type":"object","properties":{"local_address":{"type":"string","description":"measured local address used as the connection source"},"remote_address":{"type":"string","description":"measured remote peer address"},"remote_port":{"type":"integer","description":"measured remote peer port"},"transport":{"type":"string","enum":["tcp","udp"],"description":"transport protocol"},"process":{"type":"string","description":"process name, where visible"}},"required":["local_address","remote_address","remote_port","transport"]},
+    producers: ['device-agent'],
+    redact: false,
+    description: 'Explicitly opted-in, bounded and coalesced remote peers reported by a host. Local ephemeral ports and process ids are excluded so repeated collections have stable identity and durable facts do not retain boot-local identifiers.',
+  },
   'certs.store_count': {
     key: 'certs.store_count',
     type: 'integer',
@@ -391,6 +411,8 @@ export const FACT_KEY_ORDER: readonly FactKey[] = [
   'sw.package_count',
   'sw.cpe',
   'svc.listening_sockets',
+  'svc.bound_udp_sockets',
+  'net.outbound_connections',
   'certs.store_count',
   'certs.non_certificate_blocks',
   'eol.os.date',

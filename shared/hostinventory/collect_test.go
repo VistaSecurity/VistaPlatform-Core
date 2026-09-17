@@ -86,7 +86,7 @@ func TestCollectLinux_Ubuntu(t *testing.T) {
 	if rep.Hardware.Serial != "7BQ1EX3" || rep.Hardware.Vendor != "Dell Inc." {
 		t.Errorf("hardware: %+v", rep.Hardware)
 	}
-	if len(rep.Packages) != 7 || len(rep.Interfaces) != 4 || len(rep.Listeners) != 8 {
+	if len(rep.Packages) != 7 || len(rep.Interfaces) != 4 || len(rep.Listeners) != 5 || len(rep.BoundUDPSockets) != 3 {
 		t.Errorf("counts: %d packages / %d interfaces / %d listeners",
 			len(rep.Packages), len(rep.Interfaces), len(rep.Listeners))
 	}
@@ -184,9 +184,9 @@ func TestCollectLinux_UnreadableDMILeavesTheFactAbsent(t *testing.T) {
 	}
 }
 
-// `ss` is absent from minimal container images. /proc/net/tcp still answers,
-// and the sockets it finds must not be lost.
-func TestCollectLinux_FallsBackToProcNetTCP(t *testing.T) {
+// A partial /proc snapshot cannot be treated as a complete listener baseline:
+// it would retire unseen endpoints and cannot distinguish accepted connections.
+func TestCollectLinux_PartialProcNetTCPFailsClosed(t *testing.T) {
 	f := scriptUbuntu(t, newFakeLocal())
 	delete(f.commands, strings.Join(linuxCmdSS, " "))
 	f.file("/proc/net/tcp", fixture(t, "linux", "proc-net-tcp.txt"))
@@ -196,16 +196,51 @@ func TestCollectLinux_FallsBackToProcNetTCP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("collect: %v", err)
 	}
-	if !rep.SectionOK(SectionListeners) {
-		t.Fatalf("listeners = %q, want ok: %+v", rep.SectionState(SectionListeners), rep.Errors)
+	if rep.SectionState(SectionListeners) != SectionFailed {
+		t.Fatalf("listeners = %q, want failed: %+v", rep.SectionState(SectionListeners), rep.Errors)
 	}
-	if len(rep.Listeners) != 3 {
-		t.Errorf("got %d listeners from /proc, want 3: %+v", len(rep.Listeners), rep.Listeners)
+	if len(rep.Listeners) != 0 {
+		t.Errorf("partial listener snapshot escaped: %+v", rep.Listeners)
 	}
 	// The one unreadable source is still reported, so a reader knows the IPv6
 	// half is missing rather than empty.
 	if len(rep.Errors) == 0 {
 		t.Error("the unreadable /proc/net/tcp6 was not recorded")
+	}
+}
+
+func TestCollectLinux_FallsBackToCompleteProcNetSocketSnapshot(t *testing.T) {
+	f := scriptUbuntu(t, newFakeLocal())
+	delete(f.commands, strings.Join(linuxCmdSS, " "))
+	f.file("/proc/net/tcp", fixture(t, "linux", "proc-net-tcp.txt"))
+	f.file("/proc/net/tcp6", "  sl  local_address rem_address st\n")
+	f.file("/proc/net/udp", "  sl  local_address rem_address st\n")
+	f.file("/proc/net/udp6", "  sl  local_address rem_address st\n")
+	rep, err := Collect(context.Background(), f, Options{Mode: ModeLocal, Platform: PlatformLinux, Now: fixedNow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.SectionOK(SectionListeners) || !rep.SectionOK(SectionBoundUDP) {
+		t.Fatalf("complete fallback states: %+v errors=%+v", rep.Sections, rep.Errors)
+	}
+	if len(rep.Listeners) != 3 {
+		t.Fatalf("listeners=%+v, want three TCP listeners", rep.Listeners)
+	}
+}
+
+func TestCollectLinux_PartialProcNetUDPFailsClosed(t *testing.T) {
+	f := scriptUbuntu(t, newFakeLocal())
+	delete(f.commands, strings.Join(linuxCmdSS, " "))
+	f.file("/proc/net/tcp", "  sl  local_address rem_address st\n")
+	f.file("/proc/net/tcp6", "  sl  local_address rem_address st\n")
+	f.file("/proc/net/udp", "  sl  local_address rem_address st\n")
+	f.missingFile("/proc/net/udp6")
+	rep, err := Collect(context.Background(), f, Options{Mode: ModeLocal, Platform: PlatformLinux, Now: fixedNow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.SectionState(SectionBoundUDP) != SectionFailed || len(rep.BoundUDPSockets) != 0 {
+		t.Fatalf("partial UDP snapshot = state %q, value %#v; want failed and omitted", rep.SectionState(SectionBoundUDP), rep.BoundUDPSockets)
 	}
 }
 

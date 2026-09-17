@@ -4739,7 +4739,7 @@
       "sysoid_sub/40": -0.002699
     }
   },
-  "feature_schema": "v1;oui=256;sysoid=64,64;pid=64,128;banner=128;mdns=64;cloud=128;ports=64;lldp=11;cdp=11;rules=20;targets=18;ouirows=462;ouihash=0b9627cea72745d2",
+  "feature_schema": "v1;oui=256;sysoid=64,64;pid=64,128;banner=128;mdns=64;cloud=128;ports=64;lldp=11;cdp=11;rules=22;targets=19;ouirows=462;ouihash=0b9627cea72745d2",
   "temperature": 0.388,
   "calibration": {
     "access_point": {

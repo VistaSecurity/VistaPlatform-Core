@@ -1469,24 +1469,71 @@ func (s *FindingsService) OnCertificateChanged(ctx context.Context, event events
 		return s.reconcileTenantAfterCertChange(ctx, event, "fan_out_over_limit", len(assetIDs))
 	}
 
-	var activated, inactivated, failures int
-	for _, target := range targets {
-		summary, err := s.EvaluateAsset(ctx, tenantID, target)
-		if err != nil {
-			log.Printf("[FindingsService] ERROR: per-asset reconcile after cert change failed (cert=%s target=%s): %v", certificateID, target, err)
-			failures++
-			continue
-		}
-		activated += summary.FindingsActivated
-		inactivated += summary.FindingsInactivated
-	}
-	if failures > 0 {
-		return fmt.Errorf("certificate change reconcile failed for %d/%d targets (cert=%s)", failures, len(targets), certificateID)
+	// One multi-subject pass, NOT one EvaluateAsset call per target. EvaluateAsset
+	// now expands an asset into its own certificates (see its doc comment), so
+	// looping it here would re-expand every linked asset back onto this certificate
+	// and its siblings — bounded, convergent, and pure waste. It also collapses the
+	// score-rollup refresh from once per target to once per event.
+	summary, err := s.evaluateSubjects(ctx, tenantID, targets, "cert-change")
+	if err != nil {
+		return fmt.Errorf("certificate change reconcile failed (cert=%s, targets=%d): %w", certificateID, len(targets), err)
 	}
 
-	log.Printf("[FindingsService] INFO: Completed certificate change reconcile (scoped): event_id=%s, certificate_id=%s, linked_assets=%d, targets=%d, activated=+%d, inactivated=%d, failures=%d",
-		event.EventID, certificateID, len(assetIDs), len(targets), activated, inactivated, failures)
+	log.Printf("[FindingsService] INFO: Completed certificate change reconcile (scoped): event_id=%s, certificate_id=%s, linked_assets=%d, targets=%d, activated=+%d, inactivated=%d",
+		event.EventID, certificateID, len(assetIDs), len(targets), summary.FindingsActivated, summary.FindingsInactivated)
 	return nil
+}
+
+// certificatesForAsset returns the tenant's MEASURABLE certificates bound to an
+// asset — the inverse of assetsForCertificate, and the subject set an asset-change
+// event has to cover beyond the asset row itself.
+//
+// Both link paths matter, exactly as in assetsForCertificate:
+// crypto_implementations.certificate_id is the primary/leaf binding, while
+// crypto_implementation_certificates carries the chain.
+//
+// CA certificates are excluded, because `is_ca_certificate = false` is part of the
+// `certificate` measurement SHAPE (measurement_shapes.go): a chain intermediate
+// yields no measurement value under any certificate control, so fanning out to one
+// would only consume the fan-out budget and produce nothing. Filtering here keeps
+// the budget spent on subjects that can actually be assessed.
+func (s *FindingsService) certificatesForAsset(ctx context.Context, tenantID, assetID uuid.UUID) ([]uuid.UUID, error) {
+	const query = `
+		SELECT DISTINCT c.id
+		FROM certificates c
+		WHERE c.tenant_id = $1
+		  AND c.is_ca_certificate = false
+		  AND EXISTS (
+		      SELECT 1 FROM crypto_implementations ci
+		       WHERE ci.tenant_id = $1
+		         AND ci.asset_id = $2
+		         AND (ci.certificate_id = c.id
+		              OR EXISTS (SELECT 1 FROM crypto_implementation_certificates cic
+		                          WHERE cic.crypto_implementation_id = ci.id
+		                            AND cic.certificate_id = c.id))
+		  )
+	`
+	var certIDs []uuid.UUID
+	err := shareddatabase.WithTenantTx(ctx, s.db.DB, tenantID, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, query, tenantID, assetID)
+		if err != nil {
+			return fmt.Errorf("failed to get certificates for asset: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
+
+		for rows.Next() {
+			var certID uuid.UUID
+			if err := rows.Scan(&certID); err != nil {
+				continue
+			}
+			certIDs = append(certIDs, certID)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return certIDs, nil
 }
 
 // certReconcileTargets decides what a certificate change reconciles. Pure (no DB) so the

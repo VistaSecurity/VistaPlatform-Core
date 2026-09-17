@@ -455,14 +455,18 @@ curl -H "Authorization: Bearer $TOKEN" \
 - **Cause**: Sensor doesn't have associated certificate
 - **Solution**: Complete sensor registration process
 
-#### "Platform sensor not registering"
-- **Cause**: Service account token missing or invalid, database not ready, or service startup issue
+#### "Platform discovery sensor not registering"
+- **Cause**: Cluster sensor service account token missing or invalid, database not ready, or service startup issue
 - **Solution**: 
-  1. Verify `CLUSTER_SENSOR_SERVICE_TOKEN` or `DEVICE_INTERROGATION_SERVICE_TOKEN` is set
+  1. Verify `CLUSTER_SENSOR_SERVICE_TOKEN` is set
   2. Check service logs for registration errors
   3. Verify service account exists in database and token hash matches
   4. Ensure database is accessible and tenants table has active tenants
   5. Check certificate files exist in `/app/certs/` or `/tmp/{service}-certs/`
+
+The platform device-interrogation identity is provisioned as a system sensor by
+the database and does not use this bootstrap flow. Operator-installed device
+agents use their enrollment key and tenant certificate instead.
 
 #### "Platform sensor certificate expired"
 - **Cause**: Certificate expired and auto-rotation failed

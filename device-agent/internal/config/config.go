@@ -50,6 +50,10 @@ type Config struct {
 	// agent installed to interrogate network devices should not start
 	// enumerating its own host's software because it was upgraded.
 	HostInventoryEnabled bool `yaml:"host_inventory_enabled" env:"HOST_INVENTORY_ENABLED"`
+	// HostInventoryConnectionsEnabled opts this agent into collecting bounded
+	// remote peer data. It is separate because connection history is more
+	// privacy-sensitive than OS/package/listener posture.
+	HostInventoryConnectionsEnabled bool `yaml:"host_inventory_connections_enabled" env:"HOST_INVENTORY_CONNECTIONS_ENABLED"`
 	// HostInventoryInterval is the local collection cadence. Below
 	// MinHostInventoryInterval it is raised to the floor, with a log line.
 	HostInventoryInterval time.Duration  `yaml:"host_inventory_interval" env:"HOST_INVENTORY_INTERVAL"`
@@ -93,6 +97,7 @@ func Load() *Config {
 
 	cfg.HeartbeatInterval = parseHeartbeatInterval(sharedconfig.GetEnv("HEARTBEAT_INTERVAL", ""))
 	cfg.HostInventoryEnabled = sharedconfig.GetEnvAsBool("HOST_INVENTORY_ENABLED", false)
+	cfg.HostInventoryConnectionsEnabled = sharedconfig.GetEnvAsBool("HOST_INVENTORY_CONNECTIONS_ENABLED", false)
 	cfg.HostInventoryInterval = ParseHostInventoryInterval(sharedconfig.GetEnv("HOST_INVENTORY_INTERVAL", ""))
 
 	return cfg
@@ -211,6 +216,9 @@ func LoadFromFile(path string) (*Config, error) {
 	}
 	if hi := os.Getenv("HOST_INVENTORY_ENABLED"); hi != "" {
 		cfg.HostInventoryEnabled = sharedconfig.GetEnvAsBool("HOST_INVENTORY_ENABLED", false)
+	}
+	if connections := os.Getenv("HOST_INVENTORY_CONNECTIONS_ENABLED"); connections != "" {
+		cfg.HostInventoryConnectionsEnabled = sharedconfig.GetEnvAsBool("HOST_INVENTORY_CONNECTIONS_ENABLED", false)
 	}
 	if hi := os.Getenv("HOST_INVENTORY_INTERVAL"); hi != "" {
 		cfg.HostInventoryInterval = ParseHostInventoryInterval(hi)

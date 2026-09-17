@@ -23,8 +23,10 @@ var (
 	darwinCmdPkgutil = []string{"pkgutil", "--pkgs"}
 	darwinCmdApps    = []string{"find", "/Applications", "-maxdepth", "3", "-name", "Info.plist", "-type", "f"}
 
-	darwinCmdLsof     = []string{"lsof", "-nP", "-iTCP", "-sTCP:LISTEN"}
-	darwinCmdIfconfig = []string{"ifconfig", "-a"}
+	darwinCmdLsof            = []string{"lsof", "-nP", "-iTCP", "-sTCP:LISTEN"}
+	darwinCmdLsofUDP         = []string{"lsof", "-nP", "-iUDP"}
+	darwinCmdLsofConnections = []string{"lsof", "-nP", "-iTCP", "-sTCP:ESTABLISHED"}
+	darwinCmdIfconfig        = []string{"ifconfig", "-a"}
 )
 
 // darwinCertStorePaths are the FILE-based trust stores macOS exposes.
@@ -47,6 +49,7 @@ func collectDarwin(ctx context.Context, r Runner, rep *Report, opts Options) {
 	collectDarwinInterfaces(ctx, r, rep, opts)
 	collectDarwinPackages(ctx, r, rep, opts)
 	collectDarwinListeners(ctx, r, rep)
+	collectDarwinConnections(ctx, r, rep, opts)
 	collectCertStoresUnix(ctx, r, rep, darwinCertStorePaths, opts)
 }
 
@@ -428,13 +431,22 @@ func ParseInfoPlist(b []byte, path string) (Package, bool) {
 }
 
 func collectDarwinListeners(ctx context.Context, r Runner, rep *Report) {
-	out, ok := commandPresent(ctx, r, darwinCmdLsof)
+	out, ok := runLsof(ctx, r, darwinCmdLsof)
 	if !ok {
 		rep.fail(SectionListeners, errors.New("lsof produced no usable output"))
+	} else {
+		rep.Listeners = ParseLsof([]byte(out))
+		rep.mark(SectionListeners, SectionOK)
+	}
+
+	udpOut, udpOK := runLsof(ctx, r, darwinCmdLsofUDP)
+	if !udpOK {
+		rep.fail(SectionBoundUDP, errors.New("lsof UDP query produced no usable output"))
 		return
 	}
-	rep.Listeners = ParseLsof([]byte(out))
-	rep.mark(SectionListeners, SectionOK)
+	_, bound := ParseLsofUDP([]byte(udpOut))
+	rep.BoundUDPSockets = coalesceBoundUDP(bound)
+	rep.mark(SectionBoundUDP, SectionOK)
 }
 
 // ParseLsof parses `lsof -nP -iTCP -sTCP:LISTEN`.
@@ -471,4 +483,82 @@ func ParseLsof(b []byte) []Listener {
 		out = append(out, Listener{Proto: "tcp", Address: addr, Port: port, Process: f[0], PID: pid})
 	}
 	return out
+}
+
+func collectDarwinConnections(ctx context.Context, r Runner, rep *Report, opts Options) {
+	if !opts.CollectConnections {
+		return
+	}
+	if !rep.SectionOK(SectionListeners) {
+		rep.fail(SectionConnections, errors.New("listener snapshot incomplete; established TCP direction cannot be determined"))
+		return
+	}
+	var connections []Connection
+	tcpOut, tcpOK := runLsof(ctx, r, darwinCmdLsofConnections)
+	udpOut, udpOK := runLsof(ctx, r, darwinCmdLsofUDP)
+	if !tcpOK || !udpOK {
+		rep.fail(SectionConnections, errors.New("lsof connection snapshot incomplete"))
+		return
+	}
+	if tcpOK {
+		connections = append(connections, ParseLsofConnections([]byte(tcpOut), "tcp")...)
+	}
+	if udpOK {
+		udp, _ := ParseLsofUDP([]byte(udpOut))
+		connections = append(connections, udp...)
+	}
+	rep.Connections = coalesceConnections(excludeAcceptedConnections(connections, rep.Listeners), opts.maxConnections())
+	rep.mark(SectionConnections, SectionOK)
+}
+
+// runLsof treats exit 1 as a successful empty answer. lsof uses it when no
+// file matches; for an inventory query that means "none", not "not assessed".
+func runLsof(ctx context.Context, r Runner, argv []string) (string, bool) {
+	out, errOut, exit, err := r.Run(ctx, argv)
+	// lsof exit 1 with no output and no diagnostic means "no matches". Exit 1
+	// with stderr is a failed query and must not become an empty complete list.
+	if err != nil || (exit != 0 && (exit != 1 || len(out) != 0 || len(errOut) != 0)) {
+		return "", false
+	}
+	return string(out), true
+}
+
+func ParseLsofConnections(b []byte, proto string) []Connection {
+	var out []Connection
+	for i, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 9 || (i == 0 && strings.EqualFold(f[0], "COMMAND")) {
+			continue
+		}
+		localRaw, remoteRaw, ok := strings.Cut(f[8], "->")
+		if !ok {
+			continue
+		}
+		local, localPort, lok := splitHostPortSuffix(localRaw)
+		remote, port, rok := splitHostPortSuffix(remoteRaw)
+		if !lok || !rok {
+			continue
+		}
+		pid, _ := strconv.Atoi(f[1])
+		out = append(out, Connection{Proto: proto, LocalAddress: local, LocalPort: localPort, RemoteAddress: remote, RemotePort: port, Process: f[0], PID: pid})
+	}
+	return out
+}
+
+func ParseLsofUDP(b []byte) ([]Connection, []BoundUDPSocket) {
+	connections := ParseLsofConnections(b, "udp")
+	var bound []BoundUDPSocket
+	for i, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 9 || (i == 0 && strings.EqualFold(f[0], "COMMAND")) || strings.Contains(f[8], "->") {
+			continue
+		}
+		addr, port, ok := splitHostPortSuffix(f[8])
+		if !ok {
+			continue
+		}
+		pid, _ := strconv.Atoi(f[1])
+		bound = append(bound, BoundUDPSocket{Address: addr, Port: port, Process: f[0], PID: pid})
+	}
+	return connections, bound
 }

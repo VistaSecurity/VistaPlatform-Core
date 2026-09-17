@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -24,6 +25,96 @@ import (
 // RUN's ref, which is what the retirement sweep compares against.
 var testEndpointSource = identity.Source{
 	Kind: identity.SourceMeasured, Ref: "agent:test-agent:test-job", Mode: identity.ModeActive,
+}
+
+func TestHostInventoryConnections_ValidatesCoalescesAndCapsAtIntake(t *testing.T) {
+	subject := di.PeerRef{Identifiers: []di.PeerIdentifier{{Kind: di.IdentifierAgentID, Value: "agent-1"}}}
+	connections := make([]projectedConnection, 0, maxHostInventoryConnections+4)
+	connections = append(connections,
+		projectedConnection{Transport: " TCP ", LocalAddress: "::ffff:192.0.2.10", RemoteAddress: "::ffff:203.0.113.20", RemotePort: 443},
+		projectedConnection{Transport: "tcp", LocalAddress: "192.0.2.10", RemoteAddress: "203.0.113.20", RemotePort: 443, Process: " browser "},
+		projectedConnection{Transport: "tcp", LocalAddress: "127.0.0.1", RemoteAddress: "203.0.113.21", RemotePort: 443},
+		projectedConnection{Transport: "udp", LocalAddress: "192.0.2.10", RemoteAddress: "169.254.10.1", RemotePort: 53},
+	)
+	for i := 1; i <= maxHostInventoryConnections+2; i++ {
+		connections = append(connections, projectedConnection{
+			Transport: "tcp", LocalAddress: "192.0.2.10",
+			RemoteAddress: fmt.Sprintf("2400::%x", i), RemotePort: 8443,
+		})
+	}
+	obs := &di.InterrogateResult{Facts: []di.FactObservation{{
+		Key: facts.KeyNetOutboundConnections, Value: connections, Subject: subject,
+	}}}
+
+	got, err := hostInventoryConnections(obs, subject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != maxHostInventoryConnections {
+		t.Fatalf("connections = %d, want server cap %d", len(got), maxHostInventoryConnections)
+	}
+	var normalized int
+	for _, c := range got {
+		if c.LocalAddress == "192.0.2.10" && c.RemoteAddress == "203.0.113.20" && c.RemotePort == 443 {
+			normalized++
+			if c.Process != "browser" {
+				t.Errorf("coalescing did not retain useful process: %#v", c)
+			}
+		}
+		if c.LocalAddress == "127.0.0.1" || c.RemoteAddress == "169.254.10.1" {
+			t.Errorf("non-routable address survived intake: %#v", c)
+		}
+	}
+	if normalized != 1 {
+		t.Fatalf("IPv4-mapped duplicate count = %d, want 1", normalized)
+	}
+}
+
+func TestHostInventoryConnections_RejectsForeignSubjectAndMalformedSnapshot(t *testing.T) {
+	subject := di.PeerRef{Identifiers: []di.PeerIdentifier{{Kind: di.IdentifierAgentID, Value: "agent-1"}}}
+	other := di.PeerRef{Identifiers: []di.PeerIdentifier{{Kind: di.IdentifierAgentID, Value: "agent-2"}}}
+	obs := &di.InterrogateResult{Facts: []di.FactObservation{{
+		Key: facts.KeyNetOutboundConnections, Value: []projectedConnection{}, Subject: other,
+	}}}
+	if _, err := hostInventoryConnections(obs, subject); err == nil {
+		t.Fatal("foreign-subject connection snapshot was accepted")
+	}
+	obs.Facts[0].Subject = subject
+	obs.Facts[0].Value = "not an array"
+	if _, err := hostInventoryConnections(obs, subject); err == nil {
+		t.Fatal("malformed connection snapshot was silently treated as empty")
+	}
+}
+
+func TestConnectionSnapshotReady_PreservesOptOutEmptyAndFailureStates(t *testing.T) {
+	tests := []struct {
+		name  string
+		meta  hostInventoryMetadata
+		facts []di.FactObservation
+		ready bool
+		err   bool
+	}{
+		{name: "absent means privacy opt-out"},
+		{
+			name:  "successful empty is a measured zero",
+			meta:  hostInventoryMetadata{Sections: map[string]string{hostinventory.SectionConnections: hostinventory.SectionOK}},
+			facts: []di.FactObservation{{Key: facts.KeyNetOutboundConnections, Value: []map[string]any{}}},
+			ready: true,
+		},
+		{
+			name: "failed collection is visible",
+			meta: hostInventoryMetadata{Sections: map[string]string{hostinventory.SectionConnections: hostinventory.SectionFailed}},
+			err:  true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ready, err := connectionSnapshotReady(tc.meta, &di.InterrogateResult{Facts: tc.facts})
+			if ready != tc.ready || (err != nil) != tc.err {
+				t.Fatalf("ready/error = %t/%v, want %t/error=%t", ready, err, tc.ready, tc.err)
+			}
+		})
+	}
 }
 
 func TestHostInventoryEndpoints_AWildcardBindTakesTheHostsOwnAddress(t *testing.T) {
@@ -521,18 +612,102 @@ func TestClassProposal_ExcludesLoopbackPortsFromThePortProfile(t *testing.T) {
 	}
 }
 
-func TestClassProposal_IsEmptyWhenTheRulesDoNotDecide(t *testing.T) {
+func TestClassifyHost_IsEmptyWhenTheRulesDoNotDecide(t *testing.T) {
 	// "The rules did not decide" is a normal outcome with a complete answer,
 	// and it must come back as no proposal rather than a guess.
-	if got := classProposal(context.Background(), &di.InterrogateResult{}); got != "" {
-		t.Fatalf("class proposal = %q for a payload with no evidence", got)
+	h := NewHostInventoryIngest(nil, nil)
+	ctx := context.Background()
+
+	if got := h.classifyHost(ctx, &di.InterrogateResult{}); got.Class != "" || got.Conflict {
+		t.Fatalf("proposal = %+v for a payload with no evidence", got)
 	}
 	obs := &di.InterrogateResult{Facts: []di.FactObservation{
 		{Key: facts.KeyHWVendor, Value: "Some Vendor Nobody Has A Rule For"},
 		{Key: facts.KeyHWModel, Value: "XYZ-1"},
+		{Key: facts.KeyOSName, Value: "Ubuntu"},
 	}}
-	if got := classProposal(context.Background(), obs); got != "" {
-		t.Fatalf("class proposal = %q for a vendor no rule covers", got)
+	if got := h.classifyHost(ctx, obs); got.Class != "" {
+		t.Fatalf("proposal = %q for evidence no rule covers", got.Class)
+	}
+}
+
+// The projection, over the payload the reported asset actually produced.
+//
+// This is the unit half of the reclassification fix and it drives the REAL
+// function the ingest calls, not a re-implementation of it: delete the
+// `facts.KeyOSName` case from hostInventoryClassEvidence and this goes red,
+// which is the only thing that proves the OS reaches the rules at all. The
+// integration test proves it reaches the ASSET.
+func TestHostInventoryClassEvidence_CarriesTheOperatingSystemToTheRules(t *testing.T) {
+	h := NewHostInventoryIngest(nil, nil)
+
+	// The reported asset, fact for fact.
+	xps := &di.InterrogateResult{
+		Facts: []di.FactObservation{
+			{Key: facts.KeyOSName, Value: "Microsoft Windows 11 Pro"},
+			{Key: facts.KeyOSVersion, Value: "10.0.26200"},
+			{Key: facts.KeyHWVendor, Value: "Dell Inc."},
+			{Key: facts.KeyHWModel, Value: "XPS 16 9640"},
+			{Key: facts.KeyHWSerial, Value: "5SDH994"},
+		},
+		Assets: []di.CryptoAsset{
+			{Port: 445, Metadata: map[string]interface{}{"bound_local": false}},
+			{Port: 5432, Metadata: map[string]interface{}{"bound_local": true}},
+		},
+	}
+
+	ev := hostInventoryClassEvidence(xps)
+	if ev.OS != "Microsoft Windows 11 Pro" {
+		t.Errorf("OS = %q — os.name is the only evidence a general-purpose computer offers", ev.OS)
+	}
+	if ev.Vendor != "Dell Inc." || ev.Model != "XPS 16 9640" {
+		t.Errorf("vendor/model = %q/%q", ev.Vendor, ev.Model)
+	}
+	if len(ev.OpenPorts) != 1 || ev.OpenPorts[0] != 445 {
+		t.Errorf("open ports = %v, want only the non-loopback one", ev.OpenPorts)
+	}
+	// The interface MACs are deliberately absent — see the doc comment. A veth
+	// address reaching the rules classifies a Linux server as a `container`.
+	if len(ev.MACs) != 0 {
+		t.Errorf("MACs = %v, want none", ev.MACs)
+	}
+
+	got := h.classifyHost(context.Background(), xps)
+	if got.Class != "computer" {
+		t.Fatalf("class = %q, want computer — this asset is the whole reason for the fix (matched %+v)",
+			got.Class, got.MatchedRules)
+	}
+	if got.Conflict {
+		t.Errorf("conflict over %v", got.ConflictingClasses)
+	}
+	if got.ModelID != "" {
+		t.Errorf("model id %q — a learned answer must never be applied, only proposed", got.ModelID)
+	}
+
+	// The other polarity, on the same code path: a Windows SERVER is a server,
+	// and a Linux box is still nothing at all.
+	server := &di.InterrogateResult{Facts: []di.FactObservation{
+		{Key: facts.KeyOSName, Value: "Microsoft Windows Server 2022 Datacenter"},
+	}}
+	if c := h.classifyHost(context.Background(), server).Class; c != "server" {
+		t.Errorf("Windows Server classified as %q, want server", c)
+	}
+}
+
+// A fact value that is not a string is an ABSENT input, not a formatted one.
+// `%!v(...)` in an OS name would match no rule and read as a catalogue gap
+// rather than the producer bug it is.
+func TestHostInventoryClassEvidence_IgnoresFactValuesOfTheWrongType(t *testing.T) {
+	ev := hostInventoryClassEvidence(&di.InterrogateResult{Facts: []di.FactObservation{
+		{Key: facts.KeyOSName, Value: 11},
+		{Key: facts.KeyHWVendor, Value: map[string]any{"name": "Dell"}},
+		{Key: facts.KeyHWModel, Value: "  XPS 16 9640  "},
+	}})
+	if ev.OS != "" || ev.Vendor != "" {
+		t.Errorf("a non-string fact became evidence: %+v", ev)
+	}
+	if ev.Model != "XPS 16 9640" {
+		t.Errorf("model = %q, want it trimmed", ev.Model)
 	}
 }
 

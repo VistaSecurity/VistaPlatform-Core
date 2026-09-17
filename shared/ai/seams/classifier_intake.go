@@ -110,6 +110,7 @@ func ClassFacts(in classify.ClassifyInput) AssetFacts {
 			FactMDNSServices:      in.MDNSServices,
 			FactLLDPCapabilities:  in.LLDPCapabilities,
 			FactCDPCapabilities:   in.CDPCapabilities,
+			FactOSName:            in.OS,
 		},
 	}
 }

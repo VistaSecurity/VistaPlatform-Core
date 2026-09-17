@@ -66,20 +66,36 @@ Get-ItemProperty -Path $paths |
   Sort-Object Name |
   ConvertTo-Json -Depth 3 -Compress`
 
-	// psScriptListeners asks for listening TCP sockets and their owning
-	// process names, plus the UDP endpoints, which have no listen state.
-	psScriptListeners = `$ErrorActionPreference='SilentlyContinue'
+	// psScriptListeners asks only for sockets whose listening role Windows can
+	// prove. Get-NetUDPEndpoint exposes no peer and UDP has no listen state, so
+	// those bindings are collected separately as unknown-role evidence.
+	psScriptListeners = `$ErrorActionPreference='Stop'
 $rows = @()
-$rows += Get-NetTCPConnection -State Listen |
+$rows += Get-NetTCPConnection |
+  Where-Object { $_.State -eq 'Listen' } |
   Select-Object @{n='Proto';e={'tcp'}},
                 @{n='Address';e={$_.LocalAddress}},
                 @{n='Port';e={$_.LocalPort}},
                 @{n='PID';e={$_.OwningProcess}},
                 @{n='Process';e={(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName}}
-$rows += Get-NetUDPEndpoint |
-  Select-Object @{n='Proto';e={'udp'}},
-                @{n='Address';e={$_.LocalAddress}},
+ConvertTo-Json -InputObject @($rows) -Depth 3 -Compress`
+
+	psScriptBoundUDP = `$ErrorActionPreference='Stop'
+$rows = Get-NetUDPEndpoint |
+  Select-Object @{n='Address';e={$_.LocalAddress}},
                 @{n='Port';e={$_.LocalPort}},
+                @{n='PID';e={$_.OwningProcess}},
+                @{n='Process';e={(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName}}
+ConvertTo-Json -InputObject @($rows) -Depth 3 -Compress`
+
+	psScriptConnections = `$ErrorActionPreference='Stop'
+$rows = Get-NetTCPConnection |
+  Where-Object { $_.State -eq 'Established' } |
+  Select-Object @{n='Proto';e={'tcp'}},
+                @{n='LocalAddress';e={$_.LocalAddress}},
+				@{n='LocalPort';e={$_.LocalPort}},
+                @{n='RemoteAddress';e={$_.RemoteAddress}},
+                @{n='RemotePort';e={$_.RemotePort}},
                 @{n='PID';e={$_.OwningProcess}},
                 @{n='Process';e={(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName}}
 ConvertTo-Json -InputObject @($rows) -Depth 3 -Compress`
@@ -173,6 +189,7 @@ func collectWindows(ctx context.Context, r Runner, rep *Report, opts Options) {
 	collectWindowsInterfaces(ctx, r, rep)
 	collectWindowsPackages(ctx, r, rep, opts)
 	collectWindowsListeners(ctx, r, rep)
+	collectWindowsConnections(ctx, r, rep, opts)
 	collectWindowsCertStores(ctx, r, rep, opts)
 }
 
@@ -390,15 +407,22 @@ func collectWindowsListeners(ctx context.Context, r Runner, rep *Report) {
 	out, err := runText(ctx, r, powershellArgv(psScriptListeners))
 	if err != nil {
 		rep.fail(SectionListeners, err)
-		return
-	}
-	listeners, perr := ParseWindowsListeners([]byte(out))
-	if perr != nil {
+	} else if listeners, perr := ParseWindowsListeners([]byte(out)); perr != nil {
 		rep.fail(SectionListeners, perr)
-		return
+	} else {
+		rep.Listeners = listeners
+		rep.mark(SectionListeners, SectionOK)
 	}
-	rep.Listeners = listeners
-	rep.mark(SectionListeners, SectionOK)
+
+	udpOut, udpErr := runText(ctx, r, powershellArgv(psScriptBoundUDP))
+	if udpErr != nil {
+		rep.fail(SectionBoundUDP, udpErr)
+	} else if sockets, err := ParseWindowsBoundUDP([]byte(udpOut)); err != nil {
+		rep.fail(SectionBoundUDP, err)
+	} else {
+		rep.BoundUDPSockets = coalesceBoundUDP(sockets)
+		rep.mark(SectionBoundUDP, SectionOK)
+	}
 }
 
 // ParseWindowsListeners projects Get-NetTCPConnection / Get-NetUDPEndpoint.
@@ -410,7 +434,7 @@ func ParseWindowsListeners(b []byte) ([]Listener, error) {
 	out := make([]Listener, 0, len(raw))
 	for _, l := range raw {
 		proto := strings.ToLower(strings.TrimSpace(l.Proto))
-		if proto != "tcp" && proto != "udp" {
+		if proto != "tcp" {
 			continue
 		}
 		if l.Port <= 0 {
@@ -425,6 +449,57 @@ func ParseWindowsListeners(b []byte) ([]Listener, error) {
 		})
 	}
 	return out, nil
+}
+
+func ParseWindowsBoundUDP(b []byte) ([]BoundUDPSocket, error) {
+	raw, err := unmarshalPSArray[winListener](b)
+	if err != nil {
+		return nil, fmt.Errorf("Get-NetUDPEndpoint: %w", err)
+	}
+	out := make([]BoundUDPSocket, 0, len(raw))
+	for _, s := range raw {
+		if p := strings.ToLower(strings.TrimSpace(s.Proto)); p != "" && p != "udp" {
+			continue
+		}
+		out = append(out, BoundUDPSocket{Address: strings.TrimSpace(s.Address), Port: s.Port, Process: strings.TrimSpace(s.Process), PID: s.PID})
+	}
+	return out, nil
+}
+
+type winConnection struct {
+	Proto         string `json:"Proto"`
+	LocalAddress  string `json:"LocalAddress"`
+	LocalPort     int    `json:"LocalPort"`
+	RemoteAddress string `json:"RemoteAddress"`
+	RemotePort    int    `json:"RemotePort"`
+	PID           int    `json:"PID"`
+	Process       string `json:"Process"`
+}
+
+func collectWindowsConnections(ctx context.Context, r Runner, rep *Report, opts Options) {
+	if !opts.CollectConnections {
+		return
+	}
+	if !rep.SectionOK(SectionListeners) {
+		rep.fail(SectionConnections, errors.New("listener snapshot incomplete; established TCP direction cannot be determined"))
+		return
+	}
+	out, err := runText(ctx, r, powershellArgv(psScriptConnections))
+	if err != nil {
+		rep.fail(SectionConnections, err)
+		return
+	}
+	raw, err := unmarshalPSArray[winConnection]([]byte(out))
+	if err != nil {
+		rep.fail(SectionConnections, fmt.Errorf("Get-NetTCPConnection established: %w", err))
+		return
+	}
+	connections := make([]Connection, 0, len(raw))
+	for _, c := range raw {
+		connections = append(connections, Connection{Proto: c.Proto, LocalAddress: c.LocalAddress, LocalPort: c.LocalPort, RemoteAddress: c.RemoteAddress, RemotePort: c.RemotePort, Process: c.Process, PID: c.PID})
+	}
+	rep.Connections = coalesceConnections(excludeAcceptedConnections(connections, rep.Listeners), opts.maxConnections())
+	rep.mark(SectionConnections, SectionOK)
 }
 
 // winCert mirrors psScriptCertStores's output.

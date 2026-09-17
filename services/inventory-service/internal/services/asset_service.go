@@ -948,7 +948,6 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 			log.Printf("[AssetService] IngestFindings: skipping %s: %v", findingLabel(f), obsErr)
 			continue
 		}
-
 		existingID, existingStatus, found, lookupErr := s.lookupExistingAsset(ctx, tenantID, obs)
 		if lookupErr != nil {
 			return result(), fmt.Errorf("failed to find existing asset: %w", lookupErr)
@@ -1460,9 +1459,25 @@ func (s *AssetService) routeToExternalConnection(tenantID uuid.UUID, f IngestFin
 		DestPort: destPort,
 		Protocol: protocol,
 	}
+	upsert.SourceAssetID = hostConnectionSourceAssetID(f.RawData)
 
 	if f.Hostname != nil {
 		upsert.DestHostname = f.Hostname
+		// Carry the producer's own statement about where that name came from,
+		// when it made one. discovery-processor stamps it for every finding it
+		// forwards (measured for a captured SNI or an announced name, inferred
+		// for a reverse-DNS answer); anything else leaves it absent, which the
+		// upsert reads as "provenance unstated" rather than guessing.
+		//
+		// Without this the inferred names that reach external_connections
+		// through the INGEST path — rather than the direct third-party path —
+		// would arrive unlabelled and outrank a stored measurement.
+		if f.RawData != nil {
+			if kind, ok := f.RawData["dest_hostname_source_kind"].(string); ok && kind != "" {
+				k := kind
+				upsert.DestHostnameSourceKind = &k
+			}
+		}
 	}
 	upsert.ProtocolVersion = f.ProtocolVersion
 	upsert.CipherSuite = f.CipherSuite
@@ -1517,6 +1532,26 @@ func (s *AssetService) routeToExternalConnection(tenantID uuid.UUID, f IngestFin
 
 	_, err := s.externalConnectionsSvc.Upsert(tenantID, upsert)
 	return err
+}
+
+// hostConnectionSourceAssetID accepts an explicit source only from the host
+// inventory connection projection. Other producers may carry arbitrary
+// metadata named source_asset_id; treating that as measured identity would let
+// a third-party payload choose the source asset for an external connection.
+func hostConnectionSourceAssetID(raw map[string]interface{}) *uuid.UUID {
+	if !isHostInventoryConnectionRawData(raw) {
+		return nil
+	}
+	value, _ := raw["source_asset_id"].(string)
+	id, err := uuid.Parse(strings.TrimSpace(value))
+	if err != nil {
+		return nil
+	}
+	return &id
+}
+
+func isHostInventoryConnectionRawData(raw map[string]interface{}) bool {
+	return raw != nil && raw["discovery_type"] == "host_connection" && raw["discovery_method"] == "host_inventory"
 }
 
 // ElevateExternalConnection promotes a 3rd-party connection to a managed,

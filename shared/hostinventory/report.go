@@ -85,6 +85,8 @@ const (
 	SectionInterfaces  = "interfaces"
 	SectionPackages    = "packages"
 	SectionListeners   = "listeners"
+	SectionBoundUDP    = "bound_udp_sockets"
+	SectionConnections = "connections"
 	SectionCertStores  = "cert_stores"
 	SectionPlatformDet = "platform"
 )
@@ -114,7 +116,16 @@ type Report struct {
 	Interfaces []Interface `json:"interfaces,omitempty"`
 	Packages   []Package   `json:"packages,omitempty"`
 	Listeners  []Listener  `json:"listeners,omitempty"`
-	CertStores []CertStore `json:"cert_stores,omitempty"`
+	// BoundUDPSockets are UDP sockets whose local binding is known but whose
+	// role is not. UDP has no listen state; without a peer, calling one a
+	// listener would turn clients into services. Keeping the measured binding
+	// separately preserves genuine DNS/SNMP/syslog evidence without making a
+	// reachability claim the OS did not supply.
+	BoundUDPSockets []BoundUDPSocket `json:"bound_udp_sockets,omitempty"`
+	// Connections contains coalesced remote peers. Local ephemeral ports are
+	// intentionally absent: they are neither identity nor stable inventory.
+	Connections []Connection `json:"connections,omitempty"`
+	CertStores  []CertStore  `json:"cert_stores,omitempty"`
 
 	// PackagesOmitted marks a Report whose Packages slice was emptied ON
 	// PURPOSE before transmission, because the same list travels — sanitised —
@@ -215,7 +226,8 @@ type Package struct {
 // which sees the loopback-only and firewalled services no network scan reaches,
 // and it is the ground truth for which asset a service actually runs on.
 type Listener struct {
-	// Proto is "tcp" or "udp".
+	// Proto is "tcp". UDP bindings have no listening state and are reported as
+	// BoundUDPSockets unless the OS supplies a concrete remote peer.
 	Proto string `json:"proto"`
 	// Address is the bound address. 0.0.0.0 or :: means all interfaces.
 	Address string `json:"address,omitempty"`
@@ -224,6 +236,29 @@ type Listener struct {
 	// collector could see it (it needs privilege on most platforms).
 	Process string `json:"process,omitempty"`
 	PID     int    `json:"pid,omitempty"`
+}
+
+// BoundUDPSocket is a measured local UDP binding with an unknown role.
+type BoundUDPSocket struct {
+	Address string `json:"address,omitempty"`
+	Port    int    `json:"port"`
+	Process string `json:"process,omitempty"`
+	PID     int    `json:"pid,omitempty"`
+}
+
+// Connection is an outbound/established socket projected onto its stable
+// remote identity. A collector emits one only when the operating system
+// supplies a concrete peer address and port.
+type Connection struct {
+	Proto        string `json:"proto"`
+	LocalAddress string `json:"local_address"`
+	// LocalPort is retained only as collection evidence used to reject accepted
+	// inbound sockets. It is excluded from the fact projection and dedupe key.
+	LocalPort     int    `json:"local_port,omitempty"`
+	RemoteAddress string `json:"remote_address"`
+	RemotePort    int    `json:"remote_port"`
+	Process       string `json:"process,omitempty"`
+	PID           int    `json:"pid,omitempty"`
 }
 
 // CertStore is one certificate store found on the host, summarised.

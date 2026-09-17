@@ -139,8 +139,17 @@ kubectl -n vista logs deployment/notification-service
   - Auto-registers platform discovery sensor for all tenants on startup
 - **compliance-engine**: nats, postgres, redis
 - **device-interrogation-service**: nats, postgres, redis
-  - Requires `DEVICE_INTERROGATION_SERVICE_TOKEN` for auto-registration
-  - Auto-registers platform device interrogation agent for all tenants on startup
+  - Uses the per-tenant `device_interrogation` system sensor created by the
+    database trigger; it does not auto-register a duplicate fleet agent
+  - Operator-installed agents enroll with a registration key and tenant
+    certificate
+
+Upgraded installations may retain a historical platform entry in the device
+agent fleet. It no longer receives a heartbeat and can raise the ordinary
+offline-agent alert until an operator deletes it through the agent fleet or
+agent API. Removing that obsolete row does not affect the system sensor or the
+in-cluster interrogation worker.
+
 - **discovery-processor-service**: nats, postgres
 - **inventory-service**: nats, postgres, redis
 - **mcp-service**: _none_

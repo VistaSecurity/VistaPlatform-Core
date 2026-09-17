@@ -24,10 +24,18 @@
 // two-answer case, a proposal names the classes that disagreed so the CATALOGUE
 // can be fixed rather than the asset guessed at.
 //
-// It never sets a class on an existing asset. ADR-0008 D3 sends a machine's
-// proposal through Approvals, and ADR-0002 D5 forbids the auto-decide; a rule
-// that changed its mind six months after somebody approved a class would be a
-// silent rewrite of the inventory.
+// It never OVERRIDES a class on an existing asset. ADR-0008 D3 sends a
+// machine's proposal through Approvals, and ADR-0002 D5 forbids the
+// auto-decide; a rule that changed its mind six months after somebody approved
+// a class would be a silent rewrite of the inventory.
+//
+// [Promote] is the one exception and it is a narrow one: an asset still sitting
+// on the unassigned FLOOR (`unknown_host` / `external`) holds no answer to
+// override. Nothing decided it — not a rule, not an import, not a person — and
+// "nothing was ever decided" is a different situation from "something was
+// decided and this disagrees". See that function for the five guards that keep
+// the two apart, and inventory-service's upgradeUnknownHostClass for the same
+// reasoning applied to a sensor's self-report.
 package classproposal
 
 import (
@@ -42,6 +50,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
+	"github.com/vistasecurity/vistaplatform/shared/assetclasshistory"
 	"github.com/vistasecurity/vistaplatform/shared/classify"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 )
@@ -396,6 +405,181 @@ func Record(
 		return fmt.Errorf("record class proposal: %w", err)
 	}
 	return nil
+}
+
+// Promote applies a RULE's class to an EXISTING asset that is still sitting on
+// the unassigned floor, and records the move in `asset_class_history`.
+//
+// # Why this exists
+//
+// Classification used to happen exactly once, at the moment an asset was
+// created, from whatever the creating observation happened to carry. A passive
+// sensor sees an address and a MAC, which decides nothing, so the asset is born
+// `unknown_host` — and then a device agent delivers a full host inventory three
+// minutes later, and nothing re-asks the question. The asset that prompted this
+// was a fully inventoried laptop (OS, vendor, model, serial, 106 packages, 83
+// listening sockets) still displayed as an unknown host identified by a bare
+// IP. Three of that tenant's four assets were in the same state, and
+// `asset_class_history` held exactly one row each, all written at creation.
+//
+// # Why it does not go through Approvals
+//
+// Because there is nothing to review. [Record]'s case 4 raises a proposal when
+// a rule DISAGREES with an asset's class, which is a question for a person. The
+// floor is not a class and is not a disagreement: `unknown_host` is what the
+// intake builders write when they have no opinion, [IsFallbackClassHint] says
+// so, and [Apply] already acts on exactly that reading at creation time. What
+// changes here is only WHEN the reading is allowed to apply — a rule that could
+// have answered at 20:18 and can answer at 20:21 gives the same answer, and
+// making somebody wait for an approval queue to tell them their laptop is a
+// computer is not review, it is a chore.
+//
+// The asset's own approval still covers the class, exactly as at creation: a
+// promoted asset in `pending_approval` is approved class and all.
+//
+// # The five guards
+//
+// Each one is the answer to a different way this could be wrong, and each is
+// tested in both polarities:
+//
+//  1. **A rule, not a model.** `ModelID != ""` is the learned classifier, whose
+//     answers go to Approvals every time (ADR-0008 D3). Same rule as [Apply].
+//  2. **A decided class, not another floor.** A proposal OF `unknown_host` or
+//     `external` promotes nothing, and a conflict proposes no class at all.
+//  3. **Never a human.** `class_source_kind = 'declared'` is a person's answer,
+//     and it outranks every machine (ADR-0008 D4.2) — including when the person
+//     declared that they do not know.
+//  4. **Only from the floor.** This is the whole safety property and it is
+//     asserted twice: once here, and again in the UPDATE's own predicate, so a
+//     class written between the read and the write is not stomped. An asset
+//     holding ANY real class falls through to [Record] and gets a proposal,
+//     which is what stops two measured classes flapping on every observation.
+//  5. **Never a rejected class.** A reviewer who has said no to exactly this
+//     class for exactly this asset has answered; re-applying it without asking
+//     would be worse than re-proposing it.
+//
+// Returns whether it promoted. A false with no error is the ordinary outcome —
+// most observations arrive at assets that were classified long ago.
+//
+// It runs on the caller's transaction, like [Record], so the class, the history
+// row and everything else the observation wrote land together or not at all.
+func Promote(
+	ctx context.Context, tx Tx, tenantID, assetID uuid.UUID, prop classify.ClassProposal,
+) (bool, error) {
+	// Guards 1 and 2. Both are about the PROPOSAL and need no query.
+	if prop.Class == "" || prop.Conflict || prop.ModelID != "" {
+		return false, nil
+	}
+	if IsFallbackClassHint(prop.Class) {
+		return false, nil
+	}
+
+	current, sourceKind, err := CurrentClassOf(ctx, tx, tenantID, assetID)
+	if err != nil {
+		return false, err
+	}
+	if current == "" {
+		// The asset is gone, or was never written — the contested path resolves
+		// to no asset at all. The same case [Record] handles.
+		return false, nil
+	}
+	// Guards 3 and 4.
+	if sourceKind == string(identity.ClassSourceDeclared) {
+		return false, nil
+	}
+	if !IsFallbackClassHint(current) {
+		return false, nil
+	}
+
+	// Guard 5.
+	rejected, err := rejectedBefore(ctx, tx, tenantID, assetID, prop.Class)
+	if err != nil {
+		return false, err
+	}
+	if rejected {
+		return false, nil
+	}
+
+	path, err := classPathFor(ctx, tx, tenantID, prop.Class)
+	if err != nil {
+		return false, err
+	}
+	kind, ref := Provenance(prop)
+
+	// `class_key = $7` repeats guard 4 in the write. The read above and this
+	// UPDATE are in one transaction, so nothing should have moved in between —
+	// but "should" is how a class an approval had just written gets overwritten
+	// by a promotion that read the floor a moment earlier, and the predicate
+	// costs nothing.
+	res, err := tx.ExecContext(ctx, `
+		UPDATE assets
+		   SET class_key = $3,
+		       class_path = $4,
+		       class_source_kind = $5,
+		       class_source_ref = NULLIF($6, ''),
+		       class_confidence = $8,
+		       updated_at = now()
+		 WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND class_key = $7
+           AND class_source_kind IS DISTINCT FROM 'declared'`,
+		tenantID, assetID, prop.Class, path, kind, ref, current, prop.Confidence)
+	if err != nil {
+		return false, fmt.Errorf("promote the asset off the unclassified floor: %w", err)
+	}
+	if n, rErr := res.RowsAffected(); rErr != nil || n == 0 {
+		// Somebody classified it between the read and the write. Their answer
+		// stands and there is no move to record.
+		return false, nil
+	}
+
+	if err := assetclasshistory.Record(ctx, tx, tenantID, assetID, assetclasshistory.Entry{
+		From:   current,
+		To:     prop.Class,
+		Source: assetclasshistory.SourceClassifier,
+		// No actor: a machine did this. uuid.Nil means "no person", never
+		// "person unknown".
+		Evidence: map[string]any{
+			"class_source_kind": kind,
+			"class_source_ref":  ref,
+			"rule_ids":          RuleIDsOf(prop, prop.Class),
+			"confidence":        prop.Confidence,
+			"promoted_from":     current,
+		},
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// classPathFor resolves the materialised ancestry `assets.class_path` carries.
+//
+// The generated registry answers for every platform class with no query; the
+// table is consulted only for a tenant leaf subclass, which is a runtime row the
+// generator cannot know about (ADR-0002 D2). A key in neither is stored with
+// itself as its path rather than rejected — class_path is NOT NULL and exists
+// for the facet prefix, and the column is an FK by value to `asset_classes`, so
+// a key naming nothing at all fails loudly at the write.
+//
+// Same shape and same reasoning as identity/postgres.classPathFor and
+// inventory-service's classPathForKey. A third copy rather than an export from
+// either, because both of those take a concrete handle this package does not
+// have and this is eight lines of lookup.
+func classPathFor(ctx context.Context, tx Tx, tenantID uuid.UUID, key string) (string, error) {
+	if c, ok := assetclass.Get(key); ok {
+		return c.Path, nil
+	}
+	var path string
+	err := tx.QueryRowContext(ctx, `
+		SELECT path FROM public.asset_classes
+		 WHERE key = $2 AND (tenant_id = $1 OR tenant_id IS NULL)
+		 ORDER BY (tenant_id IS NULL)
+		 LIMIT 1`, tenantID, key).Scan(&path)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return key, nil
+	case err != nil:
+		return "", fmt.Errorf("resolve the class path for %q: %w", key, err)
+	}
+	return path, nil
 }
 
 // ConflictKeyOf is the dedupe key for a CONFLICT proposal: the tied classes,

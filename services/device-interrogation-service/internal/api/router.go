@@ -114,9 +114,6 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 
 	deviceInterrogationGroup := v1.Group("/device-interrogation-service")
 
-	// Auto-registration endpoint for platform services (service account auth)
-	deviceInterrogationGroup.POST("/agents/auto-register", sharedmiddleware.ServiceAccountAuth(db), handlers.AutoRegisterAgentHandler(db, bypassDB))
-
 	// Tenant device agent bootstrap (registration key + CSR only; same model as sensor-manager /sensors/register)
 	deviceInterrogationGroup.POST("/agents/register", registerAgentPublicHandler(db, bypassDB, redis))
 
@@ -393,12 +390,6 @@ func deleteAgentHandler(db, bypassDB *sql.DB, redis *redis.Client) gin.HandlerFu
 		if err := agentService.DeleteAgent(c.Request.Context(), tenantID, agentID); err != nil {
 			if errors.Is(err, services.ErrAgentNotFound) {
 				c.JSON(http.StatusNotFound, gin.H{"error": "Agent not found"})
-				return
-			}
-			if errors.Is(err, services.ErrPlatformAgentProtected) {
-				c.JSON(http.StatusForbidden, gin.H{
-					"error": "This is a platform-managed agent and cannot be deleted. It is your workspace's handle to the shared in-cluster interrogation service.",
-				})
 				return
 			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})

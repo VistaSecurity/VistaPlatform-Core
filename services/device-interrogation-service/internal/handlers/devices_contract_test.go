@@ -37,6 +37,7 @@ type stubDeviceStore struct {
 	devErr  error
 	created *models.Device
 	updated *models.Device
+	stored  services.StoredDeviceCredentials
 }
 
 func (s *stubDeviceStore) CreateDevice(context.Context, uuid.UUID, models.CreateDeviceRequest) (*models.Device, error) {
@@ -54,10 +55,23 @@ func (s *stubDeviceStore) UpdateDevice(context.Context, uuid.UUID, uuid.UUID, mo
 func (s *stubDeviceStore) DeleteDevice(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
 func (s *stubDeviceStore) GetStoredDeviceCredentials(context.Context, uuid.UUID, uuid.UUID) (services.StoredDeviceCredentials, error) {
-	return services.StoredDeviceCredentials{}, nil
+	return s.stored, nil
+}
+
+type recordingJobCreator struct {
+	reqs []models.CreateDeviceJobRequest
+}
+
+func (r *recordingJobCreator) CreateJob(_ context.Context, req models.CreateDeviceJobRequest) (*models.DeviceJob, error) {
+	r.reqs = append(r.reqs, req)
+	return &models.DeviceJob{ID: uuid.New(), JobType: req.JobType, Status: models.JobStatusPending}, nil
 }
 
 func newDeviceEngine(store *stubDeviceStore) *gin.Engine {
+	return newDeviceEngineWithJobs(store, nil)
+}
+
+func newDeviceEngineWithJobs(store *stubDeviceStore, jobs jobCreator) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	grp := r.Group("/api/v1/device-interrogation-service")
@@ -65,7 +79,7 @@ func newDeviceEngine(store *stubDeviceStore) *gin.Engine {
 		c.Set("tenantID", deviceTestTenant)
 		c.Next()
 	})
-	h := &DeviceHandlers{deviceService: store}
+	h := &DeviceHandlers{deviceService: store, jobQueue: jobs}
 	grp.GET("/devices", h.ListDevices)
 	grp.POST("/devices", h.CreateDevice)
 	grp.GET("/devices/:id", h.GetDevice)

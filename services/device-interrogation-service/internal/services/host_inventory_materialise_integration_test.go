@@ -178,6 +178,105 @@ func countRows(t *testing.T, db *sql.DB, query string, args ...any) int {
 	return n
 }
 
+// TestIntegration_HostInventory_QueuesConnectionsThroughTheSharedPipeline
+// pins the production wiring: the real projection reaches Materialise, the
+// host is resolved first, and each valid peer becomes a sensor_discoveries row
+// carrying the host's measured source address and asset id. Removing the
+// writeConnections call leaves this test with zero rows.
+func TestIntegration_HostInventory_QueuesConnectionsThroughTheSharedPipeline(t *testing.T) {
+	owner := testdb.Connect(t)
+	tenantID := testdb.NewTenant(t, owner)
+	appDB := testdb.ConnectAsAppRole(t, owner)
+	agentID := seedHostInventoryAgent(t, owner, tenantID)
+	jobID := newHostInventoryJob(t, appDB, owner, tenantID, agentID)
+
+	sensorID := uuid.New()
+	if _, err := owner.Exec(`INSERT INTO sensors(id,tenant_id,name,platform,version,profile,status,tags)
+		VALUES($1,$2,'IT system interrogation','linux','test','device_interrogation','active',ARRAY['system'])`, sensorID, tenantID); err != nil {
+		t.Fatalf("seed system sensor: %v", err)
+	}
+
+	rep := hostReport(hostinventory.ModeLocal, agentID.String(), "CONNECTION-HOST", defaultPackages())
+	rep.Sections[hostinventory.SectionConnections] = hostinventory.SectionOK
+	rep.Connections = []hostinventory.Connection{
+		{Proto: "tcp", LocalAddress: "198.51.100.20", LocalPort: 50111, RemoteAddress: "8.8.8.8", RemotePort: 443, Process: "browser", PID: 77},
+		{Proto: "tcp", LocalAddress: "198.51.100.20", LocalPort: 50112, RemoteAddress: "10.40.0.15", RemotePort: 8443, Process: "agent", PID: 78},
+		// The producer normally rejects this before projection; the intake also
+		// refuses it so older/malformed agents cannot mint a localhost asset.
+		{Proto: "tcp", LocalAddress: "127.0.0.1", LocalPort: 50113, RemoteAddress: "127.0.0.1", RemotePort: 9000},
+	}
+	obs := observationsFor(t, rep)
+
+	counts, err := NewHostInventoryIngest(appDB, owner).MaterialiseAndRecord(t.Context(), tenantID, agentID, jobID, obs)
+	if err != nil {
+		t.Fatalf("MaterialiseAndRecord: %v", err)
+	}
+	if counts.ConnectionsQueued != 2 {
+		t.Fatalf("connections queued = %d, want 2: %+v", counts.ConnectionsQueued, counts)
+	}
+
+	rows, err := owner.Query(`SELECT host(source_ip),host(dest_ip),port,protocol,metadata->>'source_asset_id'
+		FROM sensor_discoveries WHERE tenant_id=$1 AND batch_id=$2 ORDER BY host(dest_ip)`, tenantID, "host-inventory-connections:"+jobID.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var got int
+	for rows.Next() {
+		var source, dest, proto, sourceAsset string
+		var port int
+		if err := rows.Scan(&source, &dest, &port, &proto, &sourceAsset); err != nil {
+			t.Fatal(err)
+		}
+		if source != "198.51.100.20" {
+			t.Errorf("source_ip=%s, want host interface", source)
+		}
+		if sourceAsset != counts.AssetID {
+			t.Errorf("source_asset_id=%s, want %s", sourceAsset, counts.AssetID)
+		}
+		if dest == "127.0.0.1" {
+			t.Error("loopback peer reached the shared routing queue")
+		}
+		if proto != "tcp" || port == 0 {
+			t.Errorf("connection tuple lost: %s:%d/%s", dest, port, proto)
+		}
+		got++
+	}
+	if got != 2 {
+		t.Fatalf("queued rows=%d, want 2", got)
+	}
+}
+
+func TestIntegration_HostInventory_FailedConnectionSnapshotIsAProcessingError(t *testing.T) {
+	owner := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, owner)
+	tenantID := testdb.NewTenant(t, owner)
+	appDB := testdb.ConnectAsAppRole(t, owner)
+	agentID := seedHostInventoryAgent(t, owner, tenantID)
+	jobID := newHostInventoryJob(t, appDB, owner, tenantID, agentID)
+
+	rep := hostReport(hostinventory.ModeLocal, agentID.String(), "CONNECTION-FAILURE-HOST", defaultPackages())
+	rep.Sections[hostinventory.SectionConnections] = hostinventory.SectionFailed
+	obs := observationsFor(t, rep)
+	counts, err := NewHostInventoryIngest(appDB, owner).MaterialiseAndRecord(t.Context(), tenantID, agentID, jobID, obs)
+	if err != nil {
+		t.Fatalf("MaterialiseAndRecord: %v", err)
+	}
+	if counts.FullyMaterialized() {
+		t.Fatalf("failed connection collection claimed full materialization: %+v", counts)
+	}
+	if len(counts.Errors) != 1 || !strings.Contains(counts.Errors[0], "connection collection failed") {
+		t.Fatalf("processing errors = %#v, want bounded connection failure", counts.Errors)
+	}
+	var queued int
+	if err := owner.QueryRow(`SELECT count(*) FROM sensor_discoveries WHERE tenant_id=$1 AND batch_id=$2`, tenantID, "host-inventory-connections:"+jobID.String()).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 0 {
+		t.Fatalf("failed snapshot queued %d connection rows", queued)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // the schema (unchanged from 2.11a — a job type that cannot be stored has
 // nothing to materialise)

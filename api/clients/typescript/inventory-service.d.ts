@@ -1458,7 +1458,11 @@ export interface paths {
          */
         get: operations["listExternalConnections"];
         put?: never;
-        post?: never;
+        /**
+         * Record a measured external connection
+         * @description Internal producer endpoint used by the discovery processor. An explicit source_asset_id may identify the measured source host when its current source address is not itself an asset identifier; inventory-service validates that the asset belongs to the tenant.
+         */
+        post: operations["upsertExternalConnection"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4374,7 +4378,7 @@ export interface components {
         ClassificationRuleRef: {
             id?: string;
             /** @enum {string} */
-            kind: "oui" | "sysobjectid" | "enip" | "cloud_type" | "banner" | "port_profile" | "model" | "platform" | "cdp_capabilities" | "lldp_capability" | "mdns_service";
+            kind: "oui" | "sysobjectid" | "enip" | "cloud_type" | "banner" | "port_profile" | "model" | "platform" | "cdp_capabilities" | "lldp_capability" | "mdns_service" | "os_name";
             pattern: string;
             class?: string;
             vendor?: string;
@@ -5071,6 +5075,50 @@ export interface components {
         /** @description Envelope for GET/PUT /lifecycle/policy — `{ "policy": {...} }`. */
         AssetLifecyclePolicyResponse: {
             policy: components["schemas"]["AssetLifecyclePolicy"];
+        };
+        /** @description Internal measured-connection payload accepted by POST /external-connections. */
+        ExternalConnectionUpsert: {
+            source_ip: string;
+            source_hostname?: string;
+            /**
+             * Format: uuid
+             * @description Measured source host asset; must exist in the request tenant.
+             */
+            source_asset_id?: string;
+            dest_ip: string;
+            dest_hostname?: string;
+            /** @enum {string} */
+            dest_hostname_source_kind?: "measured" | "declared" | "imported" | "inferred";
+            dest_port: number;
+            protocol: string;
+            protocol_version?: string;
+            cipher_suite?: string;
+            key_exchange_algorithm?: string;
+            key_size?: number;
+            supported_tls_versions?: string[];
+            /** Format: uuid */
+            sensor_id?: string;
+            cert_subject?: string;
+            cert_issuer?: string;
+            cert_san?: string[];
+            /** Format: date-time */
+            cert_not_before?: string;
+            /** Format: date-time */
+            cert_not_after?: string;
+            cert_fingerprint_sha256?: string;
+            cert_public_key_algorithm?: string;
+            cert_public_key_size?: number;
+            cert_signature_algorithm?: string;
+            cert_validation_status?: string;
+            cert_pem?: string;
+            cert_has_sct?: boolean;
+            cert_sct_source?: string;
+            cert_known_bad_ca?: string;
+            cert_no_subject?: boolean;
+            cert_no_common_name?: boolean;
+            cert_is_ev?: boolean;
+            cert_large_san_count?: number;
+            ocsp_status?: string;
         };
         /** @description A deduplicated third-party connection row (models.ExternalConnection) — one per (tenant, source_ip, dest_ip, dest_port, protocol) tuple. The many optional fields are omitempty pointers/slices, omitted when unset. */
         ExternalConnection: {
@@ -8486,6 +8534,33 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ExternalConnectionListResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    upsertExternalConnection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExternalConnectionUpsert"];
+            };
+        };
+        responses: {
+            /** @description The created or refreshed external connection. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExternalConnection"];
                 };
             };
             400: components["responses"]["LegacyBadRequest"];

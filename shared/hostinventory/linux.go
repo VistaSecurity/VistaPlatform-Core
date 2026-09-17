@@ -25,9 +25,10 @@ var (
 	linuxCmdRPM  = []string{"rpm", "-qa", "--queryformat=%{NAME}\\t%{VERSION}-%{RELEASE}\\t%{ARCH}\\t%{VENDOR}\\n"}
 	linuxCmdAPK  = []string{"apk", "info", "-v"}
 
-	linuxCmdSS   = []string{"ss", "-ltnup"}
-	linuxCmdIPJ  = []string{"ip", "-j", "addr"}
-	linuxCmdArch = []string{"uname", "-m"}
+	linuxCmdSS          = []string{"ss", "-ltnup"}
+	linuxCmdConnections = []string{"ss", "-tnup"}
+	linuxCmdIPJ         = []string{"ip", "-j", "addr"}
+	linuxCmdArch        = []string{"uname", "-m"}
 )
 
 // linuxOSReleasePath is the file that names the distribution. Every systemd-era
@@ -60,6 +61,7 @@ var linuxCertStorePaths = []string{
 // linuxProcNetTCP are the fallback sources when `ss` is unavailable — a
 // minimal container image very often has neither ss nor netstat.
 var linuxProcNetTCP = []string{"/proc/net/tcp", "/proc/net/tcp6"}
+var linuxProcNetUDP = []string{"/proc/net/udp", "/proc/net/udp6"}
 
 func collectLinux(ctx context.Context, r Runner, rep *Report, opts Options) {
 	collectLinuxHost(ctx, r, rep)
@@ -67,6 +69,7 @@ func collectLinux(ctx context.Context, r Runner, rep *Report, opts Options) {
 	collectLinuxInterfaces(ctx, r, rep, opts)
 	collectLinuxPackages(ctx, r, rep, opts)
 	collectLinuxListeners(ctx, r, rep)
+	collectLinuxConnections(ctx, r, rep, opts)
 	collectCertStoresUnix(ctx, r, rep, linuxCertStorePaths, opts)
 }
 
@@ -498,8 +501,9 @@ func allDigits(s string) bool {
 
 func collectLinuxListeners(ctx context.Context, r Runner, rep *Report) {
 	if out, ok := commandPresent(ctx, r, linuxCmdSS); ok {
-		rep.Listeners = ParseSS([]byte(out))
+		rep.Listeners, rep.BoundUDPSockets = ParseSSBindings([]byte(out))
 		rep.mark(SectionListeners, SectionOK)
+		rep.mark(SectionBoundUDP, SectionOK)
 		return
 	}
 
@@ -518,24 +522,52 @@ func collectLinuxListeners(ctx context.Context, r Runner, rep *Report) {
 		}
 		listeners = append(listeners, ParseProcNetTCP(b)...)
 	}
-	if len(failures) == len(linuxProcNetTCP) {
-		rep.fail(SectionListeners, fmt.Errorf("neither ss nor /proc/net/tcp was readable: %s", strings.Join(failures, "; ")))
-		return
-	}
-	rep.Listeners = listeners
-	rep.mark(SectionListeners, SectionOK)
 	if len(failures) > 0 {
-		rep.Errors = append(rep.Errors, StepError{Step: SectionListeners, Message: strings.Join(failures, "; ")})
+		// A partial address-family snapshot cannot license endpoint retirement
+		// or outbound direction inference. Keep neither half as complete.
+		rep.Listeners = nil
+		rep.fail(SectionListeners, fmt.Errorf("incomplete /proc/net/tcp snapshot: %s", strings.Join(failures, "; ")))
+	} else {
+		rep.Listeners = listeners
+		rep.mark(SectionListeners, SectionOK)
+	}
+
+	var udp []BoundUDPSocket
+	var udpFailures []string
+	for _, path := range linuxProcNetUDP {
+		b, err := r.ReadFile(ctx, path)
+		if err != nil {
+			udpFailures = append(udpFailures, fmt.Sprintf("%s: %v", path, err))
+			continue
+		}
+		udp = append(udp, ParseProcNetUDPBindings(b)...)
+	}
+	if len(udpFailures) > 0 {
+		// Like TCP, one address family is not a complete snapshot. Publishing it
+		// as current would erase bindings from the unread family.
+		rep.BoundUDPSockets = nil
+		rep.fail(SectionBoundUDP, fmt.Errorf("incomplete /proc/net/udp snapshot: %s", strings.Join(udpFailures, "; ")))
+	} else {
+		rep.BoundUDPSockets = coalesceBoundUDP(udp)
+		rep.mark(SectionBoundUDP, SectionOK)
 	}
 }
 
 // ParseSS parses `ss -ltnup` output.
 //
-// Both the TCP (LISTEN) and UDP (UNCONN) rows are kept: a UDP service has no
-// listen state, and dropping the UNCONN rows would silently lose every DNS,
-// SNMP and syslog listener on the host.
+// TCP LISTEN rows are returned as listeners. UDP UNCONN rows are retained by
+// ParseSSBindings as unknown-role bindings; they are not listener claims.
 func ParseSS(b []byte) []Listener {
+	listeners, _ := ParseSSBindings(b)
+	return listeners
+}
+
+// ParseSSBindings separates proven TCP listeners from UDP bindings whose role
+// ss cannot establish. UNCONN does not mean server: ordinary UDP clients can
+// be unconnected and bound to ephemeral ports.
+func ParseSSBindings(b []byte) ([]Listener, []BoundUDPSocket) {
 	var out []Listener
+	var udp []BoundUDPSocket
 	for i, line := range strings.Split(string(b), "\n") {
 		line = strings.TrimRight(line, "\r")
 		if strings.TrimSpace(line) == "" {
@@ -554,7 +586,7 @@ func ParseSS(b []byte) []Listener {
 			continue
 		}
 		state := strings.ToUpper(fields[1])
-		if state != "LISTEN" && state != "UNCONN" {
+		if (proto == "tcp" && state != "LISTEN") || (proto == "udp" && state != "UNCONN") {
 			continue
 		}
 		addr, port, ok := splitHostPortSuffix(fields[4])
@@ -567,7 +599,116 @@ func ParseSS(b []byte) []Listener {
 		if idx := strings.Index(line, `users:(("`); idx >= 0 {
 			l.Process, l.PID = parseSSUsers(line[idx:])
 		}
-		out = append(out, l)
+		if proto == "udp" {
+			udp = append(udp, BoundUDPSocket{Address: addr, Port: port, Process: l.Process, PID: l.PID})
+		} else {
+			out = append(out, l)
+		}
+	}
+	return out, coalesceBoundUDP(udp)
+}
+
+// ParseSSConnections reads rows with a concrete peer. It accepts only TCP
+// ESTAB and UDP rows with a non-wildcard peer.
+func ParseSSConnections(b []byte) []Connection {
+	var out []Connection
+	for _, line := range strings.Split(string(b), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 6 || strings.EqualFold(fields[0], "Netid") {
+			continue
+		}
+		proto, state := strings.ToLower(fields[0]), strings.ToUpper(fields[1])
+		if proto != "tcp" && proto != "udp" {
+			continue
+		}
+		if proto == "tcp" && state != "ESTAB" {
+			continue
+		}
+		local, localPort, lok := splitHostPortSuffix(fields[4])
+		remote, remotePort, rok := splitHostPortSuffix(fields[5])
+		if !lok || !rok || remote == "0.0.0.0" || remote == "::" || remotePort == 0 {
+			continue
+		}
+		c := Connection{Proto: proto, LocalAddress: local, LocalPort: localPort, RemoteAddress: remote, RemotePort: remotePort}
+		if idx := strings.Index(line, `users:(("`); idx >= 0 {
+			c.Process, c.PID = parseSSUsers(line[idx:])
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+func collectLinuxConnections(ctx context.Context, r Runner, rep *Report, opts Options) {
+	if !opts.CollectConnections {
+		return
+	}
+	if !rep.SectionOK(SectionListeners) {
+		rep.fail(SectionConnections, errors.New("listener snapshot incomplete; established TCP direction cannot be determined"))
+		return
+	}
+	if out, ok := commandPresent(ctx, r, linuxCmdConnections); ok {
+		rep.Connections = coalesceConnections(excludeAcceptedConnections(ParseSSConnections([]byte(out)), rep.Listeners), opts.maxConnections())
+		rep.mark(SectionConnections, SectionOK)
+		return
+	}
+	var out []Connection
+	var failures []string
+	for _, source := range []struct{ path, proto string }{{"/proc/net/tcp", "tcp"}, {"/proc/net/tcp6", "tcp"}, {"/proc/net/udp", "udp"}, {"/proc/net/udp6", "udp"}} {
+		b, err := r.ReadFile(ctx, source.path)
+		if err != nil {
+			failures = append(failures, source.path+": "+err.Error())
+			continue
+		}
+		out = append(out, ParseProcNetConnections(b, source.proto)...)
+	}
+	if len(failures) > 0 {
+		rep.fail(SectionConnections, errors.New(strings.Join(failures, "; ")))
+		return
+	}
+	rep.Connections = coalesceConnections(excludeAcceptedConnections(out, rep.Listeners), opts.maxConnections())
+	rep.mark(SectionConnections, SectionOK)
+}
+
+func ParseProcNetUDPBindings(b []byte) []BoundUDPSocket {
+	var out []BoundUDPSocket
+	for i, line := range strings.Split(string(b), "\n") {
+		if i == 0 {
+			continue
+		}
+		f := strings.Fields(line)
+		if len(f) < 3 {
+			continue
+		}
+		_, remotePort, ok := parseProcHexAddr(f[2])
+		if !ok || remotePort != 0 {
+			continue
+		}
+		addr, port, ok := parseProcHexAddr(f[1])
+		if ok {
+			out = append(out, BoundUDPSocket{Address: addr, Port: port})
+		}
+	}
+	return out
+}
+
+func ParseProcNetConnections(b []byte, proto string) []Connection {
+	var out []Connection
+	for i, line := range strings.Split(string(b), "\n") {
+		if i == 0 {
+			continue
+		}
+		f := strings.Fields(line)
+		if len(f) < 4 {
+			continue
+		}
+		if proto == "tcp" && f[3] != "01" {
+			continue
+		}
+		local, localPort, lok := parseProcHexAddr(f[1])
+		remote, port, rok := parseProcHexAddr(f[2])
+		if lok && rok && port > 0 {
+			out = append(out, Connection{Proto: proto, LocalAddress: local, LocalPort: localPort, RemoteAddress: remote, RemotePort: port})
+		}
 	}
 	return out
 }

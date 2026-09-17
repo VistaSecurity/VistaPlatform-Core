@@ -167,6 +167,98 @@ func TestIntegration_ExternalConnection_PersistsSourceAssetID(t *testing.T) {
 	}
 }
 
+func TestIntegration_ExternalConnection_HonoursMeasuredSourceAssetIDOnSecondaryAddress(t *testing.T) {
+	raw := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, raw)
+	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+	tenant := testdb.NewTenant(t, raw)
+	otherTenant := testdb.NewTenant(t, raw)
+
+	assetID := uuid.New()
+	mustExec(t, raw, `INSERT INTO assets(id,tenant_id,hostname,primary_address,class_key,class_path,asset_status,last_seen_at,first_discovered_at,created_at,updated_at)
+		VALUES($1,$2,'agent-host.example.test','10.55.55.55','server','hardware.computer.server','monitoring',NOW(),NOW(),NOW(),NOW())`, assetID, tenant)
+	foreignAssetID := uuid.New()
+	mustExec(t, raw, `INSERT INTO assets(id,tenant_id,hostname,primary_address,class_key,class_path,asset_status,last_seen_at,first_discovered_at,created_at,updated_at)
+		VALUES($1,$2,'foreign-agent.example.test','10.77.77.77','server','hardware.computer.server','monitoring',NOW(),NOW(),NOW(),NOW())`, foreignAssetID, otherTenant)
+
+	svc := NewExternalConnectionsService(db, NewAlgorithmService(db))
+	conn, err := svc.Upsert(tenant, models.ExternalConnectionUpsert{
+		// A secondary interface that is intentionally neither primary_address
+		// nor an endpoint. Address-only inference cannot resolve this source.
+		SourceIP: "10.66.66.66", SourceAssetID: &assetID,
+		DestIP: "8.8.8.8", DestPort: 443, Protocol: "tcp",
+	})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if conn.SourceAssetID == nil || *conn.SourceAssetID != assetID {
+		t.Fatalf("source_asset_id=%v, want explicitly measured host %s", conn.SourceAssetID, assetID)
+	}
+
+	conn, err = svc.Upsert(tenant, models.ExternalConnectionUpsert{
+		// A caller cannot attribute its tenant's observation to an asset owned
+		// by another tenant. The unrecorded address also proves this did not
+		// silently resolve through the source-address fallback.
+		SourceIP: "10.88.88.88", SourceAssetID: &foreignAssetID,
+		DestIP: "1.1.1.1", DestPort: 443, Protocol: "tcp",
+	})
+	if err != nil {
+		t.Fatalf("Upsert with foreign source_asset_id: %v", err)
+	}
+	if conn.SourceAssetID != nil {
+		t.Fatalf("foreign source_asset_id was trusted across tenants: got %s", *conn.SourceAssetID)
+	}
+}
+
+func TestIntegration_RouteToExternalConnection_PreservesHostInventorySourceAsset(t *testing.T) {
+	raw := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, raw)
+	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+	tenant := testdb.NewTenant(t, raw)
+
+	assetID := uuid.New()
+	mustExec(t, raw, `INSERT INTO assets(id,tenant_id,hostname,primary_address,class_key,class_path,asset_status,last_seen_at,first_discovered_at,created_at,updated_at)
+		VALUES($1,$2,'fallback-source.example.test','10.55.55.55','server','hardware.computer.server','monitoring',NOW(),NOW(),NOW(),NOW())`, assetID, tenant)
+
+	svc := NewAssetService(db)
+	svc.SetExternalConnectionsService(NewExternalConnectionsService(db, NewAlgorithmService(db)))
+	dest, source, port := "8.8.4.4", "10.66.66.66", 443
+	if err := svc.routeToExternalConnection(tenant, IngestFinding{
+		IPAddress: &dest, Port: &port, Protocol: "tcp",
+		RawData: map[string]interface{}{
+			"source_ip": source, "source_asset_id": assetID.String(),
+			"discovery_type": "host_connection", "discovery_method": "host_inventory",
+		},
+	}); err != nil {
+		t.Fatalf("routeToExternalConnection: %v", err)
+	}
+	var got uuid.UUID
+	if err := raw.QueryRow(`SELECT source_asset_id FROM external_connections WHERE tenant_id=$1 AND dest_ip=$2::inet AND dest_port=$3`, tenant, dest, port).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != assetID {
+		t.Fatalf("source_asset_id=%s, want measured host %s", got, assetID)
+	}
+
+	// The same field from an unrelated producer is not identity evidence.
+	dest, port = "8.8.4.5", 444
+	if err := svc.routeToExternalConnection(tenant, IngestFinding{
+		IPAddress: &dest, Port: &port, Protocol: "tcp",
+		RawData: map[string]interface{}{
+			"source_ip": source, "source_asset_id": assetID.String(), "discovery_method": "passive",
+		},
+	}); err != nil {
+		t.Fatalf("route unrelated producer: %v", err)
+	}
+	var unrelated *uuid.UUID
+	if err := raw.QueryRow(`SELECT source_asset_id FROM external_connections WHERE tenant_id=$1 AND dest_ip=$2::inet AND dest_port=$3`, tenant, dest, port).Scan(&unrelated); err != nil {
+		t.Fatal(err)
+	}
+	if unrelated != nil {
+		t.Fatalf("unrelated producer selected source asset %s", *unrelated)
+	}
+}
+
 func TestIntegration_VCIInventory_ServesLiveInventory(t *testing.T) {
 	db := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, db)

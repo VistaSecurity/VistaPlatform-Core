@@ -1,6 +1,7 @@
 package hostinventory
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -125,24 +126,18 @@ func TestParseAPK(t *testing.T) {
 }
 
 func TestParseSS(t *testing.T) {
-	listeners := ParseSS([]byte(fixture(t, "linux", "ss-ltnup.txt")))
-	if len(listeners) != 8 {
-		t.Fatalf("got %d listeners, want 8: %+v", len(listeners), listeners)
+	listeners, bound := ParseSSBindings([]byte(fixture(t, "linux", "ss-ltnup.txt")))
+	if len(listeners) != 5 {
+		t.Fatalf("got %d proven TCP listeners, want 5: %+v", len(listeners), listeners)
 	}
-
-	var udp, tcp int
+	var tcp int
 	for _, l := range listeners {
-		switch l.Proto {
-		case "udp":
-			udp++
-		case "tcp":
+		if l.Proto == "tcp" {
 			tcp++
 		}
 	}
-	// A UDP service has no listen state, so it appears as UNCONN. Keeping only
-	// LISTEN would silently lose every DNS, SNMP and syslog listener.
-	if udp != 3 {
-		t.Errorf("got %d udp listeners, want 3 — the UNCONN rows were dropped", udp)
+	if len(bound) != 3 {
+		t.Errorf("got %d unknown-role UDP bindings, want 3 — the evidence was dropped", len(bound))
 	}
 	if tcp != 5 {
 		t.Errorf("got %d tcp listeners, want 5", tcp)
@@ -508,8 +503,8 @@ func TestParseWindowsListeners(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if len(listeners) != 7 {
-		t.Fatalf("got %d listeners, want 7", len(listeners))
+	if len(listeners) != 5 {
+		t.Fatalf("got %d proven TCP listeners, want 5", len(listeners))
 	}
 	var udp int
 	for _, l := range listeners {
@@ -517,8 +512,12 @@ func TestParseWindowsListeners(t *testing.T) {
 			udp++
 		}
 	}
-	if udp != 2 {
-		t.Errorf("got %d udp endpoints, want 2", udp)
+	if udp != 0 {
+		t.Errorf("got %d UDP listener claims, want 0; Get-NetUDPEndpoint cannot prove role", udp)
+	}
+	bound, err := ParseWindowsBoundUDP([]byte(fixture(t, "windows", "listeners.json")))
+	if err != nil || len(bound) != 2 {
+		t.Fatalf("unknown-role UDP bindings = %+v, err=%v; want the two measured endpoints", bound, err)
 	}
 	byPort := map[int]Listener{}
 	for _, l := range listeners {
@@ -529,6 +528,20 @@ func TestParseWindowsListeners(t *testing.T) {
 	}
 	if byPort[22].Process != "sshd" {
 		t.Errorf("sshd: %+v", byPort[22])
+	}
+}
+
+func TestWindowsSocketSnapshotsAcceptValidEmptyResults(t *testing.T) {
+	listeners, err := ParseWindowsListeners([]byte("[]"))
+	if err != nil || len(listeners) != 0 {
+		t.Fatalf("empty TCP listener snapshot = %#v, %v", listeners, err)
+	}
+	bound, err := ParseWindowsBoundUDP([]byte("[]"))
+	if err != nil || len(bound) != 0 {
+		t.Fatalf("empty UDP binding snapshot = %#v, %v", bound, err)
+	}
+	if strings.Contains(psScriptListeners, "-State Listen") || strings.Contains(psScriptConnections, "-State Established") {
+		t.Fatal("zero-match Get-NetTCPConnection query can throw instead of serializing an empty snapshot")
 	}
 }
 

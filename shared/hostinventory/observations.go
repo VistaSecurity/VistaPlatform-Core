@@ -108,6 +108,12 @@ func ToObservations(rep *Report) (*di.InterrogateResult, error) {
 	if rep.SectionOK(SectionListeners) && len(rep.Listeners) > 0 {
 		add(facts.KeySvcListeningSockets, projectListeners(rep.Listeners), di.ConfidenceReported)
 	}
+	if rep.SectionOK(SectionBoundUDP) {
+		add(facts.KeySvcBoundUdpSockets, projectBoundUDPSockets(rep.BoundUDPSockets), di.ConfidenceReported)
+	}
+	if rep.SectionOK(SectionConnections) {
+		add(facts.KeyNetOutboundConnections, projectConnections(rep.Connections), di.ConfidenceReported)
+	}
 
 	// --- trust stores -------------------------------------------------------
 	// SUMMARY ONLY, and counts for the same reason sw.package_count is a count:
@@ -382,6 +388,38 @@ func projectListeners(listeners []Listener) []map[string]any {
 		// The PID is deliberately NOT carried into the fact. It identifies a
 		// process on one boot of one machine, so it is meaningless the moment
 		// the fact is read back, and a fact is a durable statement.
+		out = append(out, entry)
+	}
+	return out
+}
+
+func projectBoundUDPSockets(sockets []BoundUDPSocket) []map[string]any {
+	out := make([]map[string]any, 0, len(sockets))
+	for _, s := range sockets {
+		entry := map[string]any{"port": s.Port, "role": "unknown"}
+		if s.Address != "" {
+			entry["address"] = s.Address
+		}
+		if s.Process != "" {
+			entry["process"] = s.Process
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func projectConnections(connections []Connection) []map[string]any {
+	out := make([]map[string]any, 0, len(connections))
+	for _, c := range connections {
+		entry := map[string]any{
+			"local_address":  c.LocalAddress,
+			"remote_address": c.RemoteAddress,
+			"remote_port":    c.RemotePort,
+			"transport":      c.Proto,
+		}
+		if c.Process != "" {
+			entry["process"] = c.Process
+		}
 		out = append(out, entry)
 	}
 	return out

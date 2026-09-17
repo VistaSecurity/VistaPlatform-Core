@@ -187,9 +187,9 @@ var Registry = []Entry{
 		BaselineDays:     0,
 		BaselinePercent:  0,
 		BaselineSeverity: "",
-		AutoResolve:      "heartbeat returns",
+		AutoResolve:      "a heartbeat arrives",
 		EnabledByDefault: true,
-		Description:      "A sensor stopped reporting (15-minute dwell before opening).",
+		Description:      "A sensor stopped reporting, or registered and never reported at all (15-minute dwell before opening; for a sensor that has never reported the dwell runs from registration). Sensors an operator has marked air-gapped, pending or inactive are not expected to check in and do not raise this.",
 	},
 	{
 		ID:               "discovery_agent_offline",
@@ -203,9 +203,9 @@ var Registry = []Entry{
 		BaselineDays:     0,
 		BaselinePercent:  0,
 		BaselineSeverity: "",
-		AutoResolve:      "heartbeat returns",
+		AutoResolve:      "a heartbeat arrives",
 		EnabledByDefault: true,
-		Description:      "A discovery agent stopped reporting (15-minute dwell before opening).",
+		Description:      "A discovery agent stopped reporting, or registered and never reported at all (15-minute dwell before opening; for an agent that has never reported the dwell runs from registration). Agents an operator has switched to inactive do not raise this.",
 	},
 	{
 		ID:               "discovery_job_failed",

@@ -69,3 +69,39 @@ func TestLoadFromFileVerboseEnvOverridesAbsentKey(t *testing.T) {
 		t.Fatalf("Verbose = %v, want explicit false from VERBOSE env", cfg.Verbose)
 	}
 }
+
+func TestHostInventoryConnectionsRequireExplicitOptIn(t *testing.T) {
+	t.Setenv("HOST_INVENTORY_ENABLED", "true")
+	t.Setenv("HOST_INVENTORY_CONNECTIONS_ENABLED", "")
+	if cfg := Load(); !cfg.HostInventoryEnabled || cfg.HostInventoryConnectionsEnabled {
+		t.Fatalf("Load() enabled=%t connections=%t; connection peers must remain opt-in", cfg.HostInventoryEnabled, cfg.HostInventoryConnectionsEnabled)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "agent-config.yaml")
+	if err := os.WriteFile(configPath, []byte("host_inventory_enabled: true\nhost_inventory_connections_enabled: true\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadFromFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.HostInventoryConnectionsEnabled {
+		t.Fatal("YAML connection opt-in was not loaded")
+	}
+}
+
+func TestLoadFromFileConnectionsEnvOverridesWithoutHostInventoryEnv(t *testing.T) {
+	t.Setenv("HOST_INVENTORY_ENABLED", "")
+	t.Setenv("HOST_INVENTORY_CONNECTIONS_ENABLED", "true")
+	configPath := filepath.Join(t.TempDir(), "agent-config.yaml")
+	if err := os.WriteFile(configPath, []byte("host_inventory_enabled: true\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadFromFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.HostInventoryConnectionsEnabled {
+		t.Fatal("HOST_INVENTORY_CONNECTIONS_ENABLED was ignored unless HOST_INVENTORY_ENABLED was also set")
+	}
+}

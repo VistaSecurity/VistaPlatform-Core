@@ -269,6 +269,34 @@ func (s *AssetService) lookupExistingAsset(ctx context.Context, tenantID uuid.UU
 	return uuid.Nil, "", false, nil
 }
 
+// addPriorDefaultScopeIdentifier bridges the collection immediately before and
+// after a private network is registered. The first observation has only the
+// tenant-default scope; the next has the new segment scope. When the older key
+// actually has an owner, carry it alongside the new key so the identity engine
+// matches that pending asset and attaches the segment-scoped key instead of
+// creating a duplicate. Callers restrict this to measured host connections.
+func (s *AssetService) addPriorDefaultScopeIdentifier(ctx context.Context, obs identity.Observation) (identity.Observation, error) {
+	if _, err := s.identityEngine(); err != nil {
+		return obs, err
+	}
+	for _, id := range append([]identity.Identifier(nil), obs.Identifiers...) {
+		if id.Kind != identity.KindIPAddress || id.Scope == "" || id.Scope == identity.ScopeTenantDefault {
+			continue
+		}
+		refs, err := s.identityRepo.FindByIdentifier(ctx, obs.TenantID, id.Kind, id.Value, identity.ScopeTenantDefault)
+		if err != nil {
+			return obs, err
+		}
+		if len(refs) == 0 {
+			continue
+		}
+		prior := id
+		prior.Scope = identity.ScopeTenantDefault
+		obs.Identifiers = append(obs.Identifiers, prior)
+	}
+	return obs, nil
+}
+
 // assetStatusOf reads one asset's approval status. A soft-deleted asset reports
 // false: the identifier still belongs to it (the unique index spans deleted rows
 // too), but for the purpose of "is this thing in the inventory" it is not.
@@ -520,6 +548,13 @@ func (s *AssetService) discoveryObservation(tenantID uuid.UUID, f IngestFinding,
 	// applicationDependentIdentifier for what went wrong without one.
 	if id, ok := applicationDependentIdentifier(obs.ClassHint, host, derefString(effectiveIP), f); ok {
 		obs.Identifiers = append(obs.Identifiers, id)
+	}
+	if isHostInventoryConnectionRawData(f.RawData) {
+		var err error
+		obs, err = s.addPriorDefaultScopeIdentifier(context.Background(), obs)
+		if err != nil {
+			return identity.Observation{}, fmt.Errorf("looking up the host connection's prior identity scope: %w", err)
+		}
 	}
 
 	// Leniency is a decision made HERE and visible: one malformed MAC in a batch

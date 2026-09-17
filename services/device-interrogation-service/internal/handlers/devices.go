@@ -39,10 +39,14 @@ type deviceStore interface {
 	GetStoredDeviceCredentials(ctx context.Context, tenantID, deviceID uuid.UUID) (services.StoredDeviceCredentials, error)
 }
 
+type jobCreator interface {
+	CreateJob(ctx context.Context, req models.CreateDeviceJobRequest) (*models.DeviceJob, error)
+}
+
 // DeviceHandlers handles device-related HTTP requests
 type DeviceHandlers struct {
 	deviceService deviceStore
-	jobQueue      *services.JobQueueService
+	jobQueue      jobCreator
 	db            *sql.DB
 	// bypassDB is the BYPASSRLS connection; only used here to construct the
 	// JobQueueService (whose keyed-by-id paths need it) and for the
@@ -438,6 +442,10 @@ type InterrogateDeviceRequest struct {
 	// for host_inventory: the collection runs FROM an agent that can reach the
 	// target, and device_jobs' valid_job_assignment CHECK requires the column.
 	AgentID *uuid.UUID `json:"agent_id"`
+	// CollectConnections is a host_inventory-only privacy opt-in. False is
+	// omitted from the job parameters; an inventory request alone never turns
+	// remote-peer collection on.
+	CollectConnections bool `json:"collect_connections"`
 }
 
 // InterrogateDevice handles POST /devices/:id/interrogate
@@ -533,6 +541,9 @@ func (h *DeviceHandlers) InterrogateDevice(c *gin.Context) {
 		extra = map[string]interface{}{
 			"mode":      string(hostinventory.ModeRemote),
 			"transport": req.Transport,
+		}
+		if req.CollectConnections {
+			extra["collect_connections"] = true
 		}
 		agentID = req.AgentID
 		message = "Host inventory job created"

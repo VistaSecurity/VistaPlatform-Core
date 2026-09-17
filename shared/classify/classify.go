@@ -148,6 +148,23 @@ type ClassifyInput struct {
 	// protocol firing on the other's advertisement is exactly the fabricated
 	// fact this table exists to avoid.
 	CDPCapabilities []string
+
+	// OS is the operating system the host named when asked — the `os.name`
+	// fact a host inventory writes ("Microsoft Windows 11 Pro", "Ubuntu"), or
+	// the OS a vendor management API reported.
+	//
+	// The only field here whose evidence comes from INSIDE the host. Every
+	// other input is something the subject emitted onto a network or an
+	// identifier registered to a manufacturer, which is why a general-purpose
+	// computer — no OUI worth a class, no sysObjectID, no advertised
+	// capability, a model string no catalogue enumerates — used to match
+	// nothing at all.
+	//
+	// The VERSION is deliberately not part of it. `os.name` and `os.version`
+	// are separate facts, the version's spelling varies by collector far more
+	// than the name's, and no shipped rule needs it: "Windows Server" is the
+	// claim, not "Windows Server 2022 build 20348".
+	OS string
 }
 
 // ClassProposal is what the engine concluded, and why.
@@ -470,7 +487,39 @@ func (e *Engine) match(facts ClassifyInput) []Rule {
 	out = append(out, e.matchCapabilities(KindCDPCapabilities, facts.CDPCapabilities)...)
 	out = append(out, e.matchCapabilities(KindLLDPCapability, facts.LLDPCapabilities)...)
 	out = append(out, e.matchMDNSServices(facts.MDNSServices)...)
+	out = append(out, e.matchOSName(facts.OS)...)
 
+	return out
+}
+
+// matchOSName returns every os_name rule whose regexp fits what the host called
+// its operating system.
+//
+// Every rule that matches, not the longest or the most specific, because two
+// os_name patterns fitting one name is a real disagreement between two rules and
+// belongs in the arbitration — unlike a model or an OID prefix, where the
+// longer pattern is a REFINEMENT of the shorter by construction. Two regexps
+// have no such relationship: `(?i)windows` and `(?i)windows server` do, but
+// `(?i)windows` and `(?i)^ubuntu` do not, and the engine cannot tell which pair
+// it has been handed.
+func (e *Engine) matchOSName(name string) []Rule {
+	os := strings.TrimSpace(name)
+	if os == "" {
+		return nil
+	}
+	var out []Rule
+	for _, r := range e.byKind[KindOSName] {
+		if r.compiled == nil {
+			// Unreachable through New, which compiles every os_name rule or
+			// skips it. Stated rather than dereferenced, for the same reason
+			// matchBanners states it: a nil regexp would panic inside a
+			// discovery, far from the bad rule.
+			continue
+		}
+		if r.compiled.MatchString(os) {
+			out = append(out, r)
+		}
+	}
 	return out
 }
 

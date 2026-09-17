@@ -70,6 +70,16 @@ func (s *ExternalConnectionsService) Upsert(tenantID uuid.UUID, input models.Ext
 	// --- Certificate expiry flag ---
 	certIsExpired := input.CertNotAfter != nil && input.CertNotAfter.Before(time.Now())
 
+	// --- dest_hostname + its provenance ---
+	// Normalized together because they are one claim: a blank name is no claim
+	// at all, and a provenance with nothing to describe would sit in the column
+	// asserting something about a name that is not there.
+	input.DestHostname = trimmedOrNil(input.DestHostname)
+	destHostnameSourceKind := normalizeHostnameSourceKind(input.DestHostnameSourceKind)
+	if input.DestHostname == nil {
+		destHostnameSourceKind = nil
+	}
+
 	now := time.Now()
 
 	var certSAN pq.StringArray
@@ -93,7 +103,7 @@ WITH prev AS (
 upserted AS (
     INSERT INTO external_connections (
         tenant_id, source_ip, source_hostname, source_asset_id,
-        dest_ip, dest_hostname, dest_port, protocol, protocol_version,
+        dest_ip, dest_hostname, dest_hostname_source_kind, dest_port, protocol, protocol_version,
         cipher_suite, key_exchange_algorithm, key_size,
         supported_tls_versions,
         crypto_strength, is_pqc_resistant, weak_reasons, cert_hygiene_flags,
@@ -105,7 +115,7 @@ upserted AS (
         created_at, updated_at
     ) VALUES (
         $1, $2::inet, $6, $7,
-        $3::inet, $8, $4, $5, $9,
+        $3::inet, $8, $33, $4, $5, $9,
         $10, $11, $12,
         $29,
         $13, $14, $30, $31,
@@ -119,7 +129,42 @@ upserted AS (
     ON CONFLICT ON CONSTRAINT uq_external_connection DO UPDATE SET
         source_hostname         = COALESCE(EXCLUDED.source_hostname, external_connections.source_hostname),
         source_asset_id         = COALESCE(EXCLUDED.source_asset_id, external_connections.source_asset_id),
-        dest_hostname           = COALESCE(EXCLUDED.dest_hostname, external_connections.dest_hostname),
+        -- dest_hostname precedence: an INFERENCE never overwrites a MEASUREMENT.
+        --
+        -- COALESCE alone ("empty never wins") was not enough: a reverse-DNS PTR
+        -- answer is a populated string, so ec2-54-163-235-119.compute-1.amazonaws.com
+        -- cheerfully replaced the slack.com the sensor read out of the client's
+        -- own ClientHello. The rank below is the fix — it is a total order over
+        -- the three provenance states, and NULL ("producer did not say") sits
+        -- between the two rather than being folded into either:
+        --
+        --   measured                     2  -- read off the wire (TLS SNI, DHCP/mDNS)
+        --   NULL / declared / imported   1  -- unstated, or asserted by a human/import
+        --   inferred                     0  -- a guess about the address (PTR)
+        --
+        -- The incoming value wins on >= , so like beats like (a fresh PTR may
+        -- still refresh a stale PTR, a new SNI a previous SNI) while a lower
+        -- rank is refused. A CASE <expr> WHEN ... form with a NULL <expr> falls
+        -- to ELSE, so no NULL leaks into the comparison and turns it into NULL.
+        --
+        -- btrim/<> '' rather than IS NOT NULL on the incoming name: a producer
+        -- that sends a pointer to "" is making no claim, and '' is not NULL.
+        dest_hostname           = CASE
+            WHEN COALESCE(btrim(EXCLUDED.dest_hostname), '') <> ''
+             AND (external_connections.dest_hostname IS NULL
+                  OR CASE EXCLUDED.dest_hostname_source_kind WHEN 'measured' THEN 2 WHEN 'inferred' THEN 0 ELSE 1 END
+                     >= CASE external_connections.dest_hostname_source_kind WHEN 'measured' THEN 2 WHEN 'inferred' THEN 0 ELSE 1 END)
+            THEN EXCLUDED.dest_hostname
+            ELSE external_connections.dest_hostname
+        END,
+        dest_hostname_source_kind = CASE
+            WHEN COALESCE(btrim(EXCLUDED.dest_hostname), '') <> ''
+             AND (external_connections.dest_hostname IS NULL
+                  OR CASE EXCLUDED.dest_hostname_source_kind WHEN 'measured' THEN 2 WHEN 'inferred' THEN 0 ELSE 1 END
+                     >= CASE external_connections.dest_hostname_source_kind WHEN 'measured' THEN 2 WHEN 'inferred' THEN 0 ELSE 1 END)
+            THEN EXCLUDED.dest_hostname_source_kind
+            ELSE external_connections.dest_hostname_source_kind
+        END,
         protocol_version        = COALESCE(EXCLUDED.protocol_version, external_connections.protocol_version),
         cipher_suite            = COALESCE(EXCLUDED.cipher_suite, external_connections.cipher_suite),
         key_exchange_algorithm  = COALESCE(EXCLUDED.key_exchange_algorithm, external_connections.key_exchange_algorithm),
@@ -233,6 +278,11 @@ LEFT JOIN prev ON true
 		// --- Resolve source_asset_id best-effort ---
 		{
 			var id uuid.UUID
+			if input.SourceAssetID != nil {
+				if e := tx.QueryRow(`SELECT id FROM assets WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL`, tenantID, *input.SourceAssetID).Scan(&id); e == nil {
+					sourceAssetID = &id
+				}
+			}
 			// host() rather than ::text: casting inet to text renders the netmask
 			// ("10.0.0.5/32"), which never equals a bare source IP — this lookup
 			// matched nothing for as long as the ::text form was here.
@@ -246,8 +296,10 @@ LEFT JOIN prev ON true
 				  AND (host(a.primary_address) = $2 OR host(e.address) = $2)
 				  AND a.deleted_at IS NULL
 				LIMIT 1`
-			if e := tx.QueryRow(q, tenantID, input.SourceIP).Scan(&id); e == nil {
-				sourceAssetID = &id
+			if sourceAssetID == nil {
+				if e := tx.QueryRow(q, tenantID, input.SourceIP).Scan(&id); e == nil {
+					sourceAssetID = &id
+				}
 			}
 		}
 
@@ -272,6 +324,8 @@ LEFT JOIN prev ON true
 			hygieneFlagsArr,
 			// $32: cert_sct_source
 			input.CertSCTSource,
+			// $33: dest_hostname_source_kind
+			destHostnameSourceKind,
 		).Scan(
 			&conn.ID, &conn.TenantID,
 			&conn.SourceIP, &conn.SourceHostname, &conn.SourceAssetID,

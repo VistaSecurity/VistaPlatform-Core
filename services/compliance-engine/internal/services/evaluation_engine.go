@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
@@ -393,21 +394,85 @@ func (s *FindingsService) upsertFrameworkScore(ctx context.Context, tenantID, fr
 	})
 }
 
-// EvaluateAsset reconciles a SINGLE asset's compliance findings against every
-// published platform framework's controls, then refreshes the score rollups of
-// EVERY published framework (ADR-0015 per-asset reconcile). Bounded to one asset —
-// never the tenant cross-product — this is the primitive every asset/cert-change
-// event funnels through. Idempotent: re-running converges (reconcilePlan +
-// upsert/inactivate).
+// EvaluateAsset reconciles an asset's compliance findings against every published
+// platform framework's controls, then refreshes the score rollups of EVERY
+// published framework (ADR-0015 per-asset reconcile). Bounded — never the tenant
+// cross-product — this is the primitive every asset-change event funnels through.
+// Idempotent: re-running converges (reconcilePlan + upsert/inactivate).
+//
+// "An asset" here is the asset AND the certificates bound to it, because a
+// certificate is part of the cryptographic surface an asset change moves — the
+// same reason OnCertificateChanged fans a certificate out to its assets. Without
+// that fan-out the pass was not merely incomplete, it was WRONG: the certificate
+// shape's per-subject filter is `c.id = $2`, so handing it an ASSET id matches no
+// certificate, every certificate control yields zero measurement values and no
+// finding, and the rollup below then reads that absence as PASS (the scope probe
+// is tenant-wide, so it confirms the tenant HAS certificates and the control is
+// not even recorded as not-assessed). A tenant whose only certificate had 56 days
+// of validity left therefore scored 100/100 on "Certificate expires within 90
+// days" — a verdict published by a pass that structurally could not have looked
+// at the subject it was about.
 //
 // Rollups deliberately refresh for ALL published frameworks, not only the ones
 // whose findings changed: a framework the tenant fully passes never produces a
 // finding, so an affected-only refresh left it with no tenant_framework_scores
 // row at all and its card showed "—" instead of a preview score. Each refresh is
 // one grouped query over already-persisted findings, so the delta is a handful of
-// cheap DB folds per asset event, never a re-evaluation.
+// cheap DB folds per asset event, never a re-evaluation. That is exactly why the
+// SUBJECT set has to be complete: the fold cannot tell "evaluated and clean" from
+// "never looked at".
 func (s *FindingsService) EvaluateAsset(ctx context.Context, tenantID, assetID uuid.UUID) (*EvaluationSummary, error) {
+	certIDs, err := s.certificatesForAsset(ctx, tenantID, assetID)
+	if err != nil {
+		// Linkage unknown — fall back to a tenant-wide (coalesced) reconcile rather
+		// than publishing certificate verdicts this pass did not compute.
+		log.Printf("[EvalEngine] WARN: asset→certificate lookup failed (asset=%s): %v; falling back to tenant reconcile", assetID, err)
+		return s.reconcileTenantAfterFanOut(ctx, tenantID, "asset_cert_lookup_failed")
+	}
+	if len(certIDs) > assetCertFanOutLimit {
+		return s.reconcileTenantAfterFanOut(ctx, tenantID, "asset_cert_fan_out_over_limit")
+	}
+	subjects := append([]uuid.UUID{assetID}, certIDs...)
+	return s.evaluateSubjects(ctx, tenantID, subjects, "per-asset")
+}
+
+// assetCertFanOutLimit caps how many of an asset's certificates one asset-change
+// event reconciles subject-by-subject before falling back to a single (coalesced)
+// whole-tenant pass. The mirror of certFanOutLimit, and the same trade: a
+// per-subject pass re-extracts that subject's measurements, so past a few dozen
+// subjects one shared-extraction tenant pass is the cheaper shape. Well above the
+// common case — a host serves a handful of leaf certificates.
+const assetCertFanOutLimit = 32
+
+// reconcileTenantAfterFanOut runs the whole-tenant fallback through the coalescer,
+// for a per-subject pass that could not bound itself.
+func (s *FindingsService) reconcileTenantAfterFanOut(ctx context.Context, tenantID uuid.UUID, reason string) (*EvaluationSummary, error) {
+	summary, coalesced, err := s.ReconcileTenantCoalesced(ctx, tenantID, uuid.Nil)
+	if err != nil {
+		return nil, fmt.Errorf("tenant evaluation failed (%s): %w", reason, err)
+	}
+	if coalesced {
+		log.Printf("[EvalEngine] per-subject reconcile coalesced into an in-flight tenant pass: tenant=%s reason=%s", tenantID, reason)
+		return &EvaluationSummary{}, nil
+	}
+	log.Printf("[EvalEngine] per-subject reconcile escalated to tenant-wide: tenant=%s reason=%s activated=+%d inactivated=%d",
+		tenantID, reason, summary.FindingsActivated, summary.FindingsInactivated)
+	return summary, nil
+}
+
+// evaluateSubjects is the bounded reconcile primitive: it folds every published
+// framework's controls over each named SUBJECT (an asset id, a certificate id, or
+// a mix of both), reconciles the findings of exactly those subjects, and refreshes
+// every published framework's score rollup once at the end.
+//
+// Subject-scoped, not asset-scoped: stale-finding inactivation is restricted to
+// `subject_id = ANY(subjects)`, so a pass can never retire a finding about
+// something it did not evaluate.
+func (s *FindingsService) evaluateSubjects(ctx context.Context, tenantID uuid.UUID, subjects []uuid.UUID, path string) (*EvaluationSummary, error) {
 	summary := &EvaluationSummary{}
+	if len(subjects) == 0 {
+		return summary, nil
+	}
 
 	type pubFramework struct {
 		ID uuid.UUID `db:"id"`
@@ -435,28 +500,45 @@ func (s *FindingsService) EvaluateAsset(ctx context.Context, tenantID, assetID u
 	summary.FrameworksEvaluated = len(controlsByFramework)
 	summary.ControlsEvaluated = len(allControls)
 
-	// Extract THIS asset's measurement values once; fold all controls over them.
-	results, err := s.ruleEvaluator.EvaluateControlsBatchForAsset(tenantID, assetID, allControls, "platform")
-	if err != nil {
-		return nil, fmt.Errorf("per-asset evaluation failed: %w", err)
+	// Extract EACH subject's measurement values once; fold all controls over them.
+	newViolations := map[controlSubject]bool{}
+	findingByPair := map[controlSubject]models.ComplianceFinding{}
+	for _, subject := range subjects {
+		results, err := s.ruleEvaluator.EvaluateControlsBatchForAsset(tenantID, subject, allControls, "platform")
+		if err != nil {
+			return nil, fmt.Errorf("per-subject evaluation failed (subject=%s): %w", subject, err)
+		}
+		violations, findings := buildAssetViolations(results, subject)
+		for ca := range violations {
+			newViolations[ca] = true
+		}
+		for ca, f := range findings {
+			if prior, seen := findingByPair[ca]; seen {
+				mergeSubjectEvidence(&prior, &f)
+				findingByPair[ca] = prior
+				continue
+			}
+			findingByPair[ca] = f
+		}
 	}
 
-	// New violation set for THIS asset across all published controls.
-	newViolations, findingByPair := buildAssetViolations(results, assetID)
-
-	// Currently-stored ACTIVE findings for THIS asset only.
+	// Currently-stored ACTIVE findings for THESE subjects only.
+	subjectIDs := make([]string, len(subjects))
+	for i, id := range subjects {
+		subjectIDs[i] = id.String()
+	}
 	storedActive := map[controlSubject]bool{}
 	if err := shareddatabase.WithTenantTx(ctx, s.db.DB, tenantID, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `SELECT control_id FROM findings
-		  WHERE tenant_id = $1 AND subject_id = $2 AND detection_state = 'ACTIVE'
-		    AND `+complianceProducerScope("findings"), tenantID, assetID)
+		rows, err := tx.QueryContext(ctx, `SELECT control_id, subject_id FROM findings
+		  WHERE tenant_id = $1 AND subject_id = ANY($2) AND detection_state = 'ACTIVE'
+		    AND `+complianceProducerScope("findings"), tenantID, pq.Array(subjectIDs))
 		if err != nil {
-			return fmt.Errorf("failed to load active findings for asset: %w", err)
+			return fmt.Errorf("failed to load active findings for subjects: %w", err)
 		}
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
-			ca := controlSubject{SubjectID: assetID}
-			if err := rows.Scan(&ca.ControlID); err == nil {
+			var ca controlSubject
+			if err := rows.Scan(&ca.ControlID, &ca.SubjectID); err == nil {
 				storedActive[ca] = true
 			}
 		}
@@ -475,7 +557,7 @@ func (s *FindingsService) EvaluateAsset(ctx context.Context, tenantID, assetID u
 		}
 		summary.FindingsInactivated++
 	}
-	logFindingWrites("per-asset", tenantID, stats)
+	logFindingWrites(path, tenantID, stats)
 
 	// Refresh score rollups for EVERY published framework from PERSISTED findings (a DB
 	// fold, not a re-evaluation) — see the doc comment for why not affected-only.
@@ -485,8 +567,8 @@ func (s *FindingsService) EvaluateAsset(ctx context.Context, tenantID, assetID u
 		}
 	}
 
-	log.Printf("[EvalEngine] per-asset tenant=%s asset=%s controls=%d activated=+%d inactivated=%d frameworks=%d",
-		tenantID, assetID, summary.ControlsEvaluated, summary.FindingsActivated, summary.FindingsInactivated, len(controlsByFramework))
+	log.Printf("[EvalEngine] %s tenant=%s subjects=%d controls=%d activated=+%d inactivated=%d frameworks=%d",
+		path, tenantID, len(subjects), summary.ControlsEvaluated, summary.FindingsActivated, summary.FindingsInactivated, len(controlsByFramework))
 	return summary, nil
 }
 
@@ -524,4 +606,53 @@ func (s *FindingsService) recomputeFrameworkScore(ctx context.Context, tenantID,
 		return err
 	}
 	return s.upsertFrameworkScore(ctx, tenantID, frameworkID, breakdown)
+}
+
+// certBandReconcileChunk bounds how many certificate subjects one evaluateSubjects
+// call carries. Chunking, not a tenant-wide fallback: the per-event fan-out limits
+// (certFanOutLimit / assetCertFanOutLimit) exist because an ingest burst fires
+// thousands of events, so past a few dozen subjects one shared-extraction tenant
+// pass is cheaper. A band scan runs once per interval, and its subject count is
+// bounded by "certificates inside the widest compliance band" — for a tenant with
+// 10k assets and 300 certificates about to expire, 300 per-subject extractions are
+// far cheaper than one pass over every published control × every asset. So the
+// large set is split rather than escalated.
+//
+// Chunking is safe because evaluateSubjects scopes stale-finding inactivation to
+// `subject_id = ANY(subjects)`: a chunk can only retire findings about its own
+// certificates. Each chunk also refreshes the score rollups, and the rollup is a
+// fold over ALREADY-PERSISTED findings, so the last chunk's refresh reflects every
+// chunk's writes — the end state does not depend on the chunk boundary.
+const certBandReconcileChunk = 64
+
+// ReconcileCertificates reconciles a named set of CERTIFICATE subjects and refreshes
+// the score rollups, without an inventory change having occurred.
+//
+// It is the entry point for time-driven re-evaluation. `cert_expiration_days` is the
+// platform's only purely time-dependent measurement — it decreases every day with no
+// inventory change — while materialization is otherwise event-driven by design. A
+// certificate that crosses a compliance threshold (90 days, 30 days) while nothing
+// about it changes raises no event, so without this the stored finding keeps whatever
+// verdict the last reconcile computed and tenant_framework_scores keeps reporting it.
+//
+// Certificates only: passing an asset id here would be a bug, because the `certificate`
+// measurement shape filters `c.id = $2` and an asset id matches no certificate — the
+// exact shape of, where a pass published a verdict about a subject it had
+// structurally never looked at. Callers select subjects from `certificates`.
+func (s *FindingsService) ReconcileCertificates(ctx context.Context, tenantID uuid.UUID, certIDs []uuid.UUID, path string) (*EvaluationSummary, error) {
+	total := &EvaluationSummary{}
+	for start := 0; start < len(certIDs); start += certBandReconcileChunk {
+		end := min(start+certBandReconcileChunk, len(certIDs))
+		summary, err := s.evaluateSubjects(ctx, tenantID, certIDs[start:end], path)
+		if err != nil {
+			return nil, fmt.Errorf("certificate reconcile failed (tenant=%s, subjects=%d..%d of %d): %w",
+				tenantID, start, end, len(certIDs), err)
+		}
+		// Frameworks/controls are the same set every chunk; findings accumulate.
+		total.FrameworksEvaluated = summary.FrameworksEvaluated
+		total.ControlsEvaluated = summary.ControlsEvaluated
+		total.FindingsActivated += summary.FindingsActivated
+		total.FindingsInactivated += summary.FindingsInactivated
+	}
+	return total, nil
 }

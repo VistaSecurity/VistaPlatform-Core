@@ -200,9 +200,13 @@ alert_types:
     subject_type: sensor
     severity_model: fixed
     default_severity: high
-    auto_resolve: heartbeat returns
+    auto_resolve: a heartbeat arrives
     enabled_by_default: true
-    description: A sensor stopped reporting (15-minute dwell before opening).
+    description: >-
+      A sensor stopped reporting, or registered and never reported at all
+      (15-minute dwell before opening; for a sensor that has never reported the
+      dwell runs from registration). Sensors an operator has marked air-gapped,
+      pending or inactive are not expected to check in and do not raise this.
 
   - id: discovery_agent_offline
     track: tenant
@@ -212,9 +216,13 @@ alert_types:
     subject_type: agent
     severity_model: fixed
     default_severity: high
-    auto_resolve: heartbeat returns
+    auto_resolve: a heartbeat arrives
     enabled_by_default: true
-    description: A discovery agent stopped reporting (15-minute dwell before opening).
+    description: >-
+      A discovery agent stopped reporting, or registered and never reported at
+      all (15-minute dwell before opening; for an agent that has never reported
+      the dwell runs from registration). Agents an operator has switched to
+      inactive do not raise this.
 
   - id: discovery_job_failed
     track: tenant

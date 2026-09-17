@@ -245,10 +245,6 @@ export interface paths {
          *     routes in this service. RLS-isolated on `device_agents`: another tenant's
          *     agent id is answered 404, identically to an unknown id.
          *
-         *     The in-cluster platform agent's per-tenant row (`platform = 'platform'`)
-         *     is refused with 403: it is the tenant's handle to a service shared by all
-         *     tenants, not an agent they deployed.
-         *
          *     This does NOT uninstall the agent binary, which keeps running on the
          *     operator's host. It fails closed regardless: every agent-outbound path
          *     resolves the agent with `deleted_at IS NULL`, so a deleted agent's polls
@@ -1448,6 +1444,11 @@ export interface components {
              * @description Required for host_inventory: the collection runs FROM an agent that can reach the target host, and device_jobs' valid_job_assignment constraint requires the column for this job type.
              */
             agent_id?: string;
+            /**
+             * @description host_inventory only. Explicit privacy opt-in for collecting the target's bounded remote-peer snapshot. Omitted or false leaves connection collection disabled.
+             * @default false
+             */
+            collect_connections: boolean;
         };
         /** @description Open envelope for the device action endpoints (interrogate / test-connection / bulk-interrogate). The concrete shape (queued-job id or live connectivity result) depends on live device I/O and is integration- tested, not contract-pinned — hence additionalProperties:true with no required fields. */
         DeviceActionAccepted: {
@@ -2583,7 +2584,6 @@ export interface operations {
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
-            403: components["responses"]["LegacyForbidden"];
             404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
         };

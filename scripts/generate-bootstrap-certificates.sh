@@ -1,8 +1,7 @@
 #!/bin/bash
 
 # Generate Bootstrap Certificates for Platform Services
-# This script generates bootstrap certificates for cluster-sensor-service
-# and device-interrogation-service using the platform bootstrap CA
+# The remaining bootstrap registration consumer is cluster-sensor-service.
 
 set -e
 
@@ -71,7 +70,7 @@ CERT_DIR="${BOOTSTRAP_CERT_DIR:-./bootstrap-certs}"
 mkdir -p "$CERT_DIR"
 
 # Services to generate certificates for
-SERVICES=("cluster-sensor-service" "device-interrogation-service")
+SERVICES=("cluster-sensor-service")
 
 for SERVICE in "${SERVICES[@]}"; do
     echo -e "${BLUE}Generating certificate for $SERVICE...${NC}"

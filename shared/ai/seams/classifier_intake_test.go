@@ -146,6 +146,7 @@ func TestClassFacts_RoundTripsEveryKindOfEvidence(t *testing.T) {
 		{Kind: classify.KindCDPCapabilities, Pattern: "switch", Model: "cdp-switch", Confidence: 0.65, SourceURL: "u"},
 		{Kind: classify.KindLLDPCapability, Pattern: "wlan_access_point", Model: "lldp-ap", Confidence: 0.75, SourceURL: "u"},
 		{Kind: classify.KindMDNSService, Pattern: "_ipp._tcp", Model: "ipp-printer", Confidence: 0.75, SourceURL: "u"},
+		{Kind: classify.KindOSName, Pattern: `(?i)\bwindows[ ]+server\b`, Model: "windows-server", Confidence: 0.80, SourceURL: "u"},
 	})
 	if err != nil {
 		t.Fatalf("build engine: %v", err)
@@ -163,6 +164,7 @@ func TestClassFacts_RoundTripsEveryKindOfEvidence(t *testing.T) {
 		MDNSServices:      []string{"_ipp._tcp"},
 		LLDPCapabilities:  []string{"wlan_access_point"},
 		CDPCapabilities:   []string{"switch"},
+		OS:                "Microsoft Windows Server 2022 Datacenter",
 	}
 	got := Explain(context.Background(), RuleClassifier{Engine: e}, ClassFacts(in))
 

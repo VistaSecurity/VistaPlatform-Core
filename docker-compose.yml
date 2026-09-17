@@ -504,12 +504,6 @@ services:
       # See sensor-manager: agent mTLS is fail-closed by default; compose dev
       # has no agent CA, so opt out explicitly here too.
       - AGENT_MTLS_REQUIRED=false
-      # Bootstrap certificate paths for mTLS authentication
-      - BOOTSTRAP_CERT_PATH=/app/bootstrap-certs/device-interrogation-service-cert.pem
-      - BOOTSTRAP_KEY_PATH=/app/bootstrap-certs/device-interrogation-service-key.pem
-      - BOOTSTRAP_CA_CERT_PATH=/app/bootstrap-certs/bootstrap-ca-cert.pem
-      - DEVICE_INTERROGATION_SERVICE_URL=http://device-interrogation-service:8080
-      - PLATFORM_DEVICE_INTERROGATION_AGENT_ID=550e8400-e29b-41d4-a716-446655440002
       # mTLS Configuration
       - USE_MTLS=true
       - TLS_PORT=8443
@@ -529,7 +523,6 @@ services:
       nats:
         condition: service_healthy
     volumes:
-      - ./bootstrap-certs:/app/bootstrap-certs:ro
       - ./service-certs/device-interrogation-service:/app/certs:ro
     # volumes:
       # - ./services/device-interrogation-service:/app

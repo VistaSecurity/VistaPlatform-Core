@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/services"
 )
 
 // validateAgainst is assertConforms' other polarity: it RETURNS the validation
@@ -51,6 +52,7 @@ func TestContract_InterrogateDeviceRequest_ConformsToTheSpec(t *testing.T) {
 	}{
 		{"plain device interrogation", `{"job_type":"device_interrogation"}`},
 		{"host inventory, remote, ssh", `{"job_type":"host_inventory","mode":"remote","transport":"ssh","agent_id":"3f2a1c40-0000-4000-8000-000000000001"}`},
+		{"host inventory, connection opt-in", `{"job_type":"host_inventory","mode":"remote","transport":"ssh","agent_id":"3f2a1c40-0000-4000-8000-000000000001","collect_connections":true}`},
 		{"host inventory, transport defaulted", `{"job_type":"host_inventory","mode":"remote","agent_id":"3f2a1c40-0000-4000-8000-000000000001"}`},
 		{"empty body object", `{}`},
 	}
@@ -117,6 +119,43 @@ func TestContract_InterrogateDevice_HostInventoryLocalModeIs400(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "agent-originated") {
 		t.Errorf("the refusal does not explain why local cannot be queued: %s", w.Body.String())
+	}
+}
+
+func TestContract_InterrogateDevice_ConnectionOptInReachesOnlyHostInventoryJobParameters(t *testing.T) {
+	t.Setenv("ENCRYPTION_MASTER_KEY", "test-only-master-key")
+	device := sampleDevice()
+	agentID := uuid.New()
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"omitted stays disabled", `{"job_type":"host_inventory","mode":"remote","agent_id":"` + agentID.String() + `"}`, false},
+		{"explicit true reaches executor", `{"job_type":"host_inventory","mode":"remote","agent_id":"` + agentID.String() + `","collect_connections":true}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			jobs := &recordingJobCreator{}
+			eng := newDeviceEngineWithJobs(&stubDeviceStore{
+				device: device,
+				stored: services.StoredDeviceCredentials{Username: "svc", EncryptedPassword: "enc:v1:test", DeviceType: "ssh"},
+			}, jobs)
+			w := do(eng, http.MethodPost, base+"/devices/"+device.ID.String()+"/interrogate", strings.NewReader(tc.body))
+			if w.Code != http.StatusAccepted {
+				t.Fatalf("status = %d, want 202; body=%s", w.Code, w.Body.String())
+			}
+			if len(jobs.reqs) != 1 {
+				t.Fatalf("created %d jobs, want 1", len(jobs.reqs))
+			}
+			got, present := jobs.reqs[0].Parameters["collect_connections"]
+			if tc.want {
+				if !present || got != true {
+					t.Fatalf("collect_connections = %v (present=%t), want true", got, present)
+				}
+			} else if present {
+				t.Fatalf("disabled privacy option was persisted as %#v; want parameter omitted", got)
+			}
+		})
 	}
 }
 

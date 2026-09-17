@@ -90,16 +90,19 @@ func TestSniHostnameFromDiscoveryMetadata(t *testing.T) {
 // consulted — reverse DNS is a fallback, not a competitor.
 func TestResolveMissingHostname_SNIBeatsReverseDNS(t *testing.T) {
 	lookupCalled := false
-	lookupPTR := func(ip string) string {
+	ptr := func(ip string) string {
 		lookupCalled = true
 		return "lax31s06-in-f14.1e100.net" // the worse, PTR-derived name
 	}
 
 	metadata := []byte(`{"raw_metadata":{"sni":"settings-win.data.microsoft.com"}}`)
-	got := resolveMissingHostname(metadata, "203.0.113.40", lookupPTR)
+	got := resolveMissingHostname(metadata, "203.0.113.40", "", ptr)
 
-	if got != "settings-win.data.microsoft.com" {
-		t.Errorf("resolveMissingHostname = %q, want the SNI", got)
+	if got.Name != "settings-win.data.microsoft.com" {
+		t.Errorf("resolveMissingHostname = %q, want the SNI", got.Name)
+	}
+	if got.SourceKind != "measured" {
+		t.Errorf("SNI provenance = %q, want %q — a name read off the wire is a measurement", got.SourceKind, "measured")
 	}
 	if lookupCalled {
 		t.Errorf("reverse DNS was consulted even though the SNI already resolved the hostname")
@@ -112,7 +115,7 @@ func TestResolveMissingHostname_SNIBeatsReverseDNS(t *testing.T) {
 // was not captured).
 func TestResolveMissingHostname_FallsBackToReverseDNSWhenNoSNI(t *testing.T) {
 	lookupCalled := false
-	lookupPTR := func(ip string) string {
+	ptr := func(ip string) string {
 		lookupCalled = true
 		if ip == "203.0.113.41" {
 			return "ptr.example.net"
@@ -121,13 +124,16 @@ func TestResolveMissingHostname_FallsBackToReverseDNSWhenNoSNI(t *testing.T) {
 	}
 
 	metadata := []byte(`{"raw_metadata":{"cipher_suite":"TLS_AES_128_GCM_SHA256"}}`)
-	got := resolveMissingHostname(metadata, "203.0.113.41", lookupPTR)
+	got := resolveMissingHostname(metadata, "203.0.113.41", "", ptr)
 
 	if !lookupCalled {
 		t.Fatalf("reverse DNS was never consulted despite no SNI being present")
 	}
-	if got != "ptr.example.net" {
-		t.Errorf("resolveMissingHostname = %q, want the PTR result", got)
+	if got.Name != "ptr.example.net" {
+		t.Errorf("resolveMissingHostname = %q, want the PTR result", got.Name)
+	}
+	if got.SourceKind != "inferred" {
+		t.Errorf("PTR provenance = %q, want %q — a reverse-DNS answer is a guess about the address, not a measurement of the flow", got.SourceKind, "inferred")
 	}
 }
 
@@ -136,13 +142,13 @@ func TestResolveMissingHostname_FallsBackToReverseDNSWhenNoSNI(t *testing.T) {
 // this but a malformed ClientHello could still carry one) is treated the same
 // as "no SNI" rather than being written verbatim.
 func TestResolveMissingHostname_IPLiteralSNIFallsBackToReverseDNS(t *testing.T) {
-	lookupPTR := func(ip string) string { return "ptr.example.net" }
+	ptr := func(ip string) string { return "ptr.example.net" }
 
 	metadata := []byte(`{"raw_metadata":{"sni":"203.0.113.41"}}`)
-	got := resolveMissingHostname(metadata, "203.0.113.41", lookupPTR)
+	got := resolveMissingHostname(metadata, "203.0.113.41", "", ptr)
 
-	if got != "ptr.example.net" {
-		t.Errorf("resolveMissingHostname = %q, want the reverse-DNS fallback (SNI was an IP literal)", got)
+	if got.Name != "ptr.example.net" {
+		t.Errorf("resolveMissingHostname = %q, want the reverse-DNS fallback (SNI was an IP literal)", got.Name)
 	}
 }
 
@@ -179,21 +185,24 @@ func TestResolveMissingHostname_OnlyLooksUpPublicAddresses(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			called := false
-			lookupPTR := func(ip string) string {
+			ptr := func(ip string) string {
 				called = true
 				return "ptr.example.net"
 			}
 
-			got := resolveMissingHostname(metadata, tc.destIP, lookupPTR)
+			got := resolveMissingHostname(metadata, tc.destIP, "", ptr)
 
 			if called != tc.wantLookup {
 				t.Fatalf("%s: reverse DNS called=%v, want %v", tc.destIP, called, tc.wantLookup)
 			}
-			if tc.wantLookup && got != "ptr.example.net" {
-				t.Errorf("%s: resolveMissingHostname = %q, want the PTR result", tc.destIP, got)
+			if tc.wantLookup && got.Name != "ptr.example.net" {
+				t.Errorf("%s: resolveMissingHostname = %q, want the PTR result", tc.destIP, got.Name)
 			}
-			if !tc.wantLookup && got != "" {
-				t.Errorf("%s: resolveMissingHostname = %q, want empty (no lookup, no fabricated name)", tc.destIP, got)
+			if !tc.wantLookup && got.Name != "" {
+				t.Errorf("%s: resolveMissingHostname = %q, want empty (no lookup, no fabricated name)", tc.destIP, got.Name)
+			}
+			if !tc.wantLookup && got.SourceKind != "" {
+				t.Errorf("%s: provenance = %q on an unresolved name, want empty", tc.destIP, got.SourceKind)
 			}
 		})
 	}

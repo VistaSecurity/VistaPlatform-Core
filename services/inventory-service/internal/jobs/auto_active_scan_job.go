@@ -77,6 +77,7 @@ type autoScanStore interface {
 	AddressesWithScanInFlight(ctx context.Context, tenantID uuid.UUID) (map[string]bool, error)
 	RecordScanned(ctx context.Context, tenantID uuid.UUID, assetIDs []uuid.UUID, jobID string, at time.Time) error
 	StampCompletedScans(ctx context.Context, tenantID uuid.UUID) (int, error)
+	ClearUnstartedScanStamps(ctx context.Context, tenantID uuid.UUID) (int, error)
 	SetState(ctx context.Context, tenantID uuid.UUID, state autoscan.State) error
 }
 
@@ -334,6 +335,18 @@ func (j *AutoActiveScanJob) SweepTenant(ctx context.Context, tenantID uuid.UUID,
 		j.logger.Printf("ERROR: tenant %s: could not stamp completed automatic scans: %v", tenantID, err)
 	} else if stamped > 0 {
 		j.logger.Printf("tenant %s: %d endpoint(s) marked scanned by completed automatic scans", tenantID, stamped)
+	}
+
+	// And the other half of closing that loop: give back the assets whose job
+	// never ran. RecordScanned stamps at enqueue, which is right for a probe
+	// that went unanswered and wrong for a sensor that refused the command —
+	// those addresses were never touched, and without this they sit out a full
+	// rescan interval on the strength of a scan that did not happen. Also
+	// before the policy check, for the same reason as the stamp above.
+	if cleared, err := j.store.ClearUnstartedScanStamps(ctx, tenantID); err != nil {
+		j.logger.Printf("ERROR: tenant %s: could not clear stamps for automatic scans that never started: %v", tenantID, err)
+	} else if cleared > 0 {
+		j.logger.Printf("tenant %s: %d asset(s) re-queued — their automatic scan never started", tenantID, cleared)
 	}
 
 	policy, err := j.store.GetPolicy(ctx, tenantID)

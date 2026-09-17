@@ -236,19 +236,12 @@ func TestIntegration_DeleteAgent_UnknownAndRepeated(t *testing.T) {
 	}
 }
 
-// TestIntegration_DeleteAgent_ProtectsPlatformAgent covers the device_agents
-// twin of the platform-sensor guard (RC3 /).
-//
-// The in-cluster platform agent auto-registers a row per tenant with
-// platform='platform' (handlers/auto_registration.go). It is the tenant's handle
-// to a service they share with every other tenant, not something they deployed —
-// removing it takes the shared worker out of their fleet view and orphans what
-// it reports, while the process keeps running for everyone else.
-//
-// Both polarities: the platform row is refused, an ordinary enrolled agent is
-// not. An over-strict guard here would make every agent undeletable, which is
-// the same bug pointed the other way.
-func TestIntegration_DeleteAgent_ProtectsPlatformAgent(t *testing.T) {
+// TestIntegration_DeleteAgent_DeletesLegacyPlatformRow proves retirement of the
+// old fleet identity is complete. A deployment that briefly enabled the inert
+// auto-registration path may retain a device_agents row marked `platform`; it
+// is no longer authoritative and must be removable through the ordinary agent
+// lifecycle. The working in-cluster identity is the separate system sensor row.
+func TestIntegration_DeleteAgent_DeletesLegacyPlatformRow(t *testing.T) {
 	owner := testdb.Connect(t)
 	app := testdb.ConnectAsAppRole(t, owner)
 	tenant := testdb.NewTenant(t, owner)
@@ -264,21 +257,15 @@ func TestIntegration_DeleteAgent_ProtectsPlatformAgent(t *testing.T) {
 		t.Fatalf("seed platform agent: %v", err)
 	}
 
-	if err := svc.DeleteAgent(ctx, tenant, platformID); !errors.Is(err, ErrPlatformAgentProtected) {
-		t.Fatalf("DeleteAgent(platform agent) = %v, want ErrPlatformAgentProtected", err)
+	if err := svc.DeleteAgent(ctx, tenant, platformID); err != nil {
+		t.Fatalf("DeleteAgent(legacy platform row) = %v, want nil", err)
 	}
 	var deletedAt sql.NullTime
 	if err := owner.QueryRow(`SELECT deleted_at FROM device_agents WHERE id = $1`, platformID).Scan(&deletedAt); err != nil {
-		t.Fatalf("re-read platform agent: %v", err)
+		t.Fatalf("re-read legacy platform agent: %v", err)
 	}
-	if deletedAt.Valid {
-		t.Error("platform agent was soft-deleted despite the guard")
-	}
-
-	// Opposite polarity — an operator-enrolled agent still deletes.
-	ordinary := enrollAgent(t, owner, tenant)
-	if err := svc.DeleteAgent(ctx, tenant, ordinary); err != nil {
-		t.Fatalf("ordinary agent must still be deletable, got %v", err)
+	if !deletedAt.Valid {
+		t.Error("legacy platform device_agents row was not soft-deleted")
 	}
 }
 

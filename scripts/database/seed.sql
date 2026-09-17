@@ -651,7 +651,6 @@ AND force_password_change = false;
 --
 -- Default tokens (for development only - CHANGE IN PRODUCTION):
 --   cluster-sensor-service: See environment variable CLUSTER_SENSOR_SERVICE_TOKEN
---   device-interrogation-service: See environment variable DEVICE_INTERROGATION_SERVICE_TOKEN
 --
 -- To generate a token hash, use bcrypt with cost 10:
 --   hash, _ := bcrypt.GenerateFromPassword([]byte(token), 10)
@@ -674,23 +673,12 @@ ON CONFLICT (service_name) DO UPDATE SET
     is_active = true,
     updated_at = NOW();
 
--- Service account for device-interrogation-service
--- Token hash placeholder (will be replaced during deployment)
--- For development, use a test token: "dev-device-interrogation-service-token-$(openssl rand -hex 16)"
-INSERT INTO service_accounts (id, service_name, token_hash, description, is_active, created_at, updated_at)
-VALUES (
-    'b2c3d4e5-f6a7-4890-b123-456789012345',
-    'device-interrogation-service',
-    '$2a$10$placeholder.hash.for.device.interrogation.service.token.replace.in.production',
-    'Service account for device-interrogation-service platform agent auto-registration',
-    true,
-    NOW(),
-    NOW()
-)
-ON CONFLICT (service_name) DO UPDATE SET
-    description = EXCLUDED.description,
-    is_active = true,
-    updated_at = NOW();
+-- device-interrogation-service formerly carried an inert platform-agent
+-- auto-registration route. Retire its unused credential on upgrade as well as
+-- on fresh installs; enrolled device agents use registration keys and tenant
+-- certificates instead of this service account.
+DELETE FROM service_accounts
+WHERE service_name = 'device-interrogation-service';
 
 -- =================================================================
 -- Platform System Sensors for All Existing Tenants
@@ -5422,7 +5410,10 @@ INSERT INTO public.classification_rules (
     ('mdns_service', '_ipp._tcp', 'printer', NULL, NULL, 0.75, 'https://www.rfc-editor.org/rfc/rfc8011.html'),
     ('mdns_service', '_ipps._tcp', 'printer', NULL, NULL, 0.75, 'https://www.rfc-editor.org/rfc/rfc8010.html'),
     ('mdns_service', '_pdl-datastream._tcp', 'printer', NULL, NULL, 0.70, 'https://www.pwg.org/ipp/everywhere.html'),
-    ('mdns_service', '_printer._tcp', 'printer', NULL, NULL, 0.75, 'https://datatracker.ietf.org/doc/html/rfc1179')
+    ('mdns_service', '_printer._tcp', 'printer', NULL, NULL, 0.75, 'https://datatracker.ietf.org/doc/html/rfc1179'),
+    ('os_name', '(?i)\bwindows[ ]+(xp|vista|7|8|8\.1|10|11)\b', 'computer', NULL, NULL, 0.75, 'https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information'),
+    ('os_name', '(?i)\bwindows[ ]+server\b', 'server', NULL, NULL, 0.80, 'https://learn.microsoft.com/en-us/windows-server/get-started/editions-comparison-windows-server-2022'),
+    ('os_name', '(?i)^(mac ?os( ?x)?|os ?x)\b', 'computer', NULL, NULL, 0.75, 'https://support.apple.com/en-us/109033')
 ON CONFLICT (rule_kind, pattern) DO UPDATE SET
     class_key  = EXCLUDED.class_key,
     vendor     = EXCLUDED.vendor,

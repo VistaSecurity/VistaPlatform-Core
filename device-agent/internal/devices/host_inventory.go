@@ -75,7 +75,12 @@ func (e *JobExecutor) executeHostInventory(job *models.Job) error {
 	ctx, cancel := context.WithTimeout(context.Background(), hostInventoryTimeout)
 	defer cancel()
 
-	report, err := hostinventory.Collect(ctx, runner, hostinventory.Options{Mode: hostinventory.ModeRemote})
+	// Remote-peer collection is privacy-sensitive and therefore requires an
+	// explicit job parameter; host inventory alone does not enable it.
+	report, err := hostinventory.Collect(ctx, runner, hostinventory.Options{
+		Mode:               hostinventory.ModeRemote,
+		CollectConnections: paramBool(job.Parameters, "collect_connections"),
+	})
 	// Credentials are done with the moment the collection is: the report holds
 	// none of them and nothing below needs them.
 	security.ClearCredentials(decrypted)
@@ -185,9 +190,16 @@ func buildRemoteRunner(transport hostinventory.Transport, params, creds map[stri
 // support flag both need it, and because a second copy of "which options does
 // local mode use" is a second place for the two to drift.
 func CollectLocalHostInventory(ctx context.Context, agentID string) (*hostinventory.Report, *di.InterrogateResult, error) {
+	return CollectLocalHostInventoryWithConnections(ctx, agentID, false)
+}
+
+// CollectLocalHostInventoryWithConnections is the production local collector.
+// The boolean comes only from the explicit agent privacy setting.
+func CollectLocalHostInventoryWithConnections(ctx context.Context, agentID string, collectConnections bool) (*hostinventory.Report, *di.InterrogateResult, error) {
 	report, err := hostinventory.Collect(ctx, hostinventory.NewLocalRunner(), hostinventory.Options{
-		Mode:    hostinventory.ModeLocal,
-		AgentID: agentID,
+		Mode:               hostinventory.ModeLocal,
+		AgentID:            agentID,
+		CollectConnections: collectConnections,
 		// The one documented divergence from remote mode, and it only fires
 		// after `ip -j addr` has already failed — which it does on a minimal
 		// image that ships no iproute2.
@@ -201,6 +213,11 @@ func CollectLocalHostInventory(ctx context.Context, agentID string) (*hostinvent
 		return report, nil, err
 	}
 	return report, result, nil
+}
+
+func paramBool(params map[string]interface{}, key string) bool {
+	v, _ := params[key].(bool)
+	return v
 }
 
 // paramString reads a string job parameter.

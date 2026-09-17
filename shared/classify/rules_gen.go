@@ -10,7 +10,7 @@ package classify
 // device agent, a unit test) classifies exactly as a service with one does
 // until an admin curates the table.
 //
-// 564 rules: oui 462, sysobjectid 24, enip 1, cloud_type 18, banner 8, port_profile 2, model 32, platform 7, cdp_capabilities 3, lldp_capability 3, mdns_service 4.
+// 567 rules: oui 462, sysobjectid 24, enip 1, cloud_type 18, banner 8, port_profile 2, model 32, platform 7, cdp_capabilities 3, lldp_capability 3, mdns_service 4, os_name 3.
 var generatedRules = []Rule{
 	{Kind: "oui", Pattern: "000001", Vendor: "Xerox", Confidence: 0.85, SourceURL: "https://standards-oui.ieee.org/"},
 	{Kind: "oui", Pattern: "00000A", Class: "ot_device", Vendor: "Omron", Confidence: 0.7, SourceURL: "https://standards-oui.ieee.org/"},
@@ -576,4 +576,7 @@ var generatedRules = []Rule{
 	{Kind: "mdns_service", Pattern: "_ipps._tcp", Class: "printer", Confidence: 0.75, SourceURL: "https://www.rfc-editor.org/rfc/rfc8010.html"},
 	{Kind: "mdns_service", Pattern: "_pdl-datastream._tcp", Class: "printer", Confidence: 0.7, SourceURL: "https://www.pwg.org/ipp/everywhere.html"},
 	{Kind: "mdns_service", Pattern: "_printer._tcp", Class: "printer", Confidence: 0.75, SourceURL: "https://datatracker.ietf.org/doc/html/rfc1179"},
+	{Kind: "os_name", Pattern: "(?i)\\bwindows[ ]+(xp|vista|7|8|8\\.1|10|11)\\b", Class: "computer", Confidence: 0.75, SourceURL: "https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information"},
+	{Kind: "os_name", Pattern: "(?i)\\bwindows[ ]+server\\b", Class: "server", Confidence: 0.8, SourceURL: "https://learn.microsoft.com/en-us/windows-server/get-started/editions-comparison-windows-server-2022"},
+	{Kind: "os_name", Pattern: "(?i)^(mac ?os( ?x)?|os ?x)\\b", Class: "computer", Confidence: 0.75, SourceURL: "https://support.apple.com/en-us/109033"},
 }

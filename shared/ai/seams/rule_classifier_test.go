@@ -35,6 +35,7 @@ func TestRuleClassifier_MapsEveryInputFieldOutOfAssetFacts(t *testing.T) {
 		classify.Rule{Kind: classify.KindCDPCapabilities, Pattern: "switch", Model: "cdp-switch", Confidence: 0.65, SourceURL: "u"},
 		classify.Rule{Kind: classify.KindLLDPCapability, Pattern: "wlan_access_point", Model: "lldp-ap", Confidence: 0.75, SourceURL: "u"},
 		classify.Rule{Kind: classify.KindMDNSService, Pattern: "_ipp._tcp", Model: "ipp-printer", Confidence: 0.75, SourceURL: "u"},
+		classify.Rule{Kind: classify.KindOSName, Pattern: `(?i)\bwindows[ ]+server\b`, Model: "windows-server", Confidence: 0.80, SourceURL: "u"},
 	)
 	c := RuleClassifier{Engine: engine}
 
@@ -51,6 +52,7 @@ func TestRuleClassifier_MapsEveryInputFieldOutOfAssetFacts(t *testing.T) {
 			FactMDNSServices:      []string{"_ipp._tcp"},
 			FactLLDPCapabilities:  []string{"wlan_access_point"},
 			FactCDPCapabilities:   []string{"switch"},
+			FactOSName:            "Microsoft Windows Server 2022 Datacenter",
 		},
 	}
 

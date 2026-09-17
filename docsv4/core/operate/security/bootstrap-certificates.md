@@ -6,7 +6,8 @@ render_macros: false
 
 ## Overview
 
-This guide covers operational procedures for managing bootstrap certificates used by platform services (cluster-sensor-service and device-interrogation-service) for mTLS authentication.
+This guide covers operational procedures for the bootstrap certificate used by
+`cluster-sensor-service` for its platform discovery-sensor registration.
 
 ## Certificate Generation
 
@@ -24,15 +25,13 @@ This creates:
 
 ### Generate Service Certificates
 
-Generate bootstrap certificates for platform services:
+Generate the bootstrap certificate:
 
 ```bash
 ./scripts/generate-bootstrap-certificates.sh
 ```
 
-This creates certificates for:
-- `cluster-sensor-service`
-- `device-interrogation-service`
+This creates a certificate for `cluster-sensor-service`.
 
 Certificates are stored in:
 - Database: `platform_bootstrap_certificates` table
@@ -46,10 +45,12 @@ After generation, the following files are created:
 bootstrap-certs/
 ├── cluster-sensor-service-cert.pem
 ├── cluster-sensor-service-key.pem
-├── device-interrogation-service-cert.pem
-├── device-interrogation-service-key.pem
 └── bootstrap-ca-cert.pem
 ```
+
+The platform device-interrogation worker uses its database-provisioned system
+sensor identity and needs no bootstrap certificate. Operator-installed device
+agents receive tenant certificates through their enrollment flow.
 
 ## Deployment
 

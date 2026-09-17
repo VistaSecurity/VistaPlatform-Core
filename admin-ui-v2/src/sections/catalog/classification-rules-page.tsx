@@ -54,6 +54,7 @@ const KIND_COLOR: Record<string, string> = {
   cdp_capabilities: 'var(--ok-lime)',
   lldp_capability: 'var(--ok-lime)',
   mdns_service: 'var(--warn)',
+  os_name: 'var(--chart-1)',
 };
 
 /** The empty form, used for "Add rule" and as the reset after a save. */

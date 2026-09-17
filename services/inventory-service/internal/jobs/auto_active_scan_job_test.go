@@ -48,6 +48,9 @@ type fakeStore struct {
 
 	stampCalls int
 	stampErr   error
+
+	clearCalls int
+	clearErr   error
 }
 
 type recordedScan struct {
@@ -71,6 +74,14 @@ func (f *fakeStore) StampCompletedScans(context.Context, uuid.UUID) (int, error)
 	f.stampCalls++
 	if f.stampErr != nil {
 		return 0, f.stampErr
+	}
+	return 0, nil
+}
+
+func (f *fakeStore) ClearUnstartedScanStamps(context.Context, uuid.UUID) (int, error) {
+	f.clearCalls++
+	if f.clearErr != nil {
+		return 0, f.clearErr
 	}
 	return 0, nil
 }
@@ -734,5 +745,49 @@ func TestAutoActiveScan_TheKillSwitchExistsWhereItIsRead(t *testing.T) {
 		if !strings.Contains(env, name) {
 			t.Errorf("env.example: %s is undocumented, so a compose operator cannot find it", name)
 		}
+	}
+}
+
+// The other half of closing the loop on a dispatched scan: assets whose job
+// never ran get their stamp back, on every pass, and — like the stamp above —
+// even for a tenant who has since turned the feature off. A refused job is
+// still a job that scanned nothing, and the asset should not sit out a rescan
+// interval because of it.
+func TestSweepTenant_ClearsUnstartedScanStampsEvenWhenThePolicyIsOff(t *testing.T) {
+	off := sharedautoscan.DefaultPolicy()
+	off.Enabled = false
+	store := &fakeStore{policy: off}
+	newJob(store, &fakeDispatcher{}).SweepTenant(context.Background(), uuid.New(), false)
+
+	if store.clearCalls != 1 {
+		t.Fatalf("ClearUnstartedScanStamps called %d times, want 1 — assets whose sensor refused the job stay skipped for a full rescan interval", store.clearCalls)
+	}
+}
+
+// Same rule as the stamp: a record, not a gate.
+func TestSweepTenant_ClearFailureDoesNotStopThePass(t *testing.T) {
+	store := &fakeStore{
+		policy:   sharedautoscan.DefaultPolicy(),
+		targets:  targetsAt("10.0.0.1"),
+		clearErr: errors.New("assets is locked"),
+	}
+	d := &fakeDispatcher{}
+	newJob(store, d).SweepTenant(context.Background(), uuid.New(), false)
+
+	if d.n != 1 {
+		t.Fatalf("dispatched %d jobs, want 1 — a failed clear must not cancel the sweep", d.n)
+	}
+}
+
+// And the same precedence: the guard is the "may we touch this tenant at all"
+// question, so a tenant we may no longer scan gets no clear pass either.
+func TestSweepTenant_DoesNotClearATenantWeMayNoLongerScan(t *testing.T) {
+	store := &fakeStore{policy: sharedautoscan.DefaultPolicy()}
+	j := newJob(store, &fakeDispatcher{})
+	j.isScannable = func(uuid.UUID) (bool, error) { return false, nil }
+	j.SweepTenant(context.Background(), uuid.New(), false)
+
+	if store.clearCalls != 0 {
+		t.Fatalf("ClearUnstartedScanStamps called %d times for a tenant the guard refused", store.clearCalls)
 	}
 }

@@ -18,7 +18,7 @@ import (
 // This drives the real SetupRouter. lazily-opened sql.DB handles never connect,
 // because route registration makes no queries, and an empty NATSURL keeps the
 // setup offline.
-func TestAgentConfigRoutesAreRegistered(t *testing.T) {
+func TestAgentRoutesAreRegisteredAndPlatformAutoRegistrationIsRetired(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	// SetupRouter builds handlers that call config.Load, which refuses to
 	// return a config without an encryption key. Supplying one keeps this a
@@ -35,10 +35,12 @@ func TestAgentConfigRoutesAreRegistered(t *testing.T) {
 	router := SetupRouter(&config.Config{}, db, db, nil)
 
 	want := map[string]string{
-		"GET /api/v1/device-interrogation-service/agents/config/defaults": "fleet defaults read",
-		"PUT /api/v1/device-interrogation-service/agents/config/defaults": "fleet defaults write",
-		"GET /api/v1/device-interrogation-service/agents/:id/config":      "per-agent read",
-		"PUT /api/v1/device-interrogation-service/agents/:id/config":      "per-agent write",
+		"POST /api/v1/device-interrogation-service/agents/register":                "operator-enrolled agent bootstrap",
+		"POST /api/v1/device-interrogation-service/agents/:id/certificates/rotate": "enrolled-agent certificate rotation",
+		"GET /api/v1/device-interrogation-service/agents/config/defaults":          "fleet defaults read",
+		"PUT /api/v1/device-interrogation-service/agents/config/defaults":          "fleet defaults write",
+		"GET /api/v1/device-interrogation-service/agents/:id/config":               "per-agent read",
+		"PUT /api/v1/device-interrogation-service/agents/:id/config":               "per-agent write",
 	}
 	got := map[string]bool{}
 	for _, r := range router.Routes() {
@@ -48,5 +50,13 @@ func TestAgentConfigRoutesAreRegistered(t *testing.T) {
 		if !got[route] {
 			t.Errorf("%s is not registered (%s) — the handler exists but nothing routes to it", route, what)
 		}
+	}
+
+	// The in-cluster worker uses the system sensor identity. Reintroducing this
+	// route would recreate the duplicate device_agents identity retired in
+	//while the two enrolled-agent routes above must remain available.
+	retired := "POST /api/v1/device-interrogation-service/agents/auto-register"
+	if got[retired] {
+		t.Errorf("%s is registered; platform device-agent auto-registration is retired", retired)
 	}
 }

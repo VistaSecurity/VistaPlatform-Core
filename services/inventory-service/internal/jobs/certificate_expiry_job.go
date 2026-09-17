@@ -30,7 +30,17 @@ var expiryTiers = []int{30, 14, 7, 0}
 //   - on the day a certificate crosses not_after, transitions it to
 //     certificate_state='expired' and emits certificate.changed — the bridge that
 //     makes compliance-engine re-evaluate that one certificate the same day
-//     (event-driven, bounded; no scheduled re-evaluation).
+//     (event-driven, bounded).
+//
+// This bridge covers the EXPIRED transition and nothing above it, deliberately.
+// Every other compliance threshold on cert_expiration_days (the 90-day and 30-day
+// rungs, and anything a platform admin authors) is re-materialized by
+// compliance-engine's CertComplianceBandScanJob, which derives its window from the
+// framework catalogue and reconciles findings in-process. Widening this bridge
+// instead would need inventory-service to read the platform-framework tables plus a
+// new per-certificate de-duplication marker; note in particular that
+// expiry_alert_tier below is the NOTIFICATION ladder and must not be widened to 90,
+// because that would add a user-facing 90-day notification nobody asked for.
 //
 // This closes the gap where expiry events fired only during asset upsert, leaving a
 // long-idle deployment blind to certificates lapsing with no discovery activity.

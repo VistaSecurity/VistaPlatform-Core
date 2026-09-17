@@ -118,6 +118,22 @@ func TestShouldKeepCloudPlaceholderManaged(t *testing.T) {
 	}
 }
 
+func TestSourceAssetIDFromMetadata_UsesOnlyAValidExplicitUUID(t *testing.T) {
+	want := uuid.New()
+	got := sourceAssetIDFromMetadata([]byte(`{"discovery_type":"host_connection","discovery_method":"host_inventory","source_asset_id":"` + want.String() + `"}`))
+	if got == nil || *got != want {
+		t.Fatalf("source asset=%v, want %s", got, want)
+	}
+	for _, raw := range [][]byte{nil, []byte(`{}`), []byte(`{"source_asset_id":"not-a-uuid"}`)} {
+		if got := sourceAssetIDFromMetadata(raw); got != nil {
+			t.Errorf("%s produced %v", raw, got)
+		}
+	}
+	if got := sourceAssetIDFromMetadata([]byte(`{"discovery_type":"passive","discovery_method":"sensor","source_asset_id":"` + want.String() + `"}`)); got != nil {
+		t.Fatalf("non-host producer could assert source asset %v", got)
+	}
+}
+
 // reverseDNSLookup runs from inside a cluster pod, whose resolver (CoreDNS)
 // synthesises a PTR answer for any address it considers in-cluster rather
 // than forwarding to the customer's real resolver. A customer host at

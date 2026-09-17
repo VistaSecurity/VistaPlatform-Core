@@ -12,7 +12,6 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/api"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/database"
-	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/registration"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/services"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
@@ -90,46 +89,6 @@ func main() {
 		go schedulerWorker.Start()
 	} else {
 		log.Println("⚠️  INTERROGATION_SCHEDULER_ENABLED=false — scheduled interrogations will not fire")
-	}
-
-	// Platform device-agent self-heartbeat. The auto-registration below stamps
-	// device_agents.last_heartbeat once at boot and never again, so the
-	// discovery_agent_offline detector flags the in-cluster agent ~15 minutes
-	// after every start. This keeps the row fresh for as long as the
-	// process is actually running.
-	platformHeartbeat := services.NewPlatformAgentHeartbeat(bypassDB, 0)
-	go platformHeartbeat.Start()
-
-	// Auto-register platform agent for all tenants
-	var regService *registration.AutoRegisterService
-	if cfg.ServiceAccountToken != "" && db != nil {
-		go func() {
-			// Wait a bit for database to be fully ready
-			time.Sleep(2 * time.Second)
-
-			var err error
-			regService, err = registration.NewAutoRegisterService(cfg, db)
-			if err != nil {
-				log.Printf("⚠️  Failed to initialize auto-registration service: %v", err)
-				return
-			}
-
-			log.Printf("🔄 Registering platform device interrogation agent for all tenants...")
-			if err := regService.RegisterForAllTenants(); err != nil {
-				log.Printf("⚠️  Auto-registration completed with errors: %v", err)
-			} else {
-				log.Printf("✅ Platform device interrogation agent registered successfully for all tenants")
-			}
-
-			// Start certificate expiration monitoring
-			if regService != nil {
-				go regService.MonitorCertificateExpiration()
-			}
-		}()
-	} else {
-		if cfg.ServiceAccountToken == "" {
-			log.Printf("⚠️  DEVICE_INTERROGATION_SERVICE_TOKEN not set, skipping auto-registration")
-		}
 	}
 
 	// Initialize router
@@ -247,8 +206,6 @@ func main() {
 	if schedulerWorker != nil {
 		schedulerWorker.Stop()
 	}
-	platformHeartbeat.Stop()
-
 	// Give outstanding requests 30 seconds to complete
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

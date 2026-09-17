@@ -112,6 +112,58 @@ export function isPlatformManaged(row: { platform?: string | null; tags?: string
   return (row.tags ?? []).includes('system');
 }
 
+/** The subset of a `sensors` row this module's partition needs. */
+export interface SensorFleetRow {
+  platform?: string | null;
+  tags?: string[] | null;
+  profile?: string | null;
+}
+
+/**
+ * Is this `sensors` row actually the in-cluster DEVICE INTERROGATION agent?
+ *
+ * It is a row in `sensors` for a plumbing reason, not because it is a sensor.
+ * `create_system_sensors_for_tenant` gives every tenant two platform rows, and
+ * device-interrogation-service's result processor resolves the
+ * `device_interrogation` one (ResultProcessor.lookupSystemSensor) to use as the
+ * `sensor_discoveries.sensor_id` every interrogated and cloud-discovered asset
+ * is attributed to. The row is load-bearing and must not be removed — but it
+ * describes a command-driven interrogation agent, not a passive libpcap
+ * capture, so the Sensors table is the wrong place to show it: it renders "—"
+ * for Segment and carries `sensor_type = 'api'` under a column headed Type.
+ *
+ * BOTH markers are required, and that is the whole point of the predicate:
+ *
+ *   - platform-managed, so a customer-deployed sensor that happens to carry the
+ *     `device_interrogation` profile stays in the sensor table where its owner
+ *     put it (the same care `isPlatformManaged` takes not to key on profile).
+ *   - profile `device_interrogation`, so the platform DISCOVERY sensor — which
+ *     genuinely is a sensor — is not swept along with it.
+ */
+export function isPlatformInterrogationAgent(row: SensorFleetRow): boolean {
+  return isPlatformManaged(row) && (row.profile ?? '').toLowerCase() === 'device_interrogation';
+}
+
+/**
+ * Split the `sensors` fleet into the rows the Sensors table owns and the rows
+ * the Discovery agents table owns.
+ *
+ * Returned as a partition rather than two filters so the two lists cannot drift
+ * apart: every row lands in exactly one of them, and a row can never be
+ * dropped from the page by falling through both predicates.
+ */
+export function partitionSensorFleet<T extends SensorFleetRow>(rows: T[]): {
+  sensors: T[];
+  interrogationAgents: T[];
+} {
+  const sensors: T[] = [];
+  const interrogationAgents: T[] = [];
+  for (const r of rows) {
+    (isPlatformInterrogationAgent(r) ? interrogationAgents : sensors).push(r);
+  }
+  return { sensors, interrogationAgents };
+}
+
 /**
  * "Last host inventory: 2h ago — 412 packages, 18 listeners".
  *

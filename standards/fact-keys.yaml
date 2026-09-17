@@ -395,6 +395,43 @@ keys:
     producers: [device-agent]
     redact: false
 
+  - key: svc.bound_udp_sockets
+    type: array
+    item_schema:
+      type: object
+      properties:
+        address: { type: string, description: "bound local address" }
+        port: { type: integer, description: "bound local port" }
+        process: { type: string, description: "process name, where visible" }
+        role: { type: string, enum: [unknown], description: "listener/client role is not proven by the platform API" }
+      required: [port, role]
+    description: >-
+      UDP bindings whose local address and port were measured but whose role is
+      unknown. UDP has no listen state, and several platform APIs expose no
+      peer, so these are preserved as evidence without claiming that every
+      client socket is a listening service.
+    producers: [device-agent]
+    redact: false
+
+  - key: net.outbound_connections
+    type: array
+    item_schema:
+      type: object
+      properties:
+        local_address: { type: string, description: "measured local address used as the connection source" }
+        remote_address: { type: string, description: "measured remote peer address" }
+        remote_port: { type: integer, description: "measured remote peer port" }
+        transport: { type: string, enum: [tcp, udp], description: "transport protocol" }
+        process: { type: string, description: "process name, where visible" }
+      required: [local_address, remote_address, remote_port, transport]
+    description: >-
+      Explicitly opted-in, bounded and coalesced remote peers reported by a
+      host. Local ephemeral ports and process ids are excluded so repeated
+      collections have stable identity and durable facts do not retain
+      boot-local identifiers.
+    producers: [device-agent]
+    redact: false
+
   # --- certs.* : the host's own trust stores ---------------------------------
   #
   # SUMMARY ONLY. The certificates a host TRUSTS are not the certificates it

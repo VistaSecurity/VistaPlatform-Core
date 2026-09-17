@@ -53,7 +53,7 @@ const MAX_CONFIDENCE = 0.95;
 
 const KIND_ORDER = [
   'oui', 'sysobjectid', 'enip', 'cloud_type', 'banner', 'port_profile', 'model', 'platform',
-  'cdp_capabilities', 'lldp_capability', 'mdns_service',
+  'cdp_capabilities', 'lldp_capability', 'mdns_service', 'os_name',
 ];
 
 const OUI = /^[0-9A-F]{6}$/;
@@ -341,7 +341,11 @@ function normalise(rule, index, classKeys, kinds) {
         fail(`${where}: cloud_type pattern ${JSON.stringify(pattern)} must be a lower_snake resource type`);
       }
       break;
-    case 'banner': {
+    // `os_name` shares every check here: both kinds are RE2 patterns carrying
+    // their own anchoring, and a second copy of the RE2-vs-JS reasoning below
+    // is a second copy that drifts.
+    case 'banner':
+    case 'os_name': {
       // NOT `new RegExp(pattern)`. These patterns are Go RE2, and the two
       // engines disagree in both directions: JS rejects RE2's inline `(?i)`
       // flag group outright, and JS ACCEPTS backreferences and lookaround,
@@ -350,8 +354,9 @@ function normalise(rule, index, classKeys, kinds) {
       //
       // So this checks for the constructs that would pass a JS compile and
       // fail a Go one, and the authoritative compile happens in Go:
-      // shared/classify's Rule.Validate builds every banner regexp at engine
-      // construction, and TestGeneratedRules_AreValid runs it over this table.
+      // shared/classify's Rule.Validate builds every banner and os_name regexp
+      // at engine construction, and TestGeneratedRules_AreValid runs it over
+      // this table.
       const unsupported = [
         [/\(\?=/, 'lookahead (?=…)'],
         [/\(\?!/, 'negative lookahead (?!…)'],
@@ -360,7 +365,7 @@ function normalise(rule, index, classKeys, kinds) {
       ];
       for (const [re, what] of unsupported) {
         if (re.test(pattern)) {
-          fail(`${where}: banner pattern ${JSON.stringify(pattern)} uses ${what}, which Go's RE2 does not support`);
+          fail(`${where}: ${kind} pattern ${JSON.stringify(pattern)} uses ${what}, which Go's RE2 does not support`);
         }
       }
       // Balance check, so an obviously malformed pattern fails at `make
@@ -378,10 +383,10 @@ function normalise(rule, index, classKeys, kinds) {
         if (pattern[i] === '[') { inClass = true; continue; }
         if (pattern[i] === '(') depth += 1;
         if (pattern[i] === ')') depth -= 1;
-        if (depth < 0) fail(`${where}: banner pattern ${JSON.stringify(pattern)} has an unmatched ')'`);
+        if (depth < 0) fail(`${where}: ${kind} pattern ${JSON.stringify(pattern)} has an unmatched ')'`);
       }
-      if (inClass) fail(`${where}: banner pattern ${JSON.stringify(pattern)} has an unclosed '['`);
-      if (depth !== 0) fail(`${where}: banner pattern ${JSON.stringify(pattern)} has an unmatched '('`);
+      if (inClass) fail(`${where}: ${kind} pattern ${JSON.stringify(pattern)} has an unclosed '['`);
+      if (depth !== 0) fail(`${where}: ${kind} pattern ${JSON.stringify(pattern)} has an unmatched '('`);
       break;
     }
     case 'port_profile': {

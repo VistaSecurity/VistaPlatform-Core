@@ -59,6 +59,12 @@ const (
 	// step.
 	FactLLDPCapabilities = "lldp_capabilities"
 	FactCDPCapabilities  = "cdp_capabilities"
+
+	// FactOSName is the operating system the host named when asked, in Facts.
+	// It is spelled to match the `os.name` fact key a host inventory writes,
+	// so an intake holding that fact passes it straight through under a name
+	// that means the same thing on both sides.
+	FactOSName = "os_name"
 )
 
 // RuleClassifier answers the Classifier seam from the curated rule table
@@ -155,6 +161,7 @@ func classifyInput(facts AssetFacts) classify.ClassifyInput {
 		MDNSServices:      factStrings(facts.Facts, FactMDNSServices),
 		LLDPCapabilities:  factStrings(facts.Facts, FactLLDPCapabilities),
 		CDPCapabilities:   factStrings(facts.Facts, FactCDPCapabilities),
+		OS:                factString(facts.Facts, FactOSName),
 	}
 }
 

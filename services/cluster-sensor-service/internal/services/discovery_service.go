@@ -447,6 +447,38 @@ func (s *DiscoveryService) UpdateJobStatus(jobID, status string, errorMessage *s
 	if err != nil {
 		return fmt.Errorf("failed to update job status: %w", err)
 	}
+
+	// A job that ends has no unfinished targets left. Without this a job that
+	// dies before the executor ever picks it up — a sensor that refuses the
+	// command, a dispatch that fails, a stale command the sweep reaps — leaves
+	// its `discovery_targets` rows at 'pending' for ever, and the Jobs page
+	// shows targets still queued underneath a job that finished minutes ago.
+	// Only the in-cluster executor (job_processor.go) and the sensor's own
+	// completion report (sensor-manager) ever settled them, and neither of
+	// those runs on this path.
+	//
+	// The job's own error_message is copied onto each target: a target row that
+	// merely says 'failed' cannot tell an operator whether the address refused
+	// the connection or the scan never started.
+	//
+	// Terminal rows are left alone, so a job that scanned half its targets and
+	// then failed keeps the outcomes it earned.
+	if status == "completed" || status == "failed" {
+		if _, e := s.bypassDB.Exec(`
+			UPDATE discovery_targets
+			SET status = $2,
+			    completed_at = COALESCE(completed_at, NOW()),
+			    error_message = COALESCE(error_message, $3),
+			    updated_at = NOW()
+			WHERE job_id = $1 AND status NOT IN ('completed', 'failed')`,
+			jobID, status, errorMessage); e != nil {
+			// Not fatal: the job's own status is the record that matters, and
+			// the next sweep is not blocked by a stale target row. Loudly
+			// logged, because a silent failure here is what leaves the page
+			// lying.
+			log.Printf("Job %s marked %s but its unfinished targets could not be settled — the Jobs page will show them queued: %v", jobID, status, e)
+		}
+	}
 	return nil
 }
 

@@ -42,9 +42,9 @@ type Runner interface {
 
 // maxOutputBytes bounds what any single command or file may contribute. A host
 // with 40,000 dpkg entries is real; a host answering `ss -ltnup` with a
-// gigabyte is a host we must not be killed by. The bound is read-side: the
-// remote keeps writing and we keep discarding, so a long answer is truncated
-// rather than turned into a command failure that loses the rows we did read.
+// gigabyte is a host we must not be killed by. The bound is read-side, and a
+// runner reports truncation as an error so a partial snapshot is never marked
+// complete or used to retire facts and endpoints that happened to be omitted.
 const maxOutputBytes = 8 << 20 // 8 MiB
 
 // commandTimeout bounds one command. system_profiler and a large rpm database

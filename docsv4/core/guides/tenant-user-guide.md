@@ -881,14 +881,14 @@ organization:
 | **Known vulnerability** | An installed software product matched the vulnerability catalogue. |
 | **End of life** | Something on an asset passed, or is approaching, the date its vendor stops shipping fixes — its operating system, its hardware, or an installed package. |
 | **Drift detected** | Something about a subject changed relative to its recent baseline: a new device class on its segment, a protocol it has not spoken before, a different set of listening ports, a certificate from an unfamiliar issuer. Drift is not automatically bad — most are planned changes, and resolving the finding is how you tell the baseline so. |
-| **Sensor offline** | A sensor stopped reporting (after a 15-minute dwell). |
-| **Discovery agent offline** | A discovery agent stopped reporting (same dwell). |
+| **Sensor offline** | A sensor stopped reporting, or registered and never reported at all (after a 15-minute dwell — measured from the last heartbeat, or from registration if there has never been one, so a sensor whose install silently failed is not invisible). Sensors marked air-gapped, pending or inactive are not expected to check in and do not raise this. |
+| **Discovery agent offline** | A discovery agent stopped reporting, or registered and never reported at all (same dwell, measured the same way). Agents switched to inactive do not raise this. |
 | **Discovery job failed** | A discovery job failed. |
 | **Failed login burst** | Multiple failed sign-in attempts in a short window. |
 | **Asset limit approaching** | Asset usage is nearing your plan limit. |
 
 Most resolve themselves when the condition clears — a renewed certificate is
-observed, a heartbeat returns, the next run succeeds, the finding stops being
+observed, a heartbeat arrives, the next run succeeds, the finding stops being
 detected.
 
 Which alert types are enabled, and where they are delivered, is configured by a

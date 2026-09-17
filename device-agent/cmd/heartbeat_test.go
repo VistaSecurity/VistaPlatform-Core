@@ -44,8 +44,11 @@ func waitForBeats(t *testing.T, s *fakeHeartbeatSender, want int) {
 // defect. OutboundClient.SendHeartbeat existed but had ZERO callers anywhere in
 // the repo, so device_agents.last_heartbeat never moved after registration: the
 // agent was invisible in the platform's liveness view, and — because the
-// discovery_agent_offline detector skips rows whose last_heartbeat is NULL — a
-// genuinely dead tenant agent raised no alert at all.
+// discovery_agent_offline detector skipped rows whose last_heartbeat was NULL —
+// a genuinely dead tenant agent raised no alert at all. That detector has since
+// been fixed to measure the dwell from COALESCE(last_heartbeat, created_at), so
+// a missing heartbeat loop would now surface as a permanent offline alert
+// instead of silence; this test keeps the loop itself honest either way.
 func TestHeartbeatLoop_BeatsOnInterval(t *testing.T) {
 	sender := &fakeHeartbeatSender{}
 	stop := make(chan struct{})

@@ -3087,7 +3087,24 @@ CREATE TABLE IF NOT EXISTS public.external_connections (
     -- source port (a host agent watching its own connections, ADR-0004 D3) fills
     -- it in.
     source_endpoint_id uuid,
+    -- Provenance of dest_hostname (ADR-0005 source_kind vocabulary), so the
+    -- upsert can tell a MEASURED name from an INFERRED one.
+    --
+    -- `measured` is a name that came off the wire — the TLS SNI the client
+    -- itself asked for, a DHCP/mDNS/NetBIOS name the host announced.
+    -- `inferred` is a guess about the address made by someone else, in
+    -- practice a reverse-DNS PTR answer. The two used to be indistinguishable
+    -- once written, so an `ec2-…compute-1.amazonaws.com` PTR happily
+    -- overwrote a captured `slack.com` on the next observation of the same
+    -- flow: not empty, so "empty never wins" did not stop it.
+    --
+    -- NULL means "written before this column existed, or by a producer that
+    -- does not state its provenance" — deliberately a third state, not folded
+    -- into either answer. See the precedence ladder in
+    -- ExternalConnectionsService.Upsert.
+    dest_hostname_source_kind character varying(20),
     CONSTRAINT external_connections_strength_v2_check CHECK (crypto_strength IS NULL OR crypto_strength IN ('weak', 'acceptable', 'strong', 'recommended')),
+    CONSTRAINT external_connections_dest_hostname_source_kind_check CHECK ((dest_hostname_source_kind IS NULL OR (dest_hostname_source_kind)::text = ANY ((ARRAY['measured'::character varying, 'imported'::character varying, 'declared'::character varying, 'inferred'::character varying])::text[]))),
     CONSTRAINT external_connections_dest_port_check CHECK (((dest_port >= 1) AND (dest_port <= 65535)))
 );
 
@@ -19226,6 +19243,12 @@ END $$;
 -- wrong class is worse than none: an absent class shows as unclassified and
 -- invites someone to look, a wrong one shows as a fact and gets bulk-approved.
 --
+-- `os_name` joined last: it is the only kind whose evidence comes from INSIDE
+-- the host, and the only one a general-purpose computer can match at all. A
+-- laptop has no sysObjectID, advertises no capability, and its OUI belongs to
+-- Dell or Intel and is vendor-only by design, so a fully inventoried Windows
+-- machine matched nothing and stayed `unknown_host`.
+--
 -- `cdp_capabilities`, `lldp_capability` and `mdns_service` joined the list in
 -- workstream 2.10b, with the passive class signals they read; `model` and
 -- `platform` joined it in workstream 2.10a, when
@@ -19252,7 +19275,7 @@ CREATE TABLE IF NOT EXISTS public.classification_rules (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT classification_rules_pkey PRIMARY KEY (id),
-    CONSTRAINT classification_rules_rule_kind_check CHECK (rule_kind = ANY (ARRAY['oui'::text, 'sysobjectid'::text, 'enip'::text, 'cloud_type'::text, 'banner'::text, 'port_profile'::text, 'model'::text, 'platform'::text, 'cdp_capabilities'::text, 'lldp_capability'::text, 'mdns_service'::text])),
+    CONSTRAINT classification_rules_rule_kind_check CHECK (rule_kind = ANY (ARRAY['oui'::text, 'sysobjectid'::text, 'enip'::text, 'cloud_type'::text, 'banner'::text, 'port_profile'::text, 'model'::text, 'platform'::text, 'cdp_capabilities'::text, 'lldp_capability'::text, 'mdns_service'::text, 'os_name'::text])),
     CONSTRAINT classification_rules_confidence_range_check CHECK (confidence >= 0 AND confidence <= 1),
     -- A rule that asserts nothing is a row that can only waste a reviewer's
     -- time. At least one of class, vendor or model has to be populated.
@@ -20409,7 +20432,9 @@ DO $$ BEGIN
     -- above, and BOTH are required: the body covers a fresh install, this
     -- covers one that already created the table. Workstream 2.10b added
     -- `cdp_capabilities`, `lldp_capability` and `mdns_service` to the eight
-    -- 2.10a shipped.
+    -- 2.10a shipped; `os_name` came later, with the host-inventory
+    -- reclassification path. Without THIS half, the seeded os_name rows fail
+    -- the CHECK on every upgraded database and the seed Job stops there.
     ALTER TABLE public.classification_rules
         DROP CONSTRAINT IF EXISTS classification_rules_rule_kind_check;
     ALTER TABLE public.classification_rules
@@ -20417,7 +20442,7 @@ DO $$ BEGIN
         CHECK (rule_kind = ANY (ARRAY['oui'::text, 'sysobjectid'::text, 'enip'::text,
             'cloud_type'::text, 'banner'::text, 'port_profile'::text, 'model'::text,
             'platform'::text, 'cdp_capabilities'::text, 'lldp_capability'::text,
-            'mdns_service'::text]));
+            'mdns_service'::text, 'os_name'::text]));
 
     IF NOT EXISTS (
       SELECT 1 FROM pg_constraint
@@ -20859,6 +20884,40 @@ ALTER TABLE IF EXISTS public.certificates ADD COLUMN IF NOT EXISTS sct_source ch
 -- cert_sct_source mirrors certificates.sct_source above.
 ALTER TABLE IF EXISTS public.external_connections ADD COLUMN IF NOT EXISTS cert_hygiene_flags text[] DEFAULT '{}'::text[];
 ALTER TABLE IF EXISTS public.external_connections ADD COLUMN IF NOT EXISTS cert_sct_source character varying(20);
+
+
+-- ============================================================================
+-- POST-MIGRATIONS: external_connections.dest_hostname_source_kind
+-- ============================================================================
+-- A reverse-DNS guess used to overwrite a measured TLS SNI hostname, because
+-- the upsert only enforced "empty never wins" and a generic cloud PTR
+-- (`ec2-54-163-235-119.compute-1.amazonaws.com`) is not empty. This column
+-- gives dest_hostname a provenance so the upsert can refuse an inference that
+-- would replace a measurement. See the CREATE TABLE body above for the
+-- vocabulary and the meaning of NULL.
+--
+-- Nullable with no default and no backfill, on purpose: every row that exists
+-- today was written by a producer that did not state its provenance, and
+-- stamping them all `measured` (or all `inferred`) would invent an answer.
+-- NULL is the honest one, and the ladder ranks it between the two — an
+-- unlabelled stored name yields to a measurement and outranks an inference.
+-- That also keeps the CHECK satisfiable on a populated table, so the
+-- statement is safe on an upgrade rather than only on a fresh install.
+ALTER TABLE IF EXISTS public.external_connections ADD COLUMN IF NOT EXISTS dest_hostname_source_kind character varying(20);
+
+DO $$
+BEGIN
+  IF to_regclass('public.external_connections') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'external_connections_dest_hostname_source_kind_check'
+         AND conrelid = to_regclass('public.external_connections')
+     ) THEN
+    ALTER TABLE public.external_connections
+      ADD CONSTRAINT external_connections_dest_hostname_source_kind_check
+      CHECK (dest_hostname_source_kind IS NULL OR dest_hostname_source_kind IN ('measured', 'imported', 'declared', 'inferred'));
+  END IF;
+END $$;
 
 
 -- ============================================================================

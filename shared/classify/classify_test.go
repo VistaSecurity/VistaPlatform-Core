@@ -108,6 +108,13 @@ func TestClassify_EveryKindMatchesItsOwnEvidence(t *testing.T) {
 			miss:  ClassifyInput{MDNSServices: []string{"_ssh._tcp"}},
 			class: "printer",
 		},
+		{
+			name:  "os_name",
+			rule:  Rule{Kind: KindOSName, Pattern: `(?i)\bwindows[ ]+server\b`, Class: "server", Confidence: 0.80, SourceURL: "https://x"},
+			hit:   ClassifyInput{OS: "Microsoft Windows Server 2022 Datacenter"},
+			miss:  ClassifyInput{OS: "Microsoft Windows 11 Pro"},
+			class: "server",
+		},
 	}
 
 	seen := map[string]bool{}
@@ -806,5 +813,87 @@ func TestVendorAgrees(t *testing.T) {
 		if vendorAgrees(p[0], p[1]) || vendorAgrees(p[1], p[0]) {
 			t.Errorf("vendorAgrees(%q, %q) = true, want false", p[0], p[1])
 		}
+	}
+}
+
+// The os_name rules, over the SHIPPED table, against the OS names the
+// collectors actually report.
+//
+// This is the end of the chain the reclassification fix depends on, and it is
+// the one part of it a unit test can hold on its own. The asset that prompted
+// the fix is a Dell XPS 16 running Windows 11 Pro, fully inventoried — OS,
+// vendor, model, serial, 106 packages, 83 listening sockets — and it stayed
+// `unknown_host` because no rule kind could read any of it: its OUI belongs to
+// Dell and is vendor-only, it answers no SNMP, it advertises nothing, and
+// "XPS 16 9640" is a consumer product line no catalogue enumerates. If these
+// rules stop firing, the fix downstream still runs and still changes nothing,
+// which is exactly the shape of failure this repo keeps paying for.
+//
+// Both polarities. A Linux distribution must stay unclassified: Debian runs on
+// a rack server, a laptop, a firewall and a printer alike, and there is no
+// spelling of "Ubuntu" that means `server`.
+func TestGeneratedRules_ClassifyAHostByItsOperatingSystem(t *testing.T) {
+	e := Default()
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		os    string
+		class string
+	}{
+		// The reported asset, and the other spellings of it that reach
+		// `os.name` from different collectors.
+		{"Microsoft Windows 11 Pro", "computer"},
+		{"Windows 11 Pro", "computer"},
+		{"Microsoft Windows 10 Enterprise", "computer"},
+		{"Windows 7 Professional", "computer"},
+		{"macOS 15.1", "computer"},
+		{"Mac OS X 10.15.7", "computer"},
+
+		// Server editions are their own product line with one meaning, and
+		// `server` refines `computer` rather than arguing with it.
+		{"Microsoft Windows Server 2022 Datacenter", "server"},
+		{"Windows Server 2019 Standard", "server"},
+
+		// Deliberately unclassified. See the os_name block in
+		// standards/classification-rules.yaml for why each one gets no rule.
+		{"Ubuntu", ""},
+		{"Debian GNU/Linux 12 (bookworm)", ""},
+		{"Red Hat Enterprise Linux 9.4", ""},
+		{"FreeBSD 14.1-RELEASE", ""},
+		{"", ""},
+	} {
+		t.Run(tc.os, func(t *testing.T) {
+			got := e.Classify(ctx, ClassifyInput{OS: tc.os})
+			if got.Class != tc.class {
+				t.Errorf("os.name %q classified as %q, want %q (matched %+v)",
+					tc.os, got.Class, tc.class, got.MatchedRules)
+			}
+			if tc.class == "" && !got.Unknown {
+				t.Errorf("os.name %q: Unknown = false with no class", tc.os)
+			}
+		})
+	}
+}
+
+// A client Windows release must not out-argue the whole taxonomy. The rule
+// proposes `computer` — the common ancestor of workstation and laptop — and a
+// LATER, better-evidenced rule has to be able to refine it, which is the whole
+// reason it stops at the ancestor rather than guessing `workstation`.
+func TestGeneratedRules_AnOSClassIsRefinableByBetterEvidence(t *testing.T) {
+	e, err := NewStrict(append(append([]Rule(nil), generatedRules...),
+		Rule{Kind: KindOUI, Pattern: "AAAAAA", Class: "laptop", Confidence: 0.85, SourceURL: "https://x"}))
+	if err != nil {
+		t.Fatalf("build engine: %v", err)
+	}
+
+	got := e.Classify(context.Background(), ClassifyInput{
+		OS:   "Microsoft Windows 11 Pro",
+		MACs: []string{"aa:aa:aa:00:00:01"},
+	})
+	if got.Class != "laptop" {
+		t.Errorf("Class = %q, want laptop — `computer` is an ancestor of it and must drop out, not tie", got.Class)
+	}
+	if got.Conflict {
+		t.Errorf("reported a conflict between a class and its own ancestor: %v", got.ConflictingClasses)
 	}
 }

@@ -36,6 +36,8 @@ const (
 	KeySWPackageCount            = "sw.package_count"
 	KeySWCPE                     = "sw.cpe"
 	KeySvcListeningSockets       = "svc.listening_sockets"
+	KeySvcBoundUdpSockets        = "svc.bound_udp_sockets"
+	KeyNetOutboundConnections    = "net.outbound_connections"
 	KeyCertsStoreCount           = "certs.store_count"
 	KeyCertsNonCertificateBlocks = "certs.non_certificate_blocks"
 	KeyEOLOSDate                 = "eol.os.date"
@@ -302,6 +304,24 @@ var All = []Key{
 		Producers:   []string{"device-agent"},
 		Redact:      false,
 		Description: "Sockets the host is listening on, as observed locally by the agent. This is the host's own view, which sees loopback-only and firewalled services a network scan cannot; the network-visible services remain endpoints. The baseline the drift producer's port_profile_changed compares against.",
+	},
+	{
+		Key:         "svc.bound_udp_sockets",
+		Type:        "array",
+		Enum:        nil,
+		ItemSchema:  "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\",\"description\":\"bound local address\"},\"port\":{\"type\":\"integer\",\"description\":\"bound local port\"},\"process\":{\"type\":\"string\",\"description\":\"process name, where visible\"},\"role\":{\"type\":\"string\",\"enum\":[\"unknown\"],\"description\":\"listener/client role is not proven by the platform API\"}},\"required\":[\"port\",\"role\"]}",
+		Producers:   []string{"device-agent"},
+		Redact:      false,
+		Description: "UDP bindings whose local address and port were measured but whose role is unknown. UDP has no listen state, and several platform APIs expose no peer, so these are preserved as evidence without claiming that every client socket is a listening service.",
+	},
+	{
+		Key:         "net.outbound_connections",
+		Type:        "array",
+		Enum:        nil,
+		ItemSchema:  "{\"type\":\"object\",\"properties\":{\"local_address\":{\"type\":\"string\",\"description\":\"measured local address used as the connection source\"},\"remote_address\":{\"type\":\"string\",\"description\":\"measured remote peer address\"},\"remote_port\":{\"type\":\"integer\",\"description\":\"measured remote peer port\"},\"transport\":{\"type\":\"string\",\"enum\":[\"tcp\",\"udp\"],\"description\":\"transport protocol\"},\"process\":{\"type\":\"string\",\"description\":\"process name, where visible\"}},\"required\":[\"local_address\",\"remote_address\",\"remote_port\",\"transport\"]}",
+		Producers:   []string{"device-agent"},
+		Redact:      false,
+		Description: "Explicitly opted-in, bounded and coalesced remote peers reported by a host. Local ephemeral ports and process ids are excluded so repeated collections have stable identity and durable facts do not retain boot-local identifiers.",
 	},
 	{
 		Key:         "certs.store_count",

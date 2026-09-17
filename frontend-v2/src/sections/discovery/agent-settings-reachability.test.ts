@@ -241,8 +241,15 @@ describe('an agent is reachable from the fleet table', () => {
     // sensors table above it has had an onRow all along, so a file-wide search
     // for "onRow" would pass with the agents one deleted.
     // The agents table's own props, not the first 400 characters after them.
-    const agentsTable = regionFrom(page, 'cols={AGENT_COLS}', 'render={(a) => {');
-    expect(agentsTable).toMatch(/onRow=\{\(a\) => setSelectedAgent\(a\)\}/);
+    //
+    // The table now carries two row kinds (the in-cluster platform agent, whose
+    // row comes from `sensors`, and the enrolled agents from `device_agents`),
+    // so onRow branches. Both branches are asserted: the platform row must open
+    // the SENSOR drawer — the agent drawer would call
+    // device-interrogation-service's per-agent config endpoints with a sensor
+    // id and 404 — and the enrolled rows must still open the agent drawer.
+    const agentsTable = regionFrom(page, 'cols={AGENT_COLS}', 'render={(r) => (');
+    expect(agentsTable).toMatch(/onRow=\{\(r\) => \(r\.kind === 'platform' \? setSelected\(r\.sensor\) : setSelectedAgent\(r\.agent\)\)\}/);
   });
 });
 

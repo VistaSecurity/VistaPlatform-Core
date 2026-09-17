@@ -416,6 +416,7 @@ export const RULE_KIND_LABEL: Record<string, string> = {
   cdp_capabilities: 'CDP capabilities',
   lldp_capability: 'LLDP capabilities',
   mdns_service: 'Advertised mDNS service',
+  os_name: 'Operating system',
 };
 
 /**
@@ -435,6 +436,7 @@ export const RULE_KIND_HINT: Record<string, string> = {
   cdp_capabilities: 'Cisco CDP capability names, ascending, ALL of which must be advertised — e.g. router,switch. The most specific matching set wins.',
   lldp_capability: 'IEEE 802.1AB capability names, ascending, ALL of which must be advertised — e.g. bridge,router. The most specific matching set wins.',
   mdns_service: 'A DNS-SD service type, lowercase — e.g. _ipp._tcp',
+  os_name: 'A Go RE2 regexp over the reported OS name, anchored — e.g. (?i)\\bwindows[ ]+server\\b',
 };
 
 /** Confidence bounds, mirroring the engine's band. */

@@ -110,6 +110,65 @@ func TestProjectListeners_DropsThePID(t *testing.T) {
 	}
 }
 
+// Drive the public projection, not only projectConnections: deleting the
+// AddFactFrom wiring in ToObservations must make this fail.
+func TestToObservations_ConnectionsUseTheRegisteredBoundedProjection(t *testing.T) {
+	rep := &Report{
+		Mode: ModeLocal, Platform: PlatformLinux,
+		Host:        Host{Hostname: "source-host"},
+		Connections: []Connection{{Proto: "tcp", LocalAddress: "192.0.2.10", LocalPort: 50123, RemoteAddress: "203.0.113.20", RemotePort: 443, Process: "browser", PID: 991}},
+		Sections:    map[string]string{SectionConnections: SectionOK},
+	}
+	result, err := ToObservations(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value any
+	for _, fact := range result.Facts {
+		if fact.Key == facts.KeyNetOutboundConnections {
+			value = fact.Value
+		}
+	}
+	if value == nil {
+		t.Fatal("net.outbound_connections did not reach observations")
+	}
+	blob, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(blob)
+	if !strings.Contains(text, `"remote_address":"203.0.113.20"`) || strings.Contains(text, "50123") || strings.Contains(text, "991") {
+		t.Fatalf("connection projection leaked ephemeral fields or lost peer: %s", text)
+	}
+	if _, present := result.DeviceInfo["connections"]; present {
+		t.Error("peer data was copied into free-form DeviceInfo")
+	}
+}
+
+func TestToObservations_EmitsSuccessfulEmptySocketSnapshots(t *testing.T) {
+	rep := &Report{Mode: ModeLocal, Sections: map[string]string{
+		SectionBoundUDP: SectionOK, SectionConnections: SectionOK,
+	}}
+	result, err := ToObservations(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, fact := range result.Facts {
+		if fact.Key != facts.KeySvcBoundUdpSockets && fact.Key != facts.KeyNetOutboundConnections {
+			continue
+		}
+		value, ok := fact.Value.([]map[string]any)
+		if !ok || len(value) != 0 {
+			t.Fatalf("%s = %#v, want an explicit empty snapshot", fact.Key, fact.Value)
+		}
+		seen[fact.Key] = true
+	}
+	if !seen[facts.KeySvcBoundUdpSockets] || !seen[facts.KeyNetOutboundConnections] {
+		t.Fatalf("successful empty snapshots were omitted: %#v", seen)
+	}
+}
+
 // bound_local is written UNCONDITIONALLY, including when it is false.
 //
 // "Reachable only from this host" is a positive claim and so is its negation.

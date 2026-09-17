@@ -152,14 +152,17 @@ The agent can be configured via environment variables or a YAML file:
   [Host inventory](#host-inventory-local-and-remote-modes).
 - `HOST_INVENTORY_INTERVAL`: how often it does so (default: `24h`, minimum
   `1h` — a shorter value is raised to the minimum and logged).
+- `HOST_INVENTORY_CONNECTIONS_ENABLED`: explicit opt-in for collecting a
+  bounded remote-peer list (default: `false`). Destinations can reveal
+  application and browsing activity, so host inventory alone does not enable it.
 
 > **These are a starting position, not the source of truth.** Once the agent is
-> enrolled, `POLL_INTERVAL`, `HEARTBEAT_INTERVAL`, `VERBOSE` and both
-> `HOST_INVENTORY_*` settings are managed from the console (Discovery → Sensors
-> & Agents → the agent → Settings), and a later edit to this file is overwritten
-> at the next check-in. `PLATFORM_URL`, `REGISTRATION_KEY` and `AGENT_ID` stay
-> local — they are what the agent needs to reach the platform in the first
-> place. See [Agent and sensor settings](../../features/agent-and-sensor-settings.md).
+> enrolled, `POLL_INTERVAL`, `HEARTBEAT_INTERVAL`, `VERBOSE` and the inventory
+> schedule/interval settings are managed from the console. The connection
+> opt-in remains local to the agent, alongside the credentials and endpoint.
+> The managed settings are shown under Discovery → Sensors & Agents → the agent
+> → Settings, and a later local edit to them is overwritten at the next
+> check-in. See [Agent and sensor settings](../../features/agent-and-sensor-settings.md).
 
 ### Configuration File
 
@@ -335,10 +338,11 @@ the collection runs *from* an agent that can reach the target host.
 ./device-agent --host-inventory-once
 ```
 
-Collects this host once, prints the whole report as JSON, and exits. It contacts
-nothing and needs no enrollment, so you can see exactly what the agent would
-send before turning the schedule on. It exits `2` if some sections did not
-complete (the report is still printed).
+Collects this host once, prints the ordinary report as JSON, and exits. It
+contacts nothing and needs no enrollment. The preview excludes outbound
+connection peers; those remain behind the separate scheduled or requested
+collection opt-in. It exits `2` if some sections did not complete (the report
+is still printed).
 
 #### Exactly what runs, per OS
 
@@ -355,7 +359,8 @@ is changed, and no command takes an argument from outside the agent.
 | Hardware vendor, model, serial, UUID, BIOS | `/sys/class/dmi/id/{sys_vendor,product_name,product_serial,product_uuid,bios_version}` |
 | Interfaces and addresses | `ip -j addr` |
 | Installed packages | `dpkg-query -W -f=…`, or `rpm -qa --queryformat=…`, or `apk info -v` |
-| Listening sockets | `ss -ltnup`, falling back to `/proc/net/tcp` and `/proc/net/tcp6` |
+| Listening sockets and UDP bindings | `ss -ltnup`, falling back to `/proc/net/{tcp,tcp6,udp,udp6}` |
+| Outbound peers (opt-in) | `ss -tnup`, falling back to `/proc/net/{tcp,tcp6,udp,udp6}` |
 | Trust stores | `find /etc/ssl/certs /etc/pki/tls/certs -maxdepth 1 -type f …`, then reads the certificate files it lists |
 
 `product_serial` and `product_uuid` are root-readable only on most
@@ -373,7 +378,8 @@ estate would merge every host into one asset.
 | Hardware model, serial, platform UUID, boot ROM | `system_profiler SPHardwareDataType -json` |
 | Interfaces and addresses | `ifconfig -a` |
 | Installed packages | `pkgutil --pkgs`, plus each `/Applications/*/Contents/Info.plist` for names and versions |
-| Listening sockets | `lsof -nP -iTCP -sTCP:LISTEN` |
+| Listening sockets and UDP bindings | `lsof -nP -iTCP -sTCP:LISTEN`, `lsof -nP -iUDP` |
+| Outbound peers (opt-in) | `lsof -nP -iTCP -sTCP:ESTABLISHED` and connected UDP rows |
 | Trust stores | `/etc/ssl/cert.pem`, `/private/etc/ssl/certs` |
 
 The **System and login Keychains are not read.** Reading a keychain means asking
@@ -389,7 +395,8 @@ inventory has no business holding.
 | Hardware vendor, model, UUID, serial, BIOS | `Get-CimInstance Win32_ComputerSystemProduct`, `Win32_BIOS` |
 | Installed programs | `Get-ItemProperty` over the Uninstall keys under `HKLM:\SOFTWARE\…` and `HKLM:\SOFTWARE\WOW6432Node\…` |
 | Interfaces and addresses | `Get-NetAdapter`, `Get-NetIPAddress` |
-| Listening sockets | `Get-NetTCPConnection -State Listen`, `Get-NetUDPEndpoint` |
+| Listening sockets and UDP bindings | `Get-NetTCPConnection -State Listen`; `Get-NetUDPEndpoint` is retained separately with unknown role |
+| Outbound peers (opt-in) | `Get-NetTCPConnection -State Established`; this API exposes no UDP peer |
 | Certificate stores | `Get-ChildItem Cert:\LocalMachine\{Root,CA,My}` — **subject, issuer, thumbprint and expiry only** |
 
 Remote collection on Windows uses **PowerShell over SSH**, which needs the

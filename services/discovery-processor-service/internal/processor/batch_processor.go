@@ -20,6 +20,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/approval"
 	"github.com/vistasecurity/vistaplatform/shared/autoscan"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 )
 
@@ -213,6 +214,12 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 	type externalEntry struct {
 		Discovery      *models.SensorDiscovery
 		Classification *models.NetworkClassification
+		// HostnameSourceKind is the provenance of Discovery.Hostname in the
+		// ADR-0005 vocabulary, or "" when nothing stated it. Carried beside
+		// the discovery rather than on it because sensor_discoveries has no
+		// column for it — it exists to travel to external_connections, which
+		// does.
+		HostnameSourceKind string
 	}
 	var externalEntries []externalEntry
 	var findingsWithStatus []FindingWithStatus
@@ -222,6 +229,11 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 	// retries it with backoff instead of treating a dropped connection as done.
 	externalFailed := 0
 	var externalErr error
+
+	// What each destination in this batch was actually asked for, before any
+	// row is looked at on its own. The active enricher's row cannot answer that
+	// question about itself — its passive sibling can. See batchSNIIndex.
+	sniIndex := buildBatchSNIIndex(discoveries)
 
 	for _, discovery := range discoveries {
 		// Host observations (asset-inventory ADR-0004 D2) travel through this
@@ -237,9 +249,23 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 		// hostname field destroys the provenance the identification engine
 		// needs, and for an observation whose dest_ip is 0.0.0.0 ("no address
 		// observed") a lookup is a wasted query as well.
-		if !hostObservation && (discovery.Hostname == nil || *discovery.Hostname == "") {
-			if resolved := resolveMissingHostname(discovery.Metadata, discovery.DestIP, reverseDNSLookup); resolved != "" {
-				discovery.Hostname = &resolved
+		//
+		// The provenance of whatever name the row ends up with is tracked
+		// alongside it. A name the row ALREADY carried is measured: every
+		// producer that fills sensor_discoveries.hostname fills it from
+		// something read off the wire — the sensor's own reported hostname,
+		// raw_metadata's hostname, or the captured SNI (sensor-manager's
+		// StoreDiscoveries), or the SNI alone (pcap-processor). None of them
+		// resolves anything. The only inference in this pipeline is the PTR
+		// lookup below, and it is the only thing labelled `inferred`.
+		hostnameSourceKind := ""
+		if discovery.Hostname != nil && strings.TrimSpace(*discovery.Hostname) != "" {
+			hostnameSourceKind = string(identity.SourceMeasured)
+		} else if !hostObservation {
+			if resolved := resolveMissingHostname(discovery.Metadata, discovery.DestIP, sniIndex.lookup(discovery), lookupPTR); resolved.Name != "" {
+				name := resolved.Name
+				discovery.Hostname = &name
+				hostnameSourceKind = resolved.SourceKind
 			}
 		}
 
@@ -283,8 +309,9 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 		if !hostObservation && classification.Ownership == "third_party" {
 			if discovery.SourceIP != nil && *discovery.SourceIP != "" {
 				externalEntries = append(externalEntries, externalEntry{
-					Discovery:      discovery,
-					Classification: classification,
+					Discovery:          discovery,
+					Classification:     classification,
+					HostnameSourceKind: hostnameSourceKind,
 				})
 			} else {
 				fmt.Printf("Warning: skipping third-party discovery %s (no source IP)\n", discovery.ID)
@@ -330,6 +357,16 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 		}
 		finding.RawData["network_ownership"] = classification.Ownership
 		finding.RawData["network_type"] = classification.Type
+		if hostnameSourceKind != "" {
+			// inventory-service can also route a finding to
+			// external_connections from the INGEST side (AssetService's
+			// routeToExternalConnection), on its own classification rather than
+			// ours. A name that reached this row by reverse DNS must still be
+			// labelled an inference when it arrives there, or it outranks a
+			// stored measurement and we are back where we started by a
+			// different door.
+			finding.RawData["dest_hostname_source_kind"] = hostnameSourceKind
+		}
 		if discovery.SourceIP != nil && *discovery.SourceIP != "" {
 			finding.RawData["source_ip"] = *discovery.SourceIP
 		}
@@ -399,8 +436,15 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 			Protocol: d.Protocol,
 			SensorID: &d.SensorID,
 		}
+		if sourceAssetID := sourceAssetIDFromMetadata(d.Metadata); sourceAssetID != nil {
+			req.SourceAssetID = sourceAssetID
+		}
 		if d.Hostname != nil {
 			req.DestHostname = d.Hostname
+			if entry.HostnameSourceKind != "" {
+				kind := entry.HostnameSourceKind
+				req.DestHostnameSourceKind = &kind
+			}
 		}
 		if crypto != nil {
 			req.ProtocolVersion = crypto.ProtocolVersion
@@ -545,6 +589,25 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 	}
 
 	return nil
+}
+
+func sourceAssetIDFromMetadata(raw []byte) *uuid.UUID {
+	if len(raw) == 0 {
+		return nil
+	}
+	var metadata map[string]any
+	if json.Unmarshal(raw, &metadata) != nil {
+		return nil
+	}
+	if metadata["discovery_type"] != "host_connection" || metadata["discovery_method"] != "host_inventory" {
+		return nil
+	}
+	value, _ := metadata["source_asset_id"].(string)
+	id, err := uuid.Parse(strings.TrimSpace(value))
+	if err != nil {
+		return nil
+	}
+	return &id
 }
 
 // FindingWithStatus pairs a converted finding with the asset status
@@ -931,17 +994,132 @@ func shouldKeepCloudPlaceholderManaged(discovery *models.SensorDiscovery, classi
 // passive DNS capture is unaffected by this — it is a different code path
 // entirely and never reaches here.
 //
+// siblingSNI is the SNI another row in the SAME batch used for the same
+// destination — see batchSNIIndex. It is the active enricher's missing half:
+// the enrichment row has no `sni` key of its own, so without it the function
+// finds nothing to prefer and falls straight through to the PTR, which is
+// exactly how this shipped broken the first time.
+//
+// The returned value carries its own provenance, because the caller needs to
+// know which of the three answers it got, not just the string.
+//
 // lookupPTR is injected — production passes reverseDNSLookup — so callers
 // that only want to exercise the ordering (SNI beats DNS) are not forced to
 // perform a real network lookup.
-func resolveMissingHostname(metadata []byte, destIP string, lookupPTR func(string) string) string {
+func resolveMissingHostname(metadata []byte, destIP string, siblingSNI string, lookupPTR func(string) string) resolvedHostname {
 	if sni := sniHostnameFromDiscoveryMetadata(metadata); sni != "" {
-		return sni
+		return resolvedHostname{Name: sni, SourceKind: string(identity.SourceMeasured)}
+	}
+	// The SNI its own sibling captured. Same measurement, one row over — see
+	// batchSNIIndex for why it is on a different row and why borrowing it is
+	// sound.
+	if siblingSNI != "" {
+		return resolvedHostname{Name: siblingSNI, SourceKind: string(identity.SourceMeasured)}
 	}
 	if !isPublicAddress(destIP) {
+		return resolvedHostname{}
+	}
+	if name := lookupPTR(destIP); name != "" {
+		return resolvedHostname{Name: name, SourceKind: string(identity.SourceInferred)}
+	}
+	return resolvedHostname{}
+}
+
+// resolvedHostname is a hostname together with WHERE IT CAME FROM, in the
+// ADR-0005 vocabulary (shared/identity.SourceKind).
+//
+// The provenance travels with the name for the rest of the pipeline because
+// the two are one claim. A name with no provenance is exactly what let a PTR
+// answer overwrite a captured SNI in external_connections: both were just
+// strings by the time they reached the upsert, and the later one won.
+//
+// A zero value means "no name resolved" — Name == "" and SourceKind == "". Do
+// not read an empty SourceKind on a non-empty Name as `inferred`; nothing
+// produces that combination here, and the three states (measured, inferred,
+// unstated) are kept apart all the way to the column.
+type resolvedHostname struct {
+	Name       string
+	SourceKind string
+}
+
+// batchSNIIndex answers "what hostname did anything else in this batch ask
+// this destination for?".
+//
+// The active TLS enricher probes a destination BECAUSE a passive capture saw a
+// connection to it, and it writes its result as a second sensor_discoveries
+// row — same tenant, same batch, same dest_ip/port/protocol, milliseconds
+// apart. That second row carries the measured certificate and cipher but no
+// `sni` key at all: the enricher knows the name it probed with and does not
+// record it. So the row that reaches external_connections LAST, and therefore
+// decides the stored hostname, is precisely the row that cannot see the SNI —
+// even though the SNI is sitting on its sibling.
+//
+// That is the whole of the reason `slack.com` became
+// `ec2-54-163-235-119.compute-1.amazonaws.com`. Reading SNI per-row can never
+// fix it; the batch is the smallest scope where both halves are in hand.
+//
+// AMBIGUITY IS REFUSED, NOT GUESSED. One address can serve many vhosts — that
+// is what SNI is FOR — so a destination the batch contacted under two
+// different names yields nothing rather than one of them picked arbitrarily.
+// A borrowed name has to be the only candidate to be a fact about this flow.
+type batchSNIIndex map[string]string
+
+// ambiguousSNI marks a destination the batch contacted under more than one
+// name. Stored in-band rather than in a second map: it cannot collide with a
+// real answer, because sniHostnameFromMap rejects anything with no plausible
+// DNS shape, and an empty-string key is never a hostname.
+const ambiguousSNI = "\x00ambiguous"
+
+// buildBatchSNIIndex indexes every SNI observed in the batch by the
+// destination endpoint it was sent to.
+//
+// Host observations are excluded from both halves: they carry no SNI, their
+// dest_ip is routinely 0.0.0.0 ("no address observed"), and their names are a
+// different measurement (what the host called ITSELF) that must not be mixed
+// into what a client asked a remote endpoint for.
+func buildBatchSNIIndex(discoveries []*models.SensorDiscovery) batchSNIIndex {
+	index := batchSNIIndex{}
+	for _, d := range discoveries {
+		if d == nil || isHostObservationDiscovery(d) {
+			continue
+		}
+		sni := sniHostnameFromDiscoveryMetadata(d.Metadata)
+		if sni == "" {
+			continue
+		}
+		key := destinationKey(d)
+		switch existing := index[key]; existing {
+		case "":
+			index[key] = sni
+		case sni, ambiguousSNI:
+			// Same name again, or already known ambiguous: nothing changes.
+		default:
+			index[key] = ambiguousSNI
+		}
+	}
+	return index
+}
+
+// lookup returns the single SNI this batch used for a discovery's destination,
+// or "" when there was none or more than one.
+func (b batchSNIIndex) lookup(d *models.SensorDiscovery) string {
+	if d == nil {
 		return ""
 	}
-	return lookupPTR(destIP)
+	sni := b[destinationKey(d)]
+	if sni == ambiguousSNI {
+		return ""
+	}
+	return sni
+}
+
+// destinationKey identifies the endpoint a discovery describes: protocol,
+// address and port together. Protocol is folded to lower case because the
+// producers spell it inconsistently ("TLS", "tls"); the address is not
+// normalized beyond trimming, because two spellings of one address would key
+// apart and the only consequence is a borrow that does not happen.
+func destinationKey(d *models.SensorDiscovery) string {
+	return fmt.Sprintf("%s|%s|%d", strings.ToLower(strings.TrimSpace(d.Protocol)), strings.TrimSpace(d.DestIP), d.Port)
 }
 
 // isPublicAddress reports whether destIP is a genuinely public unicast
@@ -980,6 +1158,16 @@ func isPublicAddress(destIP string) bool {
 // customer's network ever answers to. That fabricated name must never become
 // a discovered asset's display name; isClusterInternalPTRName rejects it so
 // the caller falls back to the address until a real name arrives.
+// lookupPTR is the reverse-DNS lookup ProcessBatch actually calls. It is a
+// package-level var so a test can drive the REAL batch path — the loop, the
+// sibling-SNI index, the upsert payload — without a live resolver and without
+// depending on what the public DNS happens to answer for a fixture address.
+//
+// The same seam as inventory-service's `lookupHost`, for the same reason: a
+// hostname fix that is only ever exercised through the helper is how the first
+// one passed its tests and stayed broken in production.
+var lookupPTR = reverseDNSLookup
+
 func reverseDNSLookup(ipAddress string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

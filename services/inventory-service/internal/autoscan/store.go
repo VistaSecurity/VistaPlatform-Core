@@ -611,3 +611,62 @@ func (s *Store) StampCompletedScans(ctx context.Context, tenantID uuid.UUID) (in
 	}
 	return int(stamped), nil
 }
+
+// ClearUnstartedScanStamps removes the "last automatically scanned" stamp from
+// assets whose recorded job failed WITHOUT EVER STARTING. It returns how many
+// assets it un-stamped.
+//
+// [RecordScanned] stamps at enqueue, deliberately: "a job that dispatches and
+// then fails still means the address was probed, and re-stamping only on
+// success would have a permanently-failing host re-queued on every single
+// tick." That reasoning holds for a job that ran and got nothing back — an
+// unanswered probe is still a probe.
+//
+// It does NOT hold when the job never ran at all. A sensor that refuses the
+// command ("Unknown command type: discovery_job") or never collects it before
+// the command expires leaves every target untouched; cluster-sensor-service
+// says so in the job's own error_message, which ends "nothing was scanned".
+// The stamp written at enqueue then claims a probe that never happened, and
+// the asset is skipped for a full rescan interval on the strength of it. That
+// is the exact shape CLAUDE.md warns about: something reporting success while
+// doing nothing.
+//
+// The discriminator is `started_at`, not the message text. A sensor that
+// collected the job sets it (sensor-manager's discovery_job_service.go fills
+// `started_at = COALESCE(started_at, command.delivered_at)` when the sensor
+// reports back), and the platform executor sets it on the `running`
+// transition. A job that is `failed` with `started_at IS NULL` is one nothing
+// ever began. Reading the structured column rather than grepping the human
+// sentence is what keeps this from breaking the next time the wording changes.
+//
+// Only the job the asset's stamp actually NAMES is consulted
+// (`last_auto_scan_job_id`), so a later successful sweep's stamp is never
+// undone by an older failure. Idempotent — the sweep calls it on every pass,
+// and an asset whose stamp has already been cleared no longer matches.
+func (s *Store) ClearUnstartedScanStamps(ctx context.Context, tenantID uuid.UUID) (int, error) {
+	var cleared int64
+	err := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
+		res, err := tx.ExecContext(ctx, `
+			UPDATE assets a
+			SET metadata   = a.metadata - 'last_auto_scan_at' - 'last_auto_scan_job_id',
+			    updated_at = now()
+			FROM discovery_jobs j
+			WHERE a.tenant_id = $1
+			  AND a.deleted_at IS NULL
+			  AND j.tenant_id = a.tenant_id
+			  AND j.id::text = a.metadata ->> 'last_auto_scan_job_id'
+			  AND j.status = 'failed'
+			  AND j.started_at IS NULL
+			  AND j.metadata @> $2::jsonb`,
+			tenantID, originFilterJSON)
+		if err != nil {
+			return err
+		}
+		cleared, err = res.RowsAffected()
+		return err
+	})
+	if err != nil {
+		return 0, fmt.Errorf("clear stamps for automatic scans that never started: %w", err)
+	}
+	return int(cleared), nil
+}

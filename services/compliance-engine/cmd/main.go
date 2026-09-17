@@ -568,6 +568,20 @@ func main() {
 	defer certLadderJob.Stop()
 	log.Printf("🪜 Certificate ladder scan started (12h interval)")
 
+	// Certificate COMPLIANCE band scan: re-materializes findings for certificates
+	// whose verdict moves with nothing but the clock. cert_expiration_days is the
+	// only purely time-dependent measurement, and materialization is otherwise
+	// event-driven, so a certificate crossing the 90- or 30-day threshold with no
+	// inventory change was never re-evaluated. Distinct from the ladder
+	// scan above: that one raises ALERTS, this one reconciles FINDINGS and the
+	// tenant_framework_scores rollup.
+	certBandJob := jobs.NewCertComplianceBandScanJob(db, bypassDB, findingsService, 12*time.Hour)
+	certBandJob.Start()
+	defer certBandJob.Stop()
+	if jobs.CertComplianceBandScanEnabled() {
+		log.Printf("📆 Certificate compliance band scan started (12h interval)")
+	}
+
 	// Operational heartbeat detectors: raise a fixed high-severity alert when a
 	// sensor or discovery agent stops reporting for >15m, auto-resolve when the
 	// heartbeat returns. Scanned every 5m so an alert opens within ~5m of the

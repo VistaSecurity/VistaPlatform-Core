@@ -4719,9 +4719,14 @@ export interface components {
          *       access point and a desk phone also perform.
          *     * `mdns_service` — one DNS-SD service type in its registry spelling,
          *       lowercase (`_ipp._tcp`). Exact, case-insensitive.
+         *     * `os_name` — an RE2 regexp matched against the operating system the
+         *       host named when asked (the `os.name` fact). The pattern carries its
+         *       own anchoring, as a banner's does. The only kind whose evidence comes
+         *       from inside the host, and the only one a general-purpose computer can
+         *       match at all.
          * @enum {string}
          */
-        ClassificationRuleKind: "oui" | "sysobjectid" | "enip" | "cloud_type" | "banner" | "port_profile" | "model" | "platform" | "cdp_capabilities" | "lldp_capability" | "mdns_service";
+        ClassificationRuleKind: "oui" | "sysobjectid" | "enip" | "cloud_type" | "banner" | "port_profile" | "model" | "platform" | "cdp_capabilities" | "lldp_capability" | "mdns_service" | "os_name";
         /**
          * @description One curated rule. Identity is `(rule_kind, pattern)`.
          *

@@ -8,7 +8,7 @@ import { SensorDetailDrawer } from './sensor-detail-drawer';
 import { AgentDetailDrawer, type DeviceAgentRow } from './agent-detail-drawer';
 import { AgentFleetDefaultsModal } from './agent-fleet-defaults-modal';
 import { SensorFleetDefaultsModal } from './sensor-fleet-defaults-modal';
-import { profileLabel, jobsSummary, hostSummary, addressTooltip, isPlatformManaged, hostInventorySummary } from './agent-fleet';
+import { profileLabel, jobsSummary, hostSummary, addressTooltip, isPlatformManaged, hostInventorySummary, partitionSensorFleet } from './agent-fleet';
 
 // Discovery → Sensors & Agents. TWO tables, because a sensor and a discovery
 // agent are two different things:
@@ -25,11 +25,32 @@ import { profileLabel, jobsSummary, hostSummary, addressTooltip, isPlatformManag
 // jobs it has run — had nowhere to go. Merging them cost both kinds their detail
 // to gain a row count nobody needed.
 //
+// The Discovery agents table is fed from TWO sources, because the fleet has two
+// kinds of interrogation agent and they are stored in different tables:
+//
+//   the platform agent — one per tenant, in-cluster, shared by every tenant.
+//                        Its row lives in `sensors` (profile
+//                        `device_interrogation`) purely because the
+//                        interrogation pipeline attributes discoveries to it —
+//                        see isPlatformInterrogationAgent. It is not a sensor
+//                        and used to render in the sensor table above, under
+//                        Type "api" with an empty Segment.
+//   enrolled agents     — the downloadable binary an operator installs, from
+//                        device-interrogation-service's `device_agents`.
+//
 // "Assets found" joins GET /sensors/discovery-counts (sensors only); "Segment"
 // renders the monitored interface subnets a sensor reports. Write surface
 // (register / delete / pending registrations) lives in sensor-modals.tsx.
 
 type SensorRow = NonNullable<ReturnType<typeof useSensors>['data']>[number];
+
+// The Discovery agents table's row. A discriminated union rather than a common
+// interface: the platform agent and an enrolled agent genuinely know different
+// things about themselves, and flattening them into one shape is what put "—"
+// in half the columns the last time these two fleets shared a table.
+type AgentTableRow =
+  | { kind: 'platform'; sensor: SensorRow }
+  | { kind: 'agent'; agent: DeviceAgentRow };
 
 const SENSOR_COLS = [
   { label: 'Sensor', w: '1.4fr' },
@@ -65,13 +86,29 @@ export function SensorsPage() {
   const [fleetDefaultsOpen, setFleetDefaultsOpen] = useState(false);
   const [sensorDefaultsOpen, setSensorDefaultsOpen] = useState(false);
 
-  const sensors = q.data ?? [];
+  // The platform device-interrogation agent arrives on the `sensors` query — it
+  // has a `sensors` row so the interrogation pipeline has something to attribute
+  // discoveries to — but it is an agent, so it is partitioned out here and
+  // rendered in the Discovery agents table below. See
+  // isPlatformInterrogationAgent for why the predicate needs both markers.
+  const { sensors, interrogationAgents: platformAgents } = partitionSensorFleet(q.data ?? []);
   const agents = agentsQ.data ?? [];
 
   // The page count still spans both fleets — the tenant thinks of this page as
-  // "everything I have deployed", even though the tables are separate.
+  // "everything I have deployed", even though the tables are separate. Moving a
+  // row between the two tables must not change it, so the platform agent is
+  // still counted; it just is not counted as a sensor.
   const bothLoaded = !q.isLoading && !agentsQ.isLoading;
-  const total = sensors.length + agents.length;
+  const total = sensors.length + platformAgents.length + agents.length;
+
+  // One list for the Discovery agents table, tagged by which table it came from
+  // so each row renders from the fields it actually has rather than a lowest
+  // common denominator. The platform agent goes first: it is present for every
+  // tenant and is the one nobody deployed.
+  const agentRows: AgentTableRow[] = [
+    ...platformAgents.map((sensor) => ({ kind: 'platform' as const, sensor })),
+    ...agents.map((agent) => ({ kind: 'agent' as const, agent })),
+  ];
 
   // The sensors table owns the page's empty state: if there are no sensors AND
   // no agents, this is the one place that says so. When there are agents but no
@@ -162,87 +199,39 @@ export function SensorsPage() {
       )}
 
       {/* B-28: a failed agents fetch must say so, not silently render as "no
-          agents" — agents.length is 0 on error too since agentsQ.data ?? []. */}
-      {agentsQ.isError ? (
-        <div style={{ marginTop: 26 }}>{queryNote(agentsQ, false, { thing: 'discovery agents' })}</div>
-      ) : agents.length > 0 && (
+          agents" — agents.length is 0 on error too since agentsQ.data ?? [].
+          The note sits ABOVE the table rather than replacing it, because the
+          platform agent rows come from the SENSORS query: a failed
+          device_agents fetch must not take a fleet it never fed off the page. */}
+      {(agentRows.length > 0 || agentsQ.isError) && (
         <div style={{ marginTop: 26 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
             <h3 style={{ margin: 0, fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 14, color: 'var(--app-t1)' }}>Discovery agents</h3>
-            <span className="mono" style={{ fontSize: 12, color: 'var(--app-t3)' }}>{agents.length}</span>
+            <span className="mono" style={{ fontSize: 12, color: 'var(--app-t3)' }}>{agentRows.length}</span>
           </div>
-          <DTable
-            cols={AGENT_COLS}
-            rows={agents}
-            rowKey={(a) => a.id}
-            onRow={(a) => setSelectedAgent(a)}
-            render={(a) => {
-              const on = sensorOnline(a.status, a.last_heartbeat);
-              const jobs = jobsSummary(a);
-              const host = hostSummary(a);
-              return (
-                <>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 }}>
-                    <span style={{ width: 8, height: 8, borderRadius: 50, flex: 'none', background: on ? 'var(--ok)' : 'var(--danger)' }} />
-                    <div style={{ minWidth: 0 }}>
-                      {/* Agents can enroll before a name is set; fall back to a
-                          short id so the row is never blank. */}
-                      <CellMono v={a.name || `agent-${a.id.slice(0, 8)}`} />
-                      <div style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {[a.description, a.platform].filter(Boolean).join(' · ') || '—'}
-                      </div>
-                      {/* What the agent found out about its OWN host, which the
-                          jobs column cannot say: a host inventory is not work
-                          anybody queued. Omitted entirely when the agent has
-                          never reported one — see hostInventorySummary. */}
-                      {hostInventorySummary(a) && (
-                        <div style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {hostInventorySummary(a)}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                  {/* The cell shows the primary and a count; the tooltip carries
-                      the full inventory with prefixes, which is what makes the
-                      addresses answer "which segments is this agent on?". */}
-                  <div style={{ minWidth: 0 }} title={addressTooltip(a) || undefined}>
-                    <CellMono v={host.primary} />
-                    {host.extra && (
-                      <div style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{host.extra}</div>
-                    )}
-                  </div>
-                  <CellTxt v={profileLabel(a.profile)} />
-                  <div style={{ minWidth: 0 }}>
-                    <CellTxt v={jobs.last} c={a.last_job_at ? 'var(--app-t2)' : 'var(--app-t3)'} />
-                    {jobs.count && (
-                      <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>{jobs.count}</div>
-                    )}
-                  </div>
-                  <CellMono v={a.version ? 'v' + a.version : '—'} c="var(--app-t3)" />
-                  <StatusCell status={a.status} online={on} />
-                  <span style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                    {/* discovery.manage, not sensors.delete: the endpoint behind
-                        this is device-interrogation-service's, gated the same as
-                        its other destructive routes. */}
-                    {isPlatformManaged(a) ? (
-                      <PlatformLockCell />
-                    ) : (
-                      <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage} fallback={<span />}>
-                        <button
-                          className="ui-btn sm ghost"
-                          style={{ color: 'var(--danger-text)', flex: 'none', padding: '0 7px' }}
-                          title="Delete agent"
-                          onClick={(e) => { e.stopPropagation(); setAgentToDelete({ id: a.id, name: a.name || `agent-${a.id.slice(0, 8)}` }); }}
-                        >
-                          <Icon name="x" size={13} />
-                        </button>
-                      </PermissionGate>
-                    )}
-                  </span>
-                </>
-              );
-            }}
-          />
+          {agentsQ.isError && (
+            <div style={{ marginBottom: 12 }}>{queryNote(agentsQ, false, { thing: 'discovery agents' })}</div>
+          )}
+          {agentRows.length > 0 && (
+            <DTable
+              cols={AGENT_COLS}
+              rows={agentRows}
+              // Prefixed, because the two fleets are separate id spaces and a
+              // bare id could collide across them.
+              rowKey={(r) => (r.kind === 'platform' ? `platform:${r.sensor.id}` : `agent:${r.agent.id}`)}
+              // The platform agent opens the SENSOR drawer: its row is a sensor
+              // row, and that drawer already knows to drop the health, command,
+              // config and certificate tabs for a platform row while keeping
+              // Discoveries — which is where the asset count it used to show in
+              // the sensor table's "Assets found" column lives. The agent drawer
+              // would call device-interrogation-service's per-agent config
+              // endpoints with a sensor id and 404.
+              onRow={(r) => (r.kind === 'platform' ? setSelected(r.sensor) : setSelectedAgent(r.agent))}
+              render={(r) => (r.kind === 'platform'
+                ? <PlatformAgentCells sensor={r.sensor} />
+                : <EnrolledAgentCells agent={r.agent} onDelete={setAgentToDelete} />)}
+            />
+          )}
         </div>
       )}
 
@@ -256,6 +245,116 @@ export function SensorsPage() {
       {fleetDefaultsOpen && <AgentFleetDefaultsModal onClose={() => setFleetDefaultsOpen(false)} />}
       {sensorDefaultsOpen && <SensorFleetDefaultsModal onClose={() => setSensorDefaultsOpen(false)} />}
     </PageWrap>
+  );
+}
+
+// ---- Discovery agents table cells -----------------------------------------
+// One renderer per row kind, so neither has to pretend it knows something it
+// does not. Both emit exactly AGENT_COLS.length cells, in order.
+
+/**
+ * The in-cluster platform device-interrogation agent.
+ *
+ * Every tenant has exactly one and nobody deployed it, so the columns an
+ * enrolled agent fills from its own host report are answered differently here:
+ * Host is the cluster, and the row carries no job counters at all. The jobs it
+ * runs are real — device_jobs rows with a NULL agent_id, which the Jobs page
+ * resolves to "Platform Agent" — they are just not counted on this row, so the
+ * cell says nothing rather than claiming zero.
+ */
+function PlatformAgentCells({ sensor }: { sensor: SensorRow }) {
+  const on = sensorOnline(sensor.status, sensor.last_heartbeat);
+  return (
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 }}>
+        <span style={{ width: 8, height: 8, borderRadius: 50, flex: 'none', background: on ? 'var(--ok)' : 'var(--danger)' }} />
+        <div style={{ minWidth: 0 }}>
+          <CellMono v={sensor.name} />
+          <div style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {['Platform-managed', on ? relTime(sensor.last_heartbeat) : null].filter(Boolean).join(' · ')}
+          </div>
+        </div>
+      </div>
+      <CellTxt v="In-cluster" />
+      <CellTxt v={profileLabel(sensor.profile)} />
+      <span title="The platform agent's jobs are listed under Discovery → Jobs, attributed to &quot;Platform Agent&quot;. They are not counted on this row.">
+        <CellTxt v="—" c="var(--app-t3)" />
+      </span>
+      <CellMono v={sensor.version ? 'v' + sensor.version : '—'} c="var(--app-t3)" />
+      <StatusCell status={sensor.status} online={on} />
+      <span style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <PlatformLockCell />
+      </span>
+    </>
+  );
+}
+
+/** An operator-installed device agent, from device-interrogation-service. */
+function EnrolledAgentCells({ agent: a, onDelete }: { agent: DeviceAgentRow; onDelete: (v: { id: string; name: string }) => void }) {
+  const on = sensorOnline(a.status, a.last_heartbeat);
+  const jobs = jobsSummary(a);
+  const host = hostSummary(a);
+  const name = a.name || `agent-${a.id.slice(0, 8)}`;
+  return (
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 }}>
+        <span style={{ width: 8, height: 8, borderRadius: 50, flex: 'none', background: on ? 'var(--ok)' : 'var(--danger)' }} />
+        <div style={{ minWidth: 0 }}>
+          {/* Agents can enroll before a name is set; fall back to a short id so
+              the row is never blank. */}
+          <CellMono v={name} />
+          <div style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {[a.description, a.platform].filter(Boolean).join(' · ') || '—'}
+          </div>
+          {/* What the agent found out about its OWN host, which the jobs column
+              cannot say: a host inventory is not work anybody queued. Omitted
+              entirely when the agent has never reported one — see
+              hostInventorySummary. */}
+          {hostInventorySummary(a) && (
+            <div style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {hostInventorySummary(a)}
+            </div>
+          )}
+        </div>
+      </div>
+      {/* The cell shows the primary and a count; the tooltip carries the full
+          inventory with prefixes, which is what makes the addresses answer
+          "which segments is this agent on?". */}
+      <div style={{ minWidth: 0 }} title={addressTooltip(a) || undefined}>
+        <CellMono v={host.primary} />
+        {host.extra && (
+          <div style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{host.extra}</div>
+        )}
+      </div>
+      <CellTxt v={profileLabel(a.profile)} />
+      <div style={{ minWidth: 0 }}>
+        <CellTxt v={jobs.last} c={a.last_job_at ? 'var(--app-t2)' : 'var(--app-t3)'} />
+        {jobs.count && (
+          <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>{jobs.count}</div>
+        )}
+      </div>
+      <CellMono v={a.version ? 'v' + a.version : '—'} c="var(--app-t3)" />
+      <StatusCell status={a.status} online={on} />
+      <span style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        {/* discovery.manage, not sensors.delete: the endpoint behind this is
+            device-interrogation-service's, gated the same as its other
+            destructive routes. */}
+        {isPlatformManaged(a) ? (
+          <PlatformLockCell />
+        ) : (
+          <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage} fallback={<span />}>
+            <button
+              className="ui-btn sm ghost"
+              style={{ color: 'var(--danger-text)', flex: 'none', padding: '0 7px' }}
+              title="Delete agent"
+              onClick={(e) => { e.stopPropagation(); onDelete({ id: a.id, name }); }}
+            >
+              <Icon name="x" size={13} />
+            </button>
+          </PermissionGate>
+        )}
+      </span>
+    </>
   );
 }
 

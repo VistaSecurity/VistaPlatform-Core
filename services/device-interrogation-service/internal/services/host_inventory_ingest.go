@@ -29,14 +29,30 @@ package services
 //
 // # Three things it must not do
 //
-//  1. **Never guess a class.** An OS name and a hardware model are evidence,
-//     and turning evidence into a class is a RULE's job (ADR-0004 D6's curated
-//     table). The seam is asked — see classProposal — and the answer is
-//     RECORDED rather than applied, because writing a rule's answer as the
-//     asset's class with `class_source_kind: measured` would state a
-//     measurement nobody took. Workstream 2.10b is where a proposal becomes a
-//     proposal properly; until then the class is `unknown_host`, which is
-//     coarse and true.
+//  1. **Never guess a class — but do ask, and ask with everything.** An OS
+//     name and a hardware model are evidence, and turning evidence into a class
+//     is a RULE's job (ADR-0004 D6's curated table). The seam is asked — see
+//     hostInventoryClassEvidence — and what happens to the answer depends on
+//     what the asset already says:
+//
+//     A NEW asset is created with the rules' class, `class_source_kind: rule`
+//     and a `class_source_ref` naming the row, exactly as inventory-service's
+//     intake does. `measured` would have been the false provenance the original
+//     note refused, and it refused it by applying nothing at all; `rule` is the
+//     spelling workstream 2.10b added for precisely this, and the asset lands in
+//     `pending_approval` either way, so approving it approves the class.
+//
+//     An EXISTING asset still on the `unknown_host` floor is PROMOTED
+//     ([classproposal.Promote]) — nothing was ever decided about it, so there
+//     is nothing to review. This is the bug that prompted the change:
+//     classification ran once, at creation, from a passive sensor's address and
+//     MAC, and a full host inventory arriving three minutes later re-asked
+//     nothing. The asset stayed an "unknown host" identified by a bare IP while
+//     carrying its OS, vendor, model, serial, 106 packages and 83 sockets.
+//
+//     An existing asset holding a REAL class gets a proposal in Approvals and
+//     nothing else. That is the case where a person may have to choose, and it
+//     is also what stops two measured classes flapping on every collection.
 //  2. **Never retire what a failed step did not see.** Both sweeps here —
 //     installs absent from the package list, endpoints absent from the socket
 //     list — mark everything the current run did not touch. Run either after a
@@ -55,9 +71,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/netip"
+	"sort"
 	"strings"
 	"time"
 
@@ -65,11 +83,13 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/shared/ai/seams"
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
+	"github.com/vistasecurity/vistaplatform/shared/classify"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/hostinventory"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/classproposal"
 	"github.com/vistasecurity/vistaplatform/shared/software"
 	swpostgres "github.com/vistasecurity/vistaplatform/shared/software/postgres"
 )
@@ -111,6 +131,9 @@ type HostInventoryCounts struct {
 	// crypto configurations, external connections and ssh keys all point at
 	// endpoint rows.
 	EndpointsClosed int `json:"endpoints_closed"`
+	// ConnectionsQueued is the bounded, coalesced peer set handed to the
+	// existing discovery pipeline for ownership and approval routing.
+	ConnectionsQueued int `json:"connections_queued"`
 
 	// PackagesEnumerated is what the collector counted, and it is present only
 	// when the package step SUCCEEDED. Nil means the step failed or did not
@@ -126,9 +149,16 @@ type HostInventoryCounts struct {
 	// collector enumerated (an entry with no usable name is dropped).
 	InstallsActive int `json:"installs_active"`
 
-	// ClassProposal is what the Classifier seam made of the host's vendor and
-	// model, and ClassApplied says whether it was USED. It is false today, on
-	// purpose: see the file header.
+	// ClassProposal is what the Classifier seam made of the host's operating
+	// system, vendor, model and exposed ports, and ClassApplied says whether it
+	// reached the asset — as the class of a newly created one, or as a
+	// promotion off the `unknown_host` floor of an existing one.
+	//
+	// ClassApplied was hard-coded false until the rules were allowed to answer;
+	// it is computed now. A proposal WITHOUT an application is the ordinary
+	// outcome for an asset that already holds a class: the answer went to
+	// Approvals, and the job row saying `class_proposal: server,
+	// class_applied: false` is how an operator sees that without opening it.
 	ClassProposal string `json:"class_proposal,omitempty"`
 	ClassApplied  bool   `json:"class_applied"`
 
@@ -309,12 +339,24 @@ func (h *HostInventoryIngest) Materialise(
 	counts.Identifiers = len(observation.Identifiers)
 	counts.Endpoints = len(observation.Endpoints)
 
+	// The class, BEFORE the engine runs, because a newly created asset has to
+	// be born with it: `identity.Engine` reads the class off the observation at
+	// creation and never revisits it, so a class applied afterwards would mean
+	// a second write and a second history row for one decision.
+	prop := h.classifyHost(ctx, obs)
+	counts.ClassProposal = prop.Class
+	applied := classproposal.Apply(&observation, prop)
+
 	engine, _, err := h.sink.engine()
 	if err != nil {
 		return counts, fmt.Errorf("host inventory: identification engine unavailable: %w", err)
 	}
 
-	res, err := h.sink.resolveObservation(ctx, engine, observation)
+	// FirstHand: this is the host's own account of itself, taken by an agent on
+	// it or over an authenticated session to it. See [classIntent] for why that
+	// entitles this path to promote and the peer path does not.
+	res, class, err := h.sink.resolveObservationWith(ctx, engine, observation,
+		classIntent{Proposal: prop, FirstHand: true})
 	if err != nil {
 		return counts, fmt.Errorf("host inventory: resolving %s: %w", meta.label(), err)
 	}
@@ -356,6 +398,11 @@ func (h *HostInventoryIngest) Materialise(
 
 	counts.AssetID = res.Asset.ID
 	counts.AssetCreated = res.Outcome == identity.OutcomeCreated
+	// Two ways the class can have reached the asset, and they are mutually
+	// exclusive: applied at CREATION from the observation, or promoted onto an
+	// existing asset that was still on the floor. `applied` alone would claim a
+	// class on every match; `class.Promoted` alone would miss every create.
+	counts.ClassApplied = class.Promoted || (applied && counts.AssetCreated)
 
 	assetID, err := uuid.Parse(res.Asset.ID)
 	if err != nil {
@@ -384,6 +431,20 @@ func (h *HostInventoryIngest) Materialise(
 			counts.Errors = append(counts.Errors, fmt.Sprintf("writing facts: %v", err))
 		} else {
 			counts.Facts = len(factObs)
+		}
+	}
+
+	// --- remote connections -------------------------------------------------
+	// Publish measured peers into the same queue the passive sensor uses. That
+	// queue is where network-space ownership, auto-approval and public external
+	// connection routing already live; this producer must not reimplement them.
+	if ready, snapshotErr := connectionSnapshotReady(meta, obs); snapshotErr != nil {
+		counts.Errors = append(counts.Errors, snapshotErr.Error())
+	} else if ready {
+		if queued, qerr := h.writeConnections(ctx, tenantID, agentID, jobID, assetID, obs); qerr != nil {
+			counts.Errors = append(counts.Errors, fmt.Sprintf("queueing outbound connections: %v", qerr))
+		} else {
+			counts.ConnectionsQueued = queued
 		}
 	}
 
@@ -422,14 +483,174 @@ func (h *HostInventoryIngest) Materialise(
 		counts.EndpointsClosed = closed
 	}
 
-	// --- class proposal -----------------------------------------------------
-	counts.ClassProposal = classProposal(ctx, obs)
+	// --- the label ----------------------------------------------------------
+	//
+	// Same "better evidence wins" shape as the class, one column over. See
+	// nameAsset.
+	if err := h.nameAsset(ctx, tenantID, assetID, observation.Hostname); err != nil {
+		counts.Errors = append(counts.Errors, fmt.Sprintf("naming the asset: %v", err))
+	}
 
 	log.Printf("[HostInventory] %s → asset %s (created=%t): %d identifiers, %d facts, %d endpoints (-%d closed), installs +%d ~%d -%d",
 		meta.label(), counts.AssetID, counts.AssetCreated,
 		counts.Identifiers, counts.Facts, counts.Endpoints, counts.EndpointsClosed,
 		counts.InstallsCreated, counts.InstallsUpdated, counts.InstallsRemoved)
 	return counts, nil
+}
+
+type projectedConnection struct {
+	LocalAddress  string `json:"local_address"`
+	RemoteAddress string `json:"remote_address"`
+	RemotePort    int    `json:"remote_port"`
+	Transport     string `json:"transport"`
+	Process       string `json:"process"`
+}
+
+func connectionSnapshotReady(meta hostInventoryMetadata, obs *di.InterrogateResult) (bool, error) {
+	state, present := meta.Sections[hostinventory.SectionConnections]
+	if !present || state == "" {
+		// Privacy opt-out: the collector did not attempt the section.
+		return false, nil
+	}
+	if state == hostinventory.SectionFailed {
+		return false, errors.New("outbound connection collection failed; prior connection facts were left unchanged")
+	}
+	if state != hostinventory.SectionOK {
+		return false, fmt.Errorf("outbound connection collection is %s; prior connection facts were left unchanged", state)
+	}
+	if !hasFact(obs, facts.KeyNetOutboundConnections) {
+		return false, errors.New("outbound connection snapshot was marked complete but its fact was missing")
+	}
+	return true, nil
+}
+
+const maxHostInventoryConnections = 256
+
+// hostInventoryConnections repeats the collector's validation at the trust
+// boundary. Agents are upgradeable clients, so their cap and coalescing are a
+// bandwidth optimisation rather than a server-side guarantee.
+func hostInventoryConnections(obs *di.InterrogateResult, subject di.PeerRef) ([]projectedConnection, error) {
+	if obs == nil {
+		return nil, nil
+	}
+	want := identifierKey(subject)
+	var found bool
+	byKey := make(map[string]projectedConnection)
+	for _, fact := range obs.Facts {
+		if fact.Key != facts.KeyNetOutboundConnections {
+			continue
+		}
+		if found {
+			return nil, errors.New("more than one net.outbound_connections snapshot arrived")
+		}
+		found = true
+		if !fact.Subject.IsZero() && identifierKey(fact.Subject) != want {
+			return nil, errors.New("net.outbound_connections describes a different subject than the host report")
+		}
+		blob, err := json.Marshal(fact.Value)
+		if err != nil {
+			return nil, fmt.Errorf("encode net.outbound_connections: %w", err)
+		}
+		var decoded []projectedConnection
+		if err := json.Unmarshal(blob, &decoded); err != nil {
+			return nil, fmt.Errorf("decode net.outbound_connections: %w", err)
+		}
+		for _, c := range decoded {
+			local, lerr := netip.ParseAddr(strings.TrimSpace(c.LocalAddress))
+			remote, rerr := netip.ParseAddr(strings.TrimSpace(c.RemoteAddress))
+			if lerr != nil || rerr != nil {
+				continue
+			}
+			local, remote = local.Unmap(), remote.Unmap()
+			transport := strings.ToLower(strings.TrimSpace(c.Transport))
+			if local.IsLoopback() || local.IsUnspecified() || local.IsLinkLocalUnicast() || local.IsMulticast() ||
+				remote.IsLoopback() || remote.IsUnspecified() || remote.IsLinkLocalUnicast() || remote.IsMulticast() ||
+				c.RemotePort < 1 || c.RemotePort > 65535 || (transport != "tcp" && transport != "udp") {
+				continue
+			}
+			c.LocalAddress = local.String()
+			c.RemoteAddress = remote.String()
+			c.Transport = transport
+			c.Process = strings.TrimSpace(c.Process)
+			key := fmt.Sprintf("%s|%s|%s|%d", c.Transport, c.LocalAddress, c.RemoteAddress, c.RemotePort)
+			if prior, ok := byKey[key]; ok {
+				if prior.Process == "" && c.Process != "" {
+					byKey[key] = c
+				}
+				continue
+			}
+			byKey[key] = c
+		}
+	}
+	keys := make([]string, 0, len(byKey))
+	for key := range byKey {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if len(keys) > maxHostInventoryConnections {
+		keys = keys[:maxHostInventoryConnections]
+	}
+	out := make([]projectedConnection, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, byKey[key])
+	}
+	return out, nil
+}
+
+func (h *HostInventoryIngest) writeConnections(ctx context.Context, tenantID, agentID, jobID, assetID uuid.UUID, obs *di.InterrogateResult) (int, error) {
+	subject, ok := hostInventorySubject(obs)
+	if !ok {
+		return 0, errors.New("host report has no subject")
+	}
+	connections, err := hostInventoryConnections(obs, subject)
+	if err != nil {
+		return 0, err
+	}
+	if len(connections) == 0 {
+		return 0, nil
+	}
+
+	var sensorID uuid.UUID
+	if err := shareddatabase.WithTenantTx(ctx, h.db, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `SELECT id FROM sensors WHERE tenant_id=$1 AND profile='device_interrogation' AND 'system'=ANY(tags) LIMIT 1`, tenantID).Scan(&sensorID)
+	}); err != nil {
+		return 0, fmt.Errorf("system device-interrogation sensor: %w", err)
+	}
+
+	now := time.Now().UTC()
+	batchID := "host-inventory-connections:" + jobID.String()
+	queued := 0
+	err = shareddatabase.WithTenantTx(ctx, h.db, tenantID, func(tx *sql.Tx) error {
+		for _, c := range connections {
+			local := netip.MustParseAddr(c.LocalAddress)
+			remote := netip.MustParseAddr(c.RemoteAddress)
+			metadata := map[string]any{
+				"discovery_method": "host_inventory",
+				"discovery_type":   "host_connection",
+				"source_asset_id":  assetID.String(),
+				"source_agent_id":  agentID.String(),
+			}
+			if p := strings.TrimSpace(c.Process); p != "" {
+				metadata["source_process"] = p
+			}
+			blob, err := json.Marshal(metadata)
+			if err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx, `
+				INSERT INTO sensor_discoveries
+				(id,sensor_id,tenant_id,batch_id,protocol,dest_ip,port,confidence,metadata,source_ip,timestamp,created_at)
+				VALUES($1,$2,$3,$4,$5,$6::inet,$7,$8,$9,$10::inet,$11,$11)`,
+				uuid.New(), sensorID, tenantID, batchID, c.Transport, remote.String(), c.RemotePort,
+				1.0, blob, local.String(), now)
+			if err != nil {
+				return err
+			}
+			queued++
+		}
+		return nil
+	})
+	return queued, err
 }
 
 // ---------------------------------------------------------------------------
@@ -1016,56 +1237,155 @@ func refreshPackageCount(ctx context.Context, tx *sql.Tx, tenantID, assetID uuid
 // class
 // ---------------------------------------------------------------------------
 
-// classProposal asks the Classifier seam what the rules make of this host, and
-// returns the answer for the RECORD.
-//
-// It is not applied. Writing a rule's answer into `assets.class_key` needs it
-// to arrive with `class_source_kind: inferred` and a proposal a human can
-// accept or reject — which is workstream 2.10b's intake-builder work, not this
-// file's. Writing it as `measured` (the column's default, and what this path
-// would get for free) would state that the platform MEASURED the host to be a
-// server, which nothing did: a rule matched a model string.
-//
-// So the proposal is recorded on the job row, where an operator can see what
-// the rules would have said, and the asset stays `unknown_host`. When 2.10b
-// lands, this is the call whose result it consumes.
+// hostInventoryClassEvidence projects a host inventory onto the rule inputs.
 //
 // # What it is given
 //
-// Vendor and model, because those are what the rule table matches on, and the
-// NON-LOOPBACK listening ports, because `port_profile` rules read them.
+// The OPERATING SYSTEM, the vendor, the model, and the NON-LOOPBACK listening
+// ports.
+//
+// The OS is the one that matters and the one that was missing. Before the
+// `os_name` rule kind existed, this function passed vendor and model and the
+// answer for a general-purpose computer was always the same: nothing. A laptop
+// has no sysObjectID, advertises no capability, and its OUI belongs to Dell or
+// Intel and is vendor-only by design — so the richest asset in an inventory was
+// the one the catalogue could say least about. `os.name` is the only evidence a
+// host inventory carries that names a KIND of machine.
+//
 // Loopback ports are excluded deliberately: a port profile describes what a
 // device EXPOSES, and a service bound to 127.0.0.1 exposes nothing — including
 // it would let a developer laptop running a local database match a
 // database-server profile.
 //
-// The OS name is not passed: `classify.ClassifyInput` has no OS field (2.10a's
-// rule vocabulary is MACs, sysObjectID, ENIP vendor id, cloud resource type,
-// banners, ports, vendor, model and platform), and inventing one here would be
-// a rule input no rule can read.
-func classProposal(ctx context.Context, obs *di.InterrogateResult) string {
-	input := seams.AssetFacts{Facts: map[string]any{}}
+// # What it is deliberately NOT given
+//
+// The interface MACs. A host inventory enumerates every NIC on the machine
+// including veth pairs, bridges and locally-administered addresses —
+// observationFor already refuses those as IDENTITY for the same reason — and a
+// `02:42:AC` veth on a Linux server would classify it `container` through
+// Docker's OUI rule. That is the "a wrong class is worse than no class" failure
+// the rule table is written to avoid, arriving through the one collector that
+// can see the interfaces a passive observer never would.
+func hostInventoryClassEvidence(obs *di.InterrogateResult) classify.ClassifyInput {
+	in := classify.ClassifyInput{}
 	for _, f := range obs.Facts {
 		switch f.Key {
 		case facts.KeyHWVendor:
-			input.Facts[seams.FactVendor] = f.Value
+			in.Vendor = factText(f.Value)
 		case facts.KeyHWModel:
-			input.Facts[seams.FactModel] = f.Value
+			in.Model = factText(f.Value)
+		case facts.KeyOSName:
+			in.OS = factText(f.Value)
 		}
 	}
-	if ports := exposedPorts(obs); len(ports) > 0 {
-		input.Facts[seams.FactOpenPorts] = ports
+	in.OpenPorts = exposedPorts(obs)
+	return in
+}
+
+// factText reads a fact value that should be a string.
+//
+// A fact's value is `any` and has been through JSON by the time a remote
+// collection reaches here, so the native and decoded shapes are both string —
+// but a collector that emitted a number or an object for `os.name` must produce
+// an ABSENT input rather than `%!v(...)`, which would match no rule and look
+// like a catalogue gap rather than a producer bug.
+func factText(v any) string {
+	s, _ := v.(string)
+	return strings.TrimSpace(s)
+}
+
+// classifyHost asks the Classifier seam what the rules make of this host.
+//
+// Through the SEAM and over the CURATED engine, like every other intake:
+// `Config{Classifier: "none"}` means "propose no class at all", which a call
+// site that names RuleClassifier itself cannot honour, and the rules a platform
+// admin has edited in Catalog ▸ Classification rules are the ones that should
+// answer — not the compiled-in table this path used to reach for.
+//
+// Explain rather than Classify, so the matched rules and any conflict survive:
+// they are what a proposal cites and what a reviewer audits, and the seam's own
+// return carries neither.
+func (h *HostInventoryIngest) classifyHost(ctx context.Context, obs *di.InterrogateResult) classify.ClassProposal {
+	ev := hostInventoryClassEvidence(obs)
+	if ev.OS == "" && ev.Vendor == "" && ev.Model == "" && len(ev.OpenPorts) == 0 {
+		// Nothing was collected. Asking the engine about an empty input can
+		// only produce an answer with no evidence behind it.
+		return classify.ClassProposal{}
 	}
-	if len(input.Facts) == 0 {
-		return ""
+	c := seams.ClassifierFor(h.sink.seamSet(), h.sink.classifier().Engine())
+	return seams.Explain(ctx, c, seams.ClassFacts(ev))
+}
+
+// nameAsset gives an asset the hostname this collection carries, on the same
+// "better evidence wins, never overwrite an answer" principle as the class.
+//
+// Two columns, two different rules, and the difference is the whole point:
+//
+//   - `hostname` is filled only when EMPTY. An asset that already has one has
+//     been named by something, and a host inventory does not overrule it.
+//   - `display_name` is filled when empty AND replaced when it is a bare IP
+//     ADDRESS. A label that is an address is not a name — it is what
+//     identity.displayNameFor falls back to when the creating observation
+//     carried nothing better, which is exactly what a passive sighting carries.
+//     This is the other half of the reported bug: the asset was displayed as
+//     a bare IP address while the platform knew its hostname, its model and
+//     OS, because the identification engine writes display_name at CREATION and
+//     no path backfilled it afterwards.
+//
+// A display name that is not an address is left alone, whatever it says. The
+// only way one gets there is a person typing it or a collector reporting a real
+// name, and both outrank this. That guard is why the IP test is done in Go on
+// the value read back rather than guessed at in SQL: `display_name` is free
+// text and there is no honest single-statement predicate for "this is an
+// address".
+//
+// It runs AFTER the engine's transaction, like the software and endpoint
+// writes, because it is repair rather than part of the resolution: a failure
+// here costs the label, not the collection.
+func (h *HostInventoryIngest) nameAsset(ctx context.Context, tenantID, assetID uuid.UUID, hostname string) error {
+	hostname = strings.ToLower(strings.TrimSpace(hostname))
+	if hostname == "" {
+		return nil
 	}
-	proposal, err := (seams.RuleClassifier{}).Classify(ctx, input)
-	if err != nil || proposal.Unknown {
-		// "The rules did not decide" is a normal outcome with a complete
-		// answer, not a failure, and must not be logged as one.
-		return ""
+	// An address in the hostname field is an address, not a name — the same
+	// rule setAssetAddress applies, and the same reason: assets.hostname is what
+	// a hostname search looks at, and naming an asset after its address is the
+	// thing this function exists to undo.
+	if _, err := netip.ParseAddr(hostname); err == nil {
+		return nil
 	}
-	return proposal.Class
+	return shareddatabase.WithTenantTx(ctx, h.db, tenantID, func(tx *sql.Tx) error {
+		var current, display string
+		err := tx.QueryRowContext(ctx, `
+			SELECT COALESCE(hostname, ''), COALESCE(display_name, '')
+			  FROM assets
+			 WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL FOR UPDATE`,
+			tenantID, assetID).Scan(&current, &display)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		nameIt := display == ""
+		if !nameIt {
+			if _, perr := netip.ParseAddr(display); perr == nil {
+				nameIt = true
+			}
+		}
+		if current != "" && !nameIt {
+			return nil
+		}
+		_, err = tx.ExecContext(ctx, `
+			UPDATE assets
+			   SET hostname     = CASE WHEN $3 THEN $4 ELSE hostname END,
+			       display_name = CASE WHEN $5 THEN $4 ELSE display_name END,
+			       updated_at   = now()
+			 WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL`,
+			tenantID, assetID, current == "", hostname, nameIt)
+		return err
+	})
 }
 
 // exposedPorts is the set of ports the host listens on that something else

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vistasecurity/vistaplatform/device-agent/internal/config"
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/hostinventory"
 
@@ -163,6 +164,40 @@ func TestRealHostInventoryLoopHonoursAPushedInterval(t *testing.T) {
 	case <-collected:
 	case <-time.After(3 * time.Second):
 		t.Fatal("the real loop ignored the pushed interval — it is using a private timer")
+	}
+}
+
+func TestConfiguredHostInventoryCollectorPassesConnectionPrivacyOptIn(t *testing.T) {
+	tests := []struct {
+		name    string
+		enabled bool
+	}{
+		{name: "disabled by default", enabled: false},
+		{name: "explicitly enabled", enabled: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := &DeviceAgent{config: &config.Config{HostInventoryConnectionsEnabled: tt.enabled}}
+			called := false
+			collector := agent.configuredHostInventoryCollector(func(_ context.Context, agentID string, enabled bool) (*hostinventory.Report, *di.InterrogateResult, error) {
+				called = true
+				if agentID != "agent-1" {
+					t.Errorf("agentID = %q, want agent-1", agentID)
+				}
+				if enabled != tt.enabled {
+					t.Errorf("collectConnections = %t, want %t", enabled, tt.enabled)
+				}
+				return &hostinventory.Report{Platform: "test"}, &di.InterrogateResult{}, nil
+			})
+
+			if _, _, err := collector(context.Background(), "agent-1"); err != nil {
+				t.Fatalf("collector: %v", err)
+			}
+			if !called {
+				t.Fatal("configured collector did not call the production connection-aware collector")
+			}
+		})
 	}
 }
 

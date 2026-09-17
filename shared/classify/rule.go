@@ -69,6 +69,30 @@ const (
 	// advertises. Pattern: the type in its registry spelling, `_ipp._tcp`.
 	// Exact, case-insensitive.
 	KindMDNSService = "mdns_service"
+
+	// KindOSName matches an RE2 regexp against the operating system the host
+	// named when asked — the `os.name` fact a host inventory writes, or the OS
+	// a vendor API reported.
+	//
+	// It is the only kind whose evidence comes from INSIDE the host rather than
+	// from the wire, and that is the point: a general-purpose computer has no
+	// OUI, no sysObjectID, no advertised capability and no model string the
+	// catalogue could ever enumerate, so every rule kind that existed before
+	// this one was blind to the single commonest thing on a corporate network.
+	// A Dell XPS running Windows 11 matched nothing and stayed `unknown_host`
+	// however much was known about it.
+	//
+	// A regexp rather than a prefix because an OS name is prose, not an
+	// identifier: "Microsoft Windows 11 Pro", "Windows 11 Pro", "Windows Server
+	// 2022 Datacenter" and "macOS 15.1" are the same handful of answers spelled
+	// by four different collectors, and a prefix rule would have to enumerate
+	// the spellings. The pattern carries its own anchoring, like [KindBanner].
+	//
+	// What it must NOT be used for is a class the OS cannot establish. An OS
+	// says a machine is a general-purpose computer; it does not say whether
+	// that computer is a desktop, a laptop or a virtual machine, and a rule
+	// that picked one would be the wrong class that is worse than no class.
+	KindOSName = "os_name"
 )
 
 // Kinds is every rule kind, in the order standards/classification-rules.yaml
@@ -76,7 +100,7 @@ const (
 var Kinds = []string{
 	KindOUI, KindSysObjectID, KindENIP, KindCloudType,
 	KindBanner, KindPortProfile, KindModel, KindPlatform,
-	KindCDPCapabilities, KindLLDPCapability, KindMDNSService,
+	KindCDPCapabilities, KindLLDPCapability, KindMDNSService, KindOSName,
 }
 
 // Confidence bounds. The floor is 0.50 because a rule that is less than even
@@ -134,8 +158,8 @@ type Rule struct {
 	// It is what the admin console edits and what MatchedRules points at.
 	ID string `json:"id,omitempty"`
 
-	// compiled is the banner regexp, built once at Engine construction. Nil for
-	// every other kind.
+	// compiled is the banner or os_name regexp, built once at Engine
+	// construction. Nil for every other kind.
 	compiled *regexp.Regexp
 
 	// ports is the parsed port list for a KindPortProfile rule.
@@ -194,10 +218,10 @@ func (r *Rule) Validate() error {
 		if !isDigits(r.Pattern) {
 			return fmt.Errorf("classify: enip rule pattern %q must be a decimal ODVA vendor id", r.Pattern)
 		}
-	case KindBanner:
+	case KindBanner, KindOSName:
 		re, err := regexp.Compile(r.Pattern)
 		if err != nil {
-			return fmt.Errorf("classify: banner rule pattern %q does not compile: %w", r.Pattern, err)
+			return fmt.Errorf("classify: %s rule pattern %q does not compile: %w", r.Kind, r.Pattern, err)
 		}
 		r.compiled = re
 	case KindPortProfile:

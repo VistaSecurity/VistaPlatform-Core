@@ -86,9 +86,10 @@ func main() {
 				"enrollment against a platform whose certificate is signed by a private CA this host does not trust.")
 		// hostInventoryOnce is a SUPPORT flag: collect this host once, print
 		// the report as JSON, exit. It reaches no network and needs no
-		// enrollment, so an operator can see exactly what the agent would send
-		// before enabling the schedule. The report is secrets-free by
-		// construction — see shared/hostinventory.
+		// enrollment, so an operator can review the ordinary host report before
+		// enabling the schedule. Privacy-sensitive outbound peers are excluded
+		// from this preview. The report is secrets-free by construction — see
+		// shared/hostinventory.
 		hostInventoryOnce = flag.Bool("host-inventory-once", false,
 			"Collect this host's inventory once, print it as JSON, and exit. Sends nothing to the platform.")
 	)
@@ -441,7 +442,18 @@ func (a *DeviceAgent) collectHostInventory(iv *interval, stop <-chan struct{}) {
 		runLocalHostInventoryLoopWith(a.apiClient, a.config.AgentID, iv, stop, a.collector, productionHostInventoryFloor)
 		return
 	}
-	runLocalHostInventoryLoop(a.apiClient, a.config.AgentID, iv, stop)
+	collect := a.configuredHostInventoryCollector(devices.CollectLocalHostInventoryWithConnections)
+	runLocalHostInventoryLoopWith(a.apiClient, a.config.AgentID, iv, stop, collect, productionHostInventoryFloor)
+}
+
+// configuredHostInventoryCollector is the production privacy boundary between
+// local configuration and socket collection. Keeping that handoff in one small
+// method lets a test prove both polarities without walking the test host's
+// network stack or replacing the whole collection loop.
+func (a *DeviceAgent) configuredHostInventoryCollector(collect hostInventoryConnectionCollector) hostInventoryCollector {
+	return func(ctx context.Context, agentID string) (*hostinventory.Report, *di.InterrogateResult, error) {
+		return collect(ctx, agentID, a.config.HostInventoryConnectionsEnabled)
+	}
 }
 
 // hostInventorySubmitter is the slice of the API client the local loop needs,
@@ -468,6 +480,8 @@ func runLocalHostInventoryLoop(submitter hostInventorySubmitter, agentID string,
 // to run on, which makes a timing assertion both slow and dependent on the
 // runner.
 type hostInventoryCollector func(ctx context.Context, agentID string) (*hostinventory.Report, *di.InterrogateResult, error)
+
+type hostInventoryConnectionCollector func(ctx context.Context, agentID string, collectConnections bool) (*hostinventory.Report, *di.InterrogateResult, error)
 
 // hostInventoryFloor is config.MinHostInventoryInterval, indirected only so a
 // test can drive the REAL loop's timing in milliseconds. Production never
@@ -841,6 +855,9 @@ func saveConfigFile(configPath string, cfg *config.Config) error {
 	if cfg.HostInventoryEnabled {
 		configContent.WriteString("host_inventory_enabled: true\n")
 		fmt.Fprintf(&configContent, "host_inventory_interval: %s\n", cfg.HostInventoryInterval)
+	}
+	if cfg.HostInventoryConnectionsEnabled {
+		configContent.WriteString("host_inventory_connections_enabled: true\n")
 	}
 
 	// Add security section with certificate paths

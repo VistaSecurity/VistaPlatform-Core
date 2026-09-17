@@ -2728,6 +2728,34 @@ paths:
                 $ref: '#/components/schemas/LegacyError'
 
   /external-connections:
+    post:
+      operationId: upsertExternalConnection
+      tags: [external-connections]
+      summary: Record a measured external connection
+      description: >
+        Internal producer endpoint used by the discovery processor. An explicit
+        source_asset_id may identify the measured source host when its current
+        source address is not itself an asset identifier; inventory-service
+        validates that the asset belongs to the tenant.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExternalConnectionUpsert'
+      responses:
+        '200':
+          description: The created or refreshed external connection.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExternalConnection'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
     get:
       operationId: listExternalConnections
       tags: [external-connections]
@@ -8913,7 +8941,7 @@ components:
         id: { type: string }
         kind:
           type: string
-          enum: [oui, sysobjectid, enip, cloud_type, banner, port_profile, model, platform, cdp_capabilities, lldp_capability, mdns_service]
+          enum: [oui, sysobjectid, enip, cloud_type, banner, port_profile, model, platform, cdp_capabilities, lldp_capability, mdns_service, os_name]
         pattern: { type: string }
         class: { type: string }
         vendor: { type: string }
@@ -10041,6 +10069,55 @@ components:
     # ============================================================
     # External connections (third-party connection inventory)
     # ============================================================
+    ExternalConnectionUpsert:
+      type: object
+      additionalProperties: false
+      description: Internal measured-connection payload accepted by POST /external-connections.
+      required: [source_ip, dest_ip, dest_port, protocol]
+      properties:
+        source_ip: { type: string }
+        source_hostname: { type: string }
+        source_asset_id:
+          type: string
+          format: uuid
+          description: Measured source host asset; must exist in the request tenant.
+        dest_ip: { type: string }
+        dest_hostname: { type: string }
+        dest_hostname_source_kind:
+          type: string
+          enum: [measured, declared, imported, inferred]
+        dest_port: { type: integer, minimum: 1, maximum: 65535 }
+        protocol: { type: string }
+        protocol_version: { type: string }
+        cipher_suite: { type: string }
+        key_exchange_algorithm: { type: string }
+        key_size: { type: integer }
+        supported_tls_versions:
+          type: array
+          items: { type: string }
+        sensor_id: { type: string, format: uuid }
+        cert_subject: { type: string }
+        cert_issuer: { type: string }
+        cert_san:
+          type: array
+          items: { type: string }
+        cert_not_before: { type: string, format: date-time }
+        cert_not_after: { type: string, format: date-time }
+        cert_fingerprint_sha256: { type: string }
+        cert_public_key_algorithm: { type: string }
+        cert_public_key_size: { type: integer }
+        cert_signature_algorithm: { type: string }
+        cert_validation_status: { type: string }
+        cert_pem: { type: string }
+        cert_has_sct: { type: boolean }
+        cert_sct_source: { type: string }
+        cert_known_bad_ca: { type: string }
+        cert_no_subject: { type: boolean }
+        cert_no_common_name: { type: boolean }
+        cert_is_ev: { type: boolean }
+        cert_large_san_count: { type: integer }
+        ocsp_status: { type: string }
+
     ExternalConnection:
       type: object
       additionalProperties: false

@@ -41,11 +41,20 @@ type Options struct {
 	// MaxCertsPerStore bounds how many certificates are summarised per store.
 	// 0 means the default.
 	MaxCertsPerStore int
+	// CollectConnections is an explicit privacy opt-in. A remote-peer list can
+	// reveal browsing and application activity, so ordinary host inventory does
+	// not collect it merely because the agent was upgraded.
+	CollectConnections bool
+	// MaxConnections bounds the coalesced remote-peer set. Zero uses the
+	// package default. The local ephemeral port is excluded before this cap.
+	MaxConnections int
 }
 
 const (
 	defaultMaxPackages      = 20000
 	defaultMaxCertsPerStore = 500
+	defaultMaxConnections   = 256
+	defaultMaxBoundUDP      = 256
 )
 
 func (o Options) maxPackages() int {
@@ -53,6 +62,13 @@ func (o Options) maxPackages() int {
 		return o.MaxPackages
 	}
 	return defaultMaxPackages
+}
+
+func (o Options) maxConnections() int {
+	if o.MaxConnections > 0 {
+		return o.MaxConnections
+	}
+	return defaultMaxConnections
 }
 
 func (o Options) maxCertsPerStore() int {

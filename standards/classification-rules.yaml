@@ -136,6 +136,14 @@
 #                 ("_ipp._tcp"), lowercase. Exact, case-insensitive. What the
 #                 host advertises about ITSELF on the segment, which is why
 #                 this is a rule and an SSH banner is not.
+#
+#   os_name       pattern is an RE2 regexp matched against the operating system
+#                 the host named when asked — the `os.name` fact a host
+#                 inventory writes, or the OS a vendor management API reported.
+#                 The pattern carries its own anchoring, as a banner's does.
+#                 This is the only kind whose evidence comes from INSIDE the
+#                 host rather than off the wire, and the only one a
+#                 general-purpose computer can match at all.
 
 version: 1
 
@@ -151,6 +159,7 @@ kinds:
   - cdp_capabilities
   - lldp_capability
   - mdns_service
+  - os_name
 
 # Citations reused across whole blocks, so the rules below stay readable.
 # (YAML anchors; the generator resolves them before it sees a rule.)
@@ -1191,3 +1200,66 @@ rules:
     class: printer
     confidence: 0.75
     source_url: https://datatracker.ietf.org/doc/html/rfc1179
+
+  # ===========================================================================
+  # os_name — what the host says it runs
+  # ===========================================================================
+  #
+  # Every other kind in this file keys on something a device emitted onto a
+  # network or on an identifier registered to a manufacturer. A general-purpose
+  # computer emits none of it: its OUI belongs to Dell or Intel and is
+  # vendor-only by design, it answers no SNMP, it advertises no capability, and
+  # its model string ("XPS 16 9640", "OptiPlex 7010") is a consumer product line
+  # no catalogue will ever enumerate. So the commonest thing on a corporate
+  # network was the one thing the rules could not classify, and a fully
+  # inventoried laptop — OS, vendor, model, serial, 106 packages, 69 certificate
+  # stores, 83 listening sockets — stayed `unknown_host`.
+  #
+  # An OS name closes exactly that gap and nothing wider. What it establishes is
+  # that the subject is a general-purpose computer; what it does NOT establish
+  # is which KIND of computer, and the rules below stop where the evidence does.
+  #
+  #   * A client Windows or macOS release → `computer`, never `workstation` or
+  #     `laptop`. Those are siblings ("a desktop computer used by a person" and
+  #     "a portable computer used by a person") and an OS name cannot tell them
+  #     apart: the asset this rule was written for is a Windows 11 laptop, and
+  #     `workstation` would have been the narrow-and-probably-wrong answer the
+  #     header of this file forbids. Their common ancestor is certainly right,
+  #     and a later rule or a reviewer can refine it without contradicting it.
+  #   * A Windows SERVER release → `server`. Microsoft ships and licenses those
+  #     editions for server use only; this is one product line with one meaning,
+  #     which is what the 0.80 band is for. `server` refines `computer`, so a
+  #     host matching both resolves to `server` rather than conflicting.
+  #   * Linux and the BSDs → NO RULE, deliberately. A distribution name is not a
+  #     statement of function: Debian runs on a rack server, a developer's
+  #     desktop, a firewall appliance, a NAS, a label printer and a Ubiquiti
+  #     gateway, and every one of those is a different class. There is no
+  #     spelling of "Ubuntu" that means `server`, so the honest answer is the
+  #     one this file always gives when a vendor spans several classes: say
+  #     nothing, and let the OUI, the capabilities or a human decide.
+  #   * Network-appliance operating systems (IOS, JunOS, PAN-OS, FortiOS) get no
+  #     rule here either. The `platform` kind already carries them, from the
+  #     management API the collector actually spoke to, and that is a stronger
+  #     claim than a version banner's spelling of the same name.
+  #
+  # The patterns are word-anchored rather than prefixed, because the same four
+  # answers arrive spelled four ways: `Microsoft Windows 11 Pro` from WMI,
+  # `Windows 11 Pro` from the agent's own probe, `Microsoft Windows Server 2022
+  # Datacenter` from one and `Windows Server 2022` from another. They are also
+  # mutually exclusive on every real name — no client release contains the words
+  # "windows server", and no server release contains a client version number.
+  - kind: os_name
+    pattern: (?i)\bwindows[ ]+server\b
+    class: server
+    confidence: 0.80
+    source_url: https://learn.microsoft.com/en-us/windows-server/get-started/editions-comparison-windows-server-2022
+  - kind: os_name
+    pattern: (?i)\bwindows[ ]+(xp|vista|7|8|8\.1|10|11)\b
+    class: computer
+    confidence: 0.75
+    source_url: https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information
+  - kind: os_name
+    pattern: (?i)^(mac ?os( ?x)?|os ?x)\b
+    class: computer
+    confidence: 0.75
+    source_url: https://support.apple.com/en-us/109033

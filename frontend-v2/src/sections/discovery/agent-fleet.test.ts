@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { profileLabel, jobsSummary, hostSummary, addressTooltip, isPlatformManaged, hostInventorySummary } from './agent-fleet';
+import { profileLabel, jobsSummary, hostSummary, addressTooltip, isPlatformManaged, hostInventorySummary, isPlatformInterrogationAgent, partitionSensorFleet } from './agent-fleet';
 
 // A discovery agent used to be rendered through the sensor table, which had no
 // column for any of this — so every one of these values existed in the database
@@ -233,5 +233,83 @@ describe('hostInventorySummary', () => {
   it('still reports the time when it has no counts to show', () => {
     expect(hostInventorySummary({ job_count: 1, last_host_inventory_at: minutesAgo(10) }))
       .toBe('Last host inventory: 10m ago');
+  });
+});
+
+describe('isPlatformInterrogationAgent', () => {
+  // The in-cluster interrogation agent has a row in `sensors` only so the
+  // interrogation pipeline has something to attribute discoveries to
+  // (ResultProcessor.lookupSystemSensor). It is a command-driven agent, and the
+  // Sensors table showed it with Type "api" and an empty Segment because it has
+  // neither. These pin which rows move and, more importantly, which do not.
+
+  const platformInterrogation = {
+    platform: 'platform',
+    profile: 'device_interrogation',
+    tags: ['system', 'platform', 'device_interrogation'],
+  };
+  const platformDiscovery = {
+    platform: 'platform',
+    profile: 'discovery',
+    tags: ['system', 'platform', 'discovery'],
+  };
+
+  it('moves the platform interrogation agent out of the sensor fleet', () => {
+    expect(isPlatformInterrogationAgent(platformInterrogation)).toBe(true);
+  });
+
+  it('leaves the platform DISCOVERY sensor where it is — that one really is a sensor', () => {
+    // Both rows come from the same provisioning trigger and share
+    // platform='platform' and the `system` tag. Only the profile separates
+    // them, which is why the predicate cannot be isPlatformManaged alone.
+    expect(isPlatformInterrogationAgent(platformDiscovery)).toBe(false);
+  });
+
+  it('leaves a CUSTOMER sensor carrying the interrogation profile alone', () => {
+    // `device_interrogation` is a legitimate profile for a sensor an operator
+    // deployed themselves — sensor-manager accepts it at registration. Keying
+    // on the profile alone would silently relocate a row its owner put in the
+    // sensor fleet, which is the same bug pointed the other way.
+    expect(isPlatformInterrogationAgent({ platform: 'linux', profile: 'device_interrogation', tags: ['edge'] })).toBe(false);
+    expect(isPlatformInterrogationAgent({ platform: 'darwin', profile: 'device_interrogation' })).toBe(false);
+  });
+
+  it('recognises the row from either platform marker, matching isPlatformManaged', () => {
+    // A row stamped with only one of the two markers is still platform-managed
+    // everywhere else in the product; it must not read as a customer sensor here.
+    expect(isPlatformInterrogationAgent({ platform: 'platform', profile: 'device_interrogation' })).toBe(true);
+    expect(isPlatformInterrogationAgent({ tags: ['system'], profile: 'device_interrogation' })).toBe(true);
+  });
+
+  it('does not move a platform row that has no profile at all', () => {
+    expect(isPlatformInterrogationAgent({ platform: 'platform', tags: ['system'] })).toBe(false);
+    expect(isPlatformInterrogationAgent({ platform: 'platform', profile: null })).toBe(false);
+  });
+});
+
+describe('partitionSensorFleet', () => {
+  const rows = [
+    { id: 'a', platform: 'platform', profile: 'discovery', tags: ['system'] },
+    { id: 'b', platform: 'platform', profile: 'device_interrogation', tags: ['system'] },
+    { id: 'c', platform: 'linux', profile: 'datacenter_host', tags: [] },
+    { id: 'd', platform: 'linux', profile: 'device_interrogation', tags: [] },
+  ];
+
+  it('sends only the platform interrogation agent to the agents table', () => {
+    const { sensors, interrogationAgents } = partitionSensorFleet(rows);
+    expect(interrogationAgents.map((r) => r.id)).toEqual(['b']);
+    expect(sensors.map((r) => r.id)).toEqual(['a', 'c', 'd']);
+  });
+
+  it('loses nothing — every row lands in exactly one list', () => {
+    // The whole reason this is a partition and not two independent filters: a
+    // row that fell through both predicates would vanish from the page with
+    // nothing anywhere saying so.
+    const { sensors, interrogationAgents } = partitionSensorFleet(rows);
+    expect(sensors.length + interrogationAgents.length).toBe(rows.length);
+  });
+
+  it('handles an empty fleet without inventing rows', () => {
+    expect(partitionSensorFleet([])).toEqual({ sensors: [], interrogationAgents: [] });
   });
 });

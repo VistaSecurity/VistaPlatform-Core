@@ -409,7 +409,8 @@ func (s *ObservationSink) resolvePeer(
 	if err != nil {
 		return identity.AssetRef{}, err
 	}
-	res, err := s.resolveObservationWith(ctx, engine, obs, prop)
+	// No FirstHand: a peer is described by somebody else. See [classIntent].
+	res, _, err := s.resolveObservationWith(ctx, engine, obs, classIntent{Proposal: prop})
 	if err != nil {
 		return identity.AssetRef{}, err
 	}
@@ -429,40 +430,80 @@ func (s *ObservationSink) resolvePeer(
 	return res.Asset, nil
 }
 
-// resolveObservation runs one fully-built observation through the engine, on
-// the engine's own transaction.
+// classOutcome is what the CLASS half of a resolution did, beside what the
+// identity half did.
 //
-// Separated from resolvePeer because the two callers BUILD the observation
-// differently and must: a peer a device reported is described by identifiers
-// and nothing else, while a host inventory carries the host's own sockets as
-// endpoints and states its identity at first hand. What they share is the
-// running of it, including the one retry, and that is what lives here.
-func (s *ObservationSink) resolveObservation(ctx context.Context, engine *identity.Engine, obs identity.Observation) (identity.Resolution, error) {
-	return s.resolveObservationWith(ctx, engine, obs, classify.ClassProposal{})
+// It exists so a caller can report the truth rather than a constant. The
+// host-inventory job row has carried a `class_applied` field since 2.11b and it
+// was hard-coded false, because nothing could apply a class; now that something
+// can, a field that still said false would be worse than the one that was
+// honestly always false.
+type classOutcome struct {
+	// Promoted is true when the rules moved the asset off the unassigned
+	// `unknown_host` / `external` floor. See [classproposal.Promote] for the
+	// five guards that decide it.
+	Promoted bool
 }
 
-// resolveObservationWith is [ObservationSink.resolveObservation] carrying the
-// classifier's answer about the thing being resolved, so the proposal it owes
-// can be written on the ENGINE's transaction.
+// classIntent is the classifier's answer about an observation, plus what this
+// intake is entitled to DO with it.
 //
-// A zero ClassProposal means "nothing classified this", and
+// # Why the entitlement is a field and not a constant
+//
+// The two intakes that classify through this sink hold evidence of different
+// KINDS, and ADR-0002 D4's precedence is about exactly that difference:
+//
+//   - A host inventory is the subject's own account of itself, taken by an agent
+//     running ON it or over an authenticated session TO it. There is no more
+//     direct measurement in the product — observationFor gives it confidence 1
+//     for that reason — so a rule reading `os.name = Microsoft Windows 11 Pro`
+//     off it may fill an asset's EMPTY class without asking anybody.
+//   - A peer is DESCRIBED by a third party: a switch's LLDP neighbour table, a
+//     controller's device list. It is hearsay, however well-formed, and the
+//     device being described never spoke. A class from it is a proposal, on a
+//     `unknown_host` asset as much as on any other.
+//
+// Collapsing the two would make the neighbour table's opinion as good as the
+// machine's own, which is the mistake the mDNS reflector taught: a reflected
+// advertisement reaching the inventory as a first-hand claim.
+type classIntent struct {
+	// Proposal is what the classifier argued. A zero value means "nothing
+	// classified this", and both [classproposal.Record] and
+	// [classproposal.Promote] write nothing for it.
+	Proposal classify.ClassProposal
+
+	// FirstHand says the evidence came from the SUBJECT ITSELF. Only a
+	// first-hand intake may promote an asset off the unclassified floor.
+	FirstHand bool
+}
+
+// resolveObservationWith runs one fully-built observation through the engine, on
+// the engine's own transaction, carrying the classifier's answer about the thing
+// being resolved — and what this intake may do with it — so the class work it
+// owes lands in the same transaction as the asset.
+//
+// Separated from resolvePeer because the two callers BUILD the observation
+// differently and must: a peer a device reported is described by identifiers and
+// nothing else, while a host inventory carries the host's own sockets as
+// endpoints and states its identity at first hand. What they share is the
+// running of it, including the one retry, and that is what lives here.
+//
+// A zero [classIntent] means "nothing classified this", and
 // [classproposal.Record] writes nothing for it.
 //
-// That is what the host-inventory path passes, and NOT because a host arrives
-// with a class of its own: it arrives as `unknown_host`, which is that path's
-// explicit "no opinion" (see the header of host_inventory_ingest.go). That path
-// does ask the rules — `classProposal` — but records the answer on the job row
-// rather than raising it, because until 4.6a this service had no proposal
-// writer. It has one now, so finishing that half is reachable work rather than
-// a constraint; it is not done here, and saying otherwise would make the gap
-// invisible to the next reader.
+// The host-inventory path used to pass exactly that — it asked the rules and
+// then recorded the answer on the job row instead of doing anything with it,
+// because until 4.6a this service had no proposal writer. It has one now and
+// that path passes a real proposal, which is what stopped a fully inventoried
+// laptop from sitting at `unknown_host` for ever.
 func (s *ObservationSink) resolveObservationWith(
 	ctx context.Context,
 	engine *identity.Engine,
 	obs identity.Observation,
-	prop classify.ClassProposal,
-) (identity.Resolution, error) {
+	intent classIntent,
+) (identity.Resolution, classOutcome, error) {
 	var res identity.Resolution
+	var class classOutcome
 	run := func() error {
 		return s.repo.RunInTx(ctx, obs.TenantID, func(r *pgidentity.Repository) error {
 			// The tenant's auto-accept threshold, read in THIS transaction and
@@ -480,7 +521,14 @@ func (s *ObservationSink) resolveObservationWith(
 			if rErr != nil {
 				return rErr
 			}
-			return s.recordClassOutcome(ctx, r, obs, res, prop)
+			// Reset per attempt. The retry below runs this whole closure a
+			// second time against a different asset, and a `Promoted` left over
+			// from the attempt that rolled back would be a promotion nothing
+			// performed.
+			class = classOutcome{}
+			var cErr error
+			class, cErr = s.recordClassOutcome(ctx, r, obs, res, intent)
+			return cErr
 		})
 	}
 	err := run()
@@ -492,13 +540,13 @@ func (s *ObservationSink) resolveObservationWith(
 		err = run()
 	}
 	if err != nil {
-		return identity.Resolution{}, err
+		return identity.Resolution{}, classOutcome{}, err
 	}
 	// AFTER the commit. An audit event announcing a merge that then rolled back
 	// would be a record of something that did not happen. Writes nothing unless
 	// the matcher actually accepted a merge on the tenant's behalf.
 	identityaudit.LogAutoAcceptedMerge(ctx, autoAcceptAuditLogger(), obs, res)
-	return res, nil
+	return res, class, nil
 }
 
 // recordClassOutcome raises the class proposal an interrogated peer owes, on
@@ -520,28 +568,58 @@ func (s *ObservationSink) resolveObservationWith(
 // A resolution that wrote no asset — the identity floor's contested path —
 // writes nothing: a proposal against an asset that does not exist is a queue
 // item pointing at nothing.
+//
+// # Promote first, then propose
+//
+// [classproposal.Promote] runs before [classproposal.Record] and the order is
+// the point. An EXISTING asset still on the unassigned floor gets the rules'
+// class applied directly — nothing was ever decided about it, so there is
+// nothing to review — and Record then sees a class equal to the proposal and
+// correctly writes nothing. An asset holding a real class is left alone by
+// Promote and gets a proposal from Record, which is what stops two measured
+// classes flapping against each other on every observation.
+//
+// Running Record FIRST would raise a proposal and then immediately satisfy it,
+// leaving a pending question in Approvals whose answer is already on the asset.
 func (s *ObservationSink) recordClassOutcome(
 	ctx context.Context,
 	r *pgidentity.Repository,
 	obs identity.Observation,
 	res identity.Resolution,
-	prop classify.ClassProposal,
-) error {
+	intent classIntent,
+) (classOutcome, error) {
+	prop := intent.Proposal
+	var out classOutcome
 	if res.Asset.Zero() {
-		return nil
+		return out, nil
 	}
 	if prop.Class == "" && !prop.Conflict {
-		return nil
+		return out, nil
 	}
 	tenantID, err := uuid.Parse(strings.TrimSpace(obs.TenantID))
 	if err != nil {
-		return fmt.Errorf("class proposal: tenant id %q is not a uuid: %w", obs.TenantID, err)
+		return out, fmt.Errorf("class proposal: tenant id %q is not a uuid: %w", obs.TenantID, err)
 	}
 	assetID, err := uuid.Parse(strings.TrimSpace(res.Asset.ID))
 	if err != nil {
-		return fmt.Errorf("class proposal: asset id %q is not a uuid: %w", res.Asset.ID, err)
+		return out, fmt.Errorf("class proposal: asset id %q is not a uuid: %w", res.Asset.ID, err)
 	}
-	return classproposal.Record(ctx, r.Tx(), tenantID, assetID, res.Outcome, prop)
+
+	// FIRST-HAND evidence only, and never on the CREATE path. On a create the
+	// class is already on the asset — classproposal.Apply put it on the
+	// observation — and the asset is in Approvals, so approving it approves the
+	// class; promoting as well would write a second history row for one
+	// decision, and one of them would claim a move from a class the asset never
+	// held. For a peer, see [classIntent]: hearsay proposes, it does not decide.
+	if intent.FirstHand && res.Outcome != identity.OutcomeCreated {
+		promoted, pErr := classproposal.Promote(ctx, r.Tx(), tenantID, assetID, prop)
+		if pErr != nil {
+			return out, pErr
+		}
+		out.Promoted = promoted
+	}
+
+	return out, classproposal.Record(ctx, r.Tx(), tenantID, assetID, res.Outcome, prop)
 }
 
 // errPeerContested means a relationship's far end could not be resolved because

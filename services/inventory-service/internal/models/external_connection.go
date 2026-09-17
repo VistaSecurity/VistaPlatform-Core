@@ -121,15 +121,26 @@ type ExternalConnectionHistory struct {
 
 // ExternalConnectionUpsert is the write payload accepted by POST /external-connections.
 type ExternalConnectionUpsert struct {
-	SourceIP             string  `json:"source_ip"`
-	SourceHostname       *string `json:"source_hostname,omitempty"`
-	DestIP               string  `json:"dest_ip"`
-	DestHostname         *string `json:"dest_hostname,omitempty"`
-	DestPort             int     `json:"dest_port"`
-	Protocol             string  `json:"protocol"`
-	ProtocolVersion      *string `json:"protocol_version,omitempty"`
-	CipherSuite          *string `json:"cipher_suite,omitempty"`
-	KeyExchangeAlgorithm *string `json:"key_exchange_algorithm,omitempty"`
+	SourceIP       string     `json:"source_ip"`
+	SourceHostname *string    `json:"source_hostname,omitempty"`
+	SourceAssetID  *uuid.UUID `json:"source_asset_id,omitempty"`
+	DestIP         string     `json:"dest_ip"`
+	DestHostname   *string    `json:"dest_hostname,omitempty"`
+	// DestHostnameSourceKind is the provenance of DestHostname in the ADR-0005
+	// vocabulary ("measured" | "declared" | "imported" | "inferred"), and it
+	// decides who wins when two observations of the same flow disagree about
+	// the name — see the precedence ladder in ExternalConnectionsService.Upsert.
+	//
+	// nil means "this producer does not state its provenance", which is NOT the
+	// same as "inferred" and not the same as "measured". Keep the three states
+	// apart: collapsing nil into either one is how a reverse-DNS guess came to
+	// overwrite a captured TLS SNI in the first place.
+	DestHostnameSourceKind *string `json:"dest_hostname_source_kind,omitempty"`
+	DestPort               int     `json:"dest_port"`
+	Protocol               string  `json:"protocol"`
+	ProtocolVersion        *string `json:"protocol_version,omitempty"`
+	CipherSuite            *string `json:"cipher_suite,omitempty"`
+	KeyExchangeAlgorithm   *string `json:"key_exchange_algorithm,omitempty"`
 	// KeySize is measured exchange-key bits, never inferred cipher or certificate bits.
 	KeySize              *int       `json:"key_size,omitempty"`
 	SupportedTLSVersions []string   `json:"supported_tls_versions,omitempty"`

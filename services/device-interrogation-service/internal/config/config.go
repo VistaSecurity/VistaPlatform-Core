@@ -8,21 +8,14 @@ import (
 
 // Config holds all configuration for the device interrogation service
 type Config struct {
-	Port                               string
-	Environment                        string
-	DatabaseURL                        string
-	RedisURL                           string
-	NATSURL                            string
-	LogLevel                           string
-	JWTSecret                          string
-	EncryptionMasterKey                string
-	BootstrapCertPath                  string // Path to bootstrap client certificate
-	BootstrapKeyPath                   string // Path to bootstrap client private key
-	BootstrapCACertPath                string // Path to bootstrap CA certificate
-	DeviceInterrogationServiceURL      string // URL for device-interrogation-service (self-reference for auto-register)
-	PlatformDeviceInterrogationAgentID string // Fixed agent ID for platform device interrogation agent
-	ServiceAccountToken                string // Service account token for auto-registration
-
+	Port                string
+	Environment         string
+	DatabaseURL         string
+	RedisURL            string
+	NATSURL             string
+	LogLevel            string
+	JWTSecret           string
+	EncryptionMasterKey string
 	// mTLS Configuration
 	UseMTLS            bool
 	TLSPort            string
@@ -50,20 +43,14 @@ type Config struct {
 // Load loads configuration from environment variables
 func Load() (*Config, error) {
 	config := &Config{
-		Port:                               sharedconfig.GetEnv("PORT", "8080"),
-		Environment:                        sharedconfig.GetEnv("ENV", "development"),
-		DatabaseURL:                        sharedconfig.GetEnv("DATABASE_URL", "postgres://crypto_user:crypto_pass_dev@postgres:5432/crypto_inventory?sslmode=prefer"),
-		RedisURL:                           sharedconfig.GetEnv("REDIS_URL", "redis://:redis_pass_dev@redis:6379/0"),
-		NATSURL:                            sharedconfig.GetEnv("NATS_URL", ""),
-		LogLevel:                           sharedconfig.GetEnv("LOG_LEVEL", "info"),
-		JWTSecret:                          sharedconfig.GetEnv("JWT_SECRET", "dev-secret-key-change-in-production"),
-		EncryptionMasterKey:                sharedconfig.GetEnv("ENCRYPTION_MASTER_KEY", ""),
-		BootstrapCertPath:                  sharedconfig.GetEnv("BOOTSTRAP_CERT_PATH", "/app/bootstrap-certs/device-interrogation-service-cert.pem"),
-		BootstrapKeyPath:                   sharedconfig.GetEnv("BOOTSTRAP_KEY_PATH", "/app/bootstrap-certs/device-interrogation-service-key.pem"),
-		BootstrapCACertPath:                sharedconfig.GetEnv("BOOTSTRAP_CA_CERT_PATH", "/app/bootstrap-certs/bootstrap-ca-cert.pem"),
-		DeviceInterrogationServiceURL:      sharedconfig.PeerServiceURLAuto("DEVICE_INTERROGATION_SERVICE_URL", "device-interrogation-service"),
-		PlatformDeviceInterrogationAgentID: sharedconfig.GetEnv("PLATFORM_DEVICE_INTERROGATION_AGENT_ID", "550e8400-e29b-41d4-a716-446655440002"), // Fixed UUID for platform-device-interrogation-agent
-		ServiceAccountToken:                sharedconfig.GetEnv("DEVICE_INTERROGATION_SERVICE_TOKEN", ""),                                         // Service account token for auto-registration
+		Port:                sharedconfig.GetEnv("PORT", "8080"),
+		Environment:         sharedconfig.GetEnv("ENV", "development"),
+		DatabaseURL:         sharedconfig.GetEnv("DATABASE_URL", "postgres://crypto_user:crypto_pass_dev@postgres:5432/crypto_inventory?sslmode=prefer"),
+		RedisURL:            sharedconfig.GetEnv("REDIS_URL", "redis://:redis_pass_dev@redis:6379/0"),
+		NATSURL:             sharedconfig.GetEnv("NATS_URL", ""),
+		LogLevel:            sharedconfig.GetEnv("LOG_LEVEL", "info"),
+		JWTSecret:           sharedconfig.GetEnv("JWT_SECRET", "dev-secret-key-change-in-production"),
+		EncryptionMasterKey: sharedconfig.GetEnv("ENCRYPTION_MASTER_KEY", ""),
 		// mTLS Configuration
 		UseMTLS:            sharedconfig.GetEnvAsBool("USE_MTLS", true),
 		TLSPort:            sharedconfig.GetEnv("TLS_PORT", "8443"),

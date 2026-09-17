@@ -20,6 +20,8 @@ was upgraded; somebody has to turn it on or queue a job.
 | **Interfaces** | Name, MAC address, addresses, whether the interface is up, whether it is virtual |
 | **Software** | Installed packages — name, version, vendor, architecture, and the package manager that reported them |
 | **Listening sockets** | Transport, bound address, port, and the name of the process that owns it |
+| **UDP bindings** | Bound address, port, process where visible, and an explicit `unknown` role when the OS cannot prove listener versus client |
+| **Outbound connections (opt-in)** | Local source address, remote address and port, transport, and process name where visible; capped at 256 coalesced peers |
 | **Certificate stores** | Store path, how many certificates it holds, and per certificate the subject, issuer, SHA-256 fingerprint and expiry |
 
 **Posture, never key material.** Certificate stores are read for *certificates*:
@@ -71,14 +73,18 @@ can be set on the host:
 |---|---|---|
 | `HOST_INVENTORY_ENABLED` | `true` turns the local schedule on | off |
 | `HOST_INVENTORY_INTERVAL` | How often the agent re-describes its host | `24h` |
+| `HOST_INVENTORY_CONNECTIONS_ENABLED` | Also collect bounded remote peers; this can reveal application/browsing activity | off |
 
-These are a **starting position only**. Once the agent is enrolled the control
-plane owns both, and a later edit to the file is overwritten at the next
-check-in — the console is meant to be the one place you look.
+The schedule enabled/interval values are a **starting position only**. Once the
+agent is enrolled the control plane owns those two values, and a later edit to
+the file is overwritten at the next check-in. The connection setting remains
+a local privacy opt-in: the console and agent defaults do not turn it on.
 
-To see exactly what would be sent before enabling anything, run the agent with
-`--host-inventory-once`. It collects the host, prints the whole report, and
-exits without contacting the platform.
+To review the ordinary host report before enabling anything, run the agent with
+`--host-inventory-once`. It collects the host, prints the report, and exits
+without contacting the platform. The preview excludes outbound connection
+peers; those remain behind the separate scheduled or requested collection
+opt-in.
 
 Full installation detail is in the
 [device agent deployment guide](../operate/deployment/device-agent-deployment.md),
@@ -91,6 +97,9 @@ device that already has SSH credentials configured, and it must name the agent
 that will run it — the collection runs *from* an agent that can reach the
 target. Local collection is agent-originated, so there is no such thing as a
 queued local job.
+
+A remote job must also carry `collect_connections: true` to request peer data.
+The local environment setting does not opt remote targets in.
 
 **Windows targets are reached by PowerShell over SSH.** WinRM is recognised and
 **refused**, with an error that says so rather than failing obscurely. The
@@ -118,15 +127,44 @@ becomes four things on one asset:
   listening, never what it negotiates.
 - **Software** — every installed package, on the asset's Software tab.
 
-### It is held at intake
+When outbound collection is enabled, connections use the platform's existing
+network ownership rules. Public peers appear under external connections;
+private peers in registered network spaces become inventory assets and follow
+that space's auto-approval setting; private peers outside registered spaces
+wait in Approvals. The reporting host is recorded as the source asset. Local
+ephemeral ports are discarded before deduplication, so reconnecting does not
+grow a new row on every collection.
 
-The asset lands in **Discovery → Approvals**, waiting for you, with the class
-`unknown_host`. Two things follow from that:
+UDP has no listen state. Windows `Get-NetUDPEndpoint` exposes only the local
+binding, and Linux/macOS also have peerless UDP sockets whose role cannot be
+proved. The agent preserves these as `svc.bound_udp_sockets` with role
+`unknown`; it does not turn them into service endpoints or guess from a port
+number. Connected UDP peers are collected on Linux and macOS when the OS
+reports a concrete peer. Windows cannot supply connected UDP peers through the
+supported CGO-free API, so Windows outbound collection is TCP-only.
 
-- **The class is left coarse on purpose.** The collector measured an operating
-  system name and a hardware model; deciding what *kind* of thing that makes the
-  machine is a rule's job, not a measurement. A plausible-looking guess is what
-  gets bulk-approved, so the platform does not make one here.
+This capability runs in the device-agent binary. Upgrading the platform alone
+does not make already-deployed agents report peers; deploy the updated agent
+and then enable the explicit connection setting on that host.
+
+On the first successful collection from an upgraded agent, UDP endpoints that
+an older host collector created are marked closed when no other producer has
+measured them. This corrects the old, unproven listener classification; it does
+not claim that the UDP socket itself closed. The same binding remains visible
+as unknown-role evidence, and endpoint evidence from network sensors is left
+untouched.
+
+### Approval and classification
+
+The asset lands in **Discovery → Approvals** unless a network-segment rule
+auto-approves it. Its measured operating system can match a curated
+classification rule (for example, Windows client to `computer` or Windows
+Server to `server`); when no rule matches it remains `unknown_host`.
+
+- **The class comes from a rule, when evidence matches one.** The collector
+  reports the operating system and hardware; the curated classifier decides
+  what kind of machine that evidence supports. It does not guess a class when
+  no rule answers.
 - **A second collection lands on the first one's asset**, through the ordinary
   identification engine — the agent id first, then serial, then MAC address,
   then names. Where the match is confident enough and your auto-accept threshold
